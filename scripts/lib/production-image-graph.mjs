@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {inspectFutureControlCapacity,verifyFutureControlGraphCapacity} from './production-control-capacity.mjs';
 import {IMAGE_TRANSITION_LIMITS as L,IMAGE_TRANSITION_LIMITS_HASH,IMAGE_TRANSITION_COMPONENTS} from './production-image-transition.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {inspectImageArchiveBinding} from './production-image-custody.mjs';
@@ -67,7 +68,7 @@ export function createRemainingWorkImageBudget(options){
  * No credential lifetime is invented for already cached bytes. */
 export function createPrepaidControlCacheBudget(options={}){
  need(record(options)&&Object.keys(options).every(k=>['metadataReads','now','deadlineMs','signal'].includes(k)),'ControlCacheBudgetOptions');
- const metadataReads=options.metadataReads,now=options.now??Date.now;
+ const metadataReads=options.metadataReads,now=options.now??Date.now,capacity=metadataReads?.controlCapacity?inspectFutureControlCapacity(metadataReads.controlCapacity):null;
  need(metadataReads&&typeof metadataReads.reserveLocal==='function'&&typeof now==='function','ControlCachePrepaymentRequired');
  const startedMs=now(),deadlineMs=options.deadlineMs??startedMs+L.maxBlobTransferMs;
  need(integer(startedMs)&&Number.isSafeInteger(deadlineMs)&&deadlineMs>startedMs+L.cleanupReserveMs&&deadlineMs<=startedMs+L.maxBlobTransferMs,'ControlCacheDeadline');
@@ -83,10 +84,11 @@ export function createPrepaidControlCacheBudget(options={}){
   try{options.signal?.throwIfAborted();const t=now();need(integer(t)&&t>=startedMs&&t<deadlineMs-L.cleanupReserveMs,'ControlCacheDeadline');reserve(zero());}
   catch(error){held=true;throw error;}
  };
- const seen=new Map(),edges=new Set();
+ const seen=new Map(),edges=new Set(),capacityDescriptors=new Map();
  const add=(d,isManifest)=>{
   check();validateImageDescriptor(d,isManifest?'manifest':'blob');const prior=seen.get(d.digest);
   if(prior){need(prior.size===d.size&&prior.isManifest===isManifest,'ImageDescriptorConflict');return;}
+  if(capacity){capacityDescriptors.set(d.digest,d);try{verifyFutureControlGraphCapacity([...capacityDescriptors.values()],capacity);}catch(error){held=true;throw error;}}
   need(uniqueBytes+d.size<=L.maxUniqueCompressedGraphBytes,'ImageGraphByteLimit');
   need(isManifest?manifestNodes<L.maxManifestNodes:blobNodes<L.maxBlobNodes,'ImageGraphNodeLimit');
   seen.set(d.digest,{size:d.size,isManifest});uniqueBytes+=d.size;if(isManifest)manifestNodes++;else blobNodes++;
@@ -96,8 +98,8 @@ export function createPrepaidControlCacheBudget(options={}){
   manifest:d=>add(d,true),blob:d=>add(d,false),
   edge(key){check();need(typeof key==='string');if(!edges.has(key)){need(edges.size<L.maxEdges,'ImageGraphEdgeLimit');edges.add(key);}},
   cacheRead(size){check();need(integer(size)&&logicalBytes+size<=L.maxTransferredBytes,'ImageTransferLimit');need(localReads<L.maxEcrCalls,'ImageCallLimit');reserve({...zero(),logicalBytes:size});logicalBytes+=size;localReads++;},
-  uncompressed(size){check();need(integer(size)&&uncompressedBytes+size<=L.maxUncompressedBytes,'ImageUncompressedLimit');reserve({...zero(),uncompressedBytes:size});uncompressedBytes+=size;},
-  entry(){check();need(fsEntries<L.maxFsEntries,'ImageFilesystemEntryLimit');reserve({...zero(),processedEntries:1});fsEntries++;},
+  uncompressed(size){check();need(integer(size)&&uncompressedBytes+size<=Math.min(L.maxUncompressedBytes,capacity?.uncompressedBytes??Infinity),'ImageUncompressedLimit');reserve({...zero(),uncompressedBytes:size});uncompressedBytes+=size;},
+  entry(){check();need(fsEntries<Math.min(L.maxFsEntries,capacity?.processedEntries??Infinity),'ImageFilesystemEntryLimit');reserve({...zero(),processedEntries:1});fsEntries++;},
   enter(){check();need(active<L.maxConcurrency,'ImageConcurrencyLimit');active++;let closed=false;return()=>{if(!closed){closed=true;active--;}};},
   transfer:noNetwork,call:noNetwork,projected:noNetwork,
   usage:()=>({manifestNodes,blobNodes,edges:edges.size,uniqueBytes,transferredBytes:0,calls:0,logicalBytes,localReads,uncompressedBytes,fsEntries,active}),

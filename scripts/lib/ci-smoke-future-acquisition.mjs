@@ -1,3 +1,4 @@
+import {createFutureControlWireMeter,isFutureControlCapacityProfile,verifyFutureControlGraphCapacity,inspectFutureControlCapacity} from './production-control-capacity.mjs';
 import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-image-response.mjs';
 /** CFG2 funded TARGET acquisition. No funding, new clock, session issuance,
  * arbitrary endpoint, or business authority is created by these records. */
@@ -126,8 +127,10 @@ function project(action,response,request,config){
 function manifest(response,expected,chargeLocal){
  const {raw}=normalizeImageDigestResponse(imageResponseFromSdk(response),{registryId:expected.account,repositoryName:expected.repositoryName,imageDigest:expected.digest},chargeLocal);return {document:parse(raw.toString()),bytes:raw.length};
 }
-function profileMachine(profiles,config,control,chargeLocal=()=>{}){
- const counts=profiles.map(()=>0),responses=new Map(),manifests=new Map(),blobs=new Map();let root,arm,buildBinding;
+function profileMachine(profiles,config,control,chargeLocal=()=>{},capacity){
+ const counts=profiles.map(()=>0),responses=new Map(),manifests=new Map(),blobs=new Map();let root,arm,buildBinding;const capacityNodes=new Map(),finishedManifests=new Set();
+ if(capacity)inspectFutureControlCapacity(capacity);
+ const capacityNode=d=>{if(!capacity)return;const old=capacityNodes.get(d.digest);need(!old||old.size===d.size&&old.mediaType===d.mediaType,'CiFutureControlDescriptor');capacityNodes.set(d.digest,d);verifyFutureControlGraphCapacity([...capacityNodes.values()],capacity);};
  function requestFor(p){
   if(p.kind==='EXACT')return [p.request];
   if(p.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT'){
@@ -149,23 +152,23 @@ function profileMachine(profiles,config,control,chargeLocal=()=>{}){
  return {counts,responses,bind(value){need(!buildBinding,'CiFutureControlAlreadyBound');need(value.rootDigest===control?.outputDigest&&digest(value.configDigest),'CiFutureControlBinding');buildBinding=value;},select(action,request){
   for(let i=0;i<profiles.length;i++){const p=profiles[i];if(p.action!==action||counts[i]>=p.count)continue;let choices;try{choices=requestFor(p);}catch{continue;}
    let match;if(Array.isArray(choices))match=choices.some(q=>hash(q)===hash(request));else{const field=choices.field??'tasks',items=request[field],other=Object.fromEntries(Object.entries(request).filter(([k])=>k!==field));match=Array.isArray(items)&&items.length>0&&items.length<=choices.max&&new Set(items).size===items.length&&items.every(t=>(choices.values??choices.tasks).includes(t))&&hash(other)===hash(p.request);}
-   if(match)return {index:i,profile:p};
+   if(match){if(capacity&&isFutureControlCapacityProfile(p)&&['S3BlobGet','GetDownloadUrlForLayer'].includes(action)){need(finishedManifests.has(control.outputDigest)&&[...manifests.keys()].every(d=>finishedManifests.has(d)),'CiFutureControlMetadataIncomplete');const d=blobs.get(request.layerDigest)?.descriptor;need(d&&(action==='GetDownloadUrlForLayer'||d.size<=p.responseBytes),'CiFutureControlBlobCapacity');}return {index:i,profile:p};}
   }throw Error('CiFutureProfileRequest');
  },complete(index,request,value){const p=profiles[index];counts[index]++;responses.set(p.id,{action:p.action,value});
   if(p.action==='S3BlobGet'&&p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD'){const d=blobs.get(request.layerDigest)?.descriptor;need(d&&d.size===value.size,'CiFutureBlobSize');}
   if(p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD'&&p.action==='BatchGetImage'){
    const wanted=request.imageIds[0].imageDigest,decoded=manifest(value,{account:config.account,repositoryName:p.request.repositoryName,digest:wanted},chargeLocal),m=decoded.document;
-   need(m.schemaVersion===2,'CiFutureControlManifest');const announced=manifests.get(wanted);if(announced)need(announced.size===decoded.bytes&&announced.mediaType===m.mediaType,'CiFutureControlManifest');
+   need(m.schemaVersion===2,'CiFutureControlManifest');capacityNode({digest:wanted,size:decoded.bytes,mediaType:m.mediaType});finishedManifests.add(wanted);const announced=manifests.get(wanted);if(announced)need(announced.size===decoded.bytes&&announced.mediaType===m.mediaType,'CiFutureControlManifest');
    if([IMAGE_MEDIA.index,IMAGE_MEDIA.dockerIndex].includes(m.mediaType)){
     need(Array.isArray(m.manifests)&&m.manifests.length<=128,'CiFutureControlRoot');
     if(wanted===control.outputDigest){const rows=m.manifests.filter(r=>r.platform?.os==='linux'&&r.platform.architecture==='arm64');need(rows.length===1,'CiFutureControlRoot');root=rows[0].digest;}
-    for(const d of m.manifests){validateImageDescriptor(d,'manifest');need(d.digest!==control.outputDigest&&d.digest!==wanted,'CiFutureControlCycle');const old=manifests.get(d.digest);if(old)need(old.size===d.size&&old.mediaType===d.mediaType,'CiFutureControlDescriptor');else manifests.set(d.digest,d);}
+    for(const d of m.manifests){validateImageDescriptor(d,'manifest');capacityNode(d);need(d.digest!==control.outputDigest&&d.digest!==wanted,'CiFutureControlCycle');const old=manifests.get(d.digest);if(old)need(old.size===d.size&&old.mediaType===d.mediaType,'CiFutureControlDescriptor');else manifests.set(d.digest,d);}
     need(manifests.size<=128,'CiFutureControlGraphLimit');
    }else{
     need([IMAGE_MEDIA.manifest,IMAGE_MEDIA.dockerManifest].includes(m.mediaType)&&Array.isArray(m.layers)&&m.layers.length<=2048,'CiFutureControlManifest');validateImageDescriptor(m.config,'blob');
     if(wanted===root){need(m.config.digest===buildBinding.configDigest,'CiFutureControlBuildConfig');arm={config:m.config,layers:m.layers};}
     if(m.subject){validateImageDescriptor(m.subject,'manifest');need(manifests.has(m.subject.digest)||m.subject.digest===control.outputDigest,'CiFutureControlSubject');}
-    for(const [kind,items]of [['config',[m.config]],['layer',m.layers]])for(const d of items){validateImageDescriptor(d,'blob');const old=blobs.get(d.digest);if(old)need(old.descriptor.size===d.size&&old.descriptor.mediaType===d.mediaType,'CiFutureControlDescriptor');else blobs.set(d.digest,{kind,descriptor:d});}need(blobs.size<=2048,'CiFutureControlGraphLimit');
+    for(const [kind,items]of [['config',[m.config]],['layer',m.layers]])for(const d of items){validateImageDescriptor(d,'blob');capacityNode(d);const old=blobs.get(d.digest);if(old)need(old.descriptor.size===d.size&&old.descriptor.mediaType===d.mediaType,'CiFutureControlDescriptor');else blobs.set(d.digest,{kind,descriptor:d});}need(blobs.size<=2048,'CiFutureControlGraphLimit');
    }
   }
  }};
@@ -206,8 +209,8 @@ export async function openFutureCiSmokeAcquisition(input,seams={}){
   usage=localJournal(join(dir,prefix+'-local.ndjson'),zero(),accepted.consumer.localBudget);
   if(postApply)usage.charge({...zero(),logicalBytes:NONROOT_POSTAPPLY_LIMITS.readerLocalBytes});
  }catch(e){await hold();throw e;}
- const paid=accepted.consumer,machine=profileMachine(paid.profiles,config,control,n=>usage.charge({ecrRequests:0,logicalBytes:n,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0})),current=()=>{check();need(!held&&!closed&&now()<accepted.expiresMs,'CiFutureClosed');immutable(claimRef);immutable(requestRef);immutable(allowanceRef);};let wire=0;
- return Object.freeze({authority:false,authorizationSeed:Object.freeze({kind:'production-data-release',descriptor:config.target.descriptor,descriptorHash:config.startup.descriptorHash,proofHash:config.startup.proofHash,parameterVersion:config.target.parameterVersion}),
+ const paid=accepted.consumer,machine=profileMachine(paid.profiles,config,control,n=>usage.charge({ecrRequests:0,logicalBytes:n,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0}),paid.controlCapacity),controlWire=paid.controlCapacity?createFutureControlWireMeter(paid.controlCapacity):null,current=()=>{check();need(!held&&!closed&&now()<accepted.expiresMs,'CiFutureClosed');immutable(claimRef);immutable(requestRef);immutable(allowanceRef);};let wire=0;
+ return Object.freeze({authority:false,...(paid.controlCapacity?{controlCapacity:paid.controlCapacity}:{}),authorizationSeed:Object.freeze({kind:'production-data-release',descriptor:config.target.descriptor,descriptorHash:config.startup.descriptorHash,proofHash:config.startup.proofHash,parameterVersion:config.target.parameterVersion}),
   rootAuditReadBinding(){current();need(paid.profiles.filter(p=>p.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT'&&p.late.checkpoint===scope.checkpoint).length===1,'CiFutureRootReadNotFunded');return Object.freeze({scope,grantSetId:config.startup.grantSetId,storage:config.storage,ownerRoot:config.ownerRoot,proofHash:config.startup.proofHash,descriptorHash:config.startup.descriptorHash,parameterVersion:config.target.parameterVersion,runId:source.run.id,runAttempt:source.run.attempt,...(scope.checkpoint==='deploy-prod/23'?{targetFunding:{grantSetId:accepted.funded.grantSetId,grantHash:accepted.funded.grantHash,planHash:accepted.funded.planHash,debitEventHash:accepted.funded.debitEventHash,controlSource:accepted.funded.source,template:accepted.funded.owner.delivery.template,slot:accepted.funded.owner.delivery.slots.find(s=>s.kind==='target-window'),issuedMs:accepted.funded.issuedMs,notAfter:Math.min(accepted.funded.notAfter,accepted.expiresMs)}}:{})});},
   async requestRootAudit(input){try{
    current();need(paid.rootRequest&&descriptorSeen&&controlBuildRef&&resourceAllocation&&!active&&!rootStarted,'CiFutureRootRequestOrder');rootStarted=true;active={root:true};
@@ -233,11 +236,11 @@ export async function openFutureCiSmokeAcquisition(input,seams={}){
    current();controlBuildRef=await saveRecord('control-build',value);machine.bind(value);active=null;return Object.freeze({rootDigest:value.rootDigest,repositoryName:'mem9-on-aws/bootstrap',account:config.account,region:config.region});
   }catch(e){await hold();throw e;}},
   async beforeRead(action,input){try{current();need(!active,'CiFutureConcurrentRead');active={};const request=copyNonrootJson(input);if(!identitySeen)need(action==='GetCallerIdentity','CiFutureIdentityFirst');else if(!descriptorSeen)need(action==='GetParameters'&&hash(request)===hash({Names:[parameterName],WithDecryption:true}),'CiFutureDescriptorFirst');
-   const chosen=machine.select(action,request),p=chosen.profile,index=reads.length+1,intentRef=await saveRecord('read-'+index,{version:1,index,profileIndex:chosen.index,action,request,requestHash:hash(request),caps:{requestBytes:p.requestBytes,responseBytes:p.responseBytes},ownerRefund:0});current();let dispatched=false,settled=false,charged=0;
-   return Object.freeze({caps:{requestBytes:p.requestBytes,responseBytes:p.responseBytes,overshootBytes:UNKNOWN},finalGuard(){try{current();need(!dispatched&&!settled,'CiFutureDispatch');dispatched=true;}catch(e){held=true;throw e;}},charge(n){try{need(dispatched&&!settled&&integer(n),'CiFutureCharge');charged+=n;wire+=n;need(charged<=p.requestBytes+p.responseBytes+UNKNOWN&&wire<=paid.budget.httpBodyBytes,'CiFutureChargeCap');}catch(e){held=true;throw e;}},async complete(response,responseHash){try{current();need(dispatched&&!settled&&hex(responseHash)&&charged<=p.requestBytes+p.responseBytes,'CiFutureCompletion');const value=project(action,response,request,config);machine.complete(chosen.index,request,value);if(action==='GetCallerIdentity')identitySeen=true;if(action==='GetParameters'&&request.Names.includes(parameterName))descriptorSeen=true;
+   const chosen=machine.select(action,request),p=chosen.profile,controlSlot=controlWire&&isFutureControlCapacityProfile(p)?controlWire.admit(p):null,caps=controlSlot?.caps??{requestBytes:p.requestBytes,responseBytes:p.responseBytes,overshootBytes:UNKNOWN},index=reads.length+1,intentRef=await saveRecord('read-'+index,{version:1,index,profileIndex:chosen.index,action,request,requestHash:hash(request),caps:{requestBytes:caps.requestBytes,responseBytes:caps.responseBytes},ownerRefund:0});current();let dispatched=false,settled=false,charged=0;
+   return Object.freeze({caps,finalGuard(){try{current();need(!dispatched&&!settled,'CiFutureDispatch');dispatched=true;}catch(e){held=true;throw e;}},charge(n){try{need(dispatched&&!settled&&integer(n),'CiFutureCharge');controlSlot?.charge(n);charged+=n;wire+=n;need(charged<=caps.requestBytes+caps.responseBytes+UNKNOWN&&wire<=paid.budget.httpBodyBytes,'CiFutureChargeCap');}catch(e){held=true;throw e;}},async complete(response,responseHash){try{current();need(dispatched&&!settled&&hex(responseHash)&&charged<=caps.requestBytes+caps.responseBytes,'CiFutureCompletion');const value=project(action,response,request,config);machine.complete(chosen.index,request,value);if(action==='GetCallerIdentity')identitySeen=true;if(action==='GetParameters'&&request.Names.includes(parameterName))descriptorSeen=true;
     if(action==='S3BlobGet')need('sha256:'+responseHash===request.layerDigest,'CiFutureBlobHash');
-    const resultRef=await saveRecord('result-'+index,{version:1,index,responseHash,charged,value,ownerRefund:0});reads.push({intentRef,resultRef});settled=true;active=null;
-   }catch(e){await hold();throw e;}},async unknown(){if(settled)return;settled=true;active=null;await hold();}});
+    const resultRef=await saveRecord('result-'+index,{version:1,index,responseHash,charged,value,ownerRefund:0});reads.push({intentRef,resultRef});controlSlot?.complete();settled=true;active=null;
+   }catch(e){await hold();throw e;}},async unknown(){if(settled)return;controlSlot?.unknown();settled=true;active=null;await hold();}});
   }catch(e){await hold();throw e;}},
   reserveLocal(value){try{current();need(descriptorSeen,'CiFutureDescriptorFirst');return usage.charge(value);}catch(e){held=true;usage.close();throw e;}},
   hold,
@@ -283,7 +286,7 @@ export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,
   for(const [ref,suffix]of [[pair.intent,'handshake-intent-'],[pair.result,'handshake-result-']]){const name=prefix+'-'+suffix+(i+1)+'.json';need(ref.path===join(dir,name),'CiFutureLocalPath');expectedNames.add(name);refs.push(ref);}
  }
  let control=null;if(done.controlRef){control=inspectControlBuildCommitment(await read(done.controlRef));need(control.runId===binding.source.runId&&control.runAttempt===binding.source.runAttempt&&control.sourceRevision===binding.source.mainRevision&&control.sourceTree===binding.source.mainTree,'CiFutureLocalControl');need(done.controlRef.path===join(dir,prefix+'-control.json'),'CiFutureLocalPath');expectedNames.add(prefix+'-control.json');refs.push(done.controlRef);}
- const machine=profileMachine(paid.profiles,config,control);need(Array.isArray(done.reads)&&done.reads.length>=2&&done.reads.length<=65536,'CiFutureLocalReads');let wire=0,who=false,live=false,rootArchiveHash,rootReads=0;
+ const machine=profileMachine(paid.profiles,config,control,()=>{},paid.controlCapacity),controlWire=paid.controlCapacity?createFutureControlWireMeter(paid.controlCapacity):null;need(Array.isArray(done.reads)&&done.reads.length>=2&&done.reads.length<=65536,'CiFutureLocalReads');let wire=0,who=false,live=false,rootArchiveHash,rootReads=0;
  if(done.rootExchangeRef){
   need(done.rootExchangeRef.path===join(dir,prefix+'-root-exchange-complete.json'),'CiFutureLocalPath');refs.push(done.rootExchangeRef);expectedNames.add(prefix+'-root-exchange-complete.json');
   const exchange=await read(done.rootExchangeRef);exact(exchange,['version','archiveHash','requestRef','observedWireBytes','records']);need(exchange.version===1&&hex(exchange.archiveHash)&&Array.isArray(exchange.records)&&exchange.records.length<=4+3*CI_ROOT_REQUEST_POLICY.readyCalls,'CiFutureRootReplay');
@@ -298,8 +301,8 @@ export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,
   exact(pair,['intentRef','resultRef']);const intent=await read(pair.intentRef),result=await read(pair.resultRef);exact(intent,['version','index','profileIndex','action','request','requestHash','caps','ownerRefund']);exact(result,['version','index','responseHash','charged','value','ownerRefund']);
   need(intent.version===1&&result.version===1&&intent.index===i+1&&result.index===i+1&&intent.ownerRefund===0&&result.ownerRefund===0&&hex(result.responseHash)&&hash(intent.request)===intent.requestHash,'CiFutureLocalRead');
   if(!who)need(intent.action==='GetCallerIdentity','CiFutureIdentityFirst');else if(!live)need(intent.action==='GetParameters'&&hash(intent.request)===hash({Names:[parameterName],WithDecryption:true}),'CiFutureDescriptorFirst');
-  const choice=machine.select(intent.action,intent.request);need(choice.index===intent.profileIndex,'CiFutureLocalProfile');same(intent.caps,{requestBytes:choice.profile.requestBytes,responseBytes:choice.profile.responseBytes},'CiFutureLocalCaps');
-  need(integer(result.charged)&&result.charged<=intent.caps.requestBytes+intent.caps.responseBytes,'CiFutureLocalCharge');wire+=result.charged;
+  const choice=machine.select(intent.action,intent.request);need(choice.index===intent.profileIndex,'CiFutureLocalProfile');const capacitySlot=controlWire&&isFutureControlCapacityProfile(choice.profile)?controlWire.admit(choice.profile):null,caps=capacitySlot?.caps??choice.profile;same(intent.caps,{requestBytes:caps.requestBytes,responseBytes:caps.responseBytes},'CiFutureLocalCaps');
+  need(integer(result.charged)&&result.charged<=intent.caps.requestBytes+intent.caps.responseBytes,'CiFutureLocalCharge');capacitySlot?.charge(result.charged);capacitySlot?.complete();wire+=result.charged;
   if(choice.profile.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT'){need(++rootReads===1&&rootArchiveHash&&result.responseHash===rootArchiveHash,'CiFutureRootReplayArchive');}
   const value=project(intent.action,result.value,intent.request,config);same(value,result.value,'CiFutureLocalProjection');machine.complete(choice.index,intent.request,value);if(intent.action==='S3BlobGet')need('sha256:'+result.responseHash===intent.request.layerDigest,'CiFutureBlobHash');if(intent.action==='GetCallerIdentity')who=true;if(intent.action==='GetParameters'&&intent.request.Names.includes(parameterName))live=true;
   for(const[ref,suffix]of [[pair.intentRef,'read-'],[pair.resultRef,'result-']]){const name=prefix+'-'+suffix+(i+1)+'.json';need(ref.path===join(dir,name),'CiFutureLocalPath');expectedNames.add(name);refs.push(ref);}
@@ -309,7 +312,7 @@ export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,
  const names=(await readdir(dir)).filter(n=>n.startsWith(prefix+'-')&&!n.startsWith(prefix+'-local-replay-'));need(names.length===expectedNames.size&&names.every(n=>expectedNames.has(n)),'CiFutureLocalUnsettled');
  const expiresMs=Math.min(claim.expiresMs,source.expiresMs,config.startup.notAfter,accepted.expiresMs,phase.expiresMs),identity=hash(source.current),check=()=>{need(Date.now()<expiresMs&&env.MEM9_CI_ACQUISITION_CONFIG===configRaw,'CiFutureLocalExpired');currentSource(env,source,config,scope,Date.now());need(hash(source.current)===identity,'CiFutureLocalSource');for(const ref of refs)immutable(ref);};check();
  const localPrefix=prefix+'-local-replay-'+(scope.phase==='presst'?'sst':'configure'),claimRef=await save(dir,localPrefix+'-claim',{version:1,kind:'ci-future-local-replay',completionRef,bundleRef,scope,startingLocalUsed:used,expiresMs,ownerRefund:0}),usage=localJournal(join(dir,localPrefix+'.ndjson'),used,paid.localBudget);let closed=false;
- const current=()=>{need(!closed,'CiFutureLocalClosed');check();};return Object.freeze({authority:false,expiresMs,reserveLocal(value){try{current();return usage.charge(value);}catch(e){closed=true;usage.close();throw e;}},async finish(){current();
+ const current=()=>{need(!closed,'CiFutureLocalClosed');check();};return Object.freeze({authority:false,expiresMs,...(paid.controlCapacity?{controlCapacity:paid.controlCapacity}:{}),reserveLocal(value){try{current();return usage.charge(value);}catch(e){closed=true;usage.close();throw e;}},async finish(){current();
   const capture=config.version===3&&scope.phase==='presst';if(capture)usage.charge({...zero(),logicalBytes:NONROOT_POSTAPPLY_LIMITS.captureLocalBytes});
   const localRef=usage.finish();closed=true;
   if(capture)await writePostApplyCaptureAllocation({env,config,binding,scope,localRef,claimRef,localBudget:paid.localBudget,localUsed:usage.used,expiresMs});

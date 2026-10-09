@@ -40,6 +40,29 @@ async function closeBody(body){
  await new Promise((resolve,reject)=>{const done=()=>{clearTimeout(timer);resolve();},timer=setTimeout(()=>{body.off('close',done);reject(Object.assign(Error('ECLEANUP'),{code:'ECLEANUP'}));},1000);body.once('close',done);if(body.closed)done();});
 }
 
+function rawByteBody(body){
+ need(body instanceof Readable&&body.readableObjectMode===false&&body.readableEncoding===null,'NonrootRawByteBody');
+ return body;
+}
+/** Read the provider's raw byte stream directly. Adapting an object stream
+ * would first consume its entire upstream chunk, outside this byte bound. */
+async function* boundedRawBody(stream,cap){
+ rawByteBody(stream);
+ let count=0;
+  while(count<=cap){
+   rawByteBody(stream);
+   const chunk=stream.read(Math.min(65536,cap-count+1));
+   if(chunk!==null){need(chunk instanceof Uint8Array,'NonrootResponseBody');count+=chunk.length;yield chunk;continue;}
+   if(stream.readableEnded)return;
+   if(stream.destroyed)throw stream.errored??Error('NonrootResponseClosed');
+   await new Promise((resolve,reject)=>{
+    const clear=()=>{stream.off('readable',ready);stream.off('end',ready);stream.off('close',closed);stream.off('error',failed);};
+    const ready=()=>{clear();resolve();},failed=e=>{clear();reject(e);},closed=()=>{clear();stream.readableEnded?resolve():reject(Error('NonrootResponseClosed'));};
+    stream.once('readable',ready);stream.once('end',ready);stream.once('close',closed);stream.once('error',failed);
+   });
+  }
+}
+
 export function assertNonrootMetadataReads(value){
  need(value&&['beforeRead','reserveLocal','finish'].every(key=>typeof value[key]==='function'),'NonrootAcquisitionRequired');
  return value;
@@ -73,7 +96,7 @@ export function createNonrootBudgetedReads({region,env,metadataReads,requestHand
   options.abortSignal?.addEventListener('abort',abort,{once:true});
   try{
    options.abortSignal?.throwIfAborted();
-   for await(const chunk of stream instanceof Uint8Array?[stream]:stream){
+   for await(const chunk of acquisition.controlCapacity?boundedRawBody(stream,caps.responseBytes):stream instanceof Uint8Array?[stream]:stream){
     options.abortSignal?.throwIfAborted();need(chunk instanceof Uint8Array,'NonrootResponseBody');
     slot.reservation.charge(chunk.byteLength);size+=chunk.byteLength;
     need(size<=caps.responseBytes&&size<=32*1024*1024,'NonrootResponseBodyLimit');chunks.push(Buffer.from(chunk));
@@ -82,7 +105,7 @@ export function createNonrootBudgetedReads({region,env,metadataReads,requestHand
    if(length!==undefined)need(/^(?:0|[1-9][0-9]*)$/.test(String(length))&&Number(length)===size,'NonrootResponseBodyLength');
    const raw=Buffer.concat(chunks,size);slot.responseHash=sha(raw);slot.body=raw;
    return {response:{...response,body:Readable.from([raw])}};
-  }finally{options.abortSignal?.removeEventListener('abort',abort);stream.destroy?.();}
+  }finally{options.abortSignal?.removeEventListener('abort',abort);if(acquisition.controlCapacity&&stream instanceof Readable)await closeBody(stream);else stream.destroy?.();}
  }
  async function read(service,action,input,use){
   check();need(!current,'NonrootConcurrentAcquisition');
@@ -159,10 +182,11 @@ export function createNonrootBudgetedReads({region,env,metadataReads,requestHand
     pending.then(result=>{networkSettled=true;if(combined.aborted)result?.response?.body?.destroy?.();},()=>{networkSettled=true;});
     const response=(await Promise.race([pending,aborted])).response;body=response?.body;
     need(body instanceof Readable,'NonrootBlobBody');
+    if(acquisition.controlCapacity)rawByteBody(body);
     // Never follow redirects or forward our AWS session to the layer service.
     need(response.statusCode===200&&/^(?:0|[1-9][0-9]*)$/.test(response.headers?.['content-length']??'')&&Number(response.headers['content-length'])===size&&[undefined,'identity'].includes(response.headers['content-encoding']),'NonrootBlobResponse');
     const stream=(async function*(){
-     for await(const chunk of body){check();combined.throwIfAborted();need(chunk instanceof Uint8Array,'NonrootBlobBody');slot.reservation.charge(chunk.byteLength);count+=chunk.byteLength;need(count<=size&&count<=caps.responseBytes,'NonrootBlobBodyLimit');hash.update(chunk);yield chunk;}
+     for await(const chunk of acquisition.controlCapacity?boundedRawBody(body,Math.min(size,caps.responseBytes)):body){check();combined.throwIfAborted();need(chunk instanceof Uint8Array,'NonrootBlobBody');slot.reservation.charge(chunk.byteLength);count+=chunk.byteLength;need(count<=size&&count<=caps.responseBytes,'NonrootBlobBodyLimit');hash.update(chunk);yield chunk;}
      need(count===size,'NonrootBlobBodyLength');const actual=hash.digest('hex');need(actual===wanted.layerDigest.slice(7),'NonrootBlobDigest');slot.responseHash=actual;completed=true;
     })();
     try{await Promise.race([Promise.resolve().then(()=>consume(stream)),aborted]);need(completed,'NonrootBlobIncomplete');}
@@ -195,7 +219,7 @@ export function createNonrootBudgetedReads({region,env,metadataReads,requestHand
    need(key?.Arn===route.kmsKeyArn&&key.AWSAccountId===scope.account&&key.Enabled===true&&key.KeyState==='Enabled'&&key.KeyManager==='AWS','NonrootControlKeyMismatch');return key.Arn;
   }});
  }
- return Object.freeze({clients:Object.freeze(clients),readEcr,readJson,readBlob,controlMetadata,
+ return Object.freeze({clients:Object.freeze(clients),readEcr,readJson,readBlob,controlMetadata,...(acquisition.controlCapacity?{controlCapacity:acquisition.controlCapacity}:{}),
   reserveLocal(charge){check();try{return acquisition.reserveLocal(charge);}catch(error){held=true;throw error;}},
   close(){if(closed)return;closed=true;downloads.clear();for(const client of sdk.values())client.destroy();transport.destroy();credentials.accessKeyId='';credentials.secretAccessKey='';credentials.sessionToken='';},
  });

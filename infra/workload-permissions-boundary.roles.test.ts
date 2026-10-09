@@ -422,6 +422,7 @@ async function waitForRecordedRoles(expectedCount: number): Promise<void> {
 const globalNames = [
   "$app",
   "$cli",
+  "$util",
   "$config",
   "$dev",
   "$interpolate",
@@ -571,6 +572,7 @@ describe("workload role coverage from the real SST graph", () => {
         );
         Object.assign(globalThis, {
           $config: (value: unknown) => value,
+          $util: pulumi,
           $interpolate: pulumi.interpolate,
           $jsonStringify: pulumi.jsonStringify,
           $transform,

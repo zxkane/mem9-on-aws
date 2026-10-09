@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -27,7 +27,8 @@ async function fixture(options = {}) {
       secretArn: "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-pr-42-db-fixture", caFile: "/tmp/fixture.pem" },
     namespaces: Object.keys(NS).map((alias) => ({ slug: `preview-${alias}`, display_name: alias, cognito_group: `mem9-${alias}`, default_role: "member", jit_enabled: true, status: "active" })),
   };
-  await writeFile(files.deployment, JSON.stringify(manifest), { mode: options.publicManifest ? 0o644 : 0o600 });
+  await writeFile(files.deployment, JSON.stringify(manifest), { mode: 0o600 });
+  if (options.publicManifest) await chmod(files.deployment, 0o644);
   const keyrings = Object.fromEntries(SERVICES.map((name, index) => [name, JSON.stringify({ active: "a", a: Buffer.alloc(32, index + 1).toString("base64url"), b: Buffer.alloc(32, index + 3).toString("base64url") })]));
   const membershipKey = (ns, principal) => `${ns}/${principal}`;
   const memberships = new Map(SERVICES.flatMap((service) => Object.values(NS).map((namespace_id) => [membershipKey(namespace_id, PRINCIPALS[service]), {

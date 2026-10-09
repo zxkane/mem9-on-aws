@@ -1,14 +1,17 @@
-import {runtime,output, type Output} from '@pulumi/pulumi';
+import type {Output} from '@pulumi/pulumi';
 import {NONROOT_POSTAPPLY_FUNCTIONS as functions,NONROOT_POSTAPPLY_RESOURCES as selection} from '../scripts/lib/nonroot-postapply.mjs';
 import {captureSstPostApplyOutputs} from '../scripts/lib/nonroot-postapply-capture.mjs';
 
 type Node = Record<string, unknown>;
 declare const $cli: {command:string;paths:{root:string;work:string}};
+declare const $util: typeof import('@pulumi/pulumi');
 const pick=(value:Node,keys:readonly string[])=>Object.fromEntries(keys.map(key=>[key,value[key]??null]));
 /** Observe fixed resources, including children registered inside Output.apply.
  * No constructor argument, permission, provider or dependency is changed. */
 export function installNonrootDeploymentCapture(){
- if($app.stage!=='prod'||$cli.command!=='deploy'||runtime.isDryRun()||process.env.GITHUB_JOB!=='deploy-prod'||!process.env.MEM9_CI_ACQUISITION_CONFIG)return null;
+ if($app.stage!=='prod'||$cli.command!=='deploy')return null;
+ const {runtime,output}=$util;
+ if(runtime.isDryRun()||process.env.GITHUB_JOB!=='deploy-prod'||!process.env.MEM9_CI_ACQUISITION_CONFIG)return null;
  const config=JSON.parse(process.env.MEM9_CI_ACQUISITION_CONFIG);if(config.version!==3)return null;
  const deadline=config.startup?.notAfter;if(!Number.isSafeInteger(deadline)||deadline<=Date.now())throw Error('PostApplyExpired');
  const slots=new Map<string,{promise:Promise<Node>;resolve:(r:Node)=>void;seen:boolean}>();

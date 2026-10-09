@@ -1,6 +1,6 @@
 import {it,expect} from 'vitest';
 import {spawn} from 'node:child_process';
-import {mkdtemp,mkdir,writeFile,lstat,rm} from 'node:fs/promises';
+import {chmod,mkdtemp,mkdir,writeFile,lstat,rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
@@ -12,7 +12,7 @@ async function fixture(use){
  await mkdir(directory,{mode:0o700});await mkdir(context,{mode:0o700});for(const name of ['base','docker-config','output'])await mkdir(join(directory,name),{mode:0o700});
  const recipe='FROM synthetic\n',policy='{}',baseRootDigest='sha256:'+'c'.repeat(64);
  const plan={version:1,kind:'fixed-offline-carrier-build',baseRootDigest,baseImage:'123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/bootstrap@'+baseRootDigest,contextDirectory:context,deadlineMs:Date.now()+120000,dockerfileHash:sha(recipe),policyHash:sha(policy)};
- await writeFile(join(context,'Dockerfile'),recipe,{mode:0o444});await writeFile(join(directory,'source-policy.json'),policy,{mode:0o600});const raw=Buffer.from(JSON.stringify(plan));await writeFile(join(directory,'build-input.json'),raw,{mode:0o600});
+ await writeFile(join(context,'Dockerfile'),recipe,{mode:0o444});await chmod(join(context,'Dockerfile'),0o444);await writeFile(join(directory,'source-policy.json'),policy,{mode:0o600});const raw=Buffer.from(JSON.stringify(plan));await writeFile(join(directory,'build-input.json'),raw,{mode:0o600});
  try{await use({root,directory,context,plan,inputHash:sha(raw)});}finally{await rm(root,{recursive:true,force:true});}
 }
 async function fake(x,body){const file=join(x.root,'fixed-fixture-docker.py');await writeFile(file,'#!/usr/bin/python3\nimport os,sys,signal,time,json,errno\n'+body,{mode:0o700});expect(SOURCE.split('DOCKER = "/usr/bin/docker"')).toHaveLength(2);return SOURCE.replace('DOCKER = "/usr/bin/docker"','DOCKER = '+JSON.stringify(file));}

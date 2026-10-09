@@ -6731,17 +6731,17 @@ var require_dist$5 = /* @__PURE__ */ __commonJSMin(((exports) => {
 //#endregion
 //#region scripts/lib/production-image-response.mjs
 function* normalize$3(response, expected, maxBytes) {
-	need$22(record$3(expected) && Object.keys(expected).sort().join() === "imageDigest,registryId,repositoryName" && /^\d{12}$/.test(expected.registryId) && typeof expected.repositoryName === "string" && expected.repositoryName.length > 0 && /^sha256:[a-f0-9]{64}$/.test(expected.imageDigest), "ManifestDiscoveryExpectedImage");
-	need$22(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8388608, "ManifestDiscoveryImageBytes");
-	need$22(record$3(response), "ManifestDiscoveryResponseShape");
+	need$23(record$3(expected) && Object.keys(expected).sort().join() === "imageDigest,registryId,repositoryName" && /^\d{12}$/.test(expected.registryId) && typeof expected.repositoryName === "string" && expected.repositoryName.length > 0 && /^sha256:[a-f0-9]{64}$/.test(expected.imageDigest), "ManifestDiscoveryExpectedImage");
+	need$23(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8388608, "ManifestDiscoveryImageBytes");
+	need$23(record$3(response), "ManifestDiscoveryResponseShape");
 	closed(response, ["images", "failures"], "ManifestDiscoveryResponseFields");
-	need$22(Array.isArray(response.failures), "ManifestDiscoveryFailuresShape");
-	need$22(response.failures.length === 0, "ManifestDiscoveryBusinessFailures");
-	need$22(Array.isArray(response.images), "ManifestDiscoveryImagesShape");
-	need$22(response.images.length > 0, "ManifestDiscoveryImageCount");
+	need$23(Array.isArray(response.failures), "ManifestDiscoveryFailuresShape");
+	need$23(response.failures.length === 0, "ManifestDiscoveryBusinessFailures");
+	need$23(Array.isArray(response.images), "ManifestDiscoveryImagesShape");
+	need$23(response.images.length > 0, "ManifestDiscoveryImageCount");
 	let normalized, manifestBytes, mediaType, totalBytes = 0;
 	for (const image of response.images) {
-		need$22(record$3(image), "ManifestDiscoveryImageShape");
+		need$23(record$3(image), "ManifestDiscoveryImageShape");
 		closed(image, [
 			"registryId",
 			"repositoryName",
@@ -6750,39 +6750,39 @@ function* normalize$3(response, expected, maxBytes) {
 			"imageManifestMediaType",
 			"imageManifestSize"
 		], "ManifestDiscoveryImageFields");
-		need$22(typeof image.registryId === "string" && /^\d{12}$/.test(image.registryId), "ManifestDiscoveryRegistryField");
-		need$22(image.registryId === expected.registryId, "ManifestDiscoveryRegistryMismatch");
-		need$22(record$3(image.imageId), "ManifestDiscoveryImageId");
+		need$23(typeof image.registryId === "string" && /^\d{12}$/.test(image.registryId), "ManifestDiscoveryRegistryField");
+		need$23(image.registryId === expected.registryId, "ManifestDiscoveryRegistryMismatch");
+		need$23(record$3(image.imageId), "ManifestDiscoveryImageId");
 		closed(image.imageId, ["imageDigest", "imageTag"], "ManifestDiscoveryImageIdFields");
-		need$22(image.repositoryName === expected.repositoryName && image.imageId.imageDigest === expected.imageDigest && typeof image.imageManifest === "string", "ManifestDiscoveryImageBinding");
-		if (Object.hasOwn(image.imageId, "imageTag")) need$22(typeof image.imageId.imageTag === "string" && image.imageId.imageTag.length > 0 && image.imageId.imageTag.length <= 300, "ManifestDiscoveryImageTag");
+		need$23(image.repositoryName === expected.repositoryName && image.imageId.imageDigest === expected.imageDigest && typeof image.imageManifest === "string", "ManifestDiscoveryImageBinding");
+		if (Object.hasOwn(image.imageId, "imageTag")) need$23(typeof image.imageId.imageTag === "string" && image.imageId.imageTag.length > 0 && image.imageId.imageTag.length <= 300, "ManifestDiscoveryImageTag");
 		const size = Buffer.byteLength(image.imageManifest);
 		totalBytes += size;
-		need$22(size <= 4194304 && totalBytes <= maxBytes, "ManifestDiscoveryImageBytes");
+		need$23(size <= 4194304 && totalBytes <= maxBytes, "ManifestDiscoveryImageBytes");
 		yield 2 * size;
 		const raw = Buffer.from(image.imageManifest);
-		need$22("sha256:" + createHash("sha256").update(raw).digest("hex") === expected.imageDigest, "ManifestDiscoveryImageDigest");
+		need$23("sha256:" + createHash("sha256").update(raw).digest("hex") === expected.imageDigest, "ManifestDiscoveryImageDigest");
 		let type = image.imageManifestMediaType;
 		if (type === void 0) {
-			need$22(!Object.hasOwn(image, "imageManifestMediaType"), "ManifestDiscoveryImageBinding");
+			need$23(!Object.hasOwn(image, "imageManifestMediaType"), "ManifestDiscoveryImageBinding");
 			const json = JSON.parse(image.imageManifest), doc = (0, import_dist$4.parseDocument)(image.imageManifest, {
 				schema: "json",
 				uniqueKeys: true,
 				prettyErrors: false
 			});
-			need$22(doc.errors.length === 0, "ManifestDiscoveryImageBinding");
+			need$23(doc.errors.length === 0, "ManifestDiscoveryImageBinding");
 			type = json.mediaType;
 		}
-		need$22(types$6.has(type), "ManifestDiscoveryImageBinding");
-		if (Object.hasOwn(image, "imageManifestSize")) need$22(Number.isSafeInteger(image.imageManifestSize) && image.imageManifestSize === size, "ManifestDiscoveryImageSize");
+		need$23(types$6.has(type), "ManifestDiscoveryImageBinding");
+		if (Object.hasOwn(image, "imageManifestSize")) need$23(Number.isSafeInteger(image.imageManifestSize) && image.imageManifestSize === size, "ManifestDiscoveryImageSize");
 		const canonical = {
 			...image,
 			imageId: { ...image.imageId }
 		};
 		delete canonical.imageId.imageTag;
-		if (normalized) need$22(raw.equals(manifestBytes) && isDeepStrictEqual(canonical, normalized), "ManifestDiscoveryAliasConflict");
+		if (normalized) need$23(raw.equals(manifestBytes) && isDeepStrictEqual(canonical, normalized), "ManifestDiscoveryAliasConflict");
 		else {
-			need$22(JSON.parse(image.imageManifest)?.mediaType === type, response.images.length > 1 ? "ManifestDiscoveryAliasConflict" : "ManifestDiscoveryImageBinding");
+			need$23(JSON.parse(image.imageManifest)?.mediaType === type, response.images.length > 1 ? "ManifestDiscoveryAliasConflict" : "ManifestDiscoveryImageBinding");
 			normalized = canonical;
 			manifestBytes = raw;
 			mediaType = type;
@@ -6799,17 +6799,17 @@ function* normalize$3(response, expected, maxBytes) {
 /** Pure evidence formatter, never a request/authority. EVERY returned image
 * must agree except imageTag. The caller retains its complete raw response. */
 function normalizeImageDigestResponse(response, expected, chargeLocal = () => {}, maxBytes = 8388608) {
-	need$22(typeof chargeLocal === "function", "ManifestDiscoveryCallbacks");
+	need$23(typeof chargeLocal === "function", "ManifestDiscoveryCallbacks");
 	const iterator = normalize$3(response, expected, maxBytes);
 	let step = iterator.next();
 	while (!step.done) {
 		const debit = chargeLocal(step.value);
-		need$22(!debit || typeof debit.then !== "function", "ImageResponseAsyncDebit");
+		need$23(!debit || typeof debit.then !== "function", "ImageResponseAsyncDebit");
 		step = iterator.next();
 	}
 	return step.value;
 }
-var import_dist$4, types$6, record$3, need$22, closed;
+var import_dist$4, types$6, record$3, need$23, closed;
 var init_production_image_response = __esmMin((() => {
 	import_dist$4 = require_dist$5();
 	types$6 = /* @__PURE__ */ new Set([
@@ -6819,13 +6819,13 @@ var init_production_image_response = __esmMin((() => {
 		"application/vnd.docker.distribution.manifest.v2+json"
 	]);
 	record$3 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-	need$22 = (ok, code) => {
+	need$23 = (ok, code) => {
 		if (!ok) throw Object.assign(Error(code), {
 			code,
 			hold: true
 		});
 	};
-	closed = (v, keys, code) => need$22(record$3(v) && Object.keys(v).every((k) => keys.includes(k)), code);
+	closed = (v, keys, code) => need$23(record$3(v) && Object.keys(v).every((k) => keys.includes(k)), code);
 }));
 //#endregion
 //#region scripts/lib/production-nonroot-contracts.mjs
@@ -6836,25 +6836,25 @@ var init_production_image_response = __esmMin((() => {
 */
 /** Copy only inert JSON data. Never invoke getters, toJSON, or proxy traps. */
 function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
-	need$21(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
+	need$22(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
 	let bytes = 0, nodes = 0;
 	const active = /* @__PURE__ */ new Set();
 	const add = (n) => {
 		bytes += n;
-		need$21(bytes <= maxBytes);
+		need$22(bytes <= maxBytes);
 	};
 	const string = (v) => {
-		need$21(v.isWellFormed());
+		need$22(v.isWellFormed());
 		add(Buffer.byteLength(JSON.stringify(v)));
 	};
 	function copy(v, depth) {
-		need$21(depth <= NONROOT_LIMITS.maxJsonDepth && ++nodes <= 1e5);
+		need$22(depth <= NONROOT_LIMITS.maxJsonDepth && ++nodes <= 1e5);
 		if (v === null || typeof v === "boolean") {
 			add(v === null ? 4 : v ? 4 : 5);
 			return v;
 		}
 		if (typeof v === "number") {
-			need$21(Number.isSafeInteger(v) && !Object.is(v, -0));
+			need$22(Number.isSafeInteger(v) && !Object.is(v, -0));
 			add(String(v).length);
 			return v;
 		}
@@ -6862,21 +6862,21 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 			string(v);
 			return v;
 		}
-		need$21(v && typeof v === "object" && !types.isProxy(v) && !active.has(v));
+		need$22(v && typeof v === "object" && !types.isProxy(v) && !active.has(v));
 		const array = Array.isArray(v), proto = Object.getPrototypeOf(v);
-		need$21(array ? proto === Array.prototype : proto === Object.prototype || proto === null);
+		need$22(array ? proto === Array.prototype : proto === Object.prototype || proto === null);
 		const descriptors = Object.getOwnPropertyDescriptors(v), keys = Reflect.ownKeys(descriptors);
-		need$21(keys.every((k) => typeof k === "string"));
+		need$22(keys.every((k) => typeof k === "string"));
 		active.add(v);
 		add(2);
 		let result;
 		if (array) {
 			const length = descriptors.length?.value;
-			need$21(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1);
+			need$22(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1);
 			result = [];
 			for (let i = 0; i < length; i++) {
 				const d = descriptors[String(i)];
-				need$21(d?.enumerable && Object.hasOwn(d, "value"));
+				need$22(d?.enumerable && Object.hasOwn(d, "value"));
 				if (i) add(1);
 				result.push(copy(d.value, depth + 1));
 			}
@@ -6884,7 +6884,7 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 			result = {};
 			for (const [i, k] of keys.entries()) {
 				const d = descriptors[k];
-				need$21(d.enumerable && Object.hasOwn(d, "value"));
+				need$22(d.enumerable && Object.hasOwn(d, "value"));
 				if (i) add(1);
 				string(k);
 				add(1);
@@ -6904,17 +6904,17 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 /** Duplicate decoded keys must be rejected before JSON.parse loses them. */
 function parseNonrootJson(text, options = {}) {
 	const o = copyJson(options);
-	need$21(Object.keys(o).every((k) => k === "maxBytes"));
+	need$22(Object.keys(o).every((k) => k === "maxBytes"));
 	const maxBytes = o.maxBytes ?? NONROOT_LIMITS.maxProofBytes;
-	need$21(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
-	need$21(typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes);
+	need$22(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
+	need$22(typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes);
 	let i = 0;
 	const ws = () => {
 		while (/[\x20\t\r\n]/.test(text[i] ?? "!")) i++;
 	};
 	const str = () => {
 		const start = i;
-		need$21(text[i++] === "\"");
+		need$22(text[i++] === "\"");
 		let escape = false;
 		while (i < text.length) {
 			const c = text[i++];
@@ -6925,7 +6925,7 @@ function parseNonrootJson(text, options = {}) {
 		fail$9();
 	};
 	function scan(depth) {
-		need$21(depth <= NONROOT_LIMITS.maxJsonDepth);
+		need$22(depth <= NONROOT_LIMITS.maxJsonDepth);
 		ws();
 		const c = text[i];
 		if (c === "{") {
@@ -6939,17 +6939,17 @@ function parseNonrootJson(text, options = {}) {
 			while (true) {
 				ws();
 				const key = str();
-				need$21(!keys.has(key));
+				need$22(!keys.has(key));
 				keys.add(key);
 				ws();
-				need$21(text[i++] === ":");
+				need$22(text[i++] === ":");
 				scan(depth + 1);
 				ws();
 				if (text[i] === "}") {
 					i++;
 					return;
 				}
-				need$21(text[i++] === ",");
+				need$22(text[i++] === ",");
 			}
 		}
 		if (c === "[") {
@@ -6966,7 +6966,7 @@ function parseNonrootJson(text, options = {}) {
 					i++;
 					return;
 				}
-				need$21(text[i++] === ",");
+				need$22(text[i++] === ",");
 			}
 		}
 		if (c === "\"") {
@@ -6974,13 +6974,13 @@ function parseNonrootJson(text, options = {}) {
 			return;
 		}
 		const m = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(i));
-		need$21(m);
+		need$22(m);
 		i += m[0].length;
 	}
 	try {
 		scan(0);
 		ws();
-		need$21(i === text.length);
+		need$22(i === text.length);
 		return freeze$3(copyJson(JSON.parse(text), maxBytes));
 	} catch {
 		fail$9();
@@ -6988,13 +6988,13 @@ function parseNonrootJson(text, options = {}) {
 }
 /** Structural and intrinsic equality validation only. "pass" fields are claims. */
 function inspectNonrootRecord(type, value) {
-	need$21(typeof type === "string" && Object.hasOwn(schemas$2, type));
+	need$22(typeof type === "string" && Object.hasOwn(schemas$2, type));
 	const maxBytes = type === "DataDescriptorV3" ? NONROOT_LIMITS.maxDescriptorBytes : type === "CompatibilityCertificateV5" ? NONROOT_LIMITS.maxCertificateBytes : ["RuntimeIdentityV2", "TargetIdentityRecheckV1"].includes(type) ? NONROOT_LIMITS.maxRuntimeRecordBytes : NONROOT_LIMITS.maxProofBytes;
 	const data = typeof value === "string" ? parseNonrootJson(value, { maxBytes }) : copyJson(value, maxBytes);
 	schemas$2[type](data);
 	return freeze$3(data);
 }
-var NONROOT_TRANSITION_KIND, NONROOT_DATA_COMPONENTS, NONROOT_TASK_KEYS, CONTROL_NODE, NONROOT_LIMITS, NONROOT_HARDENING_POLICY, NONROOT_GUARD_BUILTINS, fail$9, need$21, rawHash, freeze$3, canonical$4, nonrootHash, NONROOT_LIMITS_HASH, copyNonrootJson, text$4, pattern$1, integer$3, literal$1, oneOf$1, array$2, object$3, union, schemas$2, ref, define$1, H$1, G$1, N, D$1, A, R, P$1, Z, B, S$2, MS, ARN, ROLE, TASK, TD, CLUSTER, COMPONENT, KEY, SAFE_PATH, ABS, unique, equal$1, named, time$2, image$1, ARGV, JSON_REF, BYTE_REF, IMG, CIMG, hashes$1, refs, clocks, builtinPolicy, auditNames, carrierEntry, network, tags$1, runFixed, updateTaskKeys, processFields, ignoredEntrypoint, trustedProcessFields, presence, deployedControlImageSlot, controlImageTargets, release$1, inspectNonrootTransition;
+var NONROOT_TRANSITION_KIND, NONROOT_DATA_COMPONENTS, NONROOT_TASK_KEYS, CONTROL_NODE, NONROOT_LIMITS, NONROOT_HARDENING_POLICY, NONROOT_GUARD_BUILTINS, fail$9, need$22, rawHash, freeze$3, canonical$4, nonrootHash, NONROOT_LIMITS_HASH, copyNonrootJson, text$4, pattern$1, integer$3, literal$1, oneOf$1, array$2, object$3, union, schemas$2, ref, define$1, H$1, G$1, N, D$1, A, R, P$1, Z, B, S$2, MS, ARN, ROLE, TASK, TD, CLUSTER, COMPONENT, KEY, SAFE_PATH, ABS, unique, equal$1, named, time$2, image$1, ARGV, JSON_REF, BYTE_REF, IMG, CIMG, hashes$1, refs, clocks, builtinPolicy, auditNames, carrierEntry, network, tags$1, runFixed, updateTaskKeys, processFields, ignoredEntrypoint, trustedProcessFields, presence, deployedControlImageSlot, controlImageTargets, release$1, inspectNonrootTransition;
 var init_production_nonroot_contracts = __esmMin((() => {
 	NONROOT_TRANSITION_KIND = "image-security-nonroot-upgrade";
 	NONROOT_DATA_COMPONENTS = Object.freeze([
@@ -7064,7 +7064,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	fail$9 = () => {
 		throw Error("NonrootContractInvalid");
 	};
-	need$21 = (condition) => {
+	need$22 = (condition) => {
 		if (!condition) fail$9();
 	};
 	rawHash = (value) => createHash("sha256").update(value).digest("hex");
@@ -7079,21 +7079,21 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	nonrootHash = (value) => rawHash(JSON.stringify(canonical$4(copyJson(value))));
 	NONROOT_LIMITS_HASH = nonrootHash(NONROOT_LIMITS);
 	copyNonrootJson = (value) => freeze$3(copyJson(value));
-	text$4 = (max = 4096, min = 1) => (v) => need$21(typeof v === "string" && v.length >= min && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max);
+	text$4 = (max = 4096, min = 1) => (v) => need$22(typeof v === "string" && v.length >= min && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max);
 	pattern$1 = (re) => (v) => {
 		text$4()(v);
-		need$21(re.test(v));
+		need$22(re.test(v));
 	};
-	integer$3 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$21(Number.isSafeInteger(v) && v >= min && v <= max);
-	literal$1 = (expected) => (v) => need$21(v === expected);
-	oneOf$1 = (...values) => (v) => need$21(values.includes(v));
+	integer$3 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$22(Number.isSafeInteger(v) && v >= min && v <= max);
+	literal$1 = (expected) => (v) => need$22(v === expected);
+	oneOf$1 = (...values) => (v) => need$22(values.includes(v));
 	array$2 = (item, min = 0, max = 1e3) => (v) => {
-		need$21(Array.isArray(v) && v.length >= min && v.length <= max);
+		need$22(Array.isArray(v) && v.length >= min && v.length <= max);
 		v.forEach(item);
 	};
 	object$3 = (fields, check = () => {}) => (v) => {
-		need$21(v && typeof v === "object" && !Array.isArray(v));
-		need$21(Object.keys(v).length === Object.keys(fields).length && Object.keys(fields).every((k) => Object.hasOwn(v, k)));
+		need$22(v && typeof v === "object" && !Array.isArray(v));
+		need$22(Object.keys(v).length === Object.keys(fields).length && Object.keys(fields).every((k) => Object.hasOwn(v, k)));
 		for (const [k, validator] of Object.entries(fields)) validator(v[k]);
 		check(v);
 	};
@@ -7106,7 +7106,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	};
 	schemas$2 = Object.create(null);
 	ref = (name) => (v) => {
-		need$21(Object.hasOwn(schemas$2, name));
+		need$22(Object.hasOwn(schemas$2, name));
 		schemas$2[name](v);
 	};
 	define$1 = (name, fields, check) => {
@@ -7132,25 +7132,25 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	KEY = oneOf$1(...NONROOT_TASK_KEYS);
 	SAFE_PATH = (v) => {
 		text$4(4096)(v);
-		need$21(!v.startsWith("/") && !v.split("/").some((p) => p === ".." || p === "") && !/[\r\n\\]/.test(v));
+		need$22(!v.startsWith("/") && !v.split("/").some((p) => p === ".." || p === "") && !/[\r\n\\]/.test(v));
 	};
 	ABS = (v) => {
 		text$4(4096)(v);
-		need$21(v.startsWith("/") && !v.split("/").includes("..") && !/[\r\n\\]/.test(v));
+		need$22(v.startsWith("/") && !v.split("/").includes("..") && !/[\r\n\\]/.test(v));
 	};
-	unique = (items, key = (x) => x) => need$21(new Set(items.map(key)).size === items.length);
-	equal$1 = (a, b) => need$21(nonrootHash(a) === nonrootHash(b));
+	unique = (items, key = (x) => x) => need$22(new Set(items.map(key)).size === items.length);
+	equal$1 = (a, b) => need$22(nonrootHash(a) === nonrootHash(b));
 	named = (items, names) => {
 		unique(items, (x) => x.name ?? x.containerName ?? x.taskKey);
 		equal$1(items.map((x) => x.name ?? x.containerName ?? x.taskKey).sort(), [...names].sort());
 	};
-	time$2 = (v) => need$21(v.completedMs >= v.startedMs);
+	time$2 = (v) => need$22(v.completedMs >= v.startedMs);
 	image$1 = (v) => {
-		need$21(v.rootDigest !== v.arm64Digest && v.configDigest !== v.rootDigest && v.configDigest !== v.arm64Digest);
+		need$22(v.rootDigest !== v.arm64Digest && v.configDigest !== v.rootDigest && v.configDigest !== v.arm64Digest);
 	};
 	ARGV = (v) => {
 		array$2(text$4(8192, 0), 0, 64)(v);
-		need$21(Buffer.byteLength(JSON.stringify(v)) <= 8192);
+		need$22(Buffer.byteLength(JSON.stringify(v)) <= 8192);
 	};
 	JSON_REF = ref("JsonRef");
 	BYTE_REF = ref("ByteRef");
@@ -7209,7 +7209,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		bytes: Z,
 		blob: BYTE_REF
 	}, (v) => {
-		need$21(v.bytes === v.blob.bytesLength && v.sha256 === v.blob.sha256);
+		need$22(v.bytes === v.blob.bytesLength && v.sha256 === v.blob.sha256);
 	});
 	define$1("SourceClosureV1", {
 		version: literal$1(1),
@@ -7219,7 +7219,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		closureHash: H$1
 	}, (v) => {
 		unique(v.files, (x) => x.path);
-		need$21(v.closureHash === nonrootHash(v.files));
+		need$22(v.closureHash === nonrootHash(v.files));
 	});
 	define$1("DataOriginV1", {
 		revision: G$1,
@@ -7243,7 +7243,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		receipts: integer$3(1, 20),
 		spent: integer$3(1, 19),
 		cap: literal$1(20)
-	}, (v) => need$21(v.receipts <= v.spent));
+	}, (v) => need$22(v.receipts <= v.spent));
 	define$1("PrimitiveEvidenceV1", {
 		version: literal$1(1),
 		kind: literal$1("verified-nnp-primitive"),
@@ -7307,7 +7307,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		gid: literal$1(0),
 		parentPathEvidence: JSON_REF
 	}, (v) => {
-		need$21(v.value === v.resolvedPath && (v.mode & 18) === 0 && (v.mode & 3072) === 0);
+		need$22(v.value === v.resolvedPath && (v.mode & 18) === 0 && (v.mode & 3072) === 0);
 	});
 	define$1("EnvironmentGateV1", {
 		version: literal$1(1),
@@ -7407,7 +7407,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		codeHash: H$1,
 		sourceHash: H$1
 	}, (v) => {
-		need$21(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256);
+		need$22(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256);
 	});
 	define$1("ReviewedHostOriginV2", {
 		version: literal$1(2),
@@ -7419,7 +7419,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		codeHash: H$1,
 		sourceHash: H$1
 	}, (v) => {
-		need$21(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256 && v.codeHash !== v.ancestor.codeHash);
+		need$22(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256 && v.codeHash !== v.ancestor.codeHash);
 	});
 	schemas$2.CarrierHostOrigin = union(ref("LegacyHostOriginV1"), ref("ReviewedHostOriginV2"));
 	define$1("LegacyImageOriginV1", {
@@ -7471,7 +7471,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		verifiedMs: MS
 	}, (v) => {
 		unique(v.files, (x) => x.destinationPath);
-		need$21(v.sourceClosureHash === v.destinationClosureHash);
+		need$22(v.sourceClosureHash === v.destinationClosureHash);
 	});
 	carrierEntry = [
 		"/bin/setpriv",
@@ -7510,7 +7510,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		completedMs: MS
 	}, (v) => {
 		equal$1(v.entryPoint, carrierEntry);
-		need$21(v.image.repositoryName === "mem9-on-aws/preview/bootstrap" && v.source.tree === v.build.tree);
+		need$22(v.image.repositoryName === "mem9-on-aws/preview/bootstrap" && v.source.tree === v.build.tree);
 		equal$1(v.image, v.legacyClosureProof.destinationImage);
 	});
 	network = object$3({ awsvpcConfiguration: object$3({
@@ -7537,7 +7537,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		pattern$1(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)(e[0].value);
 		H$1(e[1].value);
 		H$1(e[2].value);
-		need$21(Buffer.byteLength(JSON.stringify(v)) <= 8192);
+		need$22(Buffer.byteLength(JSON.stringify(v)) <= 8192);
 	});
 	runFixed = {
 		cluster: CLUSTER,
@@ -7566,8 +7566,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		startedBy: S$2,
 		overrides: ref("CarrierRunOverridesV1")
 	}, (v) => {
-		need$21(v.startedBy === "root-" + v.clientToken.slice(0, 29));
-		need$21(v.cluster.split(":").slice(0, 5).join(":") === v.taskDefinition.split(":").slice(0, 5).join(":"));
+		need$22(v.startedBy === "root-" + v.clientToken.slice(0, 29));
+		need$22(v.cluster.split(":").slice(0, 5).join(":") === v.taskDefinition.split(":").slice(0, 5).join(":"));
 	});
 	define$1("CarrierRunTaskBindingV1", {
 		version: literal$1(1),
@@ -7585,7 +7585,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			decision: literal$1("allowed")
 		})
 	}, (v) => {
-		need$21(v.requestHash === nonrootHash(v.request) && v.authorization.requestHash === v.requestHash && v.authorization.taskDefinitionArn === v.request.taskDefinition && v.authorization.clusterArn === v.request.cluster);
+		need$22(v.requestHash === nonrootHash(v.request) && v.authorization.requestHash === v.requestHash && v.authorization.taskDefinitionArn === v.request.taskDefinition && v.authorization.clusterArn === v.request.cluster);
 	});
 	define$1("PreauditLaunchPlanV1", {
 		version: literal$1(1),
@@ -7611,7 +7611,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		carrierPlatform: ref("RuntimePlatformObservationV1")
 	}, (v) => {
 		equal$1(v.entryPoint, carrierEntry);
-		need$21(v.account === v.carrierImage.account && v.region === v.carrierImage.region && v.carrierImage.repositoryName === "mem9-on-aws/preview/bootstrap" && v.runTaskContract.tags[0].value === v.owner && v.carrierPlatform.platformVersion === v.runTaskContract.platformVersion);
+		need$22(v.account === v.carrierImage.account && v.region === v.carrierImage.region && v.carrierImage.repositoryName === "mem9-on-aws/preview/bootstrap" && v.runTaskContract.tags[0].value === v.owner && v.carrierPlatform.platformVersion === v.runTaskContract.platformVersion);
 	});
 	define$1("CarrierRegistrationReadbackV1", {
 		version: literal$1(1),
@@ -7635,12 +7635,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		observedMs: MS,
 		expiresMs: MS
 	}, (v) => {
-		need$21(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5);
+		need$22(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5);
 		for (const [key, digest] of [
 			["rootManifest", "rootDigest"],
 			["arm64Manifest", "arm64Digest"],
 			["config", "configDigest"]
-		]) need$21("sha256:" + v[key].sha256 === v.image[digest]);
+		]) need$22("sha256:" + v[key].sha256 === v.image[digest]);
 	});
 	define$1("CarrierPrerequisiteReviewV1", {
 		version: literal$1(1),
@@ -7649,7 +7649,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...hashes$1("designReviewHash carrierBuildHash sourceEvidenceHash launchPlanHash permissionsHash legacyBindingsHash"),
 		reviewedMs: MS,
 		expiresMs: MS
-	}, (v) => need$21(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
+	}, (v) => need$22(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
 	define$1("PreauditPermitV1", {
 		version: literal$1(1),
 		kind: literal$1("premerge-readonly-audit-permit"),
@@ -7664,9 +7664,9 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		issuedMs: MS,
 		deadlineMs: MS
 	}, (v) => {
-		need$21(v.deadlineMs > v.issuedMs);
+		need$22(v.deadlineMs > v.issuedMs);
 		equal$1(v.runOverrides, v.runTask.request.overrides);
-		need$21(v.runTask.request.clientToken === v.invocation && v.runTask.request.tags[0].value === v.owner && v.runTask.launchPlanHash === v.launchPlanHash && v.runTask.authorization.permissionsDossierHash === v.permissionsHash && v.runTask.registrationReadbackHash === nonrootHash(v.registrationReadback) && v.runTask.environmentGateHash === nonrootHash(v.environmentGate) && v.runTask.carrierPresenceHash === nonrootHash(v.carrierPresence));
+		need$22(v.runTask.request.clientToken === v.invocation && v.runTask.request.tags[0].value === v.owner && v.runTask.launchPlanHash === v.launchPlanHash && v.runTask.authorization.permissionsDossierHash === v.permissionsHash && v.runTask.registrationReadbackHash === nonrootHash(v.registrationReadback) && v.runTask.environmentGateHash === nonrootHash(v.environmentGate) && v.runTask.carrierPresenceHash === nonrootHash(v.carrierPresence));
 	});
 	define$1("PermissionsDossierV1", {
 		version: literal$1(1),
@@ -7825,7 +7825,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		registrationBody: JSON_REF,
 		registrationBodyHash: H$1
 	}, (v) => {
-		need$21(v.entryPoint[3] === CONTROL_NODE);
+		need$22(v.entryPoint[3] === CONTROL_NODE);
 	});
 	define$1("ControlScanEvidenceV1", {
 		version: literal$1(1),
@@ -7853,7 +7853,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		workflowSha: G$1,
 		authenticatedSource: JSON_REF
 	}, (v) => {
-		need$21(v.mainTree === v.candidateTree && v.workflowSha === v.mainRevision && v.parents[0] === v.baseRevision && (v.parents.length === 1 || v.parents[1] === v.candidateRevision));
+		need$22(v.mainTree === v.candidateTree && v.workflowSha === v.mainRevision && v.parents[0] === v.baseRevision && (v.parents.length === 1 || v.parents[1] === v.candidateRevision));
 		unique(v.parents);
 	});
 	define$1("DeployedControlBuildV1", {
@@ -7893,12 +7893,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$21(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
+		need$22(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
 		equal$1(v.scan.image, v.image);
 		unique(v.resolvedLaunches, (x) => x.taskKey);
 		for (const l of v.resolvedLaunches) {
 			equal$1(l.image, v.image);
-			need$21(l.contractHash === v.contractHash);
+			need$22(l.contractHash === v.contractHash);
 		}
 	});
 	updateTaskKeys = NONROOT_TASK_KEYS.filter((k) => k !== "fallback" && k !== "preaudit");
@@ -8026,10 +8026,10 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			...v.trustedLaunch,
 			...v.managed
 		];
-		need$21(all.length <= 256);
+		need$22(all.length <= 256);
 		unique(all, (p) => p.pid + ":" + p.startTimeTicks);
-		need$21(v.phase === "preview" === (v.artifactBinding.kind === "artifact-test"));
-		need$21(v.taskArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":") && v.taskDefinitionArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":"));
+		need$22(v.phase === "preview" === (v.artifactBinding.kind === "artifact-test"));
+		need$22(v.taskArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":") && v.taskDefinitionArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":"));
 	});
 	define$1("TargetContainerBindingV1", {
 		name: COMPONENT,
@@ -8071,7 +8071,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	}, (v) => {
 		time$2(v);
 		named(v.identity, NONROOT_DATA_COMPONENTS);
-		need$21(v.routing.targetBindingHash === nonrootHash(v.target));
+		need$22(v.routing.targetBindingHash === nonrootHash(v.target));
 	});
 	define$1("TargetIdentityRecheckV1", {
 		version: literal$1(1),
@@ -8106,7 +8106,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			"startTimeTicks",
 			"executableDigest",
 			"entrypointIdentityHash"
-		]) need$21(m.preMain[k] === m.postMain[k]);
+		]) need$22(m.preMain[k] === m.postMain[k]);
 	});
 	define$1("TargetPostAuditV1", {
 		version: literal$1(1),
@@ -8119,7 +8119,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$21(v.preTargetHash === v.identityRecheck.preTargetHash && v.identityRecheck.targetBindingHash === nonrootHash(v.target) && v.routingRecheck.targetBindingHash === nonrootHash(v.target));
+		need$22(v.preTargetHash === v.identityRecheck.preTargetHash && v.identityRecheck.targetBindingHash === nonrootHash(v.target) && v.routingRecheck.targetBindingHash === nonrootHash(v.target));
 	});
 	schemas$2.AuditTargetJoinV1 = union(object$3({ kind: literal$1("not-applicable") }), object$3({
 		kind: literal$1("same-target-window"),
@@ -8142,8 +8142,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		cleanupComplete: literal$1(true)
 	}, (v) => {
 		time$2(v);
-		need$21(v.databaseObservedMs >= v.startedMs && v.databaseObservedMs <= v.completedMs);
-		need$21(v.phase === "predeployment" === (v.targetJoin.kind === "not-applicable"));
+		need$22(v.databaseObservedMs >= v.startedMs && v.databaseObservedMs <= v.completedMs);
+		need$22(v.phase === "predeployment" === (v.targetJoin.kind === "not-applicable"));
 	});
 	define$1("RuntimeReadinessV2", {
 		version: literal$1(2),
@@ -8156,7 +8156,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		result: literal$1("pass")
 	}, (v) => {
 		time$2(v);
-		need$21(v.postdeployRootAudit.phase === "postdeployment-preservation");
+		need$22(v.postdeployRootAudit.phase === "postdeployment-preservation");
 	});
 	define$1("FreshAdmissionV1", {
 		version: literal$1(1),
@@ -8170,7 +8170,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		permissionBindingsHash: H$1,
 		observedMs: MS,
 		expiresMs: MS
-	}, (v) => need$21(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5));
+	}, (v) => need$22(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5));
 	presence = union(object$3({ present: literal$1(false) }), object$3({
 		present: literal$1(true),
 		value: () => {}
@@ -8197,11 +8197,11 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		cause: oneOf$1("fixed-user", "drop-all", "fixed-data-nnp", "fixed-health-nnp", "guarded-control", "carrier-image", "retained-data-image", "ecs-derived", "disable-root-rollback"),
 		observationHash: H$1
 	}, (v) => {
-		need$21(v.after.present);
+		need$22(v.after.present);
 		const x = v.after.value;
-		if (v.field === "user") need$21(x === "1000:1000");
+		if (v.field === "user") need$22(x === "1000:1000");
 		else if (v.field === "linuxParameters.capabilities") equal$1(x, { drop: ["ALL"] });
-		else if (v.field === "deploymentCircuitBreaker.rollback") need$21(x === false);
+		else if (v.field === "deploymentCircuitBreaker.rollback") need$22(x === false);
 		else if ([
 			"entryPoint",
 			"command",
@@ -8210,7 +8210,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		else if (v.field === "image") {
 			if (typeof x === "string") text$4()(x);
 			else {
-				need$21(v.surface === "container" && v.cause === "guarded-control" && Object.hasOwn(controlImageTargets, v.taskKey) && v.selector === controlImageTargets[v.taskKey] && v.before.present);
+				need$22(v.surface === "container" && v.cause === "guarded-control" && Object.hasOwn(controlImageTargets, v.taskKey) && v.selector === controlImageTargets[v.taskKey] && v.before.present);
 				text$4()(v.before.value);
 				deployedControlImageSlot(x);
 			}
@@ -8282,7 +8282,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...refs("artifactSecurity policySources designReview"),
 		observedMs: MS
 	}, (v) => {
-		need$21(v.predeploymentAudit.phase === "predeployment");
+		need$22(v.predeploymentAudit.phase === "predeployment");
 		equal$1(v.root, v.predeploymentAudit.root);
 	});
 	define$1("NonrootTransitionV2", {
@@ -8304,14 +8304,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		images: object$3(Object.fromEntries(NONROOT_DATA_COMPONENTS.map((n) => [n, object$3({
 			rootDigest: D$1,
 			arm64Digest: D$1
-		}, (v) => need$21(v.rootDigest !== v.arm64Digest))]))),
+		}, (v) => need$22(v.rootDigest !== v.arm64Digest))]))),
 		...hashes$1("parentProofHash backendBindingHash generation targetsHash schemaDigest operatorDigest buildInputsHash securityEvidenceHash policyHash"),
 		runtimeNonce: N,
 		authorizationId: N,
 		issuedMs: MS,
 		expiresMs: MS,
 		transition: ref("NonrootTransitionV2")
-	}, (v) => need$21(v.dataSourceTag === "mem9-" + v.dataRevision.slice(0, 7) && v.expiresMs > v.issuedMs && v.expiresMs - v.issuedMs <= 864e5));
+	}, (v) => need$22(v.dataSourceTag === "mem9-" + v.dataRevision.slice(0, 7) && v.expiresMs > v.issuedMs && v.expiresMs - v.issuedMs <= 864e5));
 	define$1("FinalReviewV2", {
 		version: literal$1(2),
 		kind: literal$1("nonroot-deployment-policy-review"),
@@ -8320,14 +8320,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		controlSourceTree: G$1,
 		reviewedMs: MS,
 		expiresMs: MS
-	}, (v) => need$21(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
+	}, (v) => need$22(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
 	define$1("ParameterCaptureV1", {
 		Name: literal$1("/mem9-on-aws/prod/consolidation-runtime/data-release"),
 		Type: literal$1("SecureString"),
 		ARN,
 		Version: P$1,
 		Value: text$4(4096)
-	}, (v) => need$21(v.ARN.endsWith(":parameter" + v.Name)));
+	}, (v) => need$22(v.ARN.endsWith(":parameter" + v.Name)));
 	define$1("NonrootExpectedV2", {
 		account: A,
 		region: R,
@@ -8361,7 +8361,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		lineage: JSON_REF,
 		evidenceManifest: JSON_REF
 	}, (v) => {
-		need$21(v.authorization.hash === nonrootHash(v.authorization.data) && v.operation.owner === v.authorization.data.authorizationId && v.authorization.data.policyHash === nonrootHash(v.authorization.review) && v.operation.prior.value === v.predecessor.Value);
+		need$22(v.authorization.hash === nonrootHash(v.authorization.data) && v.operation.owner === v.authorization.data.authorizationId && v.authorization.data.policyHash === nonrootHash(v.authorization.review) && v.operation.prior.value === v.predecessor.Value);
 	});
 	release$1 = object$3({
 		sourceTree: G$1,
@@ -8423,8 +8423,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			"schemaDigest",
 			"operatorDigest",
 			"runtimeNonce"
-		]) need$21(v.previous.release[k] === v.current.release[k]);
-		for (const k of ["network", "credentials"]) need$21(v.material[k].previous === v.material[k].current);
+		]) need$22(v.previous.release[k] === v.current.release[k]);
+		for (const k of ["network", "credentials"]) need$22(v.material[k].previous === v.material[k].current);
 		equal$1(v.images.worker, v.images["llm-proxy"]);
 	});
 	define$1("ContinuationWitnessV2", {
@@ -8446,8 +8446,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		ref: union(JSON_REF, BYTE_REF),
 		encoding: oneOf$1("json", "bytes")
 	}, (v) => {
-		need$21(!v.name.includes("/") && !v.name.includes("\\") && ![".", ".."].includes(v.name));
-		need$21(v.encoding === "json" ? Object.hasOwn(v.ref, "canonicalHash") : Object.hasOwn(v.ref, "sha256"));
+		need$22(!v.name.includes("/") && !v.name.includes("\\") && ![".", ".."].includes(v.name));
+		need$22(v.encoding === "json" ? Object.hasOwn(v.ref, "canonicalHash") : Object.hasOwn(v.ref, "sha256"));
 	});
 	define$1("ArchiveManifestV2", {
 		version: literal$1(2),
@@ -8690,20 +8690,20 @@ function copyCiData(value) {
 	let bytes = 0, nodes = 0;
 	const active = /* @__PURE__ */ new Set(), add = (n) => {
 		bytes += n;
-		need$20(bytes <= CI_SMOKE_LIMITS.captureBytes, "CiSmokeJsonSize");
+		need$21(bytes <= CI_SMOKE_LIMITS.captureBytes, "CiSmokeJsonSize");
 	};
 	const string = (s) => {
-		need$20(s.isWellFormed(), "CiSmokeUtf8");
+		need$21(s.isWellFormed(), "CiSmokeUtf8");
 		add(Buffer.byteLength(JSON.stringify(s)));
 	};
 	const copy = (v, depth) => {
-		need$20(depth <= 64 && ++nodes <= 2e5, "CiSmokeJsonDepth");
+		need$21(depth <= 64 && ++nodes <= 2e5, "CiSmokeJsonDepth");
 		if (v === null || typeof v === "boolean") {
 			add(v === false ? 5 : 4);
 			return v;
 		}
 		if (typeof v === "number") {
-			need$20(Number.isSafeInteger(v) && !Object.is(v, -0), "CiSmokeInteger");
+			need$21(Number.isSafeInteger(v) && !Object.is(v, -0), "CiSmokeInteger");
 			add(String(v).length);
 			return v;
 		}
@@ -8711,21 +8711,21 @@ function copyCiData(value) {
 			string(v);
 			return v;
 		}
-		need$20(v && typeof v === "object" && !types.isProxy(v) && !active.has(v), "CiSmokeJsonData");
+		need$21(v && typeof v === "object" && !types.isProxy(v) && !active.has(v), "CiSmokeJsonData");
 		const isArray = Array.isArray(v), proto = Object.getPrototypeOf(v);
-		need$20(isArray ? proto === Array.prototype : proto === Object.prototype || proto === null, "CiSmokeJsonData");
+		need$21(isArray ? proto === Array.prototype : proto === Object.prototype || proto === null, "CiSmokeJsonData");
 		const descriptors = Object.getOwnPropertyDescriptors(v), keys = Reflect.ownKeys(descriptors);
-		need$20(keys.every((k) => typeof k === "string"), "CiSmokeJsonData");
+		need$21(keys.every((k) => typeof k === "string"), "CiSmokeJsonData");
 		active.add(v);
 		add(2);
 		let out;
 		if (isArray) {
 			const length = descriptors.length?.value;
-			need$20(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1, "CiSmokeArray");
+			need$21(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1, "CiSmokeArray");
 			out = [];
 			for (let i = 0; i < length; i++) {
 				const d = descriptors[String(i)];
-				need$20(d?.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
+				need$21(d?.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
 				if (i) add(1);
 				out.push(copy(d.value, depth + 1));
 			}
@@ -8733,7 +8733,7 @@ function copyCiData(value) {
 			out = {};
 			for (const [index, key] of keys.entries()) {
 				const d = descriptors[key];
-				need$20(d.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
+				need$21(d.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
 				string(key);
 				add(index ? 2 : 1);
 				Object.defineProperty(out, key, {
@@ -8748,14 +8748,14 @@ function copyCiData(value) {
 	return copy(value, 0);
 }
 function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}) {
-	need$20(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= CI_SMOKE_LIMITS.captureBytes && typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes, "CiSmokeJsonSize");
+	need$21(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= CI_SMOKE_LIMITS.captureBytes && typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes, "CiSmokeJsonSize");
 	let at = 0;
 	const ws = () => {
 		while (/[\x20\t\r\n]/.test(text[at] ?? "!")) at++;
 	};
 	const str = () => {
 		const start = at;
-		need$20(text[at++] === "\"", "CiSmokeJson");
+		need$21(text[at++] === "\"", "CiSmokeJson");
 		let escape = false;
 		while (at < text.length) {
 			const c = text[at++];
@@ -8763,10 +8763,10 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 			if (escape) escape = false;
 			else if (c === "\\") escape = true;
 		}
-		need$20(false, "CiSmokeJson");
+		need$21(false, "CiSmokeJson");
 	};
 	const scan = (depth) => {
-		need$20(depth <= 64, "CiSmokeJsonDepth");
+		need$21(depth <= 64, "CiSmokeJsonDepth");
 		ws();
 		const c = text[at];
 		if (c === "{") {
@@ -8780,17 +8780,17 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 			while (true) {
 				ws();
 				const key = str();
-				need$20(!seen.has(key), "CiSmokeDuplicateJsonKey");
+				need$21(!seen.has(key), "CiSmokeDuplicateJsonKey");
 				seen.add(key);
 				ws();
-				need$20(text[at++] === ":", "CiSmokeJson");
+				need$21(text[at++] === ":", "CiSmokeJson");
 				scan(depth + 1);
 				ws();
 				if (text[at] === "}") {
 					at++;
 					return;
 				}
-				need$20(text[at++] === ",", "CiSmokeJson");
+				need$21(text[at++] === ",", "CiSmokeJson");
 			}
 		}
 		if (c === "[") {
@@ -8807,7 +8807,7 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 					at++;
 					return;
 				}
-				need$20(text[at++] === ",", "CiSmokeJson");
+				need$21(text[at++] === ",", "CiSmokeJson");
 			}
 		}
 		if (c === "\"") {
@@ -8816,20 +8816,20 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 		}
 		const start = at;
 		while (at < text.length && !/[\x20\t\r\n,}\]]/.test(text[at])) at++;
-		need$20(at > start, "CiSmokeJson");
+		need$21(at > start, "CiSmokeJson");
 		JSON.parse(text.slice(start, at));
 	};
 	try {
 		scan(0);
 		ws();
-		need$20(at === text.length, "CiSmokeJsonTrailing");
+		need$21(at === text.length, "CiSmokeJsonTrailing");
 		return copyCiData(JSON.parse(text));
 	} catch (error) {
 		if (error instanceof SyntaxError) throw Error("CiSmokeJson");
 		throw error;
 	}
 }
-var CI_SMOKE_LIMITS, CI_SMOKE_CHECKS, CI_SMOKE_ROLES, CI_SMOKE_COMMANDS, CI_SMOKE_HEALTH_COMMAND, suffixes, need$20, hash$3, exact$11, integer$2, text$3, pattern, H, G, D, I, P, T$2, S$1, literal, oneOf, nullable, array$1, object$1, path$7, absolute, ByteRef, JsonRef, FilePin, timeFields, bindingFields, identityFields, Process, Mount, Container, Network, Log;
+var CI_SMOKE_LIMITS, CI_SMOKE_CHECKS, CI_SMOKE_ROLES, CI_SMOKE_COMMANDS, CI_SMOKE_HEALTH_COMMAND, suffixes, need$21, hash$3, exact$11, integer$2, text$3, pattern, H, G, D, I, P, T$2, S$1, literal, oneOf, nullable, array$1, object$1, path$7, absolute, ByteRef, JsonRef, FilePin, timeFields, bindingFields, identityFields, Process, Mount, Container, Network, Log;
 var init_ci_smoke_evidence = __esmMin((() => {
 	init_production_canary_verification();
 	init_validate_emf_event();
@@ -8907,16 +8907,16 @@ var init_ci_smoke_evidence = __esmMin((() => {
 		"cleanup"
 	];
 	Object.freeze(Object.fromEntries(CI_SMOKE_CHECKS.map((name, index) => [name, "ci-smoke-" + suffixes[index]])));
-	need$20 = (ok, code = "CiSmokeEvidenceInvalid") => {
+	need$21 = (ok, code = "CiSmokeEvidenceInvalid") => {
 		if (!ok) throw Error(code);
 	};
 	hash$3 = (value) => canaryEvidenceHash(copyCiData(value));
-	exact$11 = (v, fields) => need$20(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === Object.keys(fields).sort().join(), "CiSmokeFields");
-	integer$2 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$20(Number.isSafeInteger(v) && v >= min && v <= max, "CiSmokeInteger");
-	text$3 = (max = 256) => (v) => need$20(typeof v === "string" && v.length > 0 && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max, "CiSmokeString");
+	exact$11 = (v, fields) => need$21(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === Object.keys(fields).sort().join(), "CiSmokeFields");
+	integer$2 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$21(Number.isSafeInteger(v) && v >= min && v <= max, "CiSmokeInteger");
+	text$3 = (max = 256) => (v) => need$21(typeof v === "string" && v.length > 0 && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max, "CiSmokeString");
 	pattern = (re) => (v) => {
 		text$3(4096)(v);
-		need$20(re.test(v), "CiSmokeFormat");
+		need$21(re.test(v), "CiSmokeFormat");
 	};
 	H = pattern(/^[a-f0-9]{64}$/);
 	G = pattern(/^[a-f0-9]{40}$/);
@@ -8925,14 +8925,14 @@ var init_ci_smoke_evidence = __esmMin((() => {
 	P = integer$2(1);
 	T$2 = text$3();
 	S$1 = text$3(4096);
-	literal = (w) => (v) => need$20(hash$3(v) === hash$3(w), "CiSmokeLiteral");
-	oneOf = (...values) => (v) => need$20(values.includes(v), "CiSmokeEnum");
+	literal = (w) => (v) => need$21(hash$3(v) === hash$3(w), "CiSmokeLiteral");
+	oneOf = (...values) => (v) => need$21(values.includes(v), "CiSmokeEnum");
 	nullable = (inspect) => (v) => {
 		if (v !== null) inspect(v);
 	};
 	array$1 = (inspect, min = 0, max = 1024, unique = false) => (v) => {
-		need$20(Array.isArray(v) && v.length >= min && v.length <= max, "CiSmokeArray");
-		if (unique) need$20(new Set(v.map((x) => hash$3(x))).size === v.length, "CiSmokeDuplicate");
+		need$21(Array.isArray(v) && v.length >= min && v.length <= max, "CiSmokeArray");
+		if (unique) need$21(new Set(v.map((x) => hash$3(x))).size === v.length, "CiSmokeDuplicate");
 		v.forEach(inspect);
 	};
 	object$1 = (fields) => (v) => {
@@ -8941,11 +8941,11 @@ var init_ci_smoke_evidence = __esmMin((() => {
 	};
 	path$7 = (v) => {
 		S$1(v);
-		need$20(!v.startsWith("/") && v.split("/").every((x) => x && x !== "." && x !== "..") && /^[A-Za-z0-9_./-]+$/.test(v), "CiSmokePath");
+		need$21(!v.startsWith("/") && v.split("/").every((x) => x && x !== "." && x !== "..") && /^[A-Za-z0-9_./-]+$/.test(v), "CiSmokePath");
 	};
 	absolute = (v) => {
 		S$1(v);
-		need$20(v.startsWith("/") && !v.split("/").includes("..") && !v.includes("//"), "CiSmokePath");
+		need$21(v.startsWith("/") && !v.split("/").includes("..") && !v.includes("//"), "CiSmokePath");
 	};
 	ByteRef = object$1({
 		sha256: H,
@@ -9331,21 +9331,21 @@ var init_production_image_transition = __esmMin((() => {
 * nor this helper authenticates an envelope or authorizes an operation. */
 function nonrootAccountingPolicy(revision, expectedRevision, expectedCeiling) {
 	let version = 1, caps = NONROOT_LEGACY_ACCOUNTING_CAPS, budgetRevision;
-	if (revision === void 0) need$19(expectedRevision === void 0 && expectedCeiling === void 0, "NonrootBudgetRevisionMissing");
+	if (revision === void 0) need$20(expectedRevision === void 0 && expectedCeiling === void 0, "NonrootBudgetRevisionMissing");
 	else {
 		exact$9(revision, revisionFields);
 		exact$9(expectedRevision, revisionFields);
-		need$19(revision.version === 2 && revision.limitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2 && hex$10(revision.envelopeHash) && hex$10(revision.historyHeadHash), "NonrootBudgetRevisionBinding");
-		need$19(nonrootHash(revision) === nonrootHash(expectedRevision), "NonrootBudgetRevisionMismatch");
+		need$20(revision.version === 2 && revision.limitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2 && hex$10(revision.envelopeHash) && hex$10(revision.historyHeadHash), "NonrootBudgetRevisionBinding");
+		need$20(nonrootHash(revision) === nonrootHash(expectedRevision), "NonrootBudgetRevisionMismatch");
 		exact$9(expectedCeiling, fields);
-		for (const key of fields) need$19(Number.isSafeInteger(expectedCeiling[key]) && expectedCeiling[key] >= 0 && expectedCeiling[key] <= NONROOT_REMAINING_WORK_CAPS_V2[key], "NonrootBudgetCeiling");
+		for (const key of fields) need$20(Number.isSafeInteger(expectedCeiling[key]) && expectedCeiling[key] >= 0 && expectedCeiling[key] <= NONROOT_REMAINING_WORK_CAPS_V2[key], "NonrootBudgetCeiling");
 		version = 2;
 		caps = Object.freeze(copyNonrootJson(expectedCeiling));
 		budgetRevision = Object.freeze(copyNonrootJson(revision));
 	}
 	const counter = (value) => {
 		exact$9(value, fields);
-		for (const key of fields) need$19(Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= caps[key], "NonrootBudgetCounter");
+		for (const key of fields) need$20(Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= caps[key], "NonrootBudgetCounter");
 		return value;
 	};
 	return Object.freeze({
@@ -9355,11 +9355,11 @@ function nonrootAccountingPolicy(revision, expectedRevision, expectedCeiling) {
 		...budgetRevision ? { budgetRevision } : {}
 	});
 }
-var need$19, fields, revisionFields, exact$9, hex$10, NONROOT_LEGACY_ACCOUNTING_CAPS, NONROOT_REMAINING_WORK_CAPS_V2, NONROOT_REMAINING_WORK_REVISION_V2, NONROOT_REMAINING_WORK_LIMITS_HASH_V2;
+var need$20, fields, revisionFields, exact$9, hex$10, NONROOT_LEGACY_ACCOUNTING_CAPS, NONROOT_REMAINING_WORK_CAPS_V2, NONROOT_REMAINING_WORK_REVISION_V2, NONROOT_REMAINING_WORK_LIMITS_HASH_V2;
 var init_production_nonroot_budget_revision = __esmMin((() => {
 	init_production_image_transition();
 	init_production_nonroot_contracts();
-	need$19 = (ok, code) => {
+	need$20 = (ok, code) => {
 		if (!ok) throw Error(code);
 	};
 	fields = [
@@ -9375,7 +9375,7 @@ var init_production_nonroot_budget_revision = __esmMin((() => {
 		"envelopeHash",
 		"historyHeadHash"
 	];
-	exact$9 = (value, keys) => need$19(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join() === keys.toSorted().join(), "NonrootBudgetRevisionFields");
+	exact$9 = (value, keys) => need$20(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join() === keys.toSorted().join(), "NonrootBudgetRevisionFields");
 	hex$10 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 	NONROOT_LEGACY_ACCOUNTING_CAPS = Object.freeze({
 		ecrRequests: IMAGE_TRANSITION_LIMITS.maxEcrCalls,
@@ -9402,7 +9402,7 @@ var init_production_nonroot_budget_revision = __esmMin((() => {
 //#endregion
 //#region scripts/lib/ci-smoke-acquisition-format.mjs
 function parseAcquisitionJson(bytes, maxBytes = 33554432) {
-	need$18(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= maxBytes && maxBytes <= 33554432, "CiAcquisitionJsonSize");
+	need$19(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= maxBytes && maxBytes <= 33554432, "CiAcquisitionJsonSize");
 	const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 	let at = 0, nodes = 0;
 	const ws = () => {
@@ -9410,7 +9410,7 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 	};
 	const str = () => {
 		const start = at;
-		need$18(text[at++] === "\"");
+		need$19(text[at++] === "\"");
 		let escape = false;
 		while (at < text.length) {
 			const c = text[at++];
@@ -9418,10 +9418,10 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 			if (escape) escape = false;
 			else if (c === "\\") escape = true;
 		}
-		need$18(false, "CiAcquisitionJson");
+		need$19(false, "CiAcquisitionJson");
 	};
 	const scan = (depth) => {
-		need$18(depth <= 64 && ++nodes <= 25e4, "CiAcquisitionJsonDepth");
+		need$19(depth <= 64 && ++nodes <= 25e4, "CiAcquisitionJsonDepth");
 		ws();
 		const c = text[at];
 		if (c === "{") {
@@ -9435,17 +9435,17 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 			while (true) {
 				ws();
 				const key = str();
-				need$18(!keys.has(key), "CiAcquisitionDuplicateKey");
+				need$19(!keys.has(key), "CiAcquisitionDuplicateKey");
 				keys.add(key);
 				ws();
-				need$18(text[at++] === ":");
+				need$19(text[at++] === ":");
 				scan(depth + 1);
 				ws();
 				if (text[at] === "}") {
 					at++;
 					return;
 				}
-				need$18(text[at++] === ",");
+				need$19(text[at++] === ",");
 			}
 		}
 		if (c === "[") {
@@ -9462,7 +9462,7 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 					at++;
 					return;
 				}
-				need$18(text[at++] === ",");
+				need$19(text[at++] === ",");
 			}
 		}
 		if (c === "\"") {
@@ -9471,13 +9471,13 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 		}
 		const start = at;
 		while (at < text.length && !/[\x20\t\r\n,}\]]/.test(text[at])) at++;
-		need$18(at > start);
+		need$19(at > start);
 		const v = JSON.parse(text.slice(start, at));
-		need$18(typeof v !== "number" || Number.isFinite(v));
+		need$19(typeof v !== "number" || Number.isFinite(v));
 	};
 	scan(0);
 	ws();
-	need$18(at === text.length, "CiAcquisitionJsonTrailing");
+	need$19(at === text.length, "CiAcquisitionJsonTrailing");
 	return JSON.parse(text);
 }
 function addCounters(a, b) {
@@ -9486,14 +9486,14 @@ function addCounters(a, b) {
 	const c = {};
 	for (const k of COUNTERS) {
 		c[k] = a[k] + b[k];
-		need$18(integer$1(c[k]) && c[k] <= CAPS[k], "CustodyBudgetExceeded");
+		need$19(integer$1(c[k]) && c[k] <= CAPS[k], "CustodyBudgetExceeded");
 	}
 	return c;
 }
 function validateReserve(spent, reserve, activeWire = 0) {
 	counter(spent);
 	counter(reserve);
-	for (const k of COUNTERS) need$18(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= CAPS[k], "CustodyCompletionBudget");
+	for (const k of COUNTERS) need$19(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= CAPS[k], "CustodyCompletionBudget");
 }
 /** expectedBudgetRevision and compiledCeiling come from protected owner
 * configuration, never from the journal being replayed. */
@@ -9514,8 +9514,8 @@ function acquisitionAccounting({ budgetRevision, expectedBudgetRevision, compile
 	const validate = (spent, reserve, activeWire = 0) => {
 		check(spent);
 		check(reserve);
-		need$18(integer$1(activeWire), "CustodyCompletionBudget");
-		for (const k of COUNTERS) need$18(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= policy.caps[k], "CustodyCompletionBudget");
+		need$19(integer$1(activeWire), "CustodyCompletionBudget");
+		for (const k of COUNTERS) need$19(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= policy.caps[k], "CustodyCompletionBudget");
 	};
 	return {
 		...policy,
@@ -9550,10 +9550,10 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 			"remaining",
 			...arithmetic.version === 2 ? ["budgetRevision"] : []
 		]);
-		need$18(e.version === arithmetic.version && e.sequence === index + 1 && e.previousHash === previous, "CustodyEventChain");
+		need$19(e.version === arithmetic.version && e.sequence === index + 1 && e.previousHash === previous, "CustodyEventChain");
 		if (arithmetic.version === 2) same$8(e.budgetRevision, arithmetic.budgetRevision, "CustodyBudgetRevision");
-		for (const k of Object.keys(binding)) need$18(e[k] === binding[k], "CustodyEventBinding");
-		need$18(!sealed, "CustodyEventAfterSeal");
+		for (const k of Object.keys(binding)) need$19(e[k] === binding[k], "CustodyEventBinding");
+		need$19(!sealed, "CustodyEventAfterSeal");
 		const d = e.data;
 		if (e.type === "reservation") {
 			exact$8(d, [
@@ -9564,7 +9564,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"ecr",
 				"reserveDebit"
 			]);
-			need$18(integer$1(d.id) && d.id > 0 && !active.has(d.id) && integer$1(d.bound) && typeof d.ecr === "boolean", "CustodyReservation");
+			need$19(integer$1(d.id) && d.id > 0 && !active.has(d.id) && integer$1(d.bound) && typeof d.ecr === "boolean", "CustodyReservation");
 			active.set(d.id, d);
 			spent = addCounters(spent, {
 				...zero$5(),
@@ -9577,7 +9577,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"responseHash"
 			]);
 			const r = active.get(d.id);
-			need$18(r && integer$1(d.charged) && d.charged <= r.bound && (e.type !== "unknown" || d.charged === r.bound), "CustodySettlement");
+			need$19(r && integer$1(d.charged) && d.charged <= r.bound && (e.type !== "unknown" || d.charged === r.bound), "CustodySettlement");
 			spent = addCounters(spent, {
 				...zero$5(),
 				httpBodyBytes: d.charged
@@ -9591,7 +9591,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"origin",
 				"reserveDebit"
 			]);
-			need$18(!cache.has(d.key) && integer$1(d.descriptor.size) && ["source-cache", "completed-destination-cache"].includes(d.origin), "CustodySecondGraphPass");
+			need$19(!cache.has(d.key) && integer$1(d.descriptor.size) && ["source-cache", "completed-destination-cache"].includes(d.origin), "CustodySecondGraphPass");
 			cache.set(d.key, {
 				...d,
 				completed: false
@@ -9607,7 +9607,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"physicalBytes"
 			]);
 			const row = cache.get(d.key);
-			need$18(row && !row.completed && row.descriptor.digest === d.digest && row.descriptor.size === d.physicalBytes, "CustodyCacheCompletion");
+			need$19(row && !row.completed && row.descriptor.digest === d.digest && row.descriptor.size === d.physicalBytes, "CustodyCacheCompletion");
 			row.completed = true;
 		} else if (e.type === "filesystem") {
 			exact$8(d, [
@@ -9628,7 +9628,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"bytes",
 				"reserveDebit"
 			]);
-			need$18([
+			need$19([
 				"upload",
 				"manifest",
 				"metadata",
@@ -9647,7 +9647,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"charge",
 				"reserveDebit"
 			]);
-			need$18([
+			need$19([
 				d.allocationId,
 				d.planHash,
 				d.scopeHash
@@ -9663,11 +9663,11 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 		else if (e.type === "sealed") {
 			exact$8(d, ["reason"]);
 			sealed = true;
-		} else need$18(false, "CustodyEventType");
+		} else need$19(false, "CustodyEventType");
 		if (d.reserveDebit) {
 			counter(d.reserveDebit);
 			for (const k of COUNTERS) {
-				need$18(d.reserveDebit[k] <= remaining[k], "CustodyReserveDebit");
+				need$19(d.reserveDebit[k] <= remaining[k], "CustodyReserveDebit");
 				remaining[k] -= d.reserveDebit[k];
 			}
 		}
@@ -9686,18 +9686,18 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 		lastHash: previous
 	};
 }
-var sha$6, need$18, exact$8, same$8, integer$1, hex$9, COUNTERS, CAPS, zero$5, counter, freeze$2;
+var sha$6, need$19, exact$8, same$8, integer$1, hex$9, COUNTERS, CAPS, zero$5, counter, freeze$2;
 var init_ci_smoke_acquisition_format = __esmMin((() => {
 	init_production_canary_verification();
 	init_ci_smoke_evidence();
 	init_production_image_transition();
 	init_production_nonroot_budget_revision();
 	sha$6 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-	need$18 = (ok, code = "CiAcquisitionInvalid") => {
+	need$19 = (ok, code = "CiAcquisitionInvalid") => {
 		if (!ok) throw Error(code);
 	};
-	exact$8 = (v, keys) => need$18(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CiAcquisitionFields");
-	same$8 = (a, b, code = "CiAcquisitionBinding") => need$18(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
+	exact$8 = (v, keys) => need$19(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CiAcquisitionFields");
+	same$8 = (a, b, code = "CiAcquisitionBinding") => need$19(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
 	integer$1 = (n) => Number.isSafeInteger(n) && n >= 0;
 	hex$9 = (v, n = 64) => typeof v === "string" && new RegExp("^[a-f0-9]{" + n + "}$").test(v);
 	COUNTERS = [
@@ -9717,7 +9717,7 @@ var init_ci_smoke_acquisition_format = __esmMin((() => {
 	zero$5 = () => Object.fromEntries(COUNTERS.map((k) => [k, 0]));
 	counter = (v) => {
 		exact$8(v, COUNTERS);
-		for (const k of COUNTERS) need$18(integer$1(v[k]) && v[k] <= CAPS[k], "CiAcquisitionCounter");
+		for (const k of COUNTERS) need$19(integer$1(v[k]) && v[k] <= CAPS[k], "CiAcquisitionCounter");
 		return v;
 	};
 	freeze$2 = (v) => {
@@ -15580,16 +15580,16 @@ function compress$1(state, block) {
 		d = c;
 		c = b;
 		const s = S[(i >> 4) * 4 + (i & 3)];
-		const sum = (a + f & M$1) + (x + T$1[i] & M$1) & M$1;
-		b = b + ((sum << s | sum >>> 32 - s) >>> 0) & M$1;
+		const sum = (a + f & M$2) + (x + T$1[i] & M$2) & M$2;
+		b = b + ((sum << s | sum >>> 32 - s) >>> 0) & M$2;
 		a = tmp;
 	}
-	state[0] = state[0] + a & M$1;
-	state[1] = state[1] + b & M$1;
-	state[2] = state[2] + c & M$1;
-	state[3] = state[3] + d & M$1;
+	state[0] = state[0] + a & M$2;
+	state[1] = state[1] + b & M$2;
+	state[2] = state[2] + c & M$2;
+	state[3] = state[3] + d & M$2;
 }
-var Md5Js, INIT$2, M$1, S, T$1;
+var Md5Js, INIT$2, M$2, S, T$1;
 var init_Md5Js = __esmMin((() => {
 	init_serde();
 	Md5Js = class {
@@ -15645,7 +15645,7 @@ var init_Md5Js = __esmMin((() => {
 		2562383102,
 		271733878
 	];
-	M$1 = 4294967295;
+	M$2 = 4294967295;
 	S = Uint8Array.of(7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21);
 	T$1 = Array.from({ length: 64 }, (_, i) => Math.abs(Math.sin(i + 1)) * 2 ** 32 >>> 0);
 }));
@@ -47882,21 +47882,21 @@ function inspectOriginalIssuerSource(value) {
 		"configHash",
 		"credentialsHash"
 	]);
-	need$18(s.profile === "default" && ["instance-metadata", "static-temporary"].includes(s.provider) && hex$9(s.configHash) && (s.credentialsHash === null || hex$9(s.credentialsHash)), "OriginalIssuerSource");
-	for (const k of ["configFile", "credentialsFile"]) need$18(typeof s[k] === "string" && s[k].startsWith("/") && s[k].length <= 4096 && !s[k].split("/").includes(".."), "OriginalIssuerSourcePath");
+	need$19(s.profile === "default" && ["instance-metadata", "static-temporary"].includes(s.provider) && hex$9(s.configHash) && (s.credentialsHash === null || hex$9(s.credentialsHash)), "OriginalIssuerSource");
+	for (const k of ["configFile", "credentialsFile"]) need$19(typeof s[k] === "string" && s[k].startsWith("/") && s[k].length <= 4096 && !s[k].split("/").includes(".."), "OriginalIssuerSourcePath");
 	return s;
 }
-var K, M, ORIGINAL_ISSUER_LIMITS;
+var K, M$1, ORIGINAL_ISSUER_LIMITS;
 var init_production_nonroot_original_issuer_accounting = __esmMin((() => {
 	init_production_nonroot_contracts();
 	init_ci_smoke_acquisition_format();
 	init_ci_smoke_private_archive();
 	K = 1024;
-	M = K * K;
+	M$1 = K * K;
 	ORIGINAL_ISSUER_LIMITS = freeze$2({
-		unknownBytes: 8 * M,
-		localBytes: 16 * M,
-		cleanupLocalBytes: 2 * M,
+		unknownBytes: 8 * M$1,
+		localBytes: 16 * M$1,
+		cleanupLocalBytes: 2 * M$1,
 		sourceFileBytes: 256 * K,
 		profileFileBytes: 64 * K,
 		normalFilePasses: 28,
@@ -47917,7 +47917,7 @@ function carrierSqlDerivedProfile(rootDigest) {
 }
 function assertCarrierSqlDatabasePin(f) {
 	const derived = carrierSqlDerivedProfile(f?.rootDigest);
-	need$17(f?.rootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || derived, "CarrierPgFixedImage");
+	need$18(f?.rootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || derived, "CarrierPgFixedImage");
 	if (derived) for (const key of [
 		"archive",
 		"arm64Digest",
@@ -47925,7 +47925,7 @@ function assertCarrierSqlDatabasePin(f) {
 		"attestationDigest",
 		"uncompressedBytes",
 		"processedEntries"
-	]) need$17(nonrootHash(f[key]) === nonrootHash(derived[key]), "CarrierPgDerivedPin");
+	]) need$18(nonrootHash(f[key]) === nonrootHash(derived[key]), "CarrierPgDerivedPin");
 }
 function carrierOwnerSourceProfiles(source) {
 	const { provider } = inspectOriginalIssuerSource(source), count = provider === "instance-metadata" ? 1 : 0;
@@ -47944,7 +47944,7 @@ function image(v) {
 		"arm64Digest",
 		"configDigest"
 	]);
-	need$17(/^\d{12}$/.test(v.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(v.region) && /^[a-z0-9][a-z0-9/_-]{0,254}$/.test(v.repositoryName) && [
+	need$18(/^\d{12}$/.test(v.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(v.region) && /^[a-z0-9][a-z0-9/_-]{0,254}$/.test(v.repositoryName) && [
 		"rootDigest",
 		"arm64Digest",
 		"configDigest"
@@ -47957,7 +47957,7 @@ function profile(v, key) {
 			"requestBytes",
 			"responseBytes"
 		]);
-		need$17([0, 1].includes(v.count) && v.requestBytes === 0 && v.responseBytes === (key.endsWith("Token") ? 4096 : 65536), "CarrierSourceProfile");
+		need$18([0, 1].includes(v.count) && v.requestBytes === 0 && v.responseBytes === (key.endsWith("Token") ? 4096 : 65536), "CarrierSourceProfile");
 		return;
 	}
 	if (key === "baseBlob" || key === "ownerBlob") {
@@ -47968,7 +47968,7 @@ function profile(v, key) {
 			"maxObjectBytes",
 			"descriptorSource"
 		]);
-		need$17(v.kind === "carrier-blob-aggregate" && pos(v.maxRequests) && v.maxRequests <= 4096 && pos(v.aggregateResponseBytes) && v.aggregateResponseBytes <= 4294967296 && pos(v.maxObjectBytes) && v.maxObjectBytes <= 2147483648 && v.maxObjectBytes <= v.aggregateResponseBytes && v.descriptorSource === (key === "baseBlob" ? "authenticated-base-graph" : "verified-output-graph"), "CarrierBlobProfile");
+		need$18(v.kind === "carrier-blob-aggregate" && pos(v.maxRequests) && v.maxRequests <= 4096 && pos(v.aggregateResponseBytes) && v.aggregateResponseBytes <= 4294967296 && pos(v.maxObjectBytes) && v.maxObjectBytes <= 2147483648 && v.maxObjectBytes <= v.aggregateResponseBytes && v.descriptorSource === (key === "baseBlob" ? "authenticated-base-graph" : "verified-output-graph"), "CarrierBlobProfile");
 		return;
 	}
 	exact$7(v, [
@@ -47976,8 +47976,8 @@ function profile(v, key) {
 		"requestBytes",
 		"responseBytes"
 	]);
-	need$17(pos(v.count) && v.count <= 2e4 && Number.isSafeInteger(v.requestBytes) && v.requestBytes >= 0 && pos(v.responseBytes) && v.requestBytes <= 1073741824 && v.responseBytes <= 1073741824, "CarrierProfile");
-	if (single.has(key)) need$17(v.count === 1, "CarrierSingleAttempt");
+	need$18(pos(v.count) && v.count <= 2e4 && Number.isSafeInteger(v.requestBytes) && v.requestBytes >= 0 && pos(v.responseBytes) && v.requestBytes <= 1073741824 && v.responseBytes <= 1073741824, "CarrierProfile");
+	if (single.has(key)) need$18(v.count === 1, "CarrierSingleAttempt");
 }
 function templateArithmetic(t) {
 	if (!Object.hasOwn(t, "cumulativeLimitsHash")) return {
@@ -47985,10 +47985,10 @@ function templateArithmetic(t) {
 		counter,
 		addCounters
 	};
-	need$17(t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierCumulativeLimits");
+	need$18(t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierCumulativeLimits");
 	const check = (v) => {
 		exact$7(v, COUNTERS);
-		for (const k of COUNTERS) need$17(Number.isSafeInteger(v[k]) && v[k] >= 0 && v[k] <= NONROOT_REMAINING_WORK_CAPS_V2[k], "CarrierBudgetCounter");
+		for (const k of COUNTERS) need$18(Number.isSafeInteger(v[k]) && v[k] >= 0 && v[k] <= NONROOT_REMAINING_WORK_CAPS_V2[k], "CarrierBudgetCounter");
 		return v;
 	};
 	return {
@@ -48003,7 +48003,7 @@ function templateArithmetic(t) {
 }
 function local(v, check = counter) {
 	check(v);
-	need$17(v.ecrRequests === 0 && v.httpBodyBytes === 0, "CarrierLocalOnly");
+	need$18(v.ecrRequests === 0 && v.httpBodyBytes === 0, "CarrierLocalOnly");
 }
 function sqlFixture(f) {
 	exact$7(f, [
@@ -48020,7 +48020,7 @@ function sqlFixture(f) {
 	]);
 	exact$7(f.archive, ["sha256", "bytesLength"]);
 	exact$7(f.oldSource, ["revision", "tree"]);
-	need$17(f.version === 1 && f.kind === "carrier-sql-fixture" && hex$8(f.archive.sha256) && pos(f.archive.bytesLength) && f.archive.bytesLength <= 268435456 && [
+	need$18(f.version === 1 && f.kind === "carrier-sql-fixture" && hex$8(f.archive.sha256) && pos(f.archive.bytesLength) && f.archive.bytesLength <= 268435456 && [
 		"rootDigest",
 		"arm64Digest",
 		"configDigest",
@@ -48051,7 +48051,7 @@ function inspectCarrierBeforeCopyTemplate(value) {
 		...Object.hasOwn(t, "ownerSource") ? ["ownerSource"] : [],
 		...Object.hasOwn(t, "cumulativeLimitsHash") ? ["cumulativeLimitsHash"] : []
 	]);
-	need$17(t.version === 1 && t.kind === "carrier-before-copy-template" && t.purpose === "premerge-carrier-build" && hex$8(t.owner, 32) && hex$8(t.executionId, 32) && hex$8(t.slotNonce, 32) && pos(t.ownerGithubActorId), "CarrierTemplate");
+	need$18(t.version === 1 && t.kind === "carrier-before-copy-template" && t.purpose === "premerge-carrier-build" && hex$8(t.owner, 32) && hex$8(t.executionId, 32) && hex$8(t.slotNonce, 32) && pos(t.ownerGithubActorId), "CarrierTemplate");
 	const s = t.source;
 	exact$7(s, [
 		"repository",
@@ -48067,14 +48067,14 @@ function inspectCarrierBeforeCopyTemplate(value) {
 		"jobDefinitionHash",
 		"roleDefinitionHash"
 	]);
-	need$17(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s.repository) && pos(s.prNumber) && [
+	need$18(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s.repository) && pos(s.prNumber) && [
 		"candidateRevision",
 		"candidateTree",
 		"baseRevision",
 		"workflowSha"
 	].every((k) => hex$8(s[k], 40)) && s.workflowSha === s.candidateRevision, "CarrierSource");
-	need$17(/^refs\/heads\/[A-Za-z0-9_./-]+$/.test(s.candidateRef) && !s.candidateRef.includes("..") && /^\.github\/workflows\/[a-z0-9-]+\.ya?ml$/.test(s.workflowPath) && /^[a-z][a-z0-9-]{0,63}$/.test(s.jobKey) && text$2(s.jobName), "CarrierSource");
-	need$17([
+	need$18(/^refs\/heads\/[A-Za-z0-9_./-]+$/.test(s.candidateRef) && !s.candidateRef.includes("..") && /^\.github\/workflows\/[a-z0-9-]+\.ya?ml$/.test(s.workflowPath) && /^[a-z][a-z0-9-]{0,63}$/.test(s.jobKey) && text$2(s.jobName), "CarrierSource");
+	need$18([
 		"workflowPath",
 		"jobKey",
 		"jobName"
@@ -48091,10 +48091,10 @@ function inspectCarrierBeforeCopyTemplate(value) {
 		"kmsKeyArn",
 		"bucketKeyEnabled"
 	]);
-	need$17(/^\d{12}$/.test(q.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(q.region) && q.repositoryName === "mem9-on-aws/preview/bootstrap", "CarrierScope");
-	for (const k of ["previewRoleArn", "ownerRoleArn"]) need$17(new RegExp("^arn:aws:iam::" + q.account + ":role/[A-Za-z0-9_+=,.@/-]+$").test(q[k]), "CarrierRole");
-	need$17(q.previewRoleArn === "arn:aws:iam::" + q.account + ":role/" + CARRIER_CI_JOB.previewRoleName, "CarrierPreviewRole");
-	need$17(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(q.bucket) && !q.bucket.includes("..") && q.prefix === "decisions/pr-" + s.prNumber + "/carrier" && q.bucketKeyEnabled === true && new RegExp("^arn:aws:kms:" + q.region + ":" + q.account + ":key/(?:[a-f0-9-]{36}|mrk-[a-f0-9]{32})$").test(q.kmsKeyArn), "CarrierStorage");
+	need$18(/^\d{12}$/.test(q.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(q.region) && q.repositoryName === "mem9-on-aws/preview/bootstrap", "CarrierScope");
+	for (const k of ["previewRoleArn", "ownerRoleArn"]) need$18(new RegExp("^arn:aws:iam::" + q.account + ":role/[A-Za-z0-9_+=,.@/-]+$").test(q[k]), "CarrierRole");
+	need$18(q.previewRoleArn === "arn:aws:iam::" + q.account + ":role/" + CARRIER_CI_JOB.previewRoleName, "CarrierPreviewRole");
+	need$18(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(q.bucket) && !q.bucket.includes("..") && q.prefix === "decisions/pr-" + s.prNumber + "/carrier" && q.bucketKeyEnabled === true && new RegExp("^arn:aws:kms:" + q.region + ":" + q.account + ":key/(?:[a-f0-9-]{36}|mrk-[a-f0-9]{32})$").test(q.kmsKeyArn), "CarrierStorage");
 	exact$7(t.anchors, [
 		"oldImage",
 		"oldImageEvidenceHash",
@@ -48106,14 +48106,14 @@ function inspectCarrierBeforeCopyTemplate(value) {
 	]);
 	image(t.anchors.oldImage);
 	image(t.base);
-	for (const k of Object.keys(t.anchors).filter((k) => k !== "oldImage")) need$17(hex$8(t.anchors[k]), "CarrierAnchor");
-	for (const i of [t.base, t.anchors.oldImage]) need$17(i.account === q.account && i.region === q.region, "CarrierImageScope");
+	for (const k of Object.keys(t.anchors).filter((k) => k !== "oldImage")) need$18(hex$8(t.anchors[k]), "CarrierAnchor");
+	for (const i of [t.base, t.anchors.oldImage]) need$18(i.account === q.account && i.region === q.region, "CarrierImageScope");
 	exact$7(t.recipe, [
 		"dockerfileHash",
 		"guardHash",
 		"sourceClosureHash"
 	]);
-	need$17(Object.values(t.recipe).every((v) => hex$8(v)), "CarrierRecipe");
+	need$18(Object.values(t.recipe).every((v) => hex$8(v)), "CarrierRecipe");
 	exact$7(t.bounds, [
 		"contextBytes",
 		"contextFiles",
@@ -48126,29 +48126,29 @@ function inspectCarrierBeforeCopyTemplate(value) {
 		"processedEntries",
 		"scanPages"
 	]);
-	need$17(Object.values(t.bounds).every(pos) && t.bounds.contextBytes <= 1073741824 && t.bounds.contextFiles <= 2e4 && t.bounds.grantBytes <= 33554432 && t.bounds.resultBytes <= 33554432 && t.bounds.manifestNodes <= 4096 && t.bounds.blobNodes <= 4096 && t.bounds.compressedBytes <= 4294967296 && t.bounds.uncompressedBytes <= 34359738368 && t.bounds.processedEntries <= 1e6 && t.bounds.scanPages <= 100, "CarrierBounds");
+	need$18(Object.values(t.bounds).every(pos) && t.bounds.contextBytes <= 1073741824 && t.bounds.contextFiles <= 2e4 && t.bounds.grantBytes <= 33554432 && t.bounds.resultBytes <= 33554432 && t.bounds.manifestNodes <= 4096 && t.bounds.blobNodes <= 4096 && t.bounds.compressedBytes <= 4294967296 && t.bounds.uncompressedBytes <= 34359738368 && t.bounds.processedEntries <= 1e6 && t.bounds.scanPages <= 100, "CarrierBounds");
 	const keys = Object.keys(fixed).filter((k) => t.ownerSource || !sourceProfiles.has(k));
 	exact$7(t.profiles, keys);
 	for (const k of keys) profile(t.profiles[k], k);
 	if (t.ownerSource) {
 		const expected = carrierOwnerSourceProfiles(t.ownerSource);
 		for (const [k, v] of Object.entries(expected)) same$7(t.profiles[k], v);
-		need$17(t.fundedLocal?.owner?.logicalBytes >= 2 * ORIGINAL_ISSUER_LIMITS.localBytes, "CarrierIssuerLocalCoverage");
+		need$18(t.fundedLocal?.owner?.logicalBytes >= 2 * ORIGINAL_ISSUER_LIMITS.localBytes, "CarrierIssuerLocalCoverage");
 	}
 	const f = sqlFixture(t.sqlFixture);
-	need$17(t.profiles.fixturePut.requestBytes === f.archive.bytesLength && t.profiles.fixturePut.responseBytes >= 16384 && t.profiles.fixtureGet.requestBytes === 0 && t.profiles.fixtureGet.responseBytes === f.archive.bytesLength, "CarrierSqlFixtureBudget");
-	for (const k of ["baseBlob", "ownerBlob"]) need$17(t.profiles[k].aggregateResponseBytes === t.bounds.compressedBytes && t.profiles[k].maxRequests >= t.bounds.blobNodes, "CarrierBlobCoverage");
-	need$17(t.profiles.ownerIdentity.count === 3 && t.profiles.ownerIssuerIdentity.count === 2 && t.profiles.ownerPublisherIssuerIdentity.count === 2 && t.profiles.scan.count === t.bounds.scanPages, "CarrierProfileCoverage");
-	for (const [identity, assume] of [["ownerIssuerIdentity", "ownerAssume"], ["ownerPublisherIssuerIdentity", "ownerPublisherAssume"]]) need$17(t.profiles[identity].requestBytes >= 16384 && t.profiles[identity].responseBytes >= 16384 && t.profiles[assume].requestBytes >= 16384 && t.profiles[assume].responseBytes >= 262144, "CarrierIssuerBudget");
-	for (const k of ["contextPut"]) need$17(t.profiles[k].requestBytes >= t.bounds.contextBytes, "CarrierContextBudget");
-	for (const k of ["contextConfirm", "contextGet"]) need$17(t.profiles[k].responseBytes >= t.bounds.contextBytes, "CarrierContextBudget");
-	need$17(t.profiles.resultPut.requestBytes >= t.bounds.resultBytes && t.profiles.resultGet.responseBytes >= t.bounds.resultBytes, "CarrierResultBudget");
-	need$17(t.profiles.grantPut.requestBytes >= t.bounds.grantBytes && t.profiles.grantConfirm.responseBytes >= t.bounds.grantBytes && t.profiles.grantGet.responseBytes >= t.bounds.grantBytes, "CarrierGrantBudget");
+	need$18(t.profiles.fixturePut.requestBytes === f.archive.bytesLength && t.profiles.fixturePut.responseBytes >= 16384 && t.profiles.fixtureGet.requestBytes === 0 && t.profiles.fixtureGet.responseBytes === f.archive.bytesLength, "CarrierSqlFixtureBudget");
+	for (const k of ["baseBlob", "ownerBlob"]) need$18(t.profiles[k].aggregateResponseBytes === t.bounds.compressedBytes && t.profiles[k].maxRequests >= t.bounds.blobNodes, "CarrierBlobCoverage");
+	need$18(t.profiles.ownerIdentity.count === 3 && t.profiles.ownerIssuerIdentity.count === 2 && t.profiles.ownerPublisherIssuerIdentity.count === 2 && t.profiles.scan.count === t.bounds.scanPages, "CarrierProfileCoverage");
+	for (const [identity, assume] of [["ownerIssuerIdentity", "ownerAssume"], ["ownerPublisherIssuerIdentity", "ownerPublisherAssume"]]) need$18(t.profiles[identity].requestBytes >= 16384 && t.profiles[identity].responseBytes >= 16384 && t.profiles[assume].requestBytes >= 16384 && t.profiles[assume].responseBytes >= 262144, "CarrierIssuerBudget");
+	for (const k of ["contextPut"]) need$18(t.profiles[k].requestBytes >= t.bounds.contextBytes, "CarrierContextBudget");
+	for (const k of ["contextConfirm", "contextGet"]) need$18(t.profiles[k].responseBytes >= t.bounds.contextBytes, "CarrierContextBudget");
+	need$18(t.profiles.resultPut.requestBytes >= t.bounds.resultBytes && t.profiles.resultGet.responseBytes >= t.bounds.resultBytes, "CarrierResultBudget");
+	need$18(t.profiles.grantPut.requestBytes >= t.bounds.grantBytes && t.profiles.grantConfirm.responseBytes >= t.bounds.grantBytes && t.profiles.grantGet.responseBytes >= t.bounds.grantBytes, "CarrierGrantBudget");
 	for (const k of [
 		"runPut",
 		"runConfirm",
 		"claimPut"
-	]) need$17((k === "runConfirm" ? t.profiles[k].responseBytes : t.profiles[k].requestBytes) >= 16384, "CarrierBindingBudget");
+	]) need$18((k === "runConfirm" ? t.profiles[k].responseBytes : t.profiles[k].requestBytes) >= 16384, "CarrierBindingBudget");
 	const arithmetic = templateArithmetic(t);
 	local(t.preFundingPreparation, arithmetic.counter);
 	exact$7(t.fundedLocal, ["owner", "ci"]);
@@ -48174,7 +48174,7 @@ function measureCarrierBeforeCopyBudget(value) {
 	}, { addCounters } = templateArithmetic(t);
 	for (const [purpose, p] of Object.entries(t.profiles)) {
 		const [actor, action] = fixed[purpose], bytes = p.kind === "carrier-blob-aggregate" ? p.aggregateResponseBytes : p.count * (p.requestBytes + p.responseBytes);
-		need$17(Number.isSafeInteger(bytes), "CarrierBudgetOverflow");
+		need$18(Number.isSafeInteger(bytes), "CarrierBudgetOverflow");
 		lanes[actor] = addCounters(lanes[actor], {
 			...zero$5(),
 			ecrRequests: ecr.has(action) ? p.count : 0,
@@ -48198,7 +48198,7 @@ function measureCarrierBeforeCopyBudget(value) {
 function carrierSqlPackageReadBounds(f) {
 	const v = sqlPackageReads[f.archive.sha256];
 	if (v) {
-		need$17(f.archive.bytesLength === v.archiveBytes, "CarrierSqlArchiveSize");
+		need$18(f.archive.bytesLength === v.archiveBytes, "CarrierSqlArchiveSize");
 		return { ...v };
 	}
 	return {
@@ -48214,7 +48214,7 @@ function carrierSqlFixtureComponentBudget(value, options) {
 	const f = sqlFixture(copyNonrootJson(value));
 	exact$7(options, ["putResponseBytes"]);
 	const { putResponseBytes } = options;
-	need$17(pos(putResponseBytes) && putResponseBytes >= 16384 && putResponseBytes <= 1073741824, "CarrierSqlPutResponseBytes");
+	need$18(pos(putResponseBytes) && putResponseBytes >= 16384 && putResponseBytes <= 1073741824, "CarrierSqlPutResponseBytes");
 	assertCarrierSqlDatabasePin(f);
 	const pin = carrierSqlDerivedProfile(f.rootDigest) ?? originalSqlFixture;
 	for (const key of [
@@ -48303,28 +48303,28 @@ function inspectCarrierFundingPlan(value) {
 		"budget",
 		...p.version === 2 ? ["budgetRevision", "compiledCeiling"] : []
 	]);
-	need$17([1, 2].includes(p.version) && p.kind === "carrier-before-copy-funding-plan" && p.purpose === "premerge-carrier-build", "CarrierFundingKind");
+	need$18([1, 2].includes(p.version) && p.kind === "carrier-before-copy-funding-plan" && p.purpose === "premerge-carrier-build", "CarrierFundingKind");
 	const t = inspectCarrierBeforeCopyTemplate(p.template);
-	need$17(p.version === templateArithmetic(t).version, "CarrierFundingVersion");
+	need$18(p.version === templateArithmetic(t).version, "CarrierFundingVersion");
 	if (p.version === 2) {
 		nonrootAccountingPolicy(p.budgetRevision, p.budgetRevision, p.compiledCeiling);
-		need$17(p.budgetRevision.limitsHash === t.cumulativeLimitsHash, "CarrierCumulativeLimits");
+		need$18(p.budgetRevision.limitsHash === t.cumulativeLimitsHash, "CarrierCumulativeLimits");
 	}
-	need$17(p.templateHash === nonrootHash(t) && hex$8(p.configHash) && hex$8(p.ledgerStartHash) && pos(p.issuedMs) && pos(p.deadlineMs) && p.issuedMs < p.deadlineMs, "CarrierFunding");
+	need$18(p.templateHash === nonrootHash(t) && hex$8(p.configHash) && hex$8(p.ledgerStartHash) && pos(p.issuedMs) && pos(p.deadlineMs) && p.issuedMs < p.deadlineMs, "CarrierFunding");
 	exact$7(p.ledgerBinding, [
 		"owner",
 		"executionId",
 		"planHash",
 		"publicationHash"
 	]);
-	need$17(p.ledgerBinding.owner === t.owner && p.ledgerBinding.executionId === t.executionId && p.ledgerBinding.planHash === p.configHash && hex$8(p.ledgerBinding.publicationHash), "CarrierLedgerBinding");
+	need$18(p.ledgerBinding.owner === t.owner && p.ledgerBinding.executionId === t.executionId && p.ledgerBinding.planHash === p.configHash && hex$8(p.ledgerBinding.publicationHash), "CarrierLedgerBinding");
 	exact$7(p.context, [
 		"key",
 		"manifestHash",
 		"sha256",
 		"bytesLength"
 	]);
-	need$17(p.context.key === carrierObjectKeys(t).context && hex$8(p.context.manifestHash) && hex$8(p.context.sha256) && pos(p.context.bytesLength) && p.context.bytesLength <= t.bounds.contextBytes, "CarrierContext");
+	need$18(p.context.key === carrierObjectKeys(t).context && hex$8(p.context.manifestHash) && hex$8(p.context.sha256) && pos(p.context.bytesLength) && p.context.bytesLength <= t.bounds.contextBytes, "CarrierContext");
 	same$7(p.budget, measureCarrierBeforeCopyBudget(t).fundedRemaining);
 	return p;
 }
@@ -48344,7 +48344,7 @@ function carrierAccountingExpectation(plan, expected = {}) {
 		expectedBudgetRevision: expected.budgetRevision,
 		compiledCeiling: expected.compiledCeiling
 	});
-	need$17(plan.version === arithmetic.version, "CarrierFundingVersion");
+	need$18(plan.version === arithmetic.version, "CarrierFundingVersion");
 	if (plan.version === 2) same$7(plan.compiledCeiling, expected.compiledCeiling, "CarrierCompiledCeiling");
 	return arithmetic;
 }
@@ -48358,9 +48358,9 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 		"planHash",
 		"debit"
 	]);
-	need$17([1, 2].includes(g.version) && g.kind === "owner-prepaid-carrier-grant" && g.purpose === "premerge-carrier-build", "CarrierGrantKind");
+	need$18([1, 2].includes(g.version) && g.kind === "owner-prepaid-carrier-grant" && g.purpose === "premerge-carrier-build", "CarrierGrantKind");
 	const p = inspectCarrierFundingPlan(g.plan);
-	need$17([
+	need$18([
 		grantHash,
 		templateHash,
 		configHash,
@@ -48370,7 +48370,7 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 		budgetRevision,
 		compiledCeiling
 	});
-	need$17(g.version === p.version, "CarrierGrantVersion");
+	need$18(g.version === p.version, "CarrierGrantVersion");
 	const d = g.debit;
 	exact$7(d, [
 		"start",
@@ -48378,15 +48378,15 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 		"events",
 		"checkpoint"
 	]);
-	need$17(typeof d.startRaw === "string" && Buffer.from(d.startRaw, "base64").toString("base64") === d.startRaw && sha$6(Buffer.from(d.startRaw, "base64")) === ledgerStartHash, "CarrierLedgerStart");
+	need$18(typeof d.startRaw === "string" && Buffer.from(d.startRaw, "base64").toString("base64") === d.startRaw && sha$6(Buffer.from(d.startRaw, "base64")) === ledgerStartHash, "CarrierLedgerStart");
 	same$7(JSON.parse(Buffer.from(d.startRaw, "base64")), d.start);
-	need$17(d.start.mode === "copy" && d.start.deadlineMs === p.deadlineMs && p.issuedMs >= p.deadlineMs - 27e5, "CarrierOriginalDeadline");
+	need$18(d.start.mode === "copy" && d.start.deadlineMs === p.deadlineMs && p.issuedMs >= p.deadlineMs - 27e5, "CarrierOriginalDeadline");
 	same$7(d.start.binding, p.ledgerBinding);
 	if (p.version === 2) {
-		need$17(d.start.version === 2, "CarrierLedgerVersion");
+		need$18(d.start.version === 2, "CarrierLedgerVersion");
 		same$7(d.start.budgetRevision, budgetRevision, "CarrierLedgerRevision");
 		same$7(d.checkpoint.budgetRevision, budgetRevision, "CarrierLedgerRevision");
-	} else need$17(d.start.version === 1 && !Object.hasOwn(d.start, "budgetRevision") && !Object.hasOwn(d.checkpoint, "budgetRevision"), "CarrierLedgerVersion");
+	} else need$18(d.start.version === 1 && !Object.hasOwn(d.start, "budgetRevision") && !Object.hasOwn(d.checkpoint, "budgetRevision"), "CarrierLedgerVersion");
 	const h = replayAccounting(d.events, {
 		binding: d.start.binding,
 		startingCounters: d.start.startingCounters,
@@ -48397,9 +48397,9 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 			compiledCeiling
 		} : {}
 	});
-	need$17(!h.sealed && h.active.size === 0 && d.events.length > 0, "CarrierDebitHistory");
+	need$18(!h.sealed && h.active.size === 0 && d.events.length > 0, "CarrierDebitHistory");
 	const event = d.events.at(-1), scopeHash = nonrootHash(carrierLedgerScope(p.template));
-	need$17(event.type === "prepayment" && d.events.filter((e) => e.type === "prepayment" && e.data.scopeHash === scopeHash).length === 1, "CarrierDebitOnce");
+	need$18(event.type === "prepayment" && d.events.filter((e) => e.type === "prepayment" && e.data.scopeHash === scopeHash).length === 1, "CarrierDebitOnce");
 	same$7(event.data, {
 		allocationId: g.planHash,
 		planHash: g.planHash,
@@ -48411,8 +48411,8 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 	same$7(d.checkpoint.startingCounters, d.start.startingCounters);
 	same$7(d.checkpoint.counters, h.spent);
 	same$7(d.checkpoint.remainingReservation, h.remaining);
-	need$17(d.checkpoint.eventCount === d.events.length && d.checkpoint.lastEventHash === h.lastHash && d.checkpoint.active === 0 && d.checkpoint.sealed === false, "CarrierDebitCheckpoint");
-	if (now !== void 0) need$17(pos(now) && now >= p.issuedMs && now < p.deadlineMs, "CarrierGrantExpired");
+	need$18(d.checkpoint.eventCount === d.events.length && d.checkpoint.lastEventHash === h.lastHash && d.checkpoint.active === 0 && d.checkpoint.sealed === false, "CarrierDebitCheckpoint");
+	if (now !== void 0) need$18(pos(now) && now >= p.issuedMs && now < p.deadlineMs, "CarrierGrantExpired");
 	return copyNonrootJson({
 		plan: p,
 		grantHash,
@@ -48424,11 +48424,11 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 }
 function carrierRunBinding(planValue, grantHash, { run, commit, pullRequest, job }) {
 	const p = inspectCarrierFundingPlan(planValue), s = p.template.source;
-	need$17(hex$8(grantHash), "CarrierGrantHash");
-	need$17(run?.event === "workflow_dispatch" && run.head_sha === s.candidateRevision && run.head_branch === s.candidateRef.slice(11) && run.repository?.full_name === s.repository && run.path === s.workflowPath && pos(run.id) && pos(run.run_attempt) && ["queued", "in_progress"].includes(run.status), "CarrierActualRun");
-	need$17(commit?.sha === s.candidateRevision && commit.tree?.sha === s.candidateTree, "CarrierActualCommit");
-	need$17(pullRequest?.number === s.prNumber && pullRequest.state === "open" && pullRequest.merged === false && pullRequest.head?.sha === s.candidateRevision && pullRequest.head.repo?.full_name === s.repository && pullRequest.base?.sha === s.baseRevision && pullRequest.base.ref === "main", "CarrierActualPr");
-	need$17(job?.run_id === run.id && job.run_attempt === run.run_attempt && job.head_sha === s.candidateRevision && job.name === s.jobName && job.status === "in_progress" && pos(job.id), "CarrierActualJob");
+	need$18(hex$8(grantHash), "CarrierGrantHash");
+	need$18(run?.event === "workflow_dispatch" && run.head_sha === s.candidateRevision && run.head_branch === s.candidateRef.slice(11) && run.repository?.full_name === s.repository && run.path === s.workflowPath && pos(run.id) && pos(run.run_attempt) && ["queued", "in_progress"].includes(run.status), "CarrierActualRun");
+	need$18(commit?.sha === s.candidateRevision && commit.tree?.sha === s.candidateTree, "CarrierActualCommit");
+	need$18(pullRequest?.number === s.prNumber && pullRequest.state === "open" && pullRequest.merged === false && pullRequest.head?.sha === s.candidateRevision && pullRequest.head.repo?.full_name === s.repository && pullRequest.base?.sha === s.baseRevision && pullRequest.base.ref === "main", "CarrierActualPr");
+	need$18(job?.run_id === run.id && job.run_attempt === run.run_attempt && job.head_sha === s.candidateRevision && job.name === s.jobName && job.status === "in_progress" && pos(job.id), "CarrierActualJob");
 	return copyNonrootJson({
 		version: 1,
 		kind: "carrier-actual-run-binding",
@@ -48455,7 +48455,7 @@ function boundRun(p, b) {
 		"jobId",
 		"deadlineMs"
 	]);
-	need$17(b.version === 1 && b.kind === "carrier-actual-run-binding" && b.templateHash === p.templateHash && hex$8(b.grantHash) && b.contextHash === p.context.sha256 && b.deadlineMs === p.deadlineMs && [
+	need$18(b.version === 1 && b.kind === "carrier-actual-run-binding" && b.templateHash === p.templateHash && hex$8(b.grantHash) && b.contextHash === p.context.sha256 && b.deadlineMs === p.deadlineMs && [
 		b.runId,
 		b.runAttempt,
 		b.jobId
@@ -48489,7 +48489,7 @@ function carrierCheckpointSelection(planValue, binding, upload) {
 		checkpoint: "premerge-carrier-build",
 		jobKey: p.template.source.jobKey
 	}, bindingHash = nonrootHash(binding);
-	need$17(hex$8(upload.nonce) && upload.scopeHash === nonrootHash({
+	need$18(hex$8(upload.nonce) && upload.scopeHash === nonrootHash({
 		bindingHash,
 		scope
 	}) && pos(upload.artifactId) && hex$8(upload.artifactDigest), "CarrierArtifact");
@@ -48522,17 +48522,17 @@ function carrierCheckpointSelection(planValue, binding, upload) {
 * BEFORE dispatch. Never reconstruct usage from a caller JSON success flag. */
 function carrierBlobDebit(planValue, actor, usageValue, descriptor) {
 	const p = inspectCarrierFundingPlan(planValue);
-	need$17(["owner", "ci"].includes(actor), "CarrierBlobActor");
+	need$18(["owner", "ci"].includes(actor), "CarrierBlobActor");
 	const profile = p.template.profiles[actor === "owner" ? "ownerBlob" : "baseBlob"], usage = copyNonrootJson(usageValue);
 	exact$7(usage, [
 		"requests",
 		"responseBytes",
 		"digests"
 	]);
-	need$17(Number.isSafeInteger(usage.requests) && usage.requests >= 0 && Number.isSafeInteger(usage.responseBytes) && usage.responseBytes >= 0 && Array.isArray(usage.digests) && usage.digests.length === usage.requests && new Set(usage.digests).size === usage.requests && usage.digests.every(digest$4), "CarrierBlobUsage");
-	need$17(digest$4(descriptor?.digest) && pos(descriptor.size) && descriptor.size <= profile.maxObjectBytes && !usage.digests.includes(descriptor.digest), "CarrierBlobDescriptor");
+	need$18(Number.isSafeInteger(usage.requests) && usage.requests >= 0 && Number.isSafeInteger(usage.responseBytes) && usage.responseBytes >= 0 && Array.isArray(usage.digests) && usage.digests.length === usage.requests && new Set(usage.digests).size === usage.requests && usage.digests.every(digest$4), "CarrierBlobUsage");
+	need$18(digest$4(descriptor?.digest) && pos(descriptor.size) && descriptor.size <= profile.maxObjectBytes && !usage.digests.includes(descriptor.digest), "CarrierBlobDescriptor");
 	const requests = usage.requests + 1, responseBytes = usage.responseBytes + descriptor.size;
-	need$17(requests <= profile.maxRequests && Number.isSafeInteger(responseBytes) && responseBytes <= profile.aggregateResponseBytes, "CarrierBlobAggregateExceeded");
+	need$18(requests <= profile.maxRequests && Number.isSafeInteger(responseBytes) && responseBytes <= profile.aggregateResponseBytes, "CarrierBlobAggregateExceeded");
 	return copyNonrootJson({
 		usage: {
 			requests,
@@ -48551,7 +48551,7 @@ function carrierBlobDebit(planValue, actor, usageValue, descriptor) {
 		}
 	});
 }
-var CARRIER_CI_JOB, CARRIER_SQL_DATABASE_ROOT, CARRIER_SQL_DERIVED_FIXTURE, CARRIER_SQL_NOJIT_FIXTURE, originalSqlFixture, derivedProfiles, need$17, exact$7, hex$8, pos, same$7, digest$4, text$2, fixed, CARRIER_PROFILE_ACTIONS, sourceProfiles, single, ecr, sqlPackageReads;
+var CARRIER_CI_JOB, CARRIER_SQL_DATABASE_ROOT, CARRIER_SQL_DERIVED_FIXTURE, CARRIER_SQL_NOJIT_FIXTURE, originalSqlFixture, derivedProfiles, need$18, exact$7, hex$8, pos, same$7, digest$4, text$2, fixed, CARRIER_PROFILE_ACTIONS, sourceProfiles, single, ecr, sqlPackageReads;
 var init_ci_carrier_before_copy = __esmMin((() => {
 	init_production_nonroot_contracts();
 	init_ci_smoke_acquisition_format();
@@ -48609,13 +48609,13 @@ var init_ci_carrier_before_copy = __esmMin((() => {
 		processedEntries: 5e4
 	});
 	derivedProfiles = [CARRIER_SQL_DERIVED_FIXTURE, CARRIER_SQL_NOJIT_FIXTURE];
-	need$17 = (v, c = "CarrierContract") => {
+	need$18 = (v, c = "CarrierContract") => {
 		if (!v) throw Error(c);
 	};
-	exact$7 = (v, keys) => need$17(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CarrierFields");
+	exact$7 = (v, keys) => need$18(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CarrierFields");
 	hex$8 = (s, n = 64) => typeof s === "string" && new RegExp("^[a-f0-9]{" + n + "}$").test(s);
 	pos = (n) => Number.isSafeInteger(n) && n > 0;
-	same$7 = (a, b, c = "CarrierBinding") => need$17(nonrootHash(a) === nonrootHash(b), c);
+	same$7 = (a, b, c = "CarrierBinding") => need$18(nonrootHash(a) === nonrootHash(b), c);
 	digest$4 = (s) => typeof s === "string" && /^sha256:[a-f0-9]{64}$/.test(s);
 	text$2 = (s) => typeof s === "string" && s.length > 0 && s.length <= 512 && !/[\x00-\x1f\x7f]/.test(s);
 	fixed = {
@@ -48716,14 +48716,14 @@ var init_ci_carrier_before_copy = __esmMin((() => {
 * hash beside a subset of COPY files is not membership or closure evidence. */
 function createControlSourceContext(value, readBlob) {
 	const input = copyNonrootJson(value);
-	need$16(input && Object.keys(input).sort().join() === "entries,tree");
+	need$17(input && Object.keys(input).sort().join() === "entries,tree");
 	const { tree, entries } = input;
-	need$16(/^[a-f0-9]{40}$/.test(tree ?? "") && typeof readBlob === "function");
+	need$17(/^[a-f0-9]{40}$/.test(tree ?? "") && typeof readBlob === "function");
 	const rows = copyNonrootJson(entries);
-	need$16(Array.isArray(rows) && rows.length > 0 && rows.length <= 2e4);
+	need$17(Array.isArray(rows) && rows.length > 0 && rows.length <= 2e4);
 	const root = /* @__PURE__ */ new Map(), files = /* @__PURE__ */ new Map();
 	for (const row of rows) {
-		need$16(row && Object.keys(row).sort().join() === [
+		need$17(row && Object.keys(row).sort().join() === [
 			"path",
 			"mode",
 			"type",
@@ -48738,10 +48738,10 @@ function createControlSourceContext(value, readBlob) {
 		let node = root;
 		for (const part of parts.slice(0, -1)) {
 			if (!node.has(part)) node.set(part, /* @__PURE__ */ new Map());
-			need$16(node.get(part) instanceof Map);
+			need$17(node.get(part) instanceof Map);
 			node = node.get(part);
 		}
-		need$16(!node.has(parts.at(-1)));
+		need$17(!node.has(parts.at(-1)));
 		node.set(parts.at(-1), row);
 	}
 	const treeHash = (node) => {
@@ -48749,7 +48749,7 @@ function createControlSourceContext(value, readBlob) {
 		const bytes = Buffer.concat(entries.flatMap(([name, value]) => [Buffer.from((value instanceof Map ? "40000" : value.mode) + " " + name + "\0"), Buffer.from(value instanceof Map ? treeHash(value) : value.oid, "hex")]));
 		return gitObject("tree", bytes);
 	};
-	need$16(treeHash(root) === tree);
+	need$17(treeHash(root) === tree);
 	const handle = Object.freeze({
 		kind: "verified-control-source-tree",
 		tree
@@ -48763,13 +48763,13 @@ function createControlSourceContext(value, readBlob) {
 }
 async function readControlSourceFile(context, path) {
 	const state = contexts$3.get(context);
-	need$16(state && safePath(path));
+	need$17(state && safePath(path));
 	const entry = state.files.get(path);
-	need$16(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
+	need$17(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
 	const bytes = await state.readBlob(entry.oid, path);
-	need$16(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
+	need$17(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
 	const raw = Buffer.from(bytes);
-	need$16(gitObject("blob", raw) === entry.oid);
+	need$17(gitObject("blob", raw) === entry.oid);
 	return {
 		file: inspectNonrootRecord("SourceFileV1", {
 			path,
@@ -48789,28 +48789,28 @@ function copySources(text) {
 	for (const raw of text.split(/\r?\n/)) {
 		const line = raw.trim();
 		if (!/^(?:COPY|ADD)\b/i.test(line)) continue;
-		need$16(line.startsWith("COPY ") && !/[\\\[\]"'$`]/.test(line));
+		need$17(line.startsWith("COPY ") && !/[\\\[\]"'$`]/.test(line));
 		const words = line.split(/\s+/).slice(1);
-		need$16(words.length >= 2 && !words.some((word) => word.startsWith("--")));
+		need$17(words.length >= 2 && !words.some((word) => word.startsWith("--")));
 		words.pop();
 		for (const source of words) {
-			need$16(/^[A-Za-z0-9_.*\/-]+$/.test(source) && !source.startsWith("/") && !source.split("/").some((part) => part === "." || part === ".."));
+			need$17(/^[A-Za-z0-9_.*\/-]+$/.test(source) && !source.startsWith("/") && !source.split("/").some((part) => part === "." || part === ".."));
 			values.push(source);
 		}
 	}
-	need$16(values.length > 0);
+	need$17(values.length > 0);
 	return [...new Set(values)].sort();
 }
 /** Exact COPY expansion against the authenticated complete tree. This is the
 * declared recipe; the build launcher separately rejects untracked matches. */
 async function describeControlCopyClosure(context) {
 	const state = contexts$3.get(context);
-	need$16(state);
+	need$17(state);
 	const dockerfile = await readControlSourceFile(context, "docker/bootstrap/Dockerfile"), paths = /* @__PURE__ */ new Set();
 	for (const source of copySources(new TextDecoder("utf-8", { fatal: true }).decode(dockerfile.bytes))) {
 		const pattern = new RegExp("^" + source.split("*").map(RegExp.escape).join("[^/]*") + "$");
 		const matches = [...state.files.keys()].filter((path) => source.endsWith("/") ? path.startsWith(source) : pattern.test(path));
-		need$16(matches.length > 0);
+		need$17(matches.length > 0);
 		for (const path of matches) paths.add(path);
 	}
 	const files = [];
@@ -48825,26 +48825,26 @@ async function describeControlCopyClosure(context) {
 }
 async function verifyControlSourceClosure(context, closure, { copyContext = false } = {}) {
 	const state = contexts$3.get(context);
-	need$16(state);
+	need$17(state);
 	const checked = inspectNonrootRecord("SourceClosureV1", closure);
-	need$16(checked.tree === state.tree);
-	for (const file of checked.files) need$16(nonrootHash((await readControlSourceFile(context, file.path)).file) === nonrootHash(file));
-	if (copyContext) need$16(nonrootHash(await describeControlCopyClosure(context)) === nonrootHash(checked));
+	need$17(checked.tree === state.tree);
+	for (const file of checked.files) need$17(nonrootHash((await readControlSourceFile(context, file.path)).file) === nonrootHash(file));
+	if (copyContext) need$17(nonrootHash(await describeControlCopyClosure(context)) === nonrootHash(checked));
 	return checked;
 }
 function controlSourcePaths(context) {
 	const state = contexts$3.get(context);
-	need$16(state);
+	need$17(state);
 	return Object.freeze([...state.files.keys()].sort());
 }
-var contexts$3, fail$5, need$16, sha$5, gitObject, safePath;
+var contexts$3, fail$5, need$17, sha$5, gitObject, safePath;
 var init_production_control_source = __esmMin((() => {
 	init_production_nonroot_contracts();
 	contexts$3 = /* @__PURE__ */ new WeakMap();
 	fail$5 = () => {
 		throw Error("ControlSourceUnverified");
 	};
-	need$16 = (value) => {
+	need$17 = (value) => {
 		if (!value) fail$5();
 	};
 	sha$5 = (value) => createHash("sha256").update(value).digest("hex");
@@ -48857,7 +48857,7 @@ var init_production_control_source = __esmMin((() => {
 * permission is obtained merely from a name or an ARN-shaped string. */
 async function verifyCarrierCiSource(template, sourceContext) {
 	const t = inspectCarrierBeforeCopyTemplate(template);
-	need$15(sourceContext?.tree === t.source.candidateTree, "CarrierSourceTree");
+	need$16(sourceContext?.tree === t.source.candidateTree, "CarrierSourceTree");
 	const workflow = await readControlSourceFile(sourceContext, CARRIER_CI_JOB.workflowPath), role = await readControlSourceFile(sourceContext, CARRIER_CI_JOB.roleSourcePath);
 	const decode = (bytes) => {
 		const doc = (0, import_dist$3.parseDocument)(new TextDecoder("utf-8", { fatal: true }).decode(bytes), {
@@ -48877,12 +48877,12 @@ async function verifyCarrierCiSource(template, sourceContext) {
 				}
 			]
 		});
-		need$15(!doc.errors.length, "CarrierSourceYaml");
+		need$16(!doc.errors.length, "CarrierSourceYaml");
 		return doc.toJS({ maxAliasCount: 0 });
 	};
 	const w = decode(workflow.bytes), r = decode(role.bytes), job = w.jobs?.[CARRIER_CI_JOB.jobKey], resource = r.Resources?.[CARRIER_CI_JOB.roleResource];
-	need$15(w.on && Object.hasOwn(w.on, "workflow_dispatch") && job?.name === CARRIER_CI_JOB.jobName && job.environment === "preview-ci" && nonrootHash(job) === t.source.jobDefinitionHash, "CarrierSourceJob");
-	need$15(resource?.Type === "AWS::IAM::Role" && resource.Properties?.RoleName?.["Fn::Sub"] === "github-actions-${GitHubRepo}-preview" && nonrootHash(resource) === t.source.roleDefinitionHash, "CarrierSourceRole");
+	need$16(w.on && Object.hasOwn(w.on, "workflow_dispatch") && job?.name === CARRIER_CI_JOB.jobName && job.environment === "preview-ci" && nonrootHash(job) === t.source.jobDefinitionHash, "CarrierSourceJob");
+	need$16(resource?.Type === "AWS::IAM::Role" && resource.Properties?.RoleName?.["Fn::Sub"] === "github-actions-${GitHubRepo}-preview" && nonrootHash(resource) === t.source.roleDefinitionHash, "CarrierSourceRole");
 	const handle = Object.freeze({ kind: "carrier-ci-source" });
 	contexts$2.set(handle, {
 		templateHash: nonrootHash(t),
@@ -48892,13 +48892,13 @@ async function verifyCarrierCiSource(template, sourceContext) {
 	});
 	return handle;
 }
-var import_dist$3, contexts$2, need$15;
+var import_dist$3, contexts$2, need$16;
 var init_ci_carrier_source_policy = __esmMin((() => {
 	import_dist$3 = require_dist$5();
 	init_production_control_source();
 	init_ci_carrier_before_copy();
 	contexts$2 = /* @__PURE__ */ new WeakMap();
-	need$15 = (v, c) => {
+	need$16 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 }));
@@ -48906,16 +48906,16 @@ var init_ci_carrier_source_policy = __esmMin((() => {
 //#region scripts/lib/ci-carrier-source.mjs
 function verifyCarrierWorkerDefinition(template, env) {
 	const s = template?.source;
-	need$14(s?.jobKey === CARRIER_JOB.key && s.jobName === CARRIER_JOB.name && s.workflowPath === CARRIER_JOB.workflowPath, "CarrierWorkerDefinition");
-	need$14(typeof env?.AWS_PREVIEW_ROLE_ARN === "string" && env.AWS_PREVIEW_ROLE_ARN === template.scope.previewRoleArn, "CarrierWorkerPreviewRole");
-	need$14(env.GITHUB_ACTIONS === "true" && env.GITHUB_REPOSITORY === s.repository && env.GITHUB_JOB === CARRIER_JOB.key && env.GITHUB_EVENT_NAME === "workflow_dispatch" && env.GITHUB_REF === s.candidateRef && env.GITHUB_SHA === s.candidateRevision && env.GITHUB_WORKFLOW_SHA === s.workflowSha && env.GITHUB_WORKFLOW_REF === s.repository + "/" + CARRIER_JOB.workflowPath + "@" + s.candidateRef && (env.GITHUB_SERVER_URL ?? "https://github.com") === "https://github.com", "CarrierWorkerEnvironment");
-	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$14(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CarrierWorkerEnvironment");
+	need$15(s?.jobKey === CARRIER_JOB.key && s.jobName === CARRIER_JOB.name && s.workflowPath === CARRIER_JOB.workflowPath, "CarrierWorkerDefinition");
+	need$15(typeof env?.AWS_PREVIEW_ROLE_ARN === "string" && env.AWS_PREVIEW_ROLE_ARN === template.scope.previewRoleArn, "CarrierWorkerPreviewRole");
+	need$15(env.GITHUB_ACTIONS === "true" && env.GITHUB_REPOSITORY === s.repository && env.GITHUB_JOB === CARRIER_JOB.key && env.GITHUB_EVENT_NAME === "workflow_dispatch" && env.GITHUB_REF === s.candidateRef && env.GITHUB_SHA === s.candidateRevision && env.GITHUB_WORKFLOW_SHA === s.workflowSha && env.GITHUB_WORKFLOW_REF === s.repository + "/" + CARRIER_JOB.workflowPath + "@" + s.candidateRef && (env.GITHUB_SERVER_URL ?? "https://github.com") === "https://github.com", "CarrierWorkerEnvironment");
+	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$15(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CarrierWorkerEnvironment");
 }
 function verifyCarrierWorkerSource({ plan: input, grantHash, env, observations, checkout }) {
 	verifyCarrierWorkerDefinition(input?.template, env);
 	const plan = inspectCarrierFundingPlan(input), binding = carrierRunBinding(plan, grantHash, observations);
-	need$14(binding.runId === Number(env.GITHUB_RUN_ID) && binding.runAttempt === Number(env.GITHUB_RUN_ATTEMPT) && observations.run.status === "in_progress", "CarrierWorkerActualRun");
-	need$14(checkout?.revision === plan.template.source.candidateRevision && checkout?.tree === plan.template.source.candidateTree, "CarrierWorkerCheckout");
+	need$15(binding.runId === Number(env.GITHUB_RUN_ID) && binding.runAttempt === Number(env.GITHUB_RUN_ATTEMPT) && observations.run.status === "in_progress", "CarrierWorkerActualRun");
+	need$15(checkout?.revision === plan.template.source.candidateRevision && checkout?.tree === plan.template.source.candidateTree, "CarrierWorkerCheckout");
 	return binding;
 }
 /** Host is the existing bounded Git/GitHub reader. No AWS dependency is loaded
@@ -48923,9 +48923,9 @@ function verifyCarrierWorkerSource({ plan: input, grantHash, env, observations, 
 async function authenticateCarrierWorkerSource({ config, env, host }) {
 	verifyCarrierWorkerDefinition(config?.plan?.template, env);
 	const plan = inspectCarrierFundingPlan(config.plan), s = plan.template.source;
-	need$14(host?.env === env && typeof host.api === "function" && typeof host.checkout === "function" && typeof host.run === "function", "CarrierWorkerHost");
+	need$15(host?.env === env && typeof host.api === "function" && typeof host.checkout === "function" && typeof host.run === "function", "CarrierWorkerHost");
 	const checkout = await host.checkout();
-	need$14((await host.run("git", [
+	need$15((await host.run("git", [
 		"status",
 		"--porcelain",
 		"--untracked-files=all"
@@ -48938,7 +48938,7 @@ async function authenticateCarrierWorkerSource({ config, env, host }) {
 		s.candidateRevision
 	])).split("\0").filter(Boolean).map((row) => {
 		const m = /^(\d+) (\w+) ([a-f0-9]{40})\t(.+)$/.exec(row);
-		need$14(m, "CarrierWorkerGitEntry");
+		need$15(m, "CarrierWorkerGitEntry");
 		return {
 			mode: m[1],
 			type: m[2],
@@ -48960,9 +48960,9 @@ async function authenticateCarrierWorkerSource({ config, env, host }) {
 	const sourcePolicy = await verifyCarrierCiSource(plan.template, sourceContext);
 	const run = await host.api("actions/runs/" + env.GITHUB_RUN_ID);
 	const jobs = await host.api("actions/runs/" + env.GITHUB_RUN_ID + "/attempts/" + env.GITHUB_RUN_ATTEMPT + "/jobs?per_page=100");
-	need$14(Number.isSafeInteger(jobs?.total_count) && jobs.total_count <= 100 && Array.isArray(jobs.jobs) && jobs.jobs.length === jobs.total_count, "CarrierWorkerJobInventory");
+	need$15(Number.isSafeInteger(jobs?.total_count) && jobs.total_count <= 100 && Array.isArray(jobs.jobs) && jobs.jobs.length === jobs.total_count, "CarrierWorkerJobInventory");
 	const matches = jobs.jobs.filter((j) => j.name === CARRIER_JOB.name);
-	need$14(matches.length === 1, "CarrierWorkerJobIdentity");
+	need$15(matches.length === 1, "CarrierWorkerJobIdentity");
 	const commit = await host.api("git/commits/" + s.candidateRevision), pullRequest = await host.api("pulls/" + s.prNumber);
 	const binding = verifyCarrierWorkerSource({
 		plan,
@@ -48982,7 +48982,7 @@ async function authenticateCarrierWorkerSource({ config, env, host }) {
 		sourcePolicy
 	});
 }
-var CARRIER_JOB, need$14;
+var CARRIER_JOB, need$15;
 var init_ci_carrier_source = __esmMin((() => {
 	init_ci_carrier_before_copy();
 	init_production_control_source();
@@ -48994,22 +48994,22 @@ var init_ci_carrier_source = __esmMin((() => {
 		environment: "preview-ci",
 		actionPath: ".github/actions/ci-carrier-before-copy"
 	});
-	need$14 = (ok, code) => {
+	need$15 = (ok, code) => {
 		if (!ok) throw Error(code);
 	};
 }));
 //#endregion
 //#region scripts/lib/ci-smoke-host.mjs
 function ciSmokeHost(env, cwd = process.cwd()) {
-	need$13(env.GITHUB_ACTIONS === "true" && /^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/.test(env.GITHUB_REPOSITORY ?? "") && git(env.GITHUB_SHA), "CiSmokeHostIdentity");
-	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$13(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CiSmokeHostIdentity");
+	need$14(env.GITHUB_ACTIONS === "true" && /^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/.test(env.GITHUB_REPOSITORY ?? "") && git(env.GITHUB_SHA), "CiSmokeHostIdentity");
+	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$14(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CiSmokeHostIdentity");
 	const run = async (file, args, { maxBytes = 16777216, timeoutMs = 3e4, encoding = "utf8", input } = {}) => {
-		need$13([
+		need$14([
 			"git",
 			"gh",
 			"docker"
 		].includes(file) && Array.isArray(args) && args.every((v) => typeof v === "string" && !v.includes("\0")), "CiSmokeHostCommand");
-		need$13(timeoutMs > 0 && timeoutMs <= 18e4 && maxBytes > 0 && maxBytes <= 33554432);
+		need$14(timeoutMs > 0 && timeoutMs <= 18e4 && maxBytes > 0 && maxBytes <= 33554432);
 		try {
 			return (await execute$3(file, args, {
 				cwd,
@@ -49027,7 +49027,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 		}
 	};
 	const api = async (path) => {
-		need$13(typeof path === "string" && /^[A-Za-z0-9_./?=&%+-]+$/.test(path) && !path.includes("..") && !path.startsWith("/"), "CiSmokeGithubPath");
+		need$14(typeof path === "string" && /^[A-Za-z0-9_./?=&%+-]+$/.test(path) && !path.includes("..") && !path.startsWith("/"), "CiSmokeGithubPath");
 		return parseCiSmokeJson(await run("gh", [
 			"api",
 			"--hostname",
@@ -49036,7 +49036,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 		]));
 	};
 	const readLog = async (id) => {
-		need$13(Number.isSafeInteger(id) && id > 0);
+		need$14(Number.isSafeInteger(id) && id > 0);
 		return run("gh", [
 			"api",
 			"--hostname",
@@ -49052,7 +49052,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 			"--quiet"
 		]);
 		const revision = (await run("git", ["rev-parse", "HEAD"])).trim(), tree = (await run("git", ["rev-parse", "HEAD^{tree}"])).trim();
-		need$13(revision === env.GITHUB_SHA && git(tree), "CiSmokeCheckoutChanged");
+		need$14(revision === env.GITHUB_SHA && git(tree), "CiSmokeCheckoutChanged");
 		return {
 			revision,
 			tree
@@ -49068,15 +49068,15 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 	};
 }
 async function smokePrivateRead(path, maxBytes = 8388608, beforeRead) {
-	need$13(typeof path === "string" && resolve(path) === path && await realpath(path) === path, "CiSmokePrivatePath");
+	need$14(typeof path === "string" && resolve(path) === path && await realpath(path) === path, "CiSmokePrivatePath");
 	const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 	try {
 		const before = await fd.stat();
-		need$13(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size <= maxBytes, "CiSmokePrivateFile");
+		need$14(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size <= maxBytes, "CiSmokePrivateFile");
 		if (beforeRead) {
-			need$13(typeof beforeRead === "function", "CiSmokeReadAccounting");
+			need$14(typeof beforeRead === "function", "CiSmokeReadAccounting");
 			const charged = beforeRead(before.size + 1);
-			need$13(!charged || typeof charged.then !== "function", "CiSmokeReadAccounting");
+			need$14(!charged || typeof charged.then !== "function", "CiSmokeReadAccounting");
 		}
 		const buffer = Buffer.alloc(before.size + 1);
 		let length = 0;
@@ -49086,7 +49086,7 @@ async function smokePrivateRead(path, maxBytes = 8388608, beforeRead) {
 			length += r.bytesRead;
 		}
 		const raw = buffer.subarray(0, length), after = await fd.stat(), named = await lstat(path);
-		need$13(raw.length === before.size && [
+		need$14(raw.length === before.size && [
 			"dev",
 			"ino",
 			"uid",
@@ -49103,7 +49103,7 @@ async function smokePrivateRead(path, maxBytes = 8388608, beforeRead) {
 }
 async function smokePrivateWrite(path, value) {
 	const raw = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
-	need$13(raw.length <= 33554432, "CiSmokePrivateSize");
+	need$14(raw.length <= 33554432, "CiSmokePrivateSize");
 	const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 384);
 	try {
 		await fd.writeFile(raw);
@@ -49113,7 +49113,7 @@ async function smokePrivateWrite(path, value) {
 	}
 	return smokeHash(raw);
 }
-var execute$3, smokeHash, smokeNeed, need$13, git;
+var execute$3, smokeHash, smokeNeed, need$14, git;
 var init_ci_smoke_host = __esmMin((() => {
 	init_ci_smoke_evidence();
 	init_production_control_source();
@@ -49122,7 +49122,7 @@ var init_ci_smoke_host = __esmMin((() => {
 	smokeNeed = (ok, code = "CiSmokeHostInvalid") => {
 		if (!ok) throw Error(code);
 	};
-	need$13 = smokeNeed;
+	need$14 = smokeNeed;
 	git = (v) => typeof v === "string" && /^[a-f0-9]{40}$/.test(v);
 }));
 //#endregion
@@ -147152,20 +147152,20 @@ function inspectCarrierWorkerConfig(value) {
 		"plan",
 		...c.version === 2 ? ["budgetRevision", "compiledCeiling"] : []
 	]);
-	need$18([1, 2].includes(c.version) && c.kind === "carrier-worker-config" && [
+	need$19([1, 2].includes(c.version) && c.kind === "carrier-worker-config" && [
 		c.grantHash,
 		c.templateHash,
 		c.configHash,
 		c.ledgerStartHash
 	].every((v) => hex$9(v)), "CarrierWorkerConfig");
 	const plan = inspectCarrierFundingPlan(c.plan);
-	need$18(c.version === plan.version, "CarrierWorkerConfigVersion");
+	need$19(c.version === plan.version, "CarrierWorkerConfigVersion");
 	carrierAccountingExpectation(plan, c);
 	for (const k of [
 		"templateHash",
 		"configHash",
 		"ledgerStartHash"
-	]) need$18(c[k] === plan[k], "CarrierWorkerConfigRoots");
+	]) need$19(c[k] === plan[k], "CarrierWorkerConfigRoots");
 	return freeze$2({
 		...c,
 		plan
@@ -147191,15 +147191,15 @@ function carrierGithubHost(env, cwd = env.GITHUB_WORKSPACE) {
 	};
 }
 async function artifactClient(env) {
-	for (const k of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL"]) need$18(typeof env[k] === "string" && env[k].length > 0 && env[k] === process.env[k], "CarrierArtifactRuntime");
-	need$18(!env.ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS && !env.ACTIONS_ARTIFACT_UPLOAD_CONCURRENCY, "CarrierArtifactOverride");
+	for (const k of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL"]) need$19(typeof env[k] === "string" && env[k].length > 0 && env[k] === process.env[k], "CarrierArtifactRuntime");
+	need$19(!env.ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS && !env.ACTIONS_ARTIFACT_UPLOAD_CONCURRENCY, "CarrierArtifactOverride");
 	const url = new URL(env.ACTIONS_RESULTS_URL);
-	need$18(url.protocol === "https:" && !url.username && !url.password && !url.port && url.hostname.endsWith(".actions.githubusercontent.com"), "CarrierArtifactEndpoint");
+	need$19(url.protocol === "https:" && !url.username && !url.password && !url.port && url.hostname.endsWith(".actions.githubusercontent.com"), "CarrierArtifactEndpoint");
 	const { DefaultArtifactClient } = await Promise.resolve().then(() => (init_artifact(), artifact_exports));
 	return new DefaultArtifactClient();
 }
 async function openCarrierStartup({ config: input, env, host = carrierGithubHost(env) }, seams = {}) {
-	need$18(Object.keys(seams).every((k) => [
+	need$19(Object.keys(seams).every((k) => [
 		"artifactClient",
 		"now",
 		"sleep"
@@ -147220,7 +147220,7 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 		"AWS_PREVIEW_ROLE_ARN"
 	].map((k) => [k, env[k] ?? null]))), initial = identity();
 	const check = () => {
-		need$18(identity() === initial && now() >= openedMs && now() < deadline, "CarrierStartupExpired");
+		need$19(identity() === initial && now() >= openedMs && now() < deadline, "CarrierStartupExpired");
 		verifyCarrierWorkerDefinition(t, env);
 	};
 	check();
@@ -147239,7 +147239,7 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 		}
 	};
 	const api = async (path) => {
-		need$18(++calls <= 244, "CarrierStartupReadBudget");
+		need$19(++calls <= 244, "CarrierStartupReadBudget");
 		return wait(() => host.api(path));
 	};
 	const source = await authenticateCarrierWorkerSource({
@@ -147252,9 +147252,9 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 	}), binding = source.binding, bindingHash = nonrootHash(binding), announcement = carrierRunAnnouncement(plan, binding), statusUrl = "https://api.github.com/repos/" + t.source.repository + "/" + announcement.path;
 	const current = async () => {
 		const r = await api("actions/runs/" + binding.runId);
-		need$18(r.id === binding.runId && r.run_attempt === binding.runAttempt && r.head_sha === t.source.candidateRevision && r.head_branch === t.source.candidateRef.slice(11) && r.status === "in_progress" && r.event === "workflow_dispatch" && r.path === t.source.workflowPath && r.repository?.full_name === t.source.repository, "CarrierStartupCurrentRun");
+		need$19(r.id === binding.runId && r.run_attempt === binding.runAttempt && r.head_sha === t.source.candidateRevision && r.head_branch === t.source.candidateRef.slice(11) && r.status === "in_progress" && r.event === "workflow_dispatch" && r.path === t.source.workflowPath && r.repository?.full_name === t.source.repository, "CarrierStartupCurrentRun");
 		const c = await wait(() => host.checkout());
-		need$18(c.revision === t.source.candidateRevision && c.tree === t.source.candidateTree, "CarrierStartupCheckout");
+		need$19(c.revision === t.source.candidateRevision && c.tree === t.source.candidateTree, "CarrierStartupCheckout");
 	};
 	const statuses = async (expected, winner = false) => {
 		for (let poll = 0; poll < 12; poll++) {
@@ -147262,17 +147262,17 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 			let complete = false, announced = false;
 			for (let page = 1; page <= 10; page++) {
 				const rows = await api("commits/" + t.source.candidateRevision + "/statuses?per_page=100&page=" + page);
-				need$18(Array.isArray(rows) && rows.length <= 100, "CarrierStartupStatusPage");
+				need$19(Array.isArray(rows) && rows.length <= 100, "CarrierStartupStatusPage");
 				for (const row of rows) {
-					need$18(positive$1(row?.id) && !ids.has(row.id), "CarrierStartupStatusHistory");
+					need$19(positive$1(row?.id) && !ids.has(row.id), "CarrierStartupStatusHistory");
 					ids.add(row.id);
 					if (row.creator?.id !== t.ownerGithubActorId) continue;
 					if (row.context === announcement.payload.context) {
-						need$18(row.url === statusUrl && Object.entries(announcement.payload).every(([k, v]) => row[k] === v), "CarrierStartupAnnouncementConflict");
+						need$19(row.url === statusUrl && Object.entries(announcement.payload).every(([k, v]) => row[k] === v), "CarrierStartupAnnouncementConflict");
 						announced = true;
 					}
 					if (winner && row.context === expected.payload.context) {
-						need$18(row.url === statusUrl && row.state === "success" && row.target_url === expected.payload.target_url && /^winner:[a-f0-9]{64}$/.test(row.description ?? ""), "CarrierStartupWinnerConflict");
+						need$19(row.url === statusUrl && row.state === "success" && row.target_url === expected.payload.target_url && /^winner:[a-f0-9]{64}$/.test(row.description ?? ""), "CarrierStartupWinnerConflict");
 						wins.add(row.description);
 					}
 				}
@@ -147281,15 +147281,15 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 					break;
 				}
 			}
-			need$18(complete, "CarrierStartupIncompleteHistory");
-			need$18(wins.size <= 1, "CarrierStartupWinnerConflict");
+			need$19(complete, "CarrierStartupIncompleteHistory");
+			need$19(wins.size <= 1, "CarrierStartupWinnerConflict");
 			if (winner && wins.size) {
-				need$18(announced && wins.has(expected.payload.description), "CarrierStartupNotWinner");
+				need$19(announced && wins.has(expected.payload.description), "CarrierStartupNotWinner");
 				return;
 			}
 			if (!winner && announced) return;
 			if (poll < 11) {
-				need$18(now() + 5e3 < deadline, "CarrierStartupAnnouncementMissing");
+				need$19(now() + 5e3 < deadline, "CarrierStartupAnnouncementMissing");
 				await wait(() => sleep(5e3));
 			}
 		}
@@ -147298,10 +147298,10 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 	await statuses(announcement);
 	await current();
 	const artifactName = "mem9-carrier-start-" + nonrootHash(carrierLedgerScope(t));
-	need$18(!attempted$2.has(artifactName), "CarrierStartupAlreadyAttempted");
+	need$19(!attempted$2.has(artifactName), "CarrierStartupAlreadyAttempted");
 	attempted$2.add(artifactName);
 	const root = env.RUNNER_TEMP;
-	need$18(typeof root === "string" && resolve(root) === root && await realpath(root) === root && (await lstat(root)).isDirectory(), "CarrierStartupTemporaryRoot");
+	need$19(typeof root === "string" && resolve(root) === root && await realpath(root) === root && (await lstat(root)).isDirectory(), "CarrierStartupTemporaryRoot");
 	const directory = await mkdtemp(join(root, "mem9-carrier-startup-")), file = join(directory, "claim.json"), nonce = randomBytes(32).toString("hex"), scope = {
 		kind: "carrier",
 		checkpoint: "premerge-carrier-build",
@@ -147328,10 +147328,10 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 			compressionLevel: 0,
 			skipArchive: false
 		}));
-		need$18(positive$1(uploaded?.id) && positive$1(uploaded.size) && uploaded.size <= 65536 && hex$9(uploaded.digest), "CarrierStartupUpload");
+		need$19(positive$1(uploaded?.id) && positive$1(uploaded.size) && uploaded.size <= 65536 && hex$9(uploaded.digest), "CarrierStartupUpload");
 		const a = await api("actions/artifacts/" + uploaded.id), created = Date.parse(a?.created_at), expiry = Date.parse(a?.expires_at);
-		need$18(a?.id === uploaded.id && a.name === artifactName && a.size_in_bytes === uploaded.size && a.digest === "sha256:" + uploaded.digest && a.expired === false && positive$1(created) && created >= Math.floor(openedMs / 1e3) * 1e3 && created <= now() && positive$1(expiry) && expiry >= plan.deadlineMs, "CarrierStartupArtifact");
-		need$18(a.workflow_run?.id === binding.runId && a.workflow_run.head_sha === t.source.candidateRevision && a.workflow_run.head_branch === t.source.candidateRef.slice(11), "CarrierStartupArtifactRun");
+		need$19(a?.id === uploaded.id && a.name === artifactName && a.size_in_bytes === uploaded.size && a.digest === "sha256:" + uploaded.digest && a.expired === false && positive$1(created) && created >= Math.floor(openedMs / 1e3) * 1e3 && created <= now() && positive$1(expiry) && expiry >= plan.deadlineMs, "CarrierStartupArtifact");
+		need$19(a.workflow_run?.id === binding.runId && a.workflow_run.head_sha === t.source.candidateRevision && a.workflow_run.head_branch === t.source.candidateRef.slice(11), "CarrierStartupArtifactRun");
 		selection = carrierCheckpointSelection(plan, binding, {
 			nonce,
 			scopeHash,
@@ -147367,10 +147367,10 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 }
 function consumeCarrierStartup(handle, configValue) {
 	const s = caps.get(handle);
-	need$18(s && !s.consumed, "CarrierStartupCapability");
+	need$19(s && !s.consumed, "CarrierStartupCapability");
 	s.consumed = true;
 	const config = inspectCarrierWorkerConfig(configValue);
-	need$18(nonrootHash(config) === nonrootHash(s.config) && s.identity() === s.initial && s.now() < s.notAfter, "CarrierStartupCapabilityBinding");
+	need$19(nonrootHash(config) === nonrootHash(s.config) && s.identity() === s.initial && s.now() < s.notAfter, "CarrierStartupCapabilityBinding");
 	return Object.freeze({
 		config: s.config,
 		binding: s.binding,
@@ -147401,7 +147401,7 @@ var init_ci_carrier_startup = __esmMin((() => {
 * installation, credentials, user-selected recipe or executable callbacks. */
 function carrierDockerfile(base, { caPresent = false, derived = false } = {}) {
 	const image = base.account + ".dkr.ecr." + base.region + ".amazonaws.com/" + base.repositoryName + "@" + base.rootDigest;
-	need$12(!derived || caPresent, "CarrierDerivedCaRequired");
+	need$13(!derived || caPresent, "CarrierDerivedCaRequired");
 	return `FROM ${image}\nUSER 0:0\nRUN rm -rf /bootstrap/operator /carrier\nCOPY --chown=0:0 rootfs/ /\n${derived ? "COPY --from=carrier_runtime --chown=0:0 rootfs/ /\n" : ""}RUN chmod 0555 /bootstrap && find /carrier /bootstrap/operator -type d -exec chmod 0555 {} +\nENV PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp NODE_EXTRA_CA_CERTS=${caPresent ? "/bootstrap/global-bundle.pem" : ""}\nUSER 1000:1000\nENTRYPOINT ["/bin/setpriv","--no-new-privs","--","/usr/local/bin/node","/carrier/guard-first.mjs","audit-original-root"]\nCMD []\n`;
 }
 function inspectManifest(m, plan, baseEvidence) {
@@ -147415,7 +147415,7 @@ function inspectManifest(m, plan, baseEvidence) {
 		"files",
 		...sourceOnly ? ["runtimeSource"] : []
 	]);
-	need$12((sourceOnly || m.version === 1 && m.kind === "carrier-build-context") && m.templateHash === plan.templateHash && m.sourceTree === t.source.candidateTree && canaryEvidenceHash(m) === plan.context.manifestHash, "CarrierContextBinding");
+	need$13((sourceOnly || m.version === 1 && m.kind === "carrier-build-context") && m.templateHash === plan.templateHash && m.sourceTree === t.source.candidateTree && canaryEvidenceHash(m) === plan.context.manifestHash, "CarrierContextBinding");
 	if (sourceOnly) {
 		exact$6(m.runtimeSource, [
 			"legacyCodeHash",
@@ -147424,8 +147424,8 @@ function inspectManifest(m, plan, baseEvidence) {
 			"dependencyHash",
 			"operatorInventoryHash"
 		]);
-		need$12(Object.values(m.runtimeSource).every(hex$7) && m.runtimeSource.legacyCodeHash === t.anchors.hostCodeHash && m.runtimeSource.expandedSourceHash === t.anchors.hostSourceHash, "CarrierRuntimeSource");
-		need$12(baseEvidence === void 0, "CarrierSourceContextNoNativeFacts");
+		need$13(Object.values(m.runtimeSource).every(hex$7) && m.runtimeSource.legacyCodeHash === t.anchors.hostCodeHash && m.runtimeSource.expandedSourceHash === t.anchors.hostSourceHash, "CarrierRuntimeSource");
+		need$13(baseEvidence === void 0, "CarrierSourceContextNoNativeFacts");
 	}
 	same$6(m.provenance, {
 		oldImageHash: canaryEvidenceHash(t.anchors.oldImage),
@@ -147442,18 +147442,18 @@ function inspectManifest(m, plan, baseEvidence) {
 			"native",
 			"ca"
 		]);
-		need$12(baseEvidence.version === 1 && baseEvidence.kind === "carrier-secure-base-evidence" && canaryEvidenceHash(baseEvidence) === t.anchors.baseEvidenceHash, "CarrierContextBaseEvidence");
+		need$13(baseEvidence.version === 1 && baseEvidence.kind === "carrier-secure-base-evidence" && canaryEvidenceHash(baseEvidence) === t.anchors.baseEvidenceHash, "CarrierContextBaseEvidence");
 		same$6(baseEvidence.image, t.base, "CarrierContextBaseImage");
 		exact$6(baseEvidence.native, ["nodeSha256", "setprivSha256"]);
-		need$12(Object.values(baseEvidence.native).every(hex$7), "CarrierContextNativePin");
-		need$12(typeof baseEvidence.ca?.present === "boolean", "CarrierContextCa");
+		need$13(Object.values(baseEvidence.native).every(hex$7), "CarrierContextNativePin");
+		need$13(typeof baseEvidence.ca?.present === "boolean", "CarrierContextCa");
 		exact$6(baseEvidence.ca, baseEvidence.ca.present ? [
 			"present",
 			"ref",
 			"sourceEvidenceHash"
 		] : ["present"]);
 	}
-	need$12(Array.isArray(m.files) && m.files.length > 0 && m.files.length <= t.bounds.contextFiles, "CarrierContextFileCount");
+	need$13(Array.isArray(m.files) && m.files.length > 0 && m.files.length <= t.bounds.contextFiles, "CarrierContextFileCount");
 	const byPath = /* @__PURE__ */ new Map();
 	let total = 0;
 	for (const row of m.files) {
@@ -147465,33 +147465,33 @@ function inspectManifest(m, plan, baseEvidence) {
 			"bytesLength",
 			...row.type === "symlink" ? ["target"] : []
 		]);
-		need$12(pathAllowed(row.path) && !byPath.has(row.path), "CarrierContextPath");
-		if (sourceOnly) need$12(!["rootfs/carrier/manifest.json", "rootfs/bootstrap/global-bundle.pem"].includes(row.path), "CarrierSuppliedDerivedCollision");
-		need$12(["file", "symlink"].includes(row.type) && hex$7(row.sha256) && Number.isSafeInteger(row.bytesLength) && row.bytesLength >= 0 && row.bytesLength <= 67108864 && (row.type === "file" ? [292, 365].includes(row.mode) : row.mode === 511), "CarrierContextMember");
-		if (row.type === "symlink") need$12(row.path.startsWith(operatorPrefix) && typeof row.target === "string" && !row.target.includes("\\") && !/[\x00-\x1f\x7f]/.test(row.target) && !posix.isAbsolute(row.target) && sha$4(row.target) === row.sha256 && Buffer.byteLength(row.target) === row.bytesLength, "CarrierContextLink");
-		else if (fixedPaths.has(row.path)) need$12(row.mode === 292, "CarrierContextRecipeMode");
+		need$13(pathAllowed(row.path) && !byPath.has(row.path), "CarrierContextPath");
+		if (sourceOnly) need$13(!["rootfs/carrier/manifest.json", "rootfs/bootstrap/global-bundle.pem"].includes(row.path), "CarrierSuppliedDerivedCollision");
+		need$13(["file", "symlink"].includes(row.type) && hex$7(row.sha256) && Number.isSafeInteger(row.bytesLength) && row.bytesLength >= 0 && row.bytesLength <= 67108864 && (row.type === "file" ? [292, 365].includes(row.mode) : row.mode === 511), "CarrierContextMember");
+		if (row.type === "symlink") need$13(row.path.startsWith(operatorPrefix) && typeof row.target === "string" && !row.target.includes("\\") && !/[\x00-\x1f\x7f]/.test(row.target) && !posix.isAbsolute(row.target) && sha$4(row.target) === row.sha256 && Buffer.byteLength(row.target) === row.bytesLength, "CarrierContextLink");
+		else if (fixedPaths.has(row.path)) need$13(row.mode === 292, "CarrierContextRecipeMode");
 		total += row.bytesLength;
-		need$12(Number.isSafeInteger(total) && total <= t.bounds.contextBytes, "CarrierContextSize");
+		need$13(Number.isSafeInteger(total) && total <= t.bounds.contextBytes, "CarrierContextSize");
 		byPath.set(row.path, row);
 	}
 	same$6(m.files.map((r) => r.path), [...byPath.keys()].sort((a, b) => a.localeCompare(b)), "CarrierContextOrder");
 	for (const row of m.files) {
 		let parent = dirname(row.path);
 		while (parent !== ".") {
-			need$12(!byPath.has(parent), "CarrierContextParent");
+			need$13(!byPath.has(parent), "CarrierContextParent");
 			parent = dirname(parent);
 		}
 		if (row.type === "symlink") {
 			let path = row.path;
 			const seen = /* @__PURE__ */ new Set();
 			for (let i = 0; i < 32; i++) {
-				need$12(!seen.has(path), "CarrierContextLinkCycle");
+				need$13(!seen.has(path), "CarrierContextLinkCycle");
 				seen.add(path);
 				const current = byPath.get(path);
-				need$12(current, "CarrierContextLinkTarget");
+				need$13(current, "CarrierContextLinkTarget");
 				if (current.type === "file") break;
 				path = posix.normalize(posix.join(posix.dirname(path), current.target));
-				need$12(path.startsWith(operatorPrefix) && i < 31, "CarrierContextLinkEscape");
+				need$13(path.startsWith(operatorPrefix) && i < 31, "CarrierContextLinkEscape");
 			}
 		}
 	}
@@ -147500,8 +147500,8 @@ function inspectManifest(m, plan, baseEvidence) {
 		"rootfs/carrier/legacy-audit.mjs",
 		...!sourceOnly ? ["rootfs/carrier/manifest.json"] : [],
 		...CARRIER_OPERATOR_FILES.map((p) => operatorPrefix + p)
-	]) need$12(byPath.get(path)?.type === "file", "CarrierContextMissingClosure");
-	if (baseEvidence !== void 0) need$12(byPath.has("rootfs/bootstrap/global-bundle.pem") === baseEvidence.ca.present, "CarrierContextCa");
+	]) need$13(byPath.get(path)?.type === "file", "CarrierContextMissingClosure");
+	if (baseEvidence !== void 0) need$13(byPath.has("rootfs/bootstrap/global-bundle.pem") === baseEvidence.ca.present, "CarrierContextCa");
 	const recipe = recipePaths.map((path) => {
 		const r = byPath.get(path);
 		return {
@@ -147510,7 +147510,7 @@ function inspectManifest(m, plan, baseEvidence) {
 			bytesLength: r.bytesLength
 		};
 	}).sort((a, b) => a.path.localeCompare(b.path));
-	need$12(canaryEvidenceHash(recipe) === t.recipe.sourceClosureHash && byPath.get("Dockerfile").sha256 === t.recipe.dockerfileHash && byPath.get("rootfs/carrier/guard-first.mjs").sha256 === t.recipe.guardHash && byPath.get("rootfs/carrier/legacy-audit.mjs").sha256 === t.anchors.hostCodeHash, "CarrierContextCodePin");
+	need$13(canaryEvidenceHash(recipe) === t.recipe.sourceClosureHash && byPath.get("Dockerfile").sha256 === t.recipe.dockerfileHash && byPath.get("rootfs/carrier/guard-first.mjs").sha256 === t.recipe.guardHash && byPath.get("rootfs/carrier/legacy-audit.mjs").sha256 === t.anchors.hostCodeHash, "CarrierContextCodePin");
 	return {
 		byPath,
 		total
@@ -147528,30 +147528,30 @@ function inspectRuntime(runtime, m, plan, baseEvidence) {
 		"files",
 		"caPath"
 	]);
-	need$12(runtime.version === 1 && runtime.legacyCodeHash === plan.template.anchors.hostCodeHash && runtime.expandedSourceHash === plan.template.anchors.hostSourceHash && [
+	need$13(runtime.version === 1 && runtime.legacyCodeHash === plan.template.anchors.hostCodeHash && runtime.expandedSourceHash === plan.template.anchors.hostSourceHash && [
 		"minifiedSourceHash",
 		"dependencyHash",
 		"operatorInventoryHash"
 	].every((k) => hex$7(runtime[k])), "CarrierRuntimeManifest");
 	exact$6(runtime.runtime, ["nodeSha256", "setprivSha256"]);
-	need$12(Object.values(runtime.runtime).every(hex$7), "CarrierRuntimeNative");
+	need$13(Object.values(runtime.runtime).every(hex$7), "CarrierRuntimeNative");
 	if (baseEvidence !== void 0) same$6(runtime.runtime, baseEvidence.native, "CarrierRuntimeNative");
-	need$12(runtime.caPath === (m.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem") ? "/bootstrap/global-bundle.pem" : null), "CarrierRuntimeCa");
+	need$13(runtime.caPath === (m.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem") ? "/bootstrap/global-bundle.pem" : null), "CarrierRuntimeCa");
 	const expected = m.files.filter((r) => r.path !== "Dockerfile" && r.path !== "rootfs/carrier/manifest.json").map(({ path, bytesLength, ...r }) => ({
 		...r,
 		path: path.slice(6),
 		bytes: bytesLength
 	})).sort((a, b) => a.path.localeCompare(b.path));
-	need$12(Array.isArray(runtime.files), "CarrierRuntimeFiles");
+	need$13(Array.isArray(runtime.files), "CarrierRuntimeFiles");
 	same$6([...runtime.files].sort((a, b) => a.path.localeCompare(b.path)), expected, "CarrierRuntimeFiles");
 }
 async function materializeCarrierBuildContext({ stream, plan: input, baseEvidence: base, tempRoot, metadataReads, signal }) {
 	const plan = inspectCarrierFundingPlan(input), baseEvidence = base === void 0 ? void 0 : copyNonrootJson(base);
-	need$12(typeof metadataReads?.reserveLocal === "function" && typeof stream?.[Symbol.asyncIterator] === "function", "CarrierContextBudget");
-	need$12(resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot && (await lstat(tempRoot)).isDirectory(), "CarrierContextTemporaryRoot");
+	need$13(typeof metadataReads?.reserveLocal === "function" && typeof stream?.[Symbol.asyncIterator] === "function", "CarrierContextBudget");
+	need$13(resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot && (await lstat(tempRoot)).isDirectory(), "CarrierContextTemporaryRoot");
 	const check = () => {
 		signal?.throwIfAborted();
-		need$12(Date.now() < plan.deadlineMs, "CarrierContextExpired");
+		need$13(Date.now() < plan.deadlineMs, "CarrierContextExpired");
 		metadataReads.reserveLocal(zero$4());
 	};
 	const charge = (n) => {
@@ -147580,11 +147580,11 @@ async function materializeCarrierBuildContext({ stream, plan: input, baseEvidenc
 		}
 	};
 	try {
-		need$12((await cursor.read(CARRIER_CONTEXT_MAGIC.length)).equals(CARRIER_CONTEXT_MAGIC), "CarrierContextMagic");
+		need$13((await cursor.read(CARRIER_CONTEXT_MAGIC.length)).equals(CARRIER_CONTEXT_MAGIC), "CarrierContextMagic");
 		const headerSize = (await cursor.read(4)).readUInt32BE();
-		need$12(headerSize > 0 && headerSize <= 33554432 && headerSize + 4 + CARRIER_CONTEXT_MAGIC.length <= plan.context.bytesLength, "CarrierContextHeader");
+		need$13(headerSize > 0 && headerSize <= 33554432 && headerSize + 4 + CARRIER_CONTEXT_MAGIC.length <= plan.context.bytesLength, "CarrierContextHeader");
 		const manifest = parse$3(await cursor.read(headerSize)), { total } = inspectManifest(manifest, plan, baseEvidence);
-		need$12(total + headerSize + 4 + CARRIER_CONTEXT_MAGIC.length === plan.context.bytesLength, "CarrierContextSize");
+		need$13(total + headerSize + 4 + CARRIER_CONTEXT_MAGIC.length === plan.context.bytesLength, "CarrierContextSize");
 		for (const row of manifest.files) {
 			check();
 			await parents(row.path);
@@ -147595,7 +147595,7 @@ async function materializeCarrierBuildContext({ stream, plan: input, baseEvidenc
 			});
 			if (row.type === "symlink") {
 				const bytes = await cursor.read(row.bytesLength);
-				need$12(decode$1(bytes) === row.target, "CarrierContextLinkBytes");
+				need$13(decode$1(bytes) === row.target, "CarrierContextLinkBytes");
 				charge(bytes.length);
 				await symlink(row.target, path);
 			} else {
@@ -147608,12 +147608,12 @@ async function materializeCarrierBuildContext({ stream, plan: input, baseEvidenc
 						let at = 0;
 						while (at < bytes.length) {
 							const r = await fd.write(bytes, at, bytes.length - at);
-							need$12(r.bytesWritten > 0, "CarrierContextWrite");
+							need$13(r.bytesWritten > 0, "CarrierContextWrite");
 							at += r.bytesWritten;
 						}
 						if (fixedPaths.has(row.path)) pieces.push(Buffer.from(bytes));
 					}
-					need$12(digest.digest("hex") === row.sha256, "CarrierContextFileHash");
+					need$13(digest.digest("hex") === row.sha256, "CarrierContextFileHash");
 					await fd.sync();
 					await fd.chmod(row.mode);
 				} finally {
@@ -147623,9 +147623,9 @@ async function materializeCarrierBuildContext({ stream, plan: input, baseEvidenc
 			}
 			identities.set(path, await lstat(path));
 		}
-		need$12(!await cursor.available() && cursor.count === plan.context.bytesLength && cursor.digest.digest("hex") === plan.context.sha256, "CarrierContextWireHash");
+		need$13(!await cursor.available() && cursor.count === plan.context.bytesLength && cursor.digest.digest("hex") === plan.context.sha256, "CarrierContextWireHash");
 		const sourceOnly = manifest.version === 2;
-		need$12(small.get("Dockerfile").equals(Buffer.from(carrierDockerfile(plan.template.base, {
+		need$13(small.get("Dockerfile").equals(Buffer.from(carrierDockerfile(plan.template.base, {
 			caPresent: sourceOnly || manifest.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem"),
 			derived: sourceOnly
 		}))), "CarrierCleanRecipeRequired");
@@ -147659,7 +147659,7 @@ async function materializeCarrierBuildContext({ stream, plan: input, baseEvidenc
 }
 function context(handle) {
 	const s = contexts$1.get(handle);
-	need$12(s && !s.closed, "CarrierContextHandle");
+	need$13(s && !s.closed, "CarrierContextHandle");
 	s.check();
 	return s;
 }
@@ -147677,31 +147677,31 @@ async function verifyMaterializedCarrierContext(handle) {
 	const s = context(handle), expected = /* @__PURE__ */ new Set([...s.identities.keys(), ...s.directories.keys()]);
 	for (const [path, before] of s.directories) {
 		const now = await lstat(path);
-		need$12(now.isDirectory() && now.uid === process.getuid() && (now.mode & 511) === 448 && before.dev === now.dev && before.ino === now.ino && await realpath(path) === path, "CarrierContextDirectoryChanged");
-		for (const name of await readdir(path)) need$12(expected.has(join(path, name)), "CarrierContextUnknownFile");
+		need$13(now.isDirectory() && now.uid === process.getuid() && (now.mode & 511) === 448 && before.dev === now.dev && before.ino === now.ino && await realpath(path) === path, "CarrierContextDirectoryChanged");
+		for (const name of await readdir(path)) need$13(expected.has(join(path, name)), "CarrierContextUnknownFile");
 	}
 	for (const row of s.manifest.files) {
 		const path = join(s.directory, row.path), before = s.identities.get(path);
-		need$12(unchanged$2(before, await lstat(path)), "CarrierContextChanged");
+		need$13(unchanged$2(before, await lstat(path)), "CarrierContextChanged");
 		if (row.type === "symlink") {
-			need$12(await readlink(path) === row.target, "CarrierContextChanged");
+			need$13(await readlink(path) === row.target, "CarrierContextChanged");
 			continue;
 		}
 		s.charge(row.bytesLength);
 		const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), digest = createHash("sha256");
 		let bytes = 0;
 		try {
-			need$12(unchanged$2(before, await fd.stat()) && before.nlink === 1 && before.uid === process.getuid(), "CarrierContextChanged");
+			need$13(unchanged$2(before, await fd.stat()) && before.nlink === 1 && before.uid === process.getuid(), "CarrierContextChanged");
 			const buffer = Buffer.alloc(65536);
 			while (true) {
 				s.check();
 				const r = await fd.read(buffer, 0, buffer.length, null);
 				if (!r.bytesRead) break;
 				bytes += r.bytesRead;
-				need$12(bytes <= row.bytesLength, "CarrierContextChanged");
+				need$13(bytes <= row.bytesLength, "CarrierContextChanged");
 				digest.update(buffer.subarray(0, r.bytesRead));
 			}
-			need$12(bytes === row.bytesLength && digest.digest("hex") === row.sha256 && unchanged$2(before, await fd.stat()) && unchanged$2(before, await lstat(path)), "CarrierContextChanged");
+			need$13(bytes === row.bytesLength && digest.digest("hex") === row.sha256 && unchanged$2(before, await fd.stat()) && unchanged$2(before, await lstat(path)), "CarrierContextChanged");
 		} finally {
 			await fd.close();
 		}
@@ -147710,7 +147710,7 @@ async function verifyMaterializedCarrierContext(handle) {
 }
 async function consumeCarrierBuildContext(handle) {
 	const s = context(handle);
-	need$12(!s.consumed, "CarrierContextAlreadyConsumed");
+	need$13(!s.consumed, "CarrierContextAlreadyConsumed");
 	s.consumed = true;
 	return verifyMaterializedCarrierContext(handle);
 }
@@ -147720,7 +147720,7 @@ async function closeCarrierBuildContext(handle) {
 	await rm(s.directory, { recursive: true });
 	s.closed = true;
 }
-var CARRIER_CONTEXT_MAGIC, CARRIER_OPERATOR_FILES, operator, operatorPrefix, recipePaths, fixedPaths, contexts$1, sha$4, need$12, exact$6, hex$7, zero$4, same$6, keys$3, unchanged$2, decode$1, parse$3, pathAllowed, Cursor$1;
+var CARRIER_CONTEXT_MAGIC, CARRIER_OPERATOR_FILES, operator, operatorPrefix, recipePaths, fixedPaths, contexts$1, sha$4, need$13, exact$6, hex$7, zero$4, same$6, keys$3, unchanged$2, decode$1, parse$3, pathAllowed, Cursor$1;
 var init_ci_carrier_context = __esmMin((() => {
 	init_ci_carrier_before_copy();
 	init_production_nonroot_contracts();
@@ -147763,10 +147763,10 @@ var init_ci_carrier_context = __esmMin((() => {
 	]);
 	contexts$1 = /* @__PURE__ */ new WeakMap();
 	sha$4 = (b) => createHash("sha256").update(b).digest("hex");
-	need$12 = (v, c = "CarrierContextInvalid") => {
+	need$13 = (v, c = "CarrierContextInvalid") => {
 		if (!v) throw Error(c);
 	};
-	exact$6 = (v, k) => need$12(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.slice().sort().join(), "CarrierContextFields");
+	exact$6 = (v, k) => need$13(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.slice().sort().join(), "CarrierContextFields");
 	hex$7 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 	zero$4 = () => ({
 		ecrRequests: 0,
@@ -147775,7 +147775,7 @@ var init_ci_carrier_context = __esmMin((() => {
 		uncompressedBytes: 0,
 		processedEntries: 0
 	});
-	same$6 = (a, b, c) => need$12(canaryEvidenceHash(a) === canaryEvidenceHash(b), c);
+	same$6 = (a, b, c) => need$13(canaryEvidenceHash(a) === canaryEvidenceHash(b), c);
 	keys$3 = [
 		"dev",
 		"ino",
@@ -147806,11 +147806,11 @@ var init_ci_carrier_context = __esmMin((() => {
 				this.check();
 				const next = await this.iterator.next();
 				if (next.done) return false;
-				need$12(next.value instanceof Uint8Array && next.value.length <= 8388608, "CarrierContextChunk");
+				need$13(next.value instanceof Uint8Array && next.value.length <= 8388608, "CarrierContextChunk");
 				this.buffer = Buffer.from(next.value);
 				this.position = 0;
 				this.count += this.buffer.length;
-				need$12(this.count <= this.cap, "CarrierContextSize");
+				need$13(this.count <= this.cap, "CarrierContextSize");
 				this.charge(this.buffer.length);
 				this.digest.update(this.buffer);
 				if (this.buffer.length) return true;
@@ -147819,7 +147819,7 @@ var init_ci_carrier_context = __esmMin((() => {
 		}
 		async *chunks(n) {
 			while (n) {
-				need$12(await this.available(), "CarrierContextTruncated");
+				need$13(await this.available(), "CarrierContextTruncated");
 				const size = Math.min(n, this.buffer.length - this.position);
 				yield this.buffer.subarray(this.position, this.position + size);
 				this.position += size;
@@ -147827,7 +147827,7 @@ var init_ci_carrier_context = __esmMin((() => {
 			}
 		}
 		async read(n) {
-			need$12(n <= 33554432, "CarrierContextBuffer");
+			need$13(n <= 33554432, "CarrierContextBuffer");
 			const chunks = [];
 			for await (const chunk of this.chunks(n)) chunks.push(Buffer.from(chunk));
 			return Buffer.concat(chunks, n);
@@ -147836,6 +147836,86 @@ var init_ci_carrier_context = __esmMin((() => {
 			await this.iterator.return?.();
 		}
 	};
+}));
+//#endregion
+//#region scripts/lib/production-control-capacity.mjs
+function inspectFutureControlCapacity(value) {
+	need$12(nonrootHash(value) === FUTURE_CONTROL_CAPACITY_HASH, "FutureControlCapacityPolicy");
+	return FUTURE_CONTROL_CAPACITY;
+}
+function verifyFutureControlGraphCapacity(nodes, policy) {
+	const p = inspectFutureControlCapacity(policy), seen = /* @__PURE__ */ new Map();
+	let graphBytes = 0, manifestNodes = 0, configNodes = 0, layerNodes = 0;
+	for (const d of nodes) {
+		need$12(/^sha256:[a-f0-9]{64}$/.test(d.digest) && nat(d.size) && (manifests$6.has(d.mediaType) || configs$1.has(d.mediaType) || layers.has(d.mediaType)), "FutureControlGraphDescriptor");
+		const prior = seen.get(d.digest);
+		if (prior) {
+			need$12(prior.size === d.size && prior.mediaType === d.mediaType, "FutureControlGraphConflict");
+			continue;
+		}
+		seen.set(d.digest, d);
+		graphBytes += d.size;
+		if (manifests$6.has(d.mediaType)) manifestNodes++;
+		else if (configs$1.has(d.mediaType)) configNodes++;
+		else layerNodes++;
+		need$12(graphBytes <= p.graphBytes && manifestNodes <= p.manifestNodes && configNodes <= p.configNodes && layerNodes <= p.layerNodes && configNodes + layerNodes <= p.blobNodes, "FutureControlGraphCapacity");
+	}
+	return Object.freeze({
+		graphBytes,
+		manifestNodes,
+		configNodes,
+		layerNodes,
+		capacityVerified: false
+	});
+}
+var M, need$12, nat, FUTURE_CONTROL_CAPACITY, FUTURE_CONTROL_CAPACITY_HASH, manifests$6, configs$1, layers;
+var init_production_control_capacity = __esmMin((() => {
+	init_production_nonroot_contracts();
+	M = 1048576;
+	8 * M;
+	need$12 = (v, c) => {
+		if (!v) throw Error(c);
+	};
+	nat = (n) => Number.isSafeInteger(n) && n >= 0;
+	Object.freeze({
+		ecrRequests: 2176,
+		logicalBytes: 9 * 1024 ** 3,
+		httpBodyBytes: 4337324032,
+		uncompressedBytes: 16 * 1024 ** 3,
+		processedEntries: 65536
+	});
+	FUTURE_CONTROL_CAPACITY = Object.freeze({
+		version: 1,
+		kind: "future-control-capacity",
+		graphBytes: 660 * M,
+		manifestNodes: 3,
+		configNodes: 2,
+		layerNodes: 64,
+		blobNodes: 66,
+		uncompressedBytes: 2048 * M,
+		processedEntries: 5e4,
+		httpBodyBytes: 727842816,
+		capacityVerified: false
+	});
+	FUTURE_CONTROL_CAPACITY_HASH = nonrootHash(FUTURE_CONTROL_CAPACITY);
+	manifests$6 = /* @__PURE__ */ new Set([
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json"
+	]);
+	configs$1 = /* @__PURE__ */ new Set([
+		"application/vnd.oci.image.config.v1+json",
+		"application/vnd.docker.container.image.v1+json",
+		"application/vnd.oci.empty.v1+json"
+	]);
+	layers = /* @__PURE__ */ new Set([
+		"application/vnd.oci.image.layer.v1.tar",
+		"application/vnd.oci.image.layer.v1.tar+gzip",
+		"application/vnd.oci.image.layer.v1.tar+zstd",
+		"application/vnd.docker.image.rootfs.diff.tar.gzip",
+		"application/vnd.in-toto+json"
+	]);
 }));
 var init_authorization_archive_policy = __esmMin((() => {
 	require_dist$5();
@@ -148639,7 +148719,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		"deadlineMs",
 		"signal"
 	].includes(k)), "ControlCacheBudgetOptions");
-	const metadataReads = options.metadataReads, now = options.now ?? Date.now;
+	const metadataReads = options.metadataReads, now = options.now ?? Date.now, capacity = metadataReads?.controlCapacity ? inspectFutureControlCapacity(metadataReads.controlCapacity) : null;
 	need$9(metadataReads && typeof metadataReads.reserveLocal === "function" && typeof now === "function", "ControlCachePrepaymentRequired");
 	const startedMs = now(), deadlineMs = options.deadlineMs ?? startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs;
 	need$9(integer(startedMs) && Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs + IMAGE_TRANSITION_LIMITS.cleanupReserveMs && deadlineMs <= startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs, "ControlCacheDeadline");
@@ -148676,7 +148756,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 			throw error;
 		}
 	};
-	const seen = /* @__PURE__ */ new Map(), edges = /* @__PURE__ */ new Set();
+	const seen = /* @__PURE__ */ new Map(), edges = /* @__PURE__ */ new Set(), capacityDescriptors = /* @__PURE__ */ new Map();
 	const add = (d, isManifest) => {
 		check();
 		validateImageDescriptor(d, isManifest ? "manifest" : "blob");
@@ -148684,6 +148764,15 @@ function createPrepaidControlCacheBudget(options = {}) {
 		if (prior) {
 			need$9(prior.size === d.size && prior.isManifest === isManifest, "ImageDescriptorConflict");
 			return;
+		}
+		if (capacity) {
+			capacityDescriptors.set(d.digest, d);
+			try {
+				verifyFutureControlGraphCapacity([...capacityDescriptors.values()], capacity);
+			} catch (error) {
+				held = true;
+				throw error;
+			}
 		}
 		need$9(uniqueBytes + d.size <= IMAGE_TRANSITION_LIMITS.maxUniqueCompressedGraphBytes, "ImageGraphByteLimit");
 		need$9(isManifest ? manifestNodes < IMAGE_TRANSITION_LIMITS.maxManifestNodes : blobNodes < IMAGE_TRANSITION_LIMITS.maxBlobNodes, "ImageGraphNodeLimit");
@@ -148727,7 +148816,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		uncompressed(size) {
 			check();
-			need$9(integer(size) && uncompressedBytes + size <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, "ImageUncompressedLimit");
+			need$9(integer(size) && uncompressedBytes + size <= Math.min(IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity), "ImageUncompressedLimit");
 			reserve({
 				...zero(),
 				uncompressedBytes: size
@@ -148736,7 +148825,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		entry() {
 			check();
-			need$9(fsEntries < IMAGE_TRANSITION_LIMITS.maxFsEntries, "ImageFilesystemEntryLimit");
+			need$9(fsEntries < Math.min(IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity), "ImageFilesystemEntryLimit");
 			reserve({
 				...zero(),
 				processedEntries: 1
@@ -149378,6 +149467,7 @@ function imageGraphState(handle) {
 }
 var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts, budgets, prepaidControlBudgets, imageDigest, imageFailure, need$9, record$1, integer, hexDigest, freeze, bytesOf, oneChunk;
 var init_production_image_graph = __esmMin((() => {
+	init_production_control_capacity();
 	init_production_image_transition();
 	init_production_canary_verification();
 	init_production_image_custody();
@@ -152604,18 +152694,18 @@ if __name__ == "__main__":
 * prepaid base has been read and probed. Supplied bytes remain untouched. */
 async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem, baseCacheDirectory, sourceContext, metadataReads, tempRoot, signal }) {
 	const supplied = inspectMaterializedCarrierContext(context), p = supplied.plan, t = p.template;
-	need$18(supplied.manifest.version === 2 && supplied.manifest.kind === "carrier-build-source-context" && supplied.runtimeManifest === null && !attempted$1.has(context), "CarrierDerivationContext");
-	need$18(metadataReads?.admission?.config?.grantHash && typeof metadataReads.reserveLocal === "function", "CarrierDerivationGrant");
+	need$19(supplied.manifest.version === 2 && supplied.manifest.kind === "carrier-build-source-context" && supplied.runtimeManifest === null && !attempted$1.has(context), "CarrierDerivationContext");
+	need$19(metadataReads?.admission?.config?.grantHash && typeof metadataReads.reserveLocal === "function", "CarrierDerivationGrant");
 	same$2(metadataReads.admission.config.plan, p, "CarrierDerivationGrant");
-	need$18(sourceContext?.tree === t.source.candidateTree && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierDerivationSource");
+	need$19(sourceContext?.tree === t.source.candidateTree && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierDerivationSource");
 	const { graphHash, ...base } = controlImageGraphBinding(baseGraph), filesystem = inspectImageFilesystemEvidence(baseFilesystem);
 	same$2(base, t.base, "CarrierDerivationBase");
-	need$18(filesystem.graphHash === graphHash && imageFilesystemVerificationKind(baseFilesystem) === "live-filesystem-evidence", "CarrierDerivationFilesystem");
+	need$19(filesystem.graphHash === graphHash && imageFilesystemVerificationKind(baseFilesystem) === "live-filesystem-evidence", "CarrierDerivationFilesystem");
 	attempted$1.add(context);
 	await verifyMaterializedCarrierContext(context);
 	const check = () => {
 		signal?.throwIfAborted();
-		need$18(Date.now() < p.deadlineMs, "CarrierDerivationExpired");
+		need$19(Date.now() < p.deadlineMs, "CarrierDerivationExpired");
 		metadataReads.reserveLocal(zero$5());
 	};
 	const charge = (bytes) => {
@@ -152636,7 +152726,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 	let complete = false, unknown = false;
 	try {
 		const usage = imageGraphState(baseGraph).budget.usage();
-		need$18(Number.isSafeInteger(usage.uncompressedBytes) && usage.uncompressedBytes > 0 && usage.uncompressedBytes <= t.bounds.uncompressedBytes && Number.isSafeInteger(usage.fsEntries) && usage.fsEntries <= t.bounds.processedEntries, "CarrierDerivationBaseBounds");
+		need$19(Number.isSafeInteger(usage.uncompressedBytes) && usage.uncompressedBytes > 0 && usage.uncompressedBytes <= t.bounds.uncompressedBytes && Number.isSafeInteger(usage.fsEntries) && usage.fsEntries <= t.bounds.processedEntries, "CarrierDerivationBaseBounds");
 		metadataReads.reserveLocal({
 			...zero$5(),
 			logicalBytes: 2 * usage.uncompressedBytes,
@@ -152669,13 +152759,13 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			image: base,
 			sourceClosure: closure
 		}, options), native = inspectNonrootControlPrerequisites(handle, options);
-		need$18(native.record.cleanupConfirmed === true && native.record.container.exitCode === 0 && native.environment.caBindings.length === 1, "CarrierDerivationNative");
+		need$19(native.record.cleanupConfirmed === true && native.record.container.exitCode === 0 && native.environment.caBindings.length === 1, "CarrierDerivationNative");
 		const ca = native.environment.caBindings[0];
-		need$18(ca.value === "/bootstrap/global-bundle.pem" && ca.resolvedPath === ca.value, "CarrierDerivationCaPath");
+		need$19(ca.value === "/bootstrap/global-bundle.pem" && ca.resolvedPath === ca.value, "CarrierDerivationCaPath");
 		const caBytes = native.objects.find((row) => row.ref.sha256 === ca.file.sha256 && row.ref.bytesLength === ca.file.bytesLength)?.bytes;
-		need$18(caBytes instanceof Uint8Array && caBytes.length > 0 && caBytes.length <= 1048576 && sha$6(caBytes) === ca.file.sha256, "CarrierDerivationCaBytes");
+		need$19(caBytes instanceof Uint8Array && caBytes.length > 0 && caBytes.length <= 1048576 && sha$6(caBytes) === ca.file.sha256, "CarrierDerivationCaBytes");
 		const caText = new TextDecoder("utf-8", { fatal: true }).decode(caBytes), certificates = caText.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
-		need$18(certificates?.length > 0 && caText.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() === "", "CarrierDerivationPublicCa");
+		need$19(certificates?.length > 0 && caText.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() === "", "CarrierDerivationPublicCa");
 		for (const cert of certificates) new X509Certificate(cert);
 		const record = freeze$2(await formatCarrierDerivedMaterial({
 			context,
@@ -152687,11 +152777,11 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			metadataReads
 		}));
 		const manifestBytes = Buffer.from(record.files.find((f) => f.path === CARRIER_RUNTIME_MANIFEST_PATH).bytesBase64, "base64"), runtimeManifest = JSON.parse(manifestBytes);
-		need$18(manifestBytes.length <= 1048576 && manifestBytes.length + caBytes.length <= t.bounds.contextBytes && runtimeManifest.files.length + 2 <= t.bounds.contextFiles, "CarrierDerivedSize");
+		need$19(manifestBytes.length <= 1048576 && manifestBytes.length + caBytes.length <= t.bounds.contextBytes && runtimeManifest.files.length + 2 <= t.bounds.contextFiles, "CarrierDerivedSize");
 		const identities = /* @__PURE__ */ new Map();
 		for (const { path, bytesBase64 } of record.files) {
 			const bytes = Buffer.from(bytesBase64, "base64");
-			need$18(!supplied.manifest.files.some((row) => row.path === path), "CarrierSuppliedDerivedCollision");
+			need$19(!supplied.manifest.files.some((row) => row.path === path), "CarrierSuppliedDerivedCollision");
 			charge(bytes.length);
 			metadataReads.reserveLocal({
 				...zero$5(),
@@ -152708,7 +152798,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			identities.set(full, await lstat(full));
 		}
 		const recordBytes = Buffer.from(JSON.stringify(record));
-		need$18(recordBytes.length <= t.bounds.resultBytes, "CarrierDerivedRecordSize");
+		need$19(recordBytes.length <= t.bounds.resultBytes, "CarrierDerivedRecordSize");
 		charge(recordBytes.length);
 		const fd = await open(join(directory, "derivation.json"), "wx", 384);
 		try {
@@ -152751,12 +152841,12 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 }
 async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseFilesystem, metadataReads } = {}) {
 	const s = states$1.get(handle);
-	need$18(s && !s.closed && s.context === context && s.baseGraph === baseGraph && s.baseFilesystem === baseFilesystem && s.metadataReads === metadataReads, "CarrierDerivedHandle");
+	need$19(s && !s.closed && s.context === context && s.baseGraph === baseGraph && s.baseFilesystem === baseFilesystem && s.metadataReads === metadataReads, "CarrierDerivedHandle");
 	s.check();
 	const root = await lstat(s.directory);
-	need$18(root.isDirectory() && root.dev === s.directoryStat.dev && root.ino === s.directoryStat.ino && root.uid === process.getuid() && (root.mode & 511) === 448 && await realpath(s.directory) === s.directory, "CarrierDerivedDirectory");
+	need$19(root.isDirectory() && root.dev === s.directoryStat.dev && root.ino === s.directoryStat.ino && root.uid === process.getuid() && (root.mode & 511) === 448 && await realpath(s.directory) === s.directory, "CarrierDerivedDirectory");
 	same$2((await readdir(s.directory)).sort(), ["derivation.json", "material"], "CarrierDerivedUnknownFile");
-	need$18(sameFile(s.recordStat, await lstat(join(s.directory, "derivation.json"))), "CarrierDerivedChanged");
+	need$19(sameFile(s.recordStat, await lstat(join(s.directory, "derivation.json"))), "CarrierDerivedChanged");
 	const expected = /* @__PURE__ */ new Set([
 		"rootfs",
 		"rootfs/carrier",
@@ -152765,10 +152855,10 @@ async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseF
 	]);
 	const walk = async (relative = "") => {
 		const directory = join(s.materialDirectory, relative), d = await lstat(directory);
-		need$18(d.isDirectory() && d.uid === process.getuid() && (d.mode & 511) === 448 && await realpath(directory) === directory, "CarrierDerivedDirectory");
+		need$19(d.isDirectory() && d.uid === process.getuid() && (d.mode & 511) === 448 && await realpath(directory) === directory, "CarrierDerivedDirectory");
 		for (const name of await readdir(directory)) {
 			const p = relative ? relative + "/" + name : name;
-			need$18(expected.has(p), "CarrierDerivedUnknownFile");
+			need$19(expected.has(p), "CarrierDerivedUnknownFile");
 			if ((await lstat(join(s.materialDirectory, p))).isDirectory()) await walk(p);
 		}
 	};
@@ -152777,10 +152867,10 @@ async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseF
 		const full = join(s.materialDirectory, row.path), before = s.identities.get(full), fd = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		s.charge(row.bytesLength);
 		try {
-			need$18(sameFile(before, await fd.stat()) && sameFile(before, await lstat(full)) && before.nlink === 1, "CarrierDerivedChanged");
+			need$19(sameFile(before, await fd.stat()) && sameFile(before, await lstat(full)) && before.nlink === 1, "CarrierDerivedChanged");
 			const digest = createHash("sha256"), bytes = await fd.readFile();
 			digest.update(bytes);
-			need$18(bytes.length === row.bytesLength && digest.digest("hex") === row.sha256 && sameFile(before, await fd.stat()), "CarrierDerivedChanged");
+			need$19(bytes.length === row.bytesLength && digest.digest("hex") === row.sha256 && sameFile(before, await fd.stat()), "CarrierDerivedChanged");
 		} finally {
 			await fd.close();
 		}
@@ -152796,7 +152886,7 @@ async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseF
 }
 async function consumeCarrierRuntimeMaterial(handle, bindings) {
 	const s = states$1.get(handle);
-	need$18(s && !s.consumed, "CarrierDerivedConsumed");
+	need$19(s && !s.consumed, "CarrierDerivedConsumed");
 	s.consumed = true;
 	return inspectCarrierRuntimeMaterial(handle, bindings);
 }
@@ -152828,7 +152918,7 @@ var init_ci_carrier_derived = __esmMin((() => {
 		"ctimeMs"
 	];
 	sameFile = (a, b) => fileKeys.every((k) => a[k] === b[k]);
-	same$2 = (a, b, code) => need$18(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
+	same$2 = (a, b, code) => need$19(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
 	Object.freeze(["rootfs/carrier/manifest.json", "rootfs/bootstrap/global-bundle.pem"]);
 }));
 //#endregion
@@ -157892,11 +157982,11 @@ var init_esm = __esmMin((() => {
 /** The production manifest is never changed. Return the exact two test files;
 * only the existing CA row's hash and byte count may differ. */
 function deriveCarrierSqlTestManifest(originalBytes, fixtureCa) {
-	need$18(originalBytes instanceof Uint8Array && fixtureCa instanceof Uint8Array && fixtureCa.length > 0 && fixtureCa.length <= 16384, "CarrierSqlOverlayBytes");
+	need$19(originalBytes instanceof Uint8Array && fixtureCa instanceof Uint8Array && fixtureCa.length > 0 && fixtureCa.length <= 16384, "CarrierSqlOverlayBytes");
 	const original = parseAcquisitionJson(originalBytes, 1048576), certificate = new X509Certificate(fixtureCa);
-	need$18(Buffer.from(originalBytes).equals(Buffer.from(JSON.stringify(original))), "CarrierSqlOriginalManifestEncoding");
-	need$18(certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey) && /^CN=mem9-carrier-db-[a-f0-9]{32}$/.test(certificate.subject), "CarrierSqlOverlayCertificate");
-	need$18(Buffer.from(fixtureCa).toString("utf8").trim() === certificate.toString().trim(), "CarrierSqlOverlayCertificate");
+	need$19(Buffer.from(originalBytes).equals(Buffer.from(JSON.stringify(original))), "CarrierSqlOriginalManifestEncoding");
+	need$19(certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey) && /^CN=mem9-carrier-db-[a-f0-9]{32}$/.test(certificate.subject), "CarrierSqlOverlayCertificate");
+	need$19(Buffer.from(fixtureCa).toString("utf8").trim() === certificate.toString().trim(), "CarrierSqlOverlayCertificate");
 	exact$8(original, [
 		"version",
 		"legacyCodeHash",
@@ -157908,9 +157998,9 @@ function deriveCarrierSqlTestManifest(originalBytes, fixtureCa) {
 		"files",
 		"caPath"
 	]);
-	need$18(original.version === 1 && original.caPath === CARRIER_SQL_MOUNTS[0] && Array.isArray(original.files), "CarrierSqlOverlayManifest");
+	need$19(original.version === 1 && original.caPath === CARRIER_SQL_MOUNTS[0] && Array.isArray(original.files), "CarrierSqlOverlayManifest");
 	const test = structuredClone(original), rows = test.files.filter((f) => f.path === CARRIER_SQL_MOUNTS[0]);
-	need$18(rows.length === 1 && rows[0].type === "file" && rows[0].mode === 292, "CarrierSqlOverlayCa");
+	need$19(rows.length === 1 && rows[0].type === "file" && rows[0].mode === 292, "CarrierSqlOverlayCa");
 	rows[0].sha256 = sha$6(fixtureCa);
 	rows[0].bytes = fixtureCa.length;
 	return Buffer.from(JSON.stringify(test));
@@ -157941,35 +158031,35 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 		"cases",
 		"cleanup"
 	]);
-	need$18(r.version === 2 && r.kind === "carrier-original-closure-tests" && r.templateHash === plan.templateHash && r.grantHash === binding.grantHash && r.contextHash === plan.context.sha256 && r.bindingHash === nonrootHash(binding), "CarrierSqlAcceptanceBinding");
+	need$19(r.version === 2 && r.kind === "carrier-original-closure-tests" && r.templateHash === plan.templateHash && r.grantHash === binding.grantHash && r.contextHash === plan.context.sha256 && r.bindingHash === nonrootHash(binding), "CarrierSqlAcceptanceBinding");
 	same$1(carrierCheckpointSelection(plan, binding, Object.fromEntries([
 		"nonce",
 		"scopeHash",
 		"artifactId",
 		"artifactDigest"
 	].map((k) => [k, claim[k]]))).claim, claim);
-	need$18(r.claimHash === nonrootHash(claim) && r.sourceRevision === plan.template.source.candidateRevision && r.sourceTree === plan.template.source.candidateTree, "CarrierSqlAcceptanceSource");
+	need$19(r.claimHash === nonrootHash(claim) && r.sourceRevision === plan.template.source.candidateRevision && r.sourceTree === plan.template.source.candidateTree, "CarrierSqlAcceptanceSource");
 	same$1(r.image, image);
-	need$18([
+	need$19([
 		"account",
 		"region",
 		"repositoryName"
 	].every((k) => r.image[k] === plan.template.scope[k]), "CarrierSqlAcceptanceImageScope");
 	exact$8(oldSource, ["revision", "tree"]);
-	need$18([oldSource.revision, oldSource.tree].every((s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s)), "CarrierSqlAcceptanceOldSource");
-	need$18(Number.isSafeInteger(r.startedMs) && Number.isSafeInteger(r.completedMs) && r.startedMs >= plan.issuedMs && r.completedMs >= r.startedMs && r.completedMs <= now && r.completedMs < plan.deadlineMs && r.deadlineMs === plan.deadlineMs, "CarrierSqlAcceptanceTime");
-	need$18(Array.isArray(v.objects) && v.objects.length <= 64, "CarrierSqlAcceptanceObjects");
+	need$19([oldSource.revision, oldSource.tree].every((s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s)), "CarrierSqlAcceptanceOldSource");
+	need$19(Number.isSafeInteger(r.startedMs) && Number.isSafeInteger(r.completedMs) && r.startedMs >= plan.issuedMs && r.completedMs >= r.startedMs && r.completedMs <= now && r.completedMs < plan.deadlineMs && r.deadlineMs === plan.deadlineMs, "CarrierSqlAcceptanceTime");
+	need$19(Array.isArray(v.objects) && v.objects.length <= 64, "CarrierSqlAcceptanceObjects");
 	const objects = /* @__PURE__ */ new Map();
 	let total = 0;
 	for (const row of v.objects) {
 		exact$8(row, ["ref", "bytesBase64"]);
 		exact$8(row.ref, ["sha256", "bytesLength"]);
-		need$18(hex$3(row.ref.sha256) && Number.isSafeInteger(row.ref.bytesLength) && row.ref.bytesLength >= 0 && row.ref.bytesLength <= 2097152 && typeof row.bytesBase64 === "string" && row.bytesBase64.length <= 4 * Math.ceil(row.ref.bytesLength / 3), "CarrierSqlAcceptanceObject");
+		need$19(hex$3(row.ref.sha256) && Number.isSafeInteger(row.ref.bytesLength) && row.ref.bytesLength >= 0 && row.ref.bytesLength <= 2097152 && typeof row.bytesBase64 === "string" && row.bytesBase64.length <= 4 * Math.ceil(row.ref.bytesLength / 3), "CarrierSqlAcceptanceObject");
 		const bytes = Buffer.from(row.bytesBase64, "base64");
 		same$1(bytesRef(bytes), row.ref);
-		need$18(bytes.toString("base64") === row.bytesBase64 && !objects.has(nonrootHash(row.ref)), "CarrierSqlAcceptanceObject");
+		need$19(bytes.toString("base64") === row.bytesBase64 && !objects.has(nonrootHash(row.ref)), "CarrierSqlAcceptanceObject");
 		total += bytes.length;
-		need$18(total <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
+		need$19(total <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
 		objects.set(nonrootHash(row.ref), {
 			ref: row.ref,
 			bytes
@@ -157977,13 +158067,13 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 	}
 	const used = /* @__PURE__ */ new Set(), read = (ref) => {
 		const key = nonrootHash(ref), row = objects.get(key);
-		need$18(row, "CarrierSqlAcceptanceMissingObject");
+		need$19(row, "CarrierSqlAcceptanceMissingObject");
 		used.add(key);
 		return row.bytes;
 	};
 	const original = read(r.originalManifest), test = read(r.testManifest), ca = read(r.fixtureCa);
-	need$18(originalManifest instanceof Uint8Array && original.equals(originalManifest) && sha$6(original) === r.originalManifestHash && sha$6(test) === r.testManifestHash, "CarrierSqlAcceptanceManifest");
-	need$18(deriveCarrierSqlTestManifest(original, ca).equals(test), "CarrierSqlAcceptanceDelta");
+	need$19(originalManifest instanceof Uint8Array && original.equals(originalManifest) && sha$6(original) === r.originalManifestHash && sha$6(test) === r.testManifestHash, "CarrierSqlAcceptanceManifest");
+	need$19(deriveCarrierSqlTestManifest(original, ca).equals(test), "CarrierSqlAcceptanceDelta");
 	const manifest = parseAcquisitionJson(original, 1048576), certificate = new X509Certificate(ca), f = r.fixture;
 	exact$8(f, [
 		"imageDigest",
@@ -157998,7 +158088,7 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 	]);
 	if (f.imageDigest === CARRIER_SQL_NOJIT_FIXTURE.rootDigest) {
 		exact$8(f.jit, ["setting", "source"]);
-		need$18(f.jit.setting === "off" && f.jit.source === "command line", "CarrierSqlJitSetting");
+		need$19(f.jit.setting === "off" && f.jit.source === "command line", "CarrierSqlJitSetting");
 	}
 	if (f.package) {
 		const p = f.package, t = plan.template.sqlFixture;
@@ -158018,12 +158108,12 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			"configDigest",
 			"attestationDigest",
 			"uncompressedBytes"
-		]) need$18(p[k] === t[k], "CarrierSqlPackageBinding");
-		need$18(Number.isSafeInteger(p.processedEntries) && p.processedEntries > 0 && p.processedEntries <= t.processedEntries, "CarrierSqlPackageBinding");
+		]) need$19(p[k] === t[k], "CarrierSqlPackageBinding");
+		need$19(Number.isSafeInteger(p.processedEntries) && p.processedEntries > 0 && p.processedEntries <= t.processedEntries, "CarrierSqlPackageBinding");
 		same$1(oldSource, t.oldSource);
 	}
-	need$18((f.imageDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || carrierSqlDerivedProfile(f.imageDigest)) && f.imageDigest === (f.package?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && id$2(f.containerId) && id$2(f.networkId) && hex$3(f.seederSourceHash) && hex$3(f.rootIdentity) && f.certificateHash === sha$6(certificate.raw) && certificate.checkHost(f.hostAlias) === f.hostAlias && certificate.checkIP("127.0.0.1") === "127.0.0.1", "CarrierSqlAcceptanceFixture");
-	need$18(Array.isArray(r.cases) && r.cases.length === CARRIER_SQL_CASES.length, "CarrierSqlAcceptanceCases");
+	need$19((f.imageDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || carrierSqlDerivedProfile(f.imageDigest)) && f.imageDigest === (f.package?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && id$2(f.containerId) && id$2(f.networkId) && hex$3(f.seederSourceHash) && hex$3(f.rootIdentity) && f.certificateHash === sha$6(certificate.raw) && certificate.checkHost(f.hostAlias) === f.hostAlias && certificate.checkIP("127.0.0.1") === "127.0.0.1", "CarrierSqlAcceptanceFixture");
+	need$19(Array.isArray(r.cases) && r.cases.length === CARRIER_SQL_CASES.length, "CarrierSqlAcceptanceCases");
 	let last = r.startedMs;
 	const ids = /* @__PURE__ */ new Set();
 	for (const [i, c] of r.cases.entries()) {
@@ -158045,13 +158135,13 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			"cleanup",
 			...c.name === "untrusted-fixture-ca" ? ["tlsFailure"] : []
 		]);
-		need$18(c.name === CARRIER_SQL_CASES[i] && id$2(c.containerId) && !ids.has(c.containerId) && hex$3(c.commandHash), "CarrierSqlAcceptanceCase");
+		need$19(c.name === CARRIER_SQL_CASES[i] && id$2(c.containerId) && !ids.has(c.containerId) && hex$3(c.commandHash), "CarrierSqlAcceptanceCase");
 		ids.add(c.containerId);
 		same$1(c.image, r.image);
-		need$18(Number.isSafeInteger(c.startedMs) && Number.isSafeInteger(c.completedMs) && c.startedMs >= last && c.completedMs >= c.startedMs && c.completedMs - c.startedMs <= 17e4 && c.completedMs <= r.completedMs, "CarrierSqlAcceptanceCaseTime");
+		need$19(Number.isSafeInteger(c.startedMs) && Number.isSafeInteger(c.completedMs) && c.startedMs >= last && c.completedMs >= c.startedMs && c.completedMs - c.startedMs <= 17e4 && c.completedMs <= r.completedMs, "CarrierSqlAcceptanceCaseTime");
 		last = c.completedMs;
 		const inputBytes = read(c.inputBytes), stdout = read(c.stdout).toString("utf8"), stderr = read(c.stderr).toString("utf8");
-		need$18(inputBytes.length <= 32768, "CarrierSqlAcceptanceInput");
+		need$19(inputBytes.length <= 32768, "CarrierSqlAcceptanceInput");
 		exact$8(c.state, [
 			"Running",
 			"Pid",
@@ -158059,23 +158149,23 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			"OOMKilled",
 			"Status"
 		]);
-		need$18(c.state.Running === false && c.state.Pid === 0 && c.state.OOMKilled === false && c.state.Status === "exited" && c.state.ExitCode === c.exitCode, "CarrierSqlAcceptanceStopped");
+		need$19(c.state.Running === false && c.state.Pid === 0 && c.state.OOMKilled === false && c.state.Status === "exited" && c.state.ExitCode === c.exitCode, "CarrierSqlAcceptanceStopped");
 		exact$8(c.cleanup, [
 			"removed",
 			"absenceStatus",
 			"absenceHash"
 		]);
-		need$18(c.cleanup.removed === true && c.cleanup.absenceStatus === 1 && hex$3(c.cleanup.absenceHash), "CarrierSqlAcceptanceCleanup");
+		need$19(c.cleanup.removed === true && c.cleanup.absenceStatus === 1 && hex$3(c.cleanup.absenceHash), "CarrierSqlAcceptanceCleanup");
 		const tls = c.name === "untrusted-fixture-ca";
-		need$18(c.manifestHash === (tls ? r.originalManifestHash : r.testManifestHash), "CarrierSqlAcceptanceCaseManifest");
-		need$18(Array.isArray(c.mounts) && c.mounts.length === (tls ? 0 : 2), "CarrierSqlAcceptanceMounts");
+		need$19(c.manifestHash === (tls ? r.originalManifestHash : r.testManifestHash), "CarrierSqlAcceptanceCaseManifest");
+		need$19(Array.isArray(c.mounts) && c.mounts.length === (tls ? 0 : 2), "CarrierSqlAcceptanceMounts");
 		for (const [j, m] of c.mounts.entries()) {
 			exact$8(m, [
 				"destination",
 				"readOnly",
 				"source"
 			]);
-			need$18(m.destination === CARRIER_SQL_MOUNTS[j] && m.readOnly === true, "CarrierSqlAcceptanceMounts");
+			need$19(m.destination === CARRIER_SQL_MOUNTS[j] && m.readOnly === true, "CarrierSqlAcceptanceMounts");
 			const s = m.source;
 			exact$8(s, [
 				"path",
@@ -158090,19 +158180,19 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 				"ctimeNs",
 				"sha256"
 			]);
-			need$18(typeof s.path === "string" && /^\/[^\0]+\/mem9-carrier-sql-[A-Za-z0-9_-]+\/material\/(?:ca.pem|manifest.json)$/.test(s.path) && [
+			need$19(typeof s.path === "string" && /^\/[^\0]+\/mem9-carrier-sql-[A-Za-z0-9_-]+\/material\/(?:ca.pem|manifest.json)$/.test(s.path) && [
 				"dev",
 				"ino",
 				"mtimeNs",
 				"ctimeNs"
 			].every((k) => typeof s[k] === "string" && /^[0-9]+$/.test(s[k])) && s.uid === 0 && s.gid === 0 && s.mode === 292 && s.nlink === 1, "CarrierSqlAcceptanceMountSource");
 			const expected = j === 0 ? ca : test;
-			need$18(s.sha256 === sha$6(expected) && s.size === expected.length, "CarrierSqlAcceptanceMountSource");
+			need$19(s.sha256 === sha$6(expected) && s.size === expected.length, "CarrierSqlAcceptanceMountSource");
 		}
 		if (i === 0) {
-			need$18(c.exitCode === 0, "CarrierSqlAcceptancePositive");
+			need$19(c.exitCode === 0, "CarrierSqlAcceptancePositive");
 			const lines = stdout.trimEnd().split("\n").map((line) => parseAcquisitionJson(Buffer.from(line), 1048576));
-			need$18(lines.length === 4, "CarrierSqlAcceptancePositive");
+			need$19(lines.length === 4, "CarrierSqlAcceptancePositive");
 			const [before, legacy, supplement, after] = lines, input = parseAcquisitionJson(inputBytes, 32768);
 			same$1(input.deployed, {
 				revision: oldSource.revision,
@@ -158110,7 +158200,7 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			});
 			for (const p of [before, after]) {
 				const who = p.identity;
-				need$18(p.event === "carrier_process_identity" && p.manifestHash === r.testManifestHash && p.inputHash === sha$6(inputBytes) && p.invocation === input.invocation && p.legacyCodeHash === manifest.legacyCodeHash && who?.noNewPrivs === 1 && who.executableDigest === manifest.runtime.nodeSha256 && who.pid === 1 && who.ppid === 0 && who.uid?.length === 4 && who.gid?.length === 4 && [
+				need$19(p.event === "carrier_process_identity" && p.manifestHash === r.testManifestHash && p.inputHash === sha$6(inputBytes) && p.invocation === input.invocation && p.legacyCodeHash === manifest.legacyCodeHash && who?.noNewPrivs === 1 && who.executableDigest === manifest.runtime.nodeSha256 && who.pid === 1 && who.ppid === 0 && who.uid?.length === 4 && who.gid?.length === 4 && [
 					...who.uid,
 					...who.gid,
 					...who.groups
@@ -158122,29 +158212,29 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 					"CapAmb"
 				].every((k) => who[k] === "0000000000000000"), "CarrierSqlAcceptancePositive");
 			}
-			need$18(before.phase === "before" && after.phase === "after" && after.identity.startTimeTicks === before.identity.startTimeTicks && legacy.event === "supersession_root_audit" && legacy.cleanupComplete === true && legacy.codeHash === manifest.legacyCodeHash && legacy.dependencyHash === manifest.dependencyHash && legacy.inputHash === sha$6(inputBytes) && legacy.rootHash === f.rootIdentity && supplement.event === "carrier_supplemental_audit" && supplement.cleanupComplete === true, "CarrierSqlAcceptancePositive");
+			need$19(before.phase === "before" && after.phase === "after" && after.identity.startTimeTicks === before.identity.startTimeTicks && legacy.event === "supersession_root_audit" && legacy.cleanupComplete === true && legacy.codeHash === manifest.legacyCodeHash && legacy.dependencyHash === manifest.dependencyHash && legacy.inputHash === sha$6(inputBytes) && legacy.rootHash === f.rootIdentity && supplement.event === "carrier_supplemental_audit" && supplement.cleanupComplete === true, "CarrierSqlAcceptancePositive");
 		} else {
-			need$18(c.exitCode === 1 && !stdout.includes("\"event\":\"supersession_root_audit\""), "CarrierSqlAcceptanceNegative");
+			need$19(c.exitCode === 1 && !stdout.includes("\"event\":\"supersession_root_audit\""), "CarrierSqlAcceptanceNegative");
 			const failure = parseAcquisitionJson(Buffer.from(stderr.trim()), 1048576), guardCodes = {
 				"root-uid": "CarrierIdentity",
 				"missing-nnp": "CarrierPrivileges",
 				"changed-input-hash": "CarrierInputHash",
 				"wrong-encoding": "CarrierInputEncoding"
 			};
-			need$18(failure.event === "carrier_guard_rejected", "CarrierSqlAcceptanceNegative");
-			if (guardCodes[c.name]) need$18(failure.stage === "guard" && failure.code === guardCodes[c.name], "CarrierSqlAcceptanceNegative");
+			need$19(failure.event === "carrier_guard_rejected", "CarrierSqlAcceptanceNegative");
+			if (guardCodes[c.name]) need$19(failure.stage === "guard" && failure.code === guardCodes[c.name], "CarrierSqlAcceptanceNegative");
 			else {
 				const lines = stdout.trimEnd().split("\n");
-				need$18(lines.length === 1 && failure.stage === "legacy", "CarrierSqlAcceptanceNegative");
+				need$19(lines.length === 1 && failure.stage === "legacy", "CarrierSqlAcceptanceNegative");
 				const before = parseAcquisitionJson(Buffer.from(lines[0]), 1048576);
-				need$18(before.event === "carrier_process_identity" && before.phase === "before" && before.inputHash === sha$6(inputBytes) && before.manifestHash === c.manifestHash, "CarrierSqlAcceptanceNegative");
+				need$19(before.event === "carrier_process_identity" && before.phase === "before" && before.inputHash === sha$6(inputBytes) && before.manifestHash === c.manifestHash, "CarrierSqlAcceptanceNegative");
 			}
 		}
 		if (tls) {
 			const lines = stdout.trimEnd().split("\n");
-			need$18(lines.length === 1, "CarrierSqlTlsGuard");
+			need$19(lines.length === 1, "CarrierSqlTlsGuard");
 			const before = parseAcquisitionJson(Buffer.from(lines[0]), 1048576), failure = parseAcquisitionJson(Buffer.from(stderr.trim()), 1048576);
-			need$18(before.event === "carrier_process_identity" && before.phase === "before" && before.manifestHash === r.originalManifestHash && before.inputHash === sha$6(inputBytes) && failure.event === "carrier_guard_rejected" && failure.stage === "legacy", "CarrierSqlTlsGuard");
+			need$19(before.event === "carrier_process_identity" && before.phase === "before" && before.manifestHash === r.originalManifestHash && before.inputHash === sha$6(inputBytes) && failure.event === "carrier_guard_rejected" && failure.stage === "legacy", "CarrierSqlTlsGuard");
 			const t = c.tlsFailure;
 			exact$8(t, [
 				"kind",
@@ -158153,8 +158243,8 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 				"peer",
 				"log"
 			]);
-			need$18(t.kind === "fixture-certificate-rejection" && t.fixtureContainerId === f.containerId && typeof t.sessionId === "string" && typeof t.peer === "string", "CarrierSqlTlsEvidence");
-			need$18(typeof c.networkAddress === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(c.networkAddress) && t.peer.startsWith(c.networkAddress + "("), "CarrierSqlTlsPeer");
+			need$19(t.kind === "fixture-certificate-rejection" && t.fixtureContainerId === f.containerId && typeof t.sessionId === "string" && typeof t.peer === "string", "CarrierSqlTlsEvidence");
+			need$19(typeof c.networkAddress === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(c.networkAddress) && t.peer.startsWith(c.networkAddress + "("), "CarrierSqlTlsPeer");
 			verifyCarrierSqlTlsRejection(read(t.log).toString("utf8"), {
 				sessionId: t.sessionId,
 				peer: t.peer
@@ -158166,8 +158256,8 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 		"networkRemoved",
 		"imageReleased"
 	]);
-	need$18(Object.values(r.cleanup).every((v) => v === true), "CarrierSqlAcceptanceCleanup");
-	need$18(used.size === objects.size && Buffer.byteLength(JSON.stringify(v)) <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
+	need$19(Object.values(r.cleanup).every((v) => v === true), "CarrierSqlAcceptanceCleanup");
+	need$19(used.size === objects.size && Buffer.byteLength(JSON.stringify(v)) <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
 	return {
 		record: r,
 		objects: [...objects.values()]
@@ -158180,13 +158270,13 @@ function id$2(value) {
 * evidence. Node may close after certificate rejection without sending an
 * alert, so bind its exact allowlisted diagnostic to the same failed peer. */
 function verifyCarrierSqlTlsRejection(raw, expected, clientFailure) {
-	need$18(typeof raw === "string" && Buffer.byteLength(raw) <= 1048576, "CarrierSqlTlsLog");
+	need$19(typeof raw === "string" && Buffer.byteLength(raw) <= 1048576, "CarrierSqlTlsLog");
 	const rows = raw.trim().split("\n").map((line) => /^mem9_fixture\|[^|]+\|([^|]+)\|[0-9]+\|([^|]+)\|(.*)$/.exec(line));
-	need$18(rows.every(Boolean), "CarrierSqlTlsLog");
+	need$19(rows.every(Boolean), "CarrierSqlTlsLog");
 	const connections = rows.filter((r) => r[3].includes("connection received:"));
-	need$18(connections.length === 1, "CarrierSqlTlsConnections");
+	need$19(connections.length === 1, "CarrierSqlTlsConnections");
 	const selected = connections[0];
-	need$18(rows.length === 2 && rows[0] === selected && rows.every((r) => r[1] === selected[1] && r[2] === selected[2]), "CarrierSqlTlsConnections");
+	need$19(rows.length === 2 && rows[0] === selected && rows.every((r) => r[1] === selected[1] && r[2] === selected[2]), "CarrierSqlTlsConnections");
 	let clientRejected = false;
 	if (clientFailure !== void 0) {
 		exact$8(clientFailure, [
@@ -158195,15 +158285,15 @@ function verifyCarrierSqlTlsRejection(raw, expected, clientFailure) {
 			"code",
 			...Object.hasOwn(clientFailure, "tlsErrorCode") ? ["tlsErrorCode"] : []
 		]);
-		need$18(clientFailure.event === "carrier_guard_rejected" && clientFailure.stage === "legacy" && ["CarrierRejected", "CarrierLegacyFailed"].includes(clientFailure.code), "CarrierSqlTlsClient");
+		need$19(clientFailure.event === "carrier_guard_rejected" && clientFailure.stage === "legacy" && ["CarrierRejected", "CarrierLegacyFailed"].includes(clientFailure.code), "CarrierSqlTlsClient");
 		if (Object.hasOwn(clientFailure, "tlsErrorCode")) {
-			need$18(clientFailure.tlsErrorCode === "DEPTH_ZERO_SELF_SIGNED_CERT", "CarrierSqlTlsClient");
+			need$19(clientFailure.tlsErrorCode === "DEPTH_ZERO_SELF_SIGNED_CERT", "CarrierSqlTlsClient");
 			clientRejected = true;
 		}
 	}
 	const rejection = rows.filter((r) => /could not accept SSL connection:.*(?:alert unknown ca|alert bad certificate|alert certificate unknown)/i.test(r[3]) || clientRejected && /could not accept SSL connection: EOF detected$/.test(r[3]));
-	need$18(rejection.length === 1, "CarrierSqlTlsCertificateRejection");
-	if (expected) need$18(expected.sessionId === selected[1] && expected.peer === selected[2], "CarrierSqlTlsConnections");
+	need$19(rejection.length === 1, "CarrierSqlTlsCertificateRejection");
+	if (expected) need$19(expected.sessionId === selected[1] && expected.peer === selected[2], "CarrierSqlTlsConnections");
 	return {
 		kind: "fixture-certificate-rejection",
 		sessionId: selected[1],
@@ -158226,7 +158316,7 @@ var init_ci_carrier_sql_acceptance_format = __esmMin((() => {
 		"changed-root-counters"
 	]);
 	CARRIER_SQL_MOUNTS = Object.freeze(["/bootstrap/global-bundle.pem", "/carrier/manifest.json"]);
-	same$1 = (a, b) => need$18(nonrootHash(a) === nonrootHash(b), "CarrierSqlAcceptanceBinding");
+	same$1 = (a, b) => need$19(nonrootHash(a) === nonrootHash(b), "CarrierSqlAcceptanceBinding");
 	hex$3 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 	bytesRef = (bytes) => ({
 		sha256: sha$6(bytes),
@@ -172279,7 +172369,7 @@ function archiveIndex(limit) {
 	let position = 0, header = Buffer.alloc(0), remaining = 0, padding = 0, member, digest, zeros = 0, ended = false;
 	const complete = () => {
 		member.sha256 = digest.digest("hex");
-		if (member.name.startsWith("blobs/")) need$18(member.sha256 === member.name.slice(13), "CarrierPgBlobHash");
+		if (member.name.startsWith("blobs/")) need$19(member.sha256 === member.name.slice(13), "CarrierPgBlobHash");
 		files.set(member.name, {
 			offset: member.offset,
 			size: member.size,
@@ -172293,7 +172383,7 @@ function archiveIndex(limit) {
 			let at = 0;
 			while (at < chunk.length) {
 				if (ended) {
-					need$18(chunk.subarray(at).every((b) => b === 0), "CarrierPgTarTrailing");
+					need$19(chunk.subarray(at).every((b) => b === 0), "CarrierPgTarTrailing");
 					zeros += chunk.length - at;
 					position += chunk.length - at;
 					break;
@@ -172309,7 +172399,7 @@ function archiveIndex(limit) {
 				}
 				if (padding) {
 					const n = Math.min(padding, chunk.length - at);
-					need$18(chunk.subarray(at, at + n).every((b) => b === 0), "CarrierPgTarPadding");
+					need$19(chunk.subarray(at, at + n).every((b) => b === 0), "CarrierPgTarPadding");
 					padding -= n;
 					at += n;
 					position += n;
@@ -172328,12 +172418,12 @@ function archiveIndex(limit) {
 				}
 				let sum = 0;
 				for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : h[i];
-				need$18(sum === number(h.subarray(148, 156)), "CarrierPgTarChecksum");
+				need$19(sum === number(h.subarray(148, 156)), "CarrierPgTarChecksum");
 				const name = text(h.subarray(0, 100)), size = number(h.subarray(124, 136)), type = String.fromCharCode(h[156] || 48);
-				need$18(["ustar", "ustar "].includes(text(h.subarray(257, 263))) && text(h.subarray(345, 500)) === "" && text(h.subarray(157, 257)) === "" && !names.has(name) && names.size < 128, "CarrierPgTarHeader");
+				need$19(["ustar", "ustar "].includes(text(h.subarray(257, 263))) && text(h.subarray(345, 500)) === "" && text(h.subarray(157, 257)) === "" && !names.has(name) && names.size < 128, "CarrierPgTarHeader");
 				names.add(name);
 				if (type === "5") {
-					need$18([
+					need$19([
 						"blobs",
 						"blobs/",
 						"blobs/sha256",
@@ -172341,7 +172431,7 @@ function archiveIndex(limit) {
 					].includes(name) && size === 0, "CarrierPgDirectoryEntry");
 					continue;
 				}
-				need$18(type === "0" && /^(?:blobs\/sha256\/[a-f0-9]{64}|index\.json|manifest\.json|oci-layout)$/.test(name) && size > 0 && position + padded(size) <= limit, "CarrierPgTarMember");
+				need$19(type === "0" && /^(?:blobs\/sha256\/[a-f0-9]{64}|index\.json|manifest\.json|oci-layout)$/.test(name) && size > 0 && position + padded(size) <= limit, "CarrierPgTarMember");
 				member = {
 					name,
 					size,
@@ -172353,7 +172443,7 @@ function archiveIndex(limit) {
 			}
 		},
 		finish() {
-			need$18(ended && zeros >= 512 && !remaining && !padding && header.length === 0 && position === limit, "CarrierPgTarEnd");
+			need$19(ended && zeros >= 512 && !remaining && !padding && header.length === 0 && position === limit, "CarrierPgTarEnd");
 			return files;
 		}
 	};
@@ -172362,14 +172452,14 @@ async function materializeCarrierSqlPackage({ stream, consumer, tempRoot }) {
 	assertCarrierConsumer(consumer);
 	const f = consumer.admission.config.plan.template.sqlFixture;
 	assertCarrierSqlDatabasePin(f);
-	need$18(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierPgDirectory");
+	need$19(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierPgDirectory");
 	const directory = await mkdtemp(join(tempRoot, "mem9-carrier-sql-pg-")), path = join(directory, "fixture.oci.tar");
 	const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 384), digest = createHash("sha256"), index = archiveIndex(f.archive.bytesLength);
 	let count = 0;
 	try {
 		for await (const chunk of stream) {
 			consumer.check();
-			need$18(chunk instanceof Uint8Array && (count += chunk.length) <= f.archive.bytesLength, "CarrierPgBytes");
+			need$19(chunk instanceof Uint8Array && (count += chunk.length) <= f.archive.bytesLength, "CarrierPgBytes");
 			consumer.reserveLocal({
 				...zero$5(),
 				logicalBytes: chunk.length
@@ -172379,11 +172469,11 @@ async function materializeCarrierSqlPackage({ stream, consumer, tempRoot }) {
 			let at = 0;
 			while (at < chunk.length) {
 				const r = await fd.write(chunk, at, chunk.length - at);
-				need$18(r.bytesWritten > 0, "CarrierPgWrite");
+				need$19(r.bytesWritten > 0, "CarrierPgWrite");
 				at += r.bytesWritten;
 			}
 		}
-		need$18(count === f.archive.bytesLength && digest.digest("hex") === f.archive.sha256, "CarrierPgHash");
+		need$19(count === f.archive.bytesLength && digest.digest("hex") === f.archive.sha256, "CarrierPgHash");
 		index.finish();
 		await fd.sync();
 	} catch (error) {
@@ -172414,24 +172504,24 @@ async function materializeCarrierSqlPackage({ stream, consumer, tempRoot }) {
 }
 function state(handle, consumer) {
 	const s = handles$1.get(handle);
-	need$18(s && !s.closed && s.consumer === consumer, "CarrierPgHandle");
+	need$19(s && !s.closed && s.consumer === consumer, "CarrierPgHandle");
 	assertCarrierConsumer(consumer);
 	return s;
 }
 async function current(s) {
 	s.consumer.check();
-	need$18(await realpath(s.path) === s.path && unchanged(s.identity, await lstat(s.path)) && s.identity.isFile() && s.identity.uid === process.getuid() && (s.identity.mode & 511) === 384 && s.identity.nlink === 1, "CarrierPgChanged");
+	need$19(await realpath(s.path) === s.path && unchanged(s.identity, await lstat(s.path)) && s.identity.isFile() && s.identity.uid === process.getuid() && (s.identity.mode & 511) === 384 && s.identity.nlink === 1, "CarrierPgChanged");
 }
 async function verifyCarrierSqlPackage(handle, { consumer }) {
 	const s = state(handle, consumer);
-	need$18(!s.verified && !s.consumed, "CarrierPgSpent");
+	need$19(!s.verified && !s.consumed, "CarrierPgSpent");
 	await current(s);
-	need$18(consumer.inspect().used.fixtureGet === 1 && consumer.inspect().events.at(-1)?.type === "complete", "CarrierPgDownloadIncomplete");
+	need$19(consumer.inspect().used.fixtureGet === 1 && consumer.inspect().events.at(-1)?.type === "complete", "CarrierPgDownloadIncomplete");
 	const fd = await open(s.path, constants.O_RDONLY | constants.O_NOFOLLOW), files = s.files, f = s.f, bounds = carrierSqlPackageReadBounds(f);
 	let readBytes = 0, layerReadBytes = 0, metadataReadBytes = 0;
 	const read = async (at, n, layer = false) => {
-		need$18(Number.isSafeInteger(n) && n >= 0 && n <= 1048576 && at + n <= f.archive.bytesLength, "CarrierPgRead");
-		need$18(layer ? layerReadBytes + n <= bounds.compressedLayerBytes : metadataReadBytes + n <= bounds.metadataReadBytes, "CarrierPgReadBudget");
+		need$19(Number.isSafeInteger(n) && n >= 0 && n <= 1048576 && at + n <= f.archive.bytesLength, "CarrierPgRead");
+		need$19(layer ? layerReadBytes + n <= bounds.compressedLayerBytes : metadataReadBytes + n <= bounds.metadataReadBytes, "CarrierPgReadBudget");
 		consumer.check();
 		consumer.reserveLocal({
 			...zero$5(),
@@ -172444,7 +172534,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 		let p = 0;
 		while (p < n) {
 			const r = await fd.read(b, p, n - p, at + p);
-			need$18(r.bytesRead > 0, "CarrierPgTruncated");
+			need$19(r.bytesRead > 0, "CarrierPgTruncated");
 			p += r.bytesRead;
 		}
 		return b;
@@ -172458,35 +172548,35 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 			digest.update(b);
 			yield b;
 		}
-		need$18(digest.digest("hex") === row.sha256, "CarrierPgStoredBlobHash");
+		need$19(digest.digest("hex") === row.sha256, "CarrierPgStoredBlobHash");
 	}
 	const body = async (name) => {
 		const r = files.get(name);
-		need$18(r && r.size <= 1048576, "CarrierPgMetadata");
+		need$19(r && r.size <= 1048576, "CarrierPgMetadata");
 		const bytes = await read(r.offset, r.size);
-		need$18(sha$6(bytes) === r.sha256, "CarrierPgStoredMetadataHash");
+		need$19(sha$6(bytes) === r.sha256, "CarrierPgStoredMetadataHash");
 		return bytes;
 	};
 	try {
 		const layout = json(await body("oci-layout")), index = json(await body("index.json"));
-		need$18(layout.imageLayoutVersion === "1.0.0" && index.schemaVersion === 2 && index.manifests?.length === 1 && index.manifests[0].digest === f.rootDigest, "CarrierPgIndex");
+		need$19(layout.imageLayoutVersion === "1.0.0" && index.schemaVersion === 2 && index.manifests?.length === 1 && index.manifests[0].digest === f.rootDigest, "CarrierPgIndex");
 		const root = json(await body("blobs/sha256/" + f.rootDigest.slice(7)));
-		need$18(root.mediaType === IMAGE_MEDIA.index && root.schemaVersion === 2 && Array.isArray(root.manifests) && root.manifests.length <= 16, "CarrierPgIndex");
+		need$19(root.mediaType === IMAGE_MEDIA.index && root.schemaVersion === 2 && Array.isArray(root.manifests) && root.manifests.length <= 16, "CarrierPgIndex");
 		const selected = root.manifests.filter((d) => d.platform?.os === "linux" && d.platform.architecture === "arm64"), att = root.manifests.filter((d) => d.annotations?.["vnd.docker.reference.digest"] === f.arm64Digest);
-		need$18(selected.length === 1 && selected[0].digest === f.arm64Digest && att.length === 1 && att[0].digest === f.attestationDigest && att[0].annotations["vnd.docker.reference.type"] === "attestation-manifest", "CarrierPgSelection");
+		need$19(selected.length === 1 && selected[0].digest === f.arm64Digest && att.length === 1 && att[0].digest === f.attestationDigest && att[0].annotations["vnd.docker.reference.type"] === "attestation-manifest", "CarrierPgSelection");
 		const nodes = /* @__PURE__ */ new Map(), manifests = /* @__PURE__ */ new Map();
 		const visit = async (d) => {
-			need$18(typeof d?.digest === "string" && /^sha256:[a-f0-9]{64}$/.test(d.digest) && Number.isSafeInteger(d.size) && d.size > 0, "CarrierPgDescriptor");
+			need$19(typeof d?.digest === "string" && /^sha256:[a-f0-9]{64}$/.test(d.digest) && Number.isSafeInteger(d.size) && d.size > 0, "CarrierPgDescriptor");
 			const row = files.get("blobs/sha256/" + d.digest.slice(7));
-			need$18(row?.size === d.size, "CarrierPgDescriptor");
+			need$19(row?.size === d.size, "CarrierPgDescriptor");
 			if (nodes.has(d.digest)) {
-				need$18(canaryEvidenceHash(nodes.get(d.digest)) === canaryEvidenceHash(d), "CarrierPgDescriptor");
+				need$19(canaryEvidenceHash(nodes.get(d.digest)) === canaryEvidenceHash(d), "CarrierPgDescriptor");
 				return;
 			}
 			nodes.set(d.digest, d);
 			if (d.mediaType === IMAGE_MEDIA.manifest) {
 				const m = json(await body("blobs/sha256/" + d.digest.slice(7)));
-				need$18(m.schemaVersion === 2 && m.mediaType === d.mediaType && Array.isArray(m.layers) && m.layers.length <= 64, "CarrierPgManifest");
+				need$19(m.schemaVersion === 2 && m.mediaType === d.mediaType && Array.isArray(m.layers) && m.layers.length <= 64, "CarrierPgManifest");
 				manifests.set(d.digest, m);
 				for (const child of [m.config, ...m.layers]) await visit(child);
 			}
@@ -172494,23 +172584,23 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 		await visit(selected[0]);
 		await visit(att[0]);
 		const expected = new Set([...nodes.keys(), f.rootDigest].map((d) => "blobs/sha256/" + d.slice(7)));
-		for (const name of files.keys()) if (name.startsWith("blobs/")) need$18(expected.has(name), "CarrierPgExtraBlob");
+		for (const name of files.keys()) if (name.startsWith("blobs/")) need$19(expected.has(name), "CarrierPgExtraBlob");
 		const main = manifests.get(f.arm64Digest), evidence = manifests.get(f.attestationDigest);
-		need$18(main.config.digest === f.configDigest, "CarrierPgConfig");
+		need$19(main.config.digest === f.configDigest, "CarrierPgConfig");
 		const config = json(await body("blobs/sha256/" + f.configDigest.slice(7)));
-		need$18(config.os === "linux" && config.architecture === "arm64" && config.rootfs?.type === "layers" && config.rootfs.diff_ids?.length === main.layers.length, "CarrierPgConfig");
+		need$19(config.os === "linux" && config.architecture === "arm64" && config.rootfs?.type === "layers" && config.rootfs.diff_ids?.length === main.layers.length, "CarrierPgConfig");
 		for (const d of evidence.layers) {
-			need$18(d.mediaType === IMAGE_MEDIA.attestation, "CarrierPgAttestation");
+			need$19(d.mediaType === IMAGE_MEDIA.attestation, "CarrierPgAttestation");
 			const payload = json(await body("blobs/sha256/" + d.digest.slice(7)));
-			need$18(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && payload.subject?.length > 0 && payload.subject.every((v) => v.digest?.sha256 === f.arm64Digest.slice(7)), "CarrierPgAttestation");
+			need$19(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && payload.subject?.length > 0 && payload.subject.every((v) => v.digest?.sha256 === f.arm64Digest.slice(7)), "CarrierPgAttestation");
 			const derived = carrierSqlDerivedProfile(f.rootDigest);
-			if (derived) need$18(evidence.layers.length === 1 && payload.predicateType === (derived.jit === "off" ? "urn:mem9:carrier-sql:offline-prune-nojit:v1" : "urn:mem9:carrier-sql:offline-prune:v1") && canaryEvidenceHash(payload.predicate) === derived.provenanceHash && payload.predicate.sourceRootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" && payload.predicate.recipeSha256 === derived.recipeHash, "CarrierPgDerivation");
+			if (derived) need$19(evidence.layers.length === 1 && payload.predicateType === (derived.jit === "off" ? "urn:mem9:carrier-sql:offline-prune-nojit:v1" : "urn:mem9:carrier-sql:offline-prune:v1") && canaryEvidenceHash(payload.predicate) === derived.provenanceHash && payload.predicate.sourceRootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" && payload.predicate.recipeSha256 === derived.recipeHash, "CarrierPgDerivation");
 		}
 		const docker = json(await body("manifest.json"));
-		need$18(docker.length === 1 && docker[0].Config === "blobs/sha256/" + f.configDigest.slice(7) && canaryEvidenceHash(docker[0].Layers) === canaryEvidenceHash(main.layers.map((d) => "blobs/sha256/" + d.digest.slice(7))) && (!docker[0].RepoTags || docker[0].RepoTags.length === 0), "CarrierPgDockerManifest");
+		need$19(docker.length === 1 && docker[0].Config === "blobs/sha256/" + f.configDigest.slice(7) && canaryEvidenceHash(docker[0].Layers) === canaryEvidenceHash(main.layers.map((d) => "blobs/sha256/" + d.digest.slice(7))) && (!docker[0].RepoTags || docker[0].RepoTags.length === 0), "CarrierPgDockerManifest");
 		let unpacked = 0, entries = 0;
 		for (const [i, d] of main.layers.entries()) {
-			need$18([
+			need$19([
 				IMAGE_MEDIA.gzip,
 				IMAGE_MEDIA.dockerGzip,
 				IMAGE_MEDIA.tar
@@ -172530,7 +172620,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 						uncompressedBytes: b.length
 					});
 					unpacked += b.length;
-					need$18(unpacked <= f.uncompressedBytes, "CarrierPgUncompressed");
+					need$19(unpacked <= f.uncompressedBytes, "CarrierPgUncompressed");
 					digest.update(b);
 					let at = 0;
 					while (at < b.length) {
@@ -172545,7 +172635,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 						at += n;
 						if (header.length === 512) {
 							if (!header.every((v) => v === 0)) {
-								need$18(++entries <= f.processedEntries, "CarrierPgEntries");
+								need$19(++entries <= f.processedEntries, "CarrierPgEntries");
 								consumer.reserveLocal({
 									...zero$5(),
 									processedEntries: 1
@@ -172556,13 +172646,13 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 						}
 					}
 				}
-				need$18(header.length === 0 && remaining === 0 && "sha256:" + digest.digest("hex") === config.rootfs.diff_ids[i], "CarrierPgDiffId");
+				need$19(header.length === 0 && remaining === 0 && "sha256:" + digest.digest("hex") === config.rootfs.diff_ids[i], "CarrierPgDiffId");
 			} finally {
 				input.destroy();
 				output.destroy();
 			}
 		}
-		need$18(unpacked === f.uncompressedBytes, "CarrierPgUncompressed");
+		need$19(unpacked === f.uncompressedBytes, "CarrierPgUncompressed");
 		await current(s);
 		Object.assign(s.io, {
 			verificationReadBytes: readBytes,
@@ -172588,7 +172678,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 }
 async function consumeCarrierSqlPackage(handle, { consumer }) {
 	const s = state(handle, consumer);
-	need$18(s.verified && !s.consumed, "CarrierPgNotVerified");
+	need$19(s.verified && !s.consumed, "CarrierPgNotVerified");
 	await current(s);
 	s.consumed = true;
 	return Object.freeze({
@@ -172601,7 +172691,7 @@ async function consumeCarrierSqlPackage(handle, { consumer }) {
 }
 async function closeCarrierSqlPackage(handle, { consumer }) {
 	const s = handles$1.get(handle);
-	need$18(s && s.consumer === consumer, "CarrierPgHandle");
+	need$19(s && s.consumer === consumer, "CarrierPgHandle");
 	if (s.closed) return;
 	s.closed = true;
 	await rm(s.directory, { recursive: true });
@@ -172631,9 +172721,9 @@ var init_ci_carrier_sql_package = __esmMin((() => {
 	};
 	number = (b) => {
 		const s = text(b).trim();
-		need$18(/^[0-7]+$/.test(s), "CarrierPgTarNumber");
+		need$19(/^[0-7]+$/.test(s), "CarrierPgTarNumber");
 		const n = parseInt(s, 8);
-		need$18(Number.isSafeInteger(n) && n >= 0, "CarrierPgTarNumber");
+		need$19(Number.isSafeInteger(n) && n >= 0, "CarrierPgTarNumber");
 		return n;
 	};
 	json = (b) => parseAcquisitionJson(b, 1048576);
@@ -172791,7 +172881,7 @@ var init_ci_carrier_sql_runtime_budget = __esmMin((() => {
 * configuration, ambient credentials, or authority-bearing result. */
 function runDocker(args, { directory, timeoutMs, signal, input }) {
 	const raw = Buffer.from(JSON.stringify(args)), source = supervisor(sha$6(raw)), outputLimit = carrierSqlDockerOutputLimit(args);
-	need$18(Buffer.byteLength(source) <= MAX.maxSupervisorBytes && raw.length <= MAX.maxDockerArgumentBytes && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 14e4 && (!input || args[0] === "cp" && args[1] === "-" && input instanceof Uint8Array && input.length <= MAX.maxFixtureCaBytes + MAX.maxManifestBytes + 3072), "CarrierSqlDockerInput");
+	need$19(Buffer.byteLength(source) <= MAX.maxSupervisorBytes && raw.length <= MAX.maxDockerArgumentBytes && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 14e4 && (!input || args[0] === "cp" && args[1] === "-" && input instanceof Uint8Array && input.length <= MAX.maxFixtureCaBytes + MAX.maxManifestBytes + 3072), "CarrierSqlDockerInput");
 	return new Promise((resolvePromise, reject) => {
 		let child, closed = false, inputDone = !input, done = false, cancelled = false, problem = false, status, sig, timer, total = 0, ackBytes = 0;
 		const out = [], err = [], ack = [];
@@ -172812,7 +172902,7 @@ function runDocker(args, { directory, timeoutMs, signal, input }) {
 			try {
 				if (status === 0 && !sig) {
 					const p = parseAcquisitionJson(Buffer.concat(ack), 4096);
-					need$18(p.version === 1 && p.kind === "carrier-sql-fixture-subreaper-echild" && p.supervisorPid === child.pid && p.cleanupComplete === true && p.leaderEnded === true && Number.isSafeInteger(p.leaderPid) && p.leaderPid > 1 && Number.isSafeInteger(p.reaped) && p.reaped >= 1 && Number.isSafeInteger(p.killedDescendants) && p.killedDescendants >= 0 && p.killedDescendants < p.reaped && p.reason === null && p.signal === null && Number.isInteger(p.status) && p.status >= 0 && p.status <= 255, "CarrierSqlDockerTermination");
+					need$19(p.version === 1 && p.kind === "carrier-sql-fixture-subreaper-echild" && p.supervisorPid === child.pid && p.cleanupComplete === true && p.leaderEnded === true && Number.isSafeInteger(p.leaderPid) && p.leaderPid > 1 && Number.isSafeInteger(p.reaped) && p.reaped >= 1 && Number.isSafeInteger(p.killedDescendants) && p.killedDescendants >= 0 && p.killedDescendants < p.reaped && p.reason === null && p.signal === null && Number.isInteger(p.status) && p.status >= 0 && p.status <= 255, "CarrierSqlDockerTermination");
 					proof = p;
 				}
 			} catch {
@@ -172900,17 +172990,17 @@ function runDocker(args, { directory, timeoutMs, signal, input }) {
 	});
 }
 async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, signal, databasePackage } = {}) {
-	need$18(process.platform === "linux" && process.arch === "arm64", "CarrierSqlNativeArm64");
-	need$18(Number.isSafeInteger(deadlineMs) && deadlineMs > Date.now() + MAX.cleanupMs && typeof metadataReads?.reserveLocal === "function", "CarrierSqlFixtureBudget");
-	need$18(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierSqlFixtureDirectory");
+	need$19(process.platform === "linux" && process.arch === "arm64", "CarrierSqlNativeArm64");
+	need$19(Number.isSafeInteger(deadlineMs) && deadlineMs > Date.now() + MAX.cleanupMs && typeof metadataReads?.reserveLocal === "function", "CarrierSqlFixtureBudget");
+	need$19(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierSqlFixtureDirectory");
 	const parent = await lstat(tempRoot);
-	need$18(parent.isDirectory() && parent.uid === process.getuid(), "CarrierSqlFixtureDirectory");
+	need$19(parent.isDirectory() && parent.uid === process.getuid(), "CarrierSqlFixtureDirectory");
 	const jitOff = Boolean(databasePackage && metadataReads.admission.config.plan.template.sqlFixture.rootDigest === CARRIER_SQL_NOJIT_FIXTURE.rootDigest), script = fixtureScript(jitOff);
 	let jitObservation;
 	const nonce = randomBytes(16).toString("hex"), name = "mem9-carrier-sql-" + nonce, hostAlias = "mem9-on-aws-prod-fixture.cluster-" + nonce + ".ap-northeast-1.rds.amazonaws.com";
 	const check = () => {
 		signal?.throwIfAborted();
-		need$18(Date.now() < deadlineMs - MAX.cleanupMs, "CarrierSqlFixtureExpired");
+		need$19(Date.now() < deadlineMs - MAX.cleanupMs, "CarrierSqlFixtureExpired");
 		metadataReads.reserveLocal(zero$5());
 	};
 	check();
@@ -172934,10 +173024,10 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		return p;
 	};
 	const docker = async (args, cleanup = false, input) => {
-		if (cleanup) need$18(++cleanupCalls <= cleanupLimit, "CarrierSqlCleanupBudget");
+		if (cleanup) need$19(++cleanupCalls <= cleanupLimit, "CarrierSqlCleanupBudget");
 		else {
 			check();
-			need$18(++normalCalls <= MAX.maxDockerCalls, "CarrierSqlDockerBudget");
+			need$19(++normalCalls <= MAX.maxDockerCalls, "CarrierSqlDockerBudget");
 			metadataReads.reserveLocal({
 				...zero$5(),
 				logicalBytes: Buffer.byteLength(supervisor(sha$6(JSON.stringify(args)))) + 2 * Buffer.byteLength(JSON.stringify(args)) + carrierSqlDockerOutputLimit(args) + MAX.maxDockerProofBytes + 2 * (input?.length ?? 0)
@@ -172955,7 +173045,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				action: args.slice(0, 2),
 				requestHash: sha$6(JSON.stringify(args))
 			}));
-			need$18(bytes.length <= MAX.maxIntentBytes, "CarrierSqlIntentBytes");
+			need$19(bytes.length <= MAX.maxIntentBytes, "CarrierSqlIntentBytes");
 			if (!cleanup) metadataReads.reserveLocal({
 				...zero$5(),
 				logicalBytes: bytes.length,
@@ -172994,16 +173084,16 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 	};
 	const checked = async (args) => {
 		const result = await docker(args);
-		need$18(result.status === 0, "CarrierSqlDockerCommand");
+		need$19(result.status === 0, "CarrierSqlDockerCommand");
 		return result.stdout.trim();
 	};
 	const object = async (args) => {
 		const rows = parse(await checked(args));
-		need$18(Array.isArray(rows) && rows.length === 1, "CarrierSqlDockerObject");
+		need$19(Array.isArray(rows) && rows.length === 1, "CarrierSqlDockerObject");
 		return rows[0];
 	};
 	const cleanupCase = async (caseId) => {
-		need$18(caseContainers.has(caseId) && !caseCleanupStarted.has(caseId), "CarrierSqlCaseCleanup");
+		need$19(caseContainers.has(caseId) && !caseCleanupStarted.has(caseId), "CarrierSqlCaseCleanup");
 		caseCleanupStarted.add(caseId);
 		const removed = await docker([
 			"container",
@@ -173016,7 +173106,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			"inspect",
 			caseId
 		], true);
-		need$18(removed.status === 0 && absent.status === 1 && new RegExp("(?:No such container|No such object): " + caseId + "(?:\\s|$)").test(absent.stderr), "CarrierSqlCaseCleanup");
+		need$19(removed.status === 0 && absent.status === 1 && new RegExp("(?:No such container|No such object): " + caseId + "(?:\\s|$)").test(absent.stderr), "CarrierSqlCaseCleanup");
 		caseContainers.delete(caseId);
 		return {
 			removed: true,
@@ -173059,13 +173149,13 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"--volumes",
 				container
 			], true);
-			need$18(removed.status === 0, "CarrierSqlContainerCleanup");
+			need$19(removed.status === 0, "CarrierSqlContainerCleanup");
 			const absent = await docker([
 				"container",
 				"inspect",
 				container
 			], true);
-			need$18(absent.status === 1 && new RegExp("(?:No such container|No such object): " + container + "(?:\\s|$)").test(absent.stderr), "CarrierSqlContainerCleanup");
+			need$19(absent.status === 1 && new RegExp("(?:No such container|No such object): " + container + "(?:\\s|$)").test(absent.stderr), "CarrierSqlContainerCleanup");
 		} catch (e) {
 			failures.push(e);
 		}
@@ -173075,13 +173165,13 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"rm",
 				network
 			], true);
-			need$18(removed.status === 0, "CarrierSqlNetworkCleanup");
+			need$19(removed.status === 0, "CarrierSqlNetworkCleanup");
 			const absent = await docker([
 				"network",
 				"inspect",
 				network
 			], true);
-			need$18(absent.status === 1 && absent.stderr.includes(network) && /not found|No such network/.test(absent.stderr), "CarrierSqlNetworkCleanup");
+			need$19(absent.status === 1 && absent.stderr.includes(network) && /not found|No such network/.test(absent.stderr), "CarrierSqlNetworkCleanup");
 		} catch (e) {
 			failures.push(e);
 		}
@@ -173095,7 +173185,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"inspect",
 				databaseTag
 			], true);
-			need$18(removed.status === 0 && absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCleanup");
+			need$19(removed.status === 0 && absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCleanup");
 		} catch (e) {
 			failures.push(e);
 		}
@@ -173123,7 +173213,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"inspect",
 				databaseTag
 			]);
-			need$18(absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCollision");
+			need$19(absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCollision");
 			await source.check();
 			metadataReads.reserveLocal({
 				...zero$5(),
@@ -173138,14 +173228,14 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"--input",
 				source.path
 			]);
-			need$18(loaded.status === 0, "CarrierSqlImageLoad");
+			need$19(loaded.status === 0, "CarrierSqlImageLoad");
 			await source.check();
 			const actual = await object([
 				"image",
 				"inspect",
 				packageReceipt.rootDigest
 			]);
-			need$18(actual.Descriptor?.digest === packageReceipt.rootDigest && [packageReceipt.rootDigest, packageReceipt.configDigest].includes(actual.Id) && actual.Architecture === "arm64" && actual.Os === "linux" && canaryEvidenceHash(actual.RootFS?.Layers) === canaryEvidenceHash(source.diffIds), "CarrierSqlImportedImage");
+			need$19(actual.Descriptor?.digest === packageReceipt.rootDigest && [packageReceipt.rootDigest, packageReceipt.configDigest].includes(actual.Id) && actual.Architecture === "arm64" && actual.Os === "linux" && canaryEvidenceHash(actual.RootFS?.Layers) === canaryEvidenceHash(source.diffIds), "CarrierSqlImportedImage");
 			await checked([
 				"image",
 				"tag",
@@ -173160,20 +173250,20 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			"inspect",
 			databaseImage
 		]);
-		need$18(image.Os === "linux" && image.Architecture === "arm64" && image.Descriptor?.digest === (packageReceipt?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && (packageReceipt ? [packageReceipt.rootDigest, packageReceipt.configDigest].includes(image.Id) : image.RepoDigests?.includes(CARRIER_SQL_DATABASE_IMAGE)), "CarrierSqlCachedImage");
+		need$19(image.Os === "linux" && image.Architecture === "arm64" && image.Descriptor?.digest === (packageReceipt?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && (packageReceipt ? [packageReceipt.rootDigest, packageReceipt.configDigest].includes(image.Id) : image.RepoDigests?.includes(CARRIER_SQL_DATABASE_IMAGE)), "CarrierSqlCachedImage");
 		network = await checked([
 			"network",
 			"create",
 			"--internal",
 			name
 		]);
-		need$18(id(network), "CarrierSqlNetworkId");
+		need$19(id(network), "CarrierSqlNetworkId");
 		const networkInfo = await object([
 			"network",
 			"inspect",
 			network
 		]);
-		need$18(networkInfo.Id === network && networkInfo.Name === name && networkInfo.Internal === true && networkInfo.Driver === "bridge" && Object.keys(networkInfo.Containers ?? {}).length === 0, "CarrierSqlNetwork");
+		need$19(networkInfo.Id === network && networkInfo.Name === name && networkInfo.Internal === true && networkInfo.Driver === "bridge" && Object.keys(networkInfo.Containers ?? {}).length === 0, "CarrierSqlNetwork");
 		metadataReads.reserveLocal({
 			...zero$5(),
 			logicalBytes: MAX.tmpfsBytes,
@@ -173222,19 +173312,19 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			"-ec",
 			script
 		]);
-		need$18(id(container), "CarrierSqlContainerId");
+		need$19(id(container), "CarrierSqlContainerId");
 		const inspect = async (running) => {
 			const v = await object([
 				"container",
 				"inspect",
 				container
 			]), h = v.HostConfig, c = v.Config, n = v.NetworkSettings;
-			need$18(v.Id === container && v.Name === "/" + name && c.Image === databaseImage && c.User === "999:999" && c.Entrypoint?.join() === "/bin/sh" && JSON.stringify(c.Cmd) === JSON.stringify(["-ec", script]), "CarrierSqlContainerBinding");
-			need$18(h.ReadonlyRootfs === true && h.Privileged === false && h.NetworkMode === network && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]) && h.PidsLimit === 128 && h.Memory === 536870912 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length, "CarrierSqlContainerIsolation");
-			need$18(canaryEvidenceHash(h.Tmpfs) === canaryEvidenceHash(tmpfs), "CarrierSqlTmpfsCapacity");
+			need$19(v.Id === container && v.Name === "/" + name && c.Image === databaseImage && c.User === "999:999" && c.Entrypoint?.join() === "/bin/sh" && JSON.stringify(c.Cmd) === JSON.stringify(["-ec", script]), "CarrierSqlContainerBinding");
+			need$19(h.ReadonlyRootfs === true && h.Privileged === false && h.NetworkMode === network && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]) && h.PidsLimit === 128 && h.Memory === 536870912 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length, "CarrierSqlContainerIsolation");
+			need$19(canaryEvidenceHash(h.Tmpfs) === canaryEvidenceHash(tmpfs), "CarrierSqlTmpfsCapacity");
 			const binds = v.Mounts.filter((m) => m.Type === "bind");
-			need$18(!h.Binds?.length && !h.Devices?.length && !h.VolumesFrom?.length && Object.keys(n.Networks ?? {}).length === 1 && Object.keys(n.Ports ?? {}).every((k) => n.Ports[k] === null) && binds.length === 1 && binds[0].Source === materialDirectory && binds[0].Destination === "/fixture-transfer" && binds[0].RW === true, "CarrierSqlContainerIsolation");
-			need$18(v.State.Running === running && (!running || v.State.Pid > 0), "CarrierSqlContainerState");
+			need$19(!h.Binds?.length && !h.Devices?.length && !h.VolumesFrom?.length && Object.keys(n.Networks ?? {}).length === 1 && Object.keys(n.Ports ?? {}).every((k) => n.Ports[k] === null) && binds.length === 1 && binds[0].Source === materialDirectory && binds[0].Destination === "/fixture-transfer" && binds[0].RW === true, "CarrierSqlContainerIsolation");
+			need$19(v.State.Running === running && (!running || v.State.Pid > 0), "CarrierSqlContainerState");
 			return v;
 		};
 		await inspect(false);
@@ -173247,7 +173337,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		let ready = false;
 		for (let i = 0; i < MAX.maxReadyAttempts; i++) {
 			check();
-			need$18(Date.now() < readyDeadline, "CarrierSqlDatabaseReady");
+			need$19(Date.now() < readyDeadline, "CarrierSqlDatabaseReady");
 			if ((await docker([
 				"exec",
 				container,
@@ -173263,19 +173353,19 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			await inspect(true);
 			await setTimeout$2(MAX.readyPollMs, void 0, { signal });
 		}
-		need$18(ready, "CarrierSqlDatabaseReady");
+		need$19(ready, "CarrierSqlDatabaseReady");
 		const fixtureCa = await checked([
 			"exec",
 			container,
 			"cat",
 			"/tmp/server.crt"
 		]);
-		need$18(Buffer.byteLength(fixtureCa) <= 16384, "CarrierSqlFixtureCertificate");
+		need$19(Buffer.byteLength(fixtureCa) <= 16384, "CarrierSqlFixtureCertificate");
 		certificate = new X509Certificate(fixtureCa);
-		need$18(certificate.subject === "CN=mem9-carrier-db-" + nonce && certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey) && certificate.checkHost(hostAlias) === hostAlias && certificate.checkHost("localhost") === "localhost" && certificate.checkIP("127.0.0.1") === "127.0.0.1", "CarrierSqlFixtureCertificate");
+		need$19(certificate.subject === "CN=mem9-carrier-db-" + nonce && certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey) && certificate.checkHost(hostAlias) === hostAlias && certificate.checkHost("localhost") === "localhost" && certificate.checkIP("127.0.0.1") === "127.0.0.1", "CarrierSqlFixtureCertificate");
 		const v = await inspect(true), entry = Object.values(v.NetworkSettings.Networks)[0];
 		address = entry.IPAddress;
-		need$18(isIPv4(address) && entry.NetworkID === network && entry.Aliases?.includes(hostAlias), "CarrierSqlFixtureAddress");
+		need$19(isIPv4(address) && entry.NetworkID === network && entry.Aliases?.includes(hostAlias), "CarrierSqlFixtureAddress");
 		const relayFailure = (e) => {
 			normalProblem ??= e;
 			for (const socket of sockets) socket.destroy();
@@ -173288,7 +173378,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			let peer;
 			try {
 				check();
-				need$18(!closing && !normalProblem && ++connections <= MAX.maxConnections && sockets.size < 2 * MAX.maxConcurrentConnections && socket.remoteAddress === "127.0.0.1", "CarrierSqlConnectionBudget");
+				need$19(!closing && !normalProblem && ++connections <= MAX.maxConnections && sockets.size < 2 * MAX.maxConcurrentConnections && socket.remoteAddress === "127.0.0.1", "CarrierSqlConnectionBudget");
 				peer = connect({
 					host: address,
 					port: 5432
@@ -173303,7 +173393,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 					s.on("data", (b) => {
 						try {
 							check();
-							need$18((relayBytes += b.length) <= MAX.maxRelayBytes, "CarrierSqlRelayBytes");
+							need$19((relayBytes += b.length) <= MAX.maxRelayBytes, "CarrierSqlRelayBytes");
 						} catch (e) {
 							relayFailure(e);
 						}
@@ -173322,15 +173412,15 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		});
 		const connect$1 = async (credential, database, options = {}) => {
 			check();
-			need$18(!closing && !normalProblem, "CarrierSqlFixtureClosed");
-			need$18(Object.keys(options).every((k) => ["signal", "deadlineMs"].includes(k)), "CarrierSqlConnectionOptions");
-			need$18(credential && Object.keys(credential).every((k) => [
+			need$19(!closing && !normalProblem, "CarrierSqlFixtureClosed");
+			need$19(Object.keys(options).every((k) => ["signal", "deadlineMs"].includes(k)), "CarrierSqlConnectionOptions");
+			need$19(credential && Object.keys(credential).every((k) => [
 				"username",
 				"password",
 				"salt"
 			].includes(k)) && /^[a-z][a-z0-9_]{0,62}$/.test(credential.username) && (["postgres", "runtime_credentials_test"].includes(database) || /^prod_workers_[a-f0-9]{32}$/.test(database)), "CarrierSqlConnectionInput");
 			const until = Math.min(deadlineMs - MAX.cleanupMs, options.deadlineMs ?? deadlineMs), abortSignal = options.signal ?? signal;
-			need$18(until > Date.now() && !abortSignal?.aborted, "CarrierSqlFixtureExpired");
+			need$19(until > Date.now() && !abortSignal?.aborted, "CarrierSqlFixtureExpired");
 			const client = new esm_default.Client({
 				host: "127.0.0.1",
 				port: relay.address().port,
@@ -173360,7 +173450,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			try {
 				await client.connect();
 				check();
-				need$18(!abortSignal?.aborted && client.connection.stream.encrypted && client.connection.stream.authorized && Buffer.from(client.connection.stream.getPeerCertificate().raw).equals(certificate.raw), "CarrierSqlFixtureTls");
+				need$19(!abortSignal?.aborted && client.connection.stream.encrypted && client.connection.stream.authorized && Buffer.from(client.connection.stream.getPeerCertificate().raw).equals(certificate.raw), "CarrierSqlFixtureTls");
 				return client;
 			} catch (e) {
 				await end(client);
@@ -173373,7 +173463,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		root = await connect$1({ username: "postgres" }, "runtime_credentials_test");
 		if (jitOff) {
 			const observed = await root.query("SELECT setting,source FROM pg_settings WHERE name='jit'");
-			need$18(observed.rows.length === 1 && observed.rows[0].setting === "off" && observed.rows[0].source === "command line", "CarrierSqlJitSetting");
+			need$19(observed.rows.length === 1 && observed.rows[0].setting === "off" && observed.rows[0].source === "command line", "CarrierSqlJitSetting");
 			jitObservation = Object.freeze({ ...observed.rows[0] });
 		}
 		const handle = Object.freeze({ kind: "carrier-sql-fixture" });
@@ -173408,7 +173498,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			},
 			check: () => {
 				check();
-				need$18(!closing && !normalProblem, "CarrierSqlFixtureClosed");
+				need$19(!closing && !normalProblem, "CarrierSqlFixtureClosed");
 			},
 			clients,
 			journal,
@@ -173441,14 +173531,14 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 }
 async function closeCarrierSqlFixture(handle) {
 	const s = states.get(handle);
-	need$18(s, "CarrierSqlFixtureHandle");
+	need$19(s, "CarrierSqlFixtureHandle");
 	await s.close();
 }
 function twoFileTar(rows) {
 	const blocks = [];
 	for (const [name, bytes] of rows) {
 		const h = Buffer.alloc(512), oct = (v, at, n) => h.write(v.toString(8).padStart(n - 1, "0") + "\0", at, n);
-		need$18(["ca.pem", "manifest.json"].includes(name), "CarrierSqlTransferMember");
+		need$19(["ca.pem", "manifest.json"].includes(name), "CarrierSqlTransferMember");
 		h.write(name);
 		oct(292, 100, 8);
 		oct(0, 108, 8);
@@ -173487,13 +173577,13 @@ async function sourceFileProof(path, bytes, prior) {
 		ctimeNs: String(stat.ctimeNs),
 		sha256: sha$6(bytes)
 	};
-	if (prior) need$18(canaryEvidenceHash(prior) === canaryEvidenceHash(proof), "CarrierSqlOverlayChanged");
+	if (prior) need$19(canaryEvidenceHash(prior) === canaryEvidenceHash(proof), "CarrierSqlOverlayChanged");
 	const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 	try {
 		const read = await fd.readFile();
-		need$18(read.equals(bytes), "CarrierSqlOverlayChanged");
+		need$19(read.equals(bytes), "CarrierSqlOverlayChanged");
 		const after = await fd.stat({ bigint: true });
-		need$18(after.dev === stat.dev && after.ino === stat.ino && after.mtimeNs === stat.mtimeNs && after.ctimeNs === stat.ctimeNs, "CarrierSqlOverlayChanged");
+		need$19(after.dev === stat.dev && after.ino === stat.ino && after.mtimeNs === stat.mtimeNs && after.ctimeNs === stat.ctimeNs, "CarrierSqlOverlayChanged");
 	} finally {
 		await fd.close();
 	}
@@ -173502,18 +173592,18 @@ async function sourceFileProof(path, bytes, prior) {
 /** Only genuine verified build bytes may acquire this test-only overlay. */
 async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext, oldSource }) {
 	const s = states.get(handle);
-	need$18(s && !s.preparing, "CarrierSqlFixtureHandle");
+	need$19(s && !s.preparing, "CarrierSqlFixtureHandle");
 	s.check();
 	s.preparing = true;
 	const b = inspectCarrierOfflineBuild(built), { graphHash, ...image } = controlImageGraphBinding(b.graph);
-	need$18(sourceContext?.tree && oldSource && Object.keys(oldSource).sort().join() === "revision,tree" && Object.values(oldSource).every((v) => /^[a-f0-9]{40}$/.test(v)), "CarrierSqlOriginalSource");
+	need$19(sourceContext?.tree && oldSource && Object.keys(oldSource).sort().join() === "revision,tree" && Object.values(oldSource).every((v) => /^[a-f0-9]{40}$/.test(v)), "CarrierSqlOriginalSource");
 	const originalRow = b.derivedRecord?.files.find((f) => f.path === "rootfs/carrier/manifest.json");
-	need$18(originalRow?.bytesBase64, "CarrierSqlOriginalManifest");
+	need$19(originalRow?.bytesBase64, "CarrierSqlOriginalManifest");
 	const original = Buffer.from(originalRow.bytesBase64, "base64"), actual = inspectImageFilesystemFile(b.filesystem, "/carrier/manifest.json");
-	need$18(sha$6(original) === actual.sha256 && original.length === actual.size && original.length <= MAX.maxManifestBytes, "CarrierSqlOriginalManifest");
+	need$19(sha$6(original) === actual.sha256 && original.length === actual.size && original.length <= MAX.maxManifestBytes, "CarrierSqlOriginalManifest");
 	const ca = Buffer.from(s.fixtureCa), test = deriveCarrierSqlTestManifest(original, ca), archive = twoFileTar([["ca.pem", ca], ["manifest.json", test]]);
-	need$18(ca.length <= MAX.maxFixtureCaBytes && test.length <= MAX.maxManifestBytes, "CarrierSqlOverlayBytes");
-	need$18((await readdir(s.materialDirectory)).length === 0, "CarrierSqlOverlayDirectory");
+	need$19(ca.length <= MAX.maxFixtureCaBytes && test.length <= MAX.maxManifestBytes, "CarrierSqlOverlayBytes");
+	need$19((await readdir(s.materialDirectory)).length === 0, "CarrierSqlOverlayDirectory");
 	s.metadataReads.reserveLocal({
 		...zero$5(),
 		logicalBytes: original.length + 3 * (ca.length + test.length),
@@ -173524,17 +173614,17 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 		"-",
 		s.container + ":/fixture-transfer"
 	], false, archive);
-	need$18(copied.status === 0, "CarrierSqlOverlayTransfer");
+	need$19(copied.status === 0, "CarrierSqlOverlayTransfer");
 	const sources = [await sourceFileProof(join(s.materialDirectory, "ca.pem"), ca), await sourceFileProof(join(s.materialDirectory, "manifest.json"), test)];
 	const schemaRoot = join(s.directory, "source", "docker", "bootstrap") + "/";
 	const paths = controlSourcePaths(sourceContext).filter((p) => p.startsWith("docker/bootstrap/") && (p.endsWith(".sql") || p === "docker/bootstrap/schema-digest.sh"));
-	need$18(paths.length > 0 && paths.length <= MAX.maxSchemaFiles, "CarrierSqlSchemaClosure");
+	need$19(paths.length > 0 && paths.length <= MAX.maxSchemaFiles, "CarrierSqlSchemaClosure");
 	let schemaBytes = 0;
 	for (const path of paths) {
 		s.check();
 		const row = await readControlSourceFile(sourceContext, path);
 		schemaBytes += row.bytes.length;
-		need$18(schemaBytes <= MAX.maxSchemaBytes, "CarrierSqlSchemaBytes");
+		need$19(schemaBytes <= MAX.maxSchemaBytes, "CarrierSqlSchemaBytes");
 		s.metadataReads.reserveLocal({
 			...zero$5(),
 			logicalBytes: 10 * row.bytes.length,
@@ -173551,8 +173641,8 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 		});
 	}
 	const seederSource = await readControlSourceFile(sourceContext, "scripts/lib/ci-carrier-sql-state.mjs");
-	need$18(seederSource.bytes.length <= MAX.maxSeederSourceBytes, "CarrierSqlSeederBytes");
-	need$18(seederSource.bytes.equals(await readFile(new URL("./ci-carrier-sql-state.mjs", new URL("../../../../scripts/lib/ci-carrier-sql-fixture.mjs", import.meta.url).href))), "CarrierSqlSeederSource");
+	need$19(seederSource.bytes.length <= MAX.maxSeederSourceBytes, "CarrierSqlSeederBytes");
+	need$19(seederSource.bytes.equals(await readFile(new URL("./ci-carrier-sql-state.mjs", new URL("../../../../scripts/lib/ci-carrier-sql-fixture.mjs", import.meta.url).href))), "CarrierSqlSeederSource");
 	s.metadataReads.reserveLocal({
 		...zero$5(),
 		logicalBytes: 2 * seederSource.bytes.length
@@ -173565,7 +173655,7 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 		hostAlias: s.hostAlias,
 		deadlineMs: s.deadlineMs - MAX.cleanupMs
 	});
-	need$18(seed.parent.verification.changedRows === 10 && seed.parent.verification.receipts === 5, "CarrierSqlSeederRoot");
+	need$19(seed.parent.verification.changedRows === 10 && seed.parent.verification.receipts === 5, "CarrierSqlSeederRoot");
 	s.acceptance = {
 		built,
 		b,
@@ -173601,12 +173691,12 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 }
 async function executeCarrierSqlCase(handle, name) {
 	const s = states.get(handle), a = s?.acceptance;
-	need$18(a && !a.failed && name === CARRIER_SQL_CASES[a.cursor], "CarrierSqlCaseOrder");
+	need$19(a && !a.failed && name === CARRIER_SQL_CASES[a.cursor], "CarrierSqlCaseOrder");
 	s.check();
 	const ordinal = a.cursor++, startedMs = Date.now(), tls = name === "untrusted-fixture-ca";
 	let containerId, cleanup;
 	const b = inspectCarrierOfflineBuild(a.built);
-	need$18(b.record.rootDigest === a.image.rootDigest, "CarrierSqlImageChanged");
+	need$19(b.record.rootDigest === a.image.rootDigest, "CarrierSqlImageChanged");
 	const input = {
 		invocation: randomBytes(16).toString("hex"),
 		owner: s.nonce,
@@ -173628,7 +173718,7 @@ async function executeCarrierSqlCase(handle, name) {
 		}
 	};
 	const inputBytes = Buffer.from(JSON.stringify(input));
-	need$18(inputBytes.length <= MAX.maxCaseInputBytes, "CarrierSqlCaseInput");
+	need$19(inputBytes.length <= MAX.maxCaseInputBytes, "CarrierSqlCaseInput");
 	const credential = name === "wrong-database-role" ? a.seed.runtime : a.seed.administrator;
 	const env = {
 		MEM9_SUPERSESSION_ROOT_INPUT: deflateRawSync(inputBytes).toString("base64"),
@@ -173642,7 +173732,7 @@ async function executeCarrierSqlCase(handle, name) {
 	if (name === "changed-input-hash") env.MEM9_SUPERSESSION_ROOT_HASH = "0".repeat(64);
 	if (name === "wrong-encoding") env.MEM9_SUPERSESSION_ROOT_INPUT = "not-base64";
 	const envBytes = Buffer.from(Object.entries(env).map(([k, v]) => k + "=" + v + "\n").join("")), envPath = join(s.directory, "case-" + ordinal + ".env");
-	need$18(envBytes.length <= MAX.maxCaseEnvironmentBytes, "CarrierSqlCaseEnvironment");
+	need$19(envBytes.length <= MAX.maxCaseEnvironmentBytes, "CarrierSqlCaseEnvironment");
 	const security = carrierSqlCaseSecurityBytes({
 		runtimeFilesBytes: b.runtimeManifest.files.reduce((n, f) => n + f.bytes, 0),
 		originalSourceBytes: b.runtimeManifest.files.filter((f) => f.path.startsWith("/bootstrap/operator/") && !f.path.startsWith("/bootstrap/operator/node_modules/") && /\.(?:mjs|js)$/.test(f.path)).reduce((n, f) => n + f.bytes, 0),
@@ -173711,7 +173801,7 @@ async function executeCarrierSqlCase(handle, name) {
 			s.container
 		]);
 		containerId = await s.checked(args);
-		need$18(id(containerId), "CarrierSqlCaseId");
+		need$19(id(containerId), "CarrierSqlCaseId");
 		s.caseContainers.add(containerId);
 		const inspect = async (exited) => {
 			const v = await s.object([
@@ -173719,15 +173809,15 @@ async function executeCarrierSqlCase(handle, name) {
 				"inspect",
 				containerId
 			]), h = v.HostConfig, c = v.Config;
-			need$18(v.Id === containerId && c.Image === a.image.rootDigest && c.User === (name === "root-uid" ? "0:0" : "1000:1000") && [
+			need$19(v.Id === containerId && c.Image === a.image.rootDigest && c.User === (name === "root-uid" ? "0:0" : "1000:1000") && [
 				a.image.rootDigest,
 				a.image.arm64Digest,
 				a.image.configDigest
 			].includes(v.Image), "CarrierSqlCaseImage");
-			need$18(h.NetworkMode === "container:" + s.container && h.ReadonlyRootfs === true && !h.Privileged && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.PidsLimit === 32 && h.Memory === 268435456 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length && !h.Binds?.length && !h.VolumesFrom?.length && !h.Devices?.length && h.PidMode !== "host" && h.IpcMode !== "host", "CarrierSqlCaseIsolation");
-			need$18(!h.ExtraHosts?.length && (!exited || v.HostsPath === s.hostsPath), "CarrierSqlCaseNetwork");
-			need$18(name === "missing-nnp" ? !h.SecurityOpt?.length : h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]), "CarrierSqlCaseNnp");
-			need$18(JSON.stringify(c.Entrypoint) === JSON.stringify(name === "missing-nnp" ? ["/usr/local/bin/node"] : [
+			need$19(h.NetworkMode === "container:" + s.container && h.ReadonlyRootfs === true && !h.Privileged && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.PidsLimit === 32 && h.Memory === 268435456 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length && !h.Binds?.length && !h.VolumesFrom?.length && !h.Devices?.length && h.PidMode !== "host" && h.IpcMode !== "host", "CarrierSqlCaseIsolation");
+			need$19(!h.ExtraHosts?.length && (!exited || v.HostsPath === s.hostsPath), "CarrierSqlCaseNetwork");
+			need$19(name === "missing-nnp" ? !h.SecurityOpt?.length : h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]), "CarrierSqlCaseNnp");
+			need$19(JSON.stringify(c.Entrypoint) === JSON.stringify(name === "missing-nnp" ? ["/usr/local/bin/node"] : [
 				"/bin/setpriv",
 				"--no-new-privs",
 				"--",
@@ -173735,13 +173825,13 @@ async function executeCarrierSqlCase(handle, name) {
 				"/carrier/guard-first.mjs",
 				"audit-original-root"
 			]) && JSON.stringify(c.Cmd ?? []) === JSON.stringify(name === "missing-nnp" ? ["/carrier/guard-first.mjs", "audit-original-root"] : []), "CarrierSqlCaseCommand");
-			need$18(v.Mounts.length === mounts.length && mounts.every((m) => v.Mounts.some((x) => x.Type === "bind" && x.Source === m.source.path && x.Destination === m.destination && x.RW === false)), "CarrierSqlCaseMounts");
+			need$19(v.Mounts.length === mounts.length && mounts.every((m) => v.Mounts.some((x) => x.Type === "bind" && x.Source === m.source.path && x.Destination === m.destination && x.RW === false)), "CarrierSqlCaseMounts");
 			const actualEnv = Object.fromEntries(c.Env.map((e) => {
 				const at = e.indexOf("=");
 				return [e.slice(0, at), e.slice(at + 1)];
 			}));
-			need$18(Object.entries(env).every(([k, value]) => actualEnv[k] === value), "CarrierSqlCaseEnvironment");
-			need$18(v.State.Running === false && v.State.Status === (exited ? "exited" : "created") && (!exited || v.State.Pid === 0 && !v.State.OOMKilled), "CarrierSqlCaseState");
+			need$19(Object.entries(env).every(([k, value]) => actualEnv[k] === value), "CarrierSqlCaseEnvironment");
+			need$19(v.State.Running === false && v.State.Status === (exited ? "exited" : "created") && (!exited || v.State.Pid === 0 && !v.State.OOMKilled), "CarrierSqlCaseState");
 			return v;
 		};
 		await inspect(false);
@@ -173778,13 +173868,13 @@ async function executeCarrierSqlCase(handle, name) {
 				"logs",
 				s.container
 			]);
-			need$18(beforeLogs.status === 0 && afterLogs.status === 0 && afterLogs.stdout === beforeLogs.stdout && afterLogs.stderr.startsWith(beforeLogs.stderr), "CarrierSqlTlsLogScope");
+			need$19(beforeLogs.status === 0 && afterLogs.status === 0 && afterLogs.stdout === beforeLogs.stdout && afterLogs.stderr.startsWith(beforeLogs.stderr), "CarrierSqlTlsLogScope");
 			tlsLog = Buffer.from(afterLogs.stderr.slice(beforeLogs.stderr.length));
 			tlsFailure = {
 				...verifyCarrierSqlTlsRejection(tlsLog.toString(), void 0, parseAcquisitionJson(Buffer.from(output.stderr.trim()), 1048576)),
 				fixtureContainerId: s.container
 			};
-			need$18(tlsFailure.peer.startsWith("127.0.0.1("), "CarrierSqlTlsPeer");
+			need$19(tlsFailure.peer.startsWith("127.0.0.1("), "CarrierSqlTlsPeer");
 		}
 		for (const [i, m] of mounts.entries()) await sourceFileProof(m.source.path, i === 0 ? a.ca : a.test, m.source);
 		cleanup = await s.cleanupCase(containerId);
@@ -173828,7 +173918,7 @@ async function executeCarrierSqlCase(handle, name) {
 }
 async function closeCarrierSqlAcceptanceFixture(handle) {
 	const s = states.get(handle);
-	need$18(s?.acceptance, "CarrierSqlFixtureHandle");
+	need$19(s?.acceptance, "CarrierSqlFixtureHandle");
 	await s.acceptance.seed.close();
 }
 var CARRIER_SQL_DATABASE_IMAGE, states, MAX, tmpfs, fixtureScript, held, id, parse, first, last, supervisor;
@@ -173866,7 +173956,7 @@ var init_ci_carrier_sql_fixture = __esmMin((() => {
 	parse = (value) => parseAcquisitionJson(Buffer.from(value), MAX.maxDockerOutputBytes);
 	first = CARRIER_PROBE_SUPERVISOR_SOURCE.indexOf("\ndef valid_args(");
 	last = CARRIER_PROBE_SUPERVISOR_SOURCE.indexOf("\ndef main():");
-	need$18(first > 0 && last > first, "CarrierSqlSupervisorSource");
+	need$19(first > 0 && last > first, "CarrierSqlSupervisorSource");
 	supervisor = (hash) => [
 		CARRIER_PROBE_SUPERVISOR_SOURCE.slice(0, first),
 		"\ndef valid_args(args):\n    return isinstance(args, list) and hashlib.sha256(json.dumps(args, ensure_ascii=False, separators=(\",\", \":\")).encode(\"utf-8\")).hexdigest() == \"" + hash + "\"\n",
@@ -173904,8 +173994,8 @@ function inspectCarrierSqlRuntimeBudget(built) {
 async function runCarrierSqlAcceptance({ built, context, derived, consumer, sourceContext, fixture, oldSource, signal }) {
 	assertCarrierConsumer(consumer);
 	const admission = consumer.admission, plan = admission.config.plan, b = inspectCarrierOfflineBuild(built);
-	need$18(!attempted.has(built) && b.record.templateHash === plan.templateHash && b.record.contextHash === plan.context.sha256 && sourceContext === admission.source.sourceContext, "CarrierSqlAcceptanceInputs");
-	need$18(context && derived && fixture && oldSource, "CarrierSqlAcceptanceDependencies");
+	need$19(!attempted.has(built) && b.record.templateHash === plan.templateHash && b.record.contextHash === plan.context.sha256 && sourceContext === admission.source.sourceContext, "CarrierSqlAcceptanceInputs");
+	need$19(context && derived && fixture && oldSource, "CarrierSqlAcceptanceDependencies");
 	attempted.add(built);
 	consumer.check();
 	const startedMs = Date.now(), { graphHash, ...image } = controlImageGraphBinding(b.graph);
@@ -173952,9 +174042,9 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 			tempRoot: consumer.directory,
 			signal
 		}, { beforeCommand({ args }) {
-			need$18(++loadCalls <= CARRIER_SQL_FIXTURE_LIMITS.maxCarrierLoadCalls && Buffer.byteLength(JSON.stringify(args)) <= CARRIER_SQL_FIXTURE_LIMITS.maxDockerArgumentBytes, "CarrierSqlLoadCommandBudget");
+			need$19(++loadCalls <= CARRIER_SQL_FIXTURE_LIMITS.maxCarrierLoadCalls && Buffer.byteLength(JSON.stringify(args)) <= CARRIER_SQL_FIXTURE_LIMITS.maxDockerArgumentBytes, "CarrierSqlLoadCommandBudget");
 		} });
-		need$18(loaded.io.logicalBytes <= runtime.budget.parts.carrierLoadFiles.logicalBytes, "CarrierSqlLoadByteBudget");
+		need$19(loaded.io.logicalBytes <= runtime.budget.parts.carrierLoadFiles.logicalBytes, "CarrierSqlLoadByteBudget");
 		const cases = [];
 		for (const name of CARRIER_SQL_CASES) {
 			signal?.throwIfAborted();
@@ -174048,7 +174138,7 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 }
 function inspectCompletedCarrierSqlAcceptance(handle, { built, consumer }) {
 	const s = completed.get(handle);
-	need$18(s && s.built === built && s.consumer === consumer, "CarrierSqlAcceptanceHandle");
+	need$19(s && s.built === built && s.consumer === consumer, "CarrierSqlAcceptanceHandle");
 	assertCarrierConsumer(consumer);
 	return s.value;
 }
@@ -174073,9 +174163,9 @@ var init_ci_carrier_sql_acceptance = __esmMin((() => {
 * ledger, claim, credit, refund, replacement grant or extended deadline. */
 function openCarrierConsumer({ startup, config: input, env }) {
 	const config = inspectCarrierWorkerConfig(input), admission = consumeCarrierStartup(startup, config), p = config.plan, t = p.template, keys = carrierObjectKeys(t);
-	need$18(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierScanActorRequired");
+	need$19(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierScanActorRequired");
 	const root = env.RUNNER_TEMP;
-	need$18(typeof root === "string" && resolve(root) === root && realpathSync(root) === root, "CarrierConsumerDirectory");
+	need$19(typeof root === "string" && resolve(root) === root && realpathSync(root) === root, "CarrierConsumerDirectory");
 	const directory = join(root, "mem9-carrier-consumer-" + nonrootHash({
 		grantHash: config.grantHash,
 		binding: admission.binding,
@@ -174092,15 +174182,15 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		digests: []
 	};
 	const check = () => {
-		need$18(!closed && !held && Date.now() >= p.issuedMs && Date.now() < p.deadlineMs, "CarrierConsumerHeld");
+		need$19(!closed && !held && Date.now() >= p.issuedMs && Date.now() < p.deadlineMs, "CarrierConsumerHeld");
 		const current = fstatSync(fd), named = lstatSync(path);
-		need$18(current.dev === identity.dev && current.ino === identity.ino && named.ino === identity.ino && named.dev === identity.dev && current.uid === process.getuid() && (current.mode & 511) === 384 && current.nlink === 1, "CarrierConsumerJournalChanged");
+		need$19(current.dev === identity.dev && current.ino === identity.ino && named.ino === identity.ino && named.dev === identity.dev && current.uid === process.getuid() && (current.mode & 511) === 384 && current.nlink === 1, "CarrierConsumerJournalChanged");
 	};
 	const reserveLocal = (charge) => {
 		check();
 		exact$8(charge, COUNTERS);
-		need$18(charge.ecrRequests === 0 && charge.httpBodyBytes === 0, "CarrierConsumerLocal");
-		for (const k of COUNTERS) need$18(Number.isSafeInteger(charge[k]) && charge[k] >= 0 && local[k] + charge[k] <= t.fundedLocal.ci[k], "CarrierConsumerLocalLimit");
+		need$19(charge.ecrRequests === 0 && charge.httpBodyBytes === 0, "CarrierConsumerLocal");
+		for (const k of COUNTERS) need$19(Number.isSafeInteger(charge[k]) && charge[k] >= 0 && local[k] + charge[k] <= t.fundedLocal.ci[k], "CarrierConsumerLocalLimit");
 		for (const k of COUNTERS) local[k] += charge[k];
 	};
 	const append = (type, data) => {
@@ -174120,7 +174210,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		let at = 0;
 		while (at < raw.length) {
 			const n = writeSync(fd, raw, at, raw.length - at);
-			need$18(n > 0, "CarrierConsumerJournalWrite");
+			need$19(n > 0, "CarrierConsumerJournalWrite");
 			at += n;
 		}
 		fsyncSync(fd);
@@ -174136,7 +174226,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		allocation: p.budget.ci
 	});
 	const scope = (q, base = false) => {
-		need$18(q.registryId === t.scope.account && q.repositoryName === (base ? t.base.repositoryName : t.scope.repositoryName), "CarrierConsumerRepository");
+		need$19(q.registryId === t.scope.account && q.repositoryName === (base ? t.base.repositoryName : t.scope.repositoryName), "CarrierConsumerRepository");
 	};
 	const register = (d) => {
 		const cost = imageDescriptorDataLocalBytes(d);
@@ -174146,7 +174236,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		});
 		const isManifest = manifests$1.has(d.mediaType), embedded = decodeImageDescriptorData(d, isManifest ? "manifest" : "blob");
 		const old = baseNodes.get(d.digest);
-		if (old?.size !== void 0) need$18(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseDescriptorConflict");
+		if (old?.size !== void 0) need$19(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseDescriptorConflict");
 		baseNodes.set(d.digest, {
 			digest: d.digest,
 			size: d.size,
@@ -174157,7 +174247,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			bytes += d.size ?? 0;
 			manifests$1.has(d.mediaType) || d.size === void 0 ? nm++ : nb++;
 		}
-		need$18(bytes <= t.bounds.compressedBytes && nm <= t.bounds.manifestNodes && nb <= t.bounds.blobNodes, "CarrierBaseGraphBound");
+		need$19(bytes <= t.bounds.compressedBytes && nm <= t.bounds.manifestNodes && nb <= t.bounds.blobNodes, "CarrierBaseGraphBound");
 		if (embedded !== void 0 && !isManifest) baseDone.add(d.digest);
 	};
 	const manifestResponse = (q, r) => {
@@ -174175,62 +174265,62 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			mediaType: image.imageManifestMediaType
 		}, doc = parseAcquisitionJson(bytes, IMAGE_TRANSITION_LIMITS.maxManifestBytes);
 		register(d);
-		need$18(doc.schemaVersion === 2 && doc.mediaType === d.mediaType, "CarrierBaseManifest");
+		need$19(doc.schemaVersion === 2 && doc.mediaType === d.mediaType, "CarrierBaseManifest");
 		if (indexes$1.has(d.mediaType)) {
-			need$18(Array.isArray(doc.manifests) && doc.manifests.length > 0, "CarrierBaseManifest");
+			need$19(Array.isArray(doc.manifests) && doc.manifests.length > 0, "CarrierBaseManifest");
 			for (const child of doc.manifests) register(child);
-			if (wanted === t.base.rootDigest) need$18(doc.manifests.filter((d) => d.digest === t.base.arm64Digest && d.platform?.os === "linux" && d.platform.architecture === "arm64").length === 1, "CarrierBaseArm64");
+			if (wanted === t.base.rootDigest) need$19(doc.manifests.filter((d) => d.digest === t.base.arm64Digest && d.platform?.os === "linux" && d.platform.architecture === "arm64").length === 1, "CarrierBaseArm64");
 		} else {
 			register(doc.config);
-			need$18(Array.isArray(doc.layers), "CarrierBaseManifest");
+			need$19(Array.isArray(doc.layers), "CarrierBaseManifest");
 			for (const child of doc.layers) register(child);
-			if (wanted === t.base.arm64Digest) need$18(doc.config.digest === t.base.configDigest, "CarrierBaseConfig");
+			if (wanted === t.base.arm64Digest) need$19(doc.config.digest === t.base.configDigest, "CarrierBaseConfig");
 		}
 		if (doc.subject) register(doc.subject);
 		baseDone.add(wanted);
 	};
 	const validate = (purpose, action, q) => {
 		const profile = t.profiles[purpose];
-		need$18(CARRIER_PROFILE_ACTIONS[purpose]?.[0] === "ci" && CARRIER_PROFILE_ACTIONS[purpose]?.[1] === action, "CarrierConsumerPurpose");
+		need$19(CARRIER_PROFILE_ACTIONS[purpose]?.[0] === "ci" && CARRIER_PROFILE_ACTIONS[purpose]?.[1] === action, "CarrierConsumerPurpose");
 		if (purpose === "assume") {
-			need$18(phase === "assume", "CarrierConsumerOrder");
+			need$19(phase === "assume", "CarrierConsumerOrder");
 			exact$8(q, [
 				"RoleArn",
 				"RoleSessionName",
 				"DurationSeconds",
 				"Policy"
 			]);
-			need$18(q.RoleArn === t.scope.previewRoleArn && q.DurationSeconds === 2700 && /^carrier-[0-9]+-[0-9]+-[a-f0-9]{16}$/.test(q.RoleSessionName) && typeof q.Policy === "string", "CarrierConsumerAssume");
+			need$19(q.RoleArn === t.scope.previewRoleArn && q.DurationSeconds === 2700 && /^carrier-[0-9]+-[0-9]+-[a-f0-9]{16}$/.test(q.RoleSessionName) && typeof q.Policy === "string", "CarrierConsumerAssume");
 		} else if (purpose === "ciIdentity") {
-			need$18(phase === "identity", "CarrierConsumerOrder");
+			need$19(phase === "identity", "CarrierConsumerOrder");
 			exact$8(q, []);
 		} else if (purpose === "grantGet" || purpose === "contextGet") {
-			need$18(purpose === "grantGet" ? phase === "grant" : phase === "context" && confirmed, "CarrierConsumerOrder");
+			need$19(purpose === "grantGet" ? phase === "grant" : phase === "context" && confirmed, "CarrierConsumerOrder");
 			exact$8(q, [
 				"Bucket",
 				"Key",
 				"ExpectedBucketOwner"
 			]);
-			need$18(q.Bucket === t.scope.bucket && q.Key === keys[purpose === "grantGet" ? "grant" : "context"] && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerObject");
+			need$19(q.Bucket === t.scope.bucket && q.Key === keys[purpose === "grantGet" ? "grant" : "context"] && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerObject");
 		} else if (purpose === "fixtureGet") {
-			need$18(phase === "base" && confirmed && !sqlAcceptance && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerFixtureOrder");
+			need$19(phase === "base" && confirmed && !sqlAcceptance && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerFixtureOrder");
 			exact$8(q, [
 				"Bucket",
 				"Key",
 				"ExpectedBucketOwner"
 			]);
-			need$18(q.Bucket === t.scope.bucket && q.Key === keys.fixture && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerFixtureScope");
+			need$19(q.Bucket === t.scope.bucket && q.Key === keys.fixture && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerFixtureScope");
 		} else if (purpose === "baseManifest") {
-			need$18(phase === "base" && confirmed, "CarrierConsumerOrder");
+			need$19(phase === "base" && confirmed, "CarrierConsumerOrder");
 			exact$8(q, [
 				"registryId",
 				"repositoryName",
 				"imageIds"
 			]);
 			scope(q, true);
-			need$18(q.imageIds?.length === 1 && Object.keys(q.imageIds[0]).join() === "imageDigest" && baseNodes.has(q.imageIds[0].imageDigest) && !baseDone.has(q.imageIds[0].imageDigest), "CarrierConsumerBaseManifest");
+			need$19(q.imageIds?.length === 1 && Object.keys(q.imageIds[0]).join() === "imageDigest" && baseNodes.has(q.imageIds[0].imageDigest) && !baseDone.has(q.imageIds[0].imageDigest), "CarrierConsumerBaseManifest");
 		} else if (purpose === "baseUrl") {
-			need$18(phase === "base", "CarrierConsumerOrder");
+			need$19(phase === "base", "CarrierConsumerOrder");
 			exact$8(q, [
 				"registryId",
 				"repositoryName",
@@ -174238,18 +174328,18 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			]);
 			scope(q, true);
 			const d = baseNodes.get(q.layerDigest);
-			need$18(d && d.size !== void 0 && !manifests$1.has(d.mediaType) && !baseUrls.has(d.digest) && !baseDone.has(d.digest), "CarrierConsumerBaseBlob");
+			need$19(d && d.size !== void 0 && !manifests$1.has(d.mediaType) && !baseUrls.has(d.digest) && !baseDone.has(d.digest), "CarrierConsumerBaseBlob");
 		} else if (purpose === "baseBlob") {
-			need$18(phase === "base", "CarrierConsumerOrder");
+			need$19(phase === "base", "CarrierConsumerOrder");
 			exact$8(q, ["repositoryName", "layerDigest"]);
-			need$18(q.repositoryName === t.base.repositoryName && baseUrls.has(q.layerDigest) && !baseDone.has(q.layerDigest), "CarrierConsumerBaseBlob");
+			need$19(q.repositoryName === t.base.repositoryName && baseUrls.has(q.layerDigest) && !baseDone.has(q.layerDigest), "CarrierConsumerBaseBlob");
 			const d = baseNodes.get(q.layerDigest), debit = carrierBlobDebit(p, "ci", blobUsage, d);
 			return {
 				caps: debit.caps,
 				blobDebit: debit
 			};
 		} else if (purpose === "availability") {
-			need$18(phase === "output", "CarrierConsumerOrder");
+			need$19(phase === "output", "CarrierConsumerOrder");
 			exact$8(q, [
 				"registryId",
 				"repositoryName",
@@ -174257,14 +174347,14 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			]);
 			scope(q);
 			const want = outputNodes.filter((d) => !manifests$1.has(d.mediaType)).slice(availabilityOffset, availabilityOffset + 100).map((d) => d.digest);
-			need$18(want.length > 0, "CarrierConsumerAvailability");
+			need$19(want.length > 0, "CarrierConsumerAvailability");
 			same(q.layerDigests, want, "CarrierConsumerAvailability");
 		} else if (purpose === "initiate") {
-			need$18(phase === "upload" && !activeUpload && missing.length > 0, "CarrierConsumerOrder");
+			need$19(phase === "upload" && !activeUpload && missing.length > 0, "CarrierConsumerOrder");
 			exact$8(q, ["registryId", "repositoryName"]);
 			scope(q);
 		} else if (purpose === "part") {
-			need$18(phase === "upload" && activeUpload, "CarrierConsumerOrder");
+			need$19(phase === "upload" && activeUpload, "CarrierConsumerOrder");
 			exact$8(q, [
 				"registryId",
 				"repositoryName",
@@ -174275,9 +174365,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			]);
 			scope(q);
 			const u = activeUpload;
-			need$18(q.uploadId === u.id && q.layerPartBlob instanceof Uint8Array && q.partFirstByte === u.offset && q.layerPartBlob.length === Math.min(IMAGE_TRANSITION_LIMITS.uploadPartBytes, u.descriptor.size - u.offset) && q.partLastByte === q.partFirstByte + q.layerPartBlob.length - 1, "CarrierConsumerUploadPart");
+			need$19(q.uploadId === u.id && q.layerPartBlob instanceof Uint8Array && q.partFirstByte === u.offset && q.layerPartBlob.length === Math.min(IMAGE_TRANSITION_LIMITS.uploadPartBytes, u.descriptor.size - u.offset) && q.partLastByte === q.partFirstByte + q.layerPartBlob.length - 1, "CarrierConsumerUploadPart");
 		} else if (purpose === "complete") {
-			need$18(phase === "upload" && activeUpload && activeUpload.offset === activeUpload.descriptor.size, "CarrierConsumerOrder");
+			need$19(phase === "upload" && activeUpload && activeUpload.offset === activeUpload.descriptor.size, "CarrierConsumerOrder");
 			exact$8(q, [
 				"registryId",
 				"repositoryName",
@@ -174285,9 +174375,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				"layerDigests"
 			]);
 			scope(q);
-			need$18(q.uploadId === activeUpload.id && nonrootHash(q.layerDigests) === nonrootHash([activeUpload.descriptor.digest]) && "sha256:" + activeUpload.digest.digest("hex") === activeUpload.descriptor.digest, "CarrierConsumerUploadComplete");
+			need$19(q.uploadId === activeUpload.id && nonrootHash(q.layerDigests) === nonrootHash([activeUpload.descriptor.digest]) && "sha256:" + activeUpload.digest.digest("hex") === activeUpload.descriptor.digest, "CarrierConsumerUploadComplete");
 		} else if (purpose === "manifestPut") {
-			need$18(phase === "manifests", "CarrierConsumerOrder");
+			need$19(phase === "manifests", "CarrierConsumerOrder");
 			exact$8(q, [
 				"registryId",
 				"repositoryName",
@@ -174297,11 +174387,11 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			]);
 			scope(q);
 			const d = outputNodes.find((d) => d.digest === q.imageDigest);
-			need$18(d && manifests$1.has(d.mediaType) && !published.has(d.digest) && q.imageManifestMediaType === d.mediaType && typeof q.imageManifest === "string" && Buffer.byteLength(q.imageManifest) === d.size && "sha256:" + sha$6(q.imageManifest) === d.digest, "CarrierConsumerPutManifest");
+			need$19(d && manifests$1.has(d.mediaType) && !published.has(d.digest) && q.imageManifestMediaType === d.mediaType && typeof q.imageManifest === "string" && Buffer.byteLength(q.imageManifest) === d.size && "sha256:" + sha$6(q.imageManifest) === d.digest, "CarrierConsumerPutManifest");
 			const doc = parseAcquisitionJson(Buffer.from(q.imageManifest), IMAGE_TRANSITION_LIMITS.maxManifestBytes);
-			for (const child of indexes$1.has(d.mediaType) ? doc.manifests : [doc.config, ...doc.layers]) need$18(manifests$1.has(child.mediaType) ? published.has(child.digest) : available.has(child.digest) || uploaded.has(child.digest), "CarrierConsumerManifestOrder");
+			for (const child of indexes$1.has(d.mediaType) ? doc.manifests : [doc.config, ...doc.layers]) need$19(manifests$1.has(child.mediaType) ? published.has(child.digest) : available.has(child.digest) || uploaded.has(child.digest), "CarrierConsumerManifestOrder");
 		} else if (purpose === "resultPut") {
-			need$18(phase === "result" && preparedResult, "CarrierConsumerOrder");
+			need$19(phase === "result" && preparedResult, "CarrierConsumerOrder");
 			exact$8(q, [
 				"Bucket",
 				"Key",
@@ -174314,7 +174404,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				"BucketKeyEnabled",
 				"ChecksumSHA256"
 			]);
-			need$18(q.Bucket === t.scope.bucket && q.Key === keys.result && q.ExpectedBucketOwner === t.scope.account && q.IfNoneMatch === "*" && q.ServerSideEncryption === "aws:kms" && q.SSEKMSKeyId === t.scope.kmsKeyArn && q.BucketKeyEnabled === true && q.ContentLength === preparedResult.length && sha$6(q.Body) === sha$6(preparedResult) && q.ChecksumSHA256 === Buffer.from(sha$6(preparedResult), "hex").toString("base64"), "CarrierConsumerResult");
+			need$19(q.Bucket === t.scope.bucket && q.Key === keys.result && q.ExpectedBucketOwner === t.scope.account && q.IfNoneMatch === "*" && q.ServerSideEncryption === "aws:kms" && q.SSEKMSKeyId === t.scope.kmsKeyArn && q.BucketKeyEnabled === true && q.ContentLength === preparedResult.length && sha$6(q.Body) === sha$6(preparedResult) && q.ChecksumSHA256 === Buffer.from(sha$6(preparedResult), "hex").toString("base64"), "CarrierConsumerResult");
 		} else throw Error("CarrierConsumerPurpose");
 		return { caps: {
 			requestBytes: profile.requestBytes,
@@ -174324,9 +174414,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 	};
 	async function beforeRequest(purpose, action, request) {
 		check();
-		need$18(!current, "CarrierConsumerSerial");
+		need$19(!current, "CarrierConsumerSerial");
 		const q = structuredClone(request), allocated = validate(purpose, action, q), profile = t.profiles[purpose], n = (used[purpose] ?? 0) + 1;
-		need$18(n <= (profile.maxRequests ?? profile.count), "CarrierConsumerCalls");
+		need$19(n <= (profile.maxRequests ?? profile.count), "CarrierConsumerCalls");
 		used[purpose] = n;
 		if (allocated.blobDebit) blobUsage = allocated.blobDebit.usage;
 		const b = allocated.blobDebit;
@@ -174348,7 +174438,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		current = intent.sequence;
 		const guard = () => {
 			check();
-			need$18(!settled && current === intent.sequence, "CarrierConsumerReservation");
+			need$19(!settled && current === intent.sequence, "CarrierConsumerReservation");
 		};
 		const unknown = async () => {
 			if (settled) return;
@@ -174369,31 +174459,31 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			finalGuard: guard,
 			charge(n) {
 				guard();
-				need$18(Number.isSafeInteger(n) && n >= 0, "CarrierConsumerCharge");
+				need$19(Number.isSafeInteger(n) && n >= 0, "CarrierConsumerCharge");
 				charged += n;
-				need$18(charged <= allocated.caps.requestBytes + allocated.caps.responseBytes, "CarrierConsumerWireLimit");
+				need$19(charged <= allocated.caps.requestBytes + allocated.caps.responseBytes, "CarrierConsumerWireLimit");
 			},
 			unknown,
 			async complete(r, responseHash) {
 				guard();
-				need$18(/^[a-f0-9]{64}$/.test(responseHash), "CarrierConsumerResponseHash");
+				need$19(/^[a-f0-9]{64}$/.test(responseHash), "CarrierConsumerResponseHash");
 				if (purpose === "assume") {
 					assumedArn = r.AssumedRoleUser?.Arn;
-					need$18(typeof assumedArn === "string" && assumedArn === "arn:aws:sts::" + t.scope.account + ":assumed-role/" + t.scope.previewRoleArn.split("/").at(-1) + "/" + q.RoleSessionName, "CarrierConsumerAssumedIdentity");
+					need$19(typeof assumedArn === "string" && assumedArn === "arn:aws:sts::" + t.scope.account + ":assumed-role/" + t.scope.previewRoleArn.split("/").at(-1) + "/" + q.RoleSessionName, "CarrierConsumerAssumedIdentity");
 					phase = "identity";
 				} else if (purpose === "ciIdentity") {
-					need$18(r.Account === t.scope.account && r.Arn === assumedArn, "CarrierConsumerIdentity");
+					need$19(r.Account === t.scope.account && r.Arn === assumedArn, "CarrierConsumerIdentity");
 					phase = "grant";
 				} else if (purpose === "grantGet" || purpose === "contextGet") {
-					need$18(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
+					need$19(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
 					if (purpose === "contextGet") {
-						need$18(r.ContentLength === p.context.bytesLength && responseHash === p.context.sha256, "CarrierConsumerContextHash");
+						need$19(r.ContentLength === p.context.bytesLength && responseHash === p.context.sha256, "CarrierConsumerContextHash");
 						phase = "base";
 					}
-				} else if (purpose === "fixtureGet") need$18(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true && r.ContentLength === t.sqlFixture.archive.bytesLength && responseHash === t.sqlFixture.archive.sha256, "CarrierConsumerFixtureResponse");
+				} else if (purpose === "fixtureGet") need$19(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true && r.ContentLength === t.sqlFixture.archive.bytesLength && responseHash === t.sqlFixture.archive.sha256, "CarrierConsumerFixtureResponse");
 				else if (purpose === "baseManifest") manifestResponse(q, r);
 				else if (purpose === "baseUrl") {
-					need$18(r.layerDigest === q.layerDigest, "CarrierConsumerUrlDigest");
+					need$19(r.layerDigest === q.layerDigest, "CarrierConsumerUrlDigest");
 					baseUrls.add(q.layerDigest);
 				} else if (purpose === "baseBlob") {
 					const d = baseNodes.get(q.layerDigest);
@@ -174402,17 +174492,17 @@ function openCarrierConsumer({ startup, config: input, env }) {
 						layerDigest: d.digest,
 						size: d.size
 					}, "CarrierConsumerBlobResponse");
-					need$18(responseHash === d.digest.slice(7), "CarrierConsumerBlobHash");
+					need$19(responseHash === d.digest.slice(7), "CarrierConsumerBlobHash");
 					baseDone.add(d.digest);
 				} else if (purpose === "availability") {
-					need$18(Array.isArray(r.layers) && Array.isArray(r.failures) && r.failures.length === 0 && r.layers.length === q.layerDigests.length, "CarrierConsumerAvailabilityResponse");
+					need$19(Array.isArray(r.layers) && Array.isArray(r.failures) && r.failures.length === 0 && r.layers.length === q.layerDigests.length, "CarrierConsumerAvailabilityResponse");
 					const seen = /* @__PURE__ */ new Set();
 					for (const row of r.layers) {
-						need$18(q.layerDigests.includes(row.layerDigest) && !seen.has(row.layerDigest) && ["AVAILABLE", "UNAVAILABLE"].includes(row.layerAvailability), "CarrierConsumerAvailabilityResponse");
+						need$19(q.layerDigests.includes(row.layerDigest) && !seen.has(row.layerDigest) && ["AVAILABLE", "UNAVAILABLE"].includes(row.layerAvailability), "CarrierConsumerAvailabilityResponse");
 						seen.add(row.layerDigest);
 						const d = outputNodes.find((d) => d.digest === row.layerDigest);
 						if (row.layerAvailability === "AVAILABLE") {
-							need$18(row.layerSize === d.size, "CarrierConsumerLayerSize");
+							need$19(row.layerSize === d.size, "CarrierConsumerLayerSize");
 							available.add(d.digest);
 						} else missing.push(d);
 					}
@@ -174422,7 +174512,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 						phase = missing.length ? "upload" : "manifests";
 					}
 				} else if (purpose === "initiate") {
-					need$18(r.repositoryName === q.repositoryName && r.registryId === q.registryId && /^[a-f0-9-]{36}$/i.test(r.uploadId ?? "") && !uploadIds.has(r.uploadId.toLowerCase()) && Number.isSafeInteger(r.partSize) && r.partSize >= IMAGE_TRANSITION_LIMITS.uploadPartBytes, "CarrierConsumerInitiateResponse");
+					need$19(r.repositoryName === q.repositoryName && r.registryId === q.registryId && /^[a-f0-9-]{36}$/i.test(r.uploadId ?? "") && !uploadIds.has(r.uploadId.toLowerCase()) && Number.isSafeInteger(r.partSize) && r.partSize >= IMAGE_TRANSITION_LIMITS.uploadPartBytes, "CarrierConsumerInitiateResponse");
 					uploadIds.add(r.uploadId.toLowerCase());
 					activeUpload = {
 						id: r.uploadId,
@@ -174431,21 +174521,21 @@ function openCarrierConsumer({ startup, config: input, env }) {
 						digest: createHash("sha256")
 					};
 				} else if (purpose === "part") {
-					need$18(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.lastByteReceived === q.partLastByte, "CarrierConsumerPartResponse");
+					need$19(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.lastByteReceived === q.partLastByte, "CarrierConsumerPartResponse");
 					activeUpload.digest.update(q.layerPartBlob);
 					activeUpload.offset += q.layerPartBlob.length;
 				} else if (purpose === "complete") {
-					need$18(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.layerDigest === activeUpload.descriptor.digest, "CarrierConsumerCompleteResponse");
+					need$19(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.layerDigest === activeUpload.descriptor.digest, "CarrierConsumerCompleteResponse");
 					uploaded.add(r.layerDigest);
 					missing.shift();
 					activeUpload = void 0;
 					if (!missing.length) phase = "manifests";
 				} else if (purpose === "manifestPut") {
-					need$18(r.image?.registryId === q.registryId && r.image?.repositoryName === q.repositoryName && r.image?.imageId?.imageDigest === q.imageDigest, "CarrierConsumerPutImageResponse");
+					need$19(r.image?.registryId === q.registryId && r.image?.repositoryName === q.repositoryName && r.image?.imageId?.imageDigest === q.imageDigest, "CarrierConsumerPutImageResponse");
 					published.add(q.imageDigest);
 					if (published.size === outputNodes.filter((d) => manifests$1.has(d.mediaType)).length) phase = "result";
 				} else if (purpose === "resultPut") {
-					need$18(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
+					need$19(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
 					phase = "published";
 				}
 				wire.httpBodyBytes += charged;
@@ -174475,7 +174565,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		beforeRequest,
 		confirmGrant(grant) {
 			check();
-			need$18(phase === "grant" && !current && !confirmed && used.grantGet === 1, "CarrierConsumerGrantOrder");
+			need$19(phase === "grant" && !current && !confirmed && used.grantGet === 1, "CarrierConsumerGrantOrder");
 			const verified = verifyCarrierBeforeCopyGrant(grant, {
 				...config,
 				now: Date.now()
@@ -174491,14 +174581,14 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		},
 		async bindSqlAcceptance(handle, built) {
 			check();
-			need$18(phase === "base" && !current && !output && !sqlAcceptance && used.fixtureGet === 1, "CarrierConsumerSqlOrder");
+			need$19(phase === "base" && !current && !output && !sqlAcceptance && used.fixtureGet === 1, "CarrierConsumerSqlOrder");
 			const { inspectCompletedCarrierSqlAcceptance } = await Promise.resolve().then(() => (init_ci_carrier_sql_acceptance(), ci_carrier_sql_acceptance_exports));
 			check();
 			const value = inspectCompletedCarrierSqlAcceptance(handle, {
 				built,
 				consumer: api
 			});
-			need$18(value.record.templateHash === p.templateHash && value.record.contextHash === p.context.sha256, "CarrierConsumerSqlBinding");
+			need$19(value.record.templateHash === p.templateHash && value.record.contextHash === p.context.sha256, "CarrierConsumerSqlBinding");
 			sqlAcceptance = value;
 			sqlBuilt = built;
 			append("sql-accepted", {
@@ -174508,9 +174598,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		},
 		bindBuilt(handle) {
 			check();
-			need$18(phase === "base" && !current && !output && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerBaseIncomplete");
+			need$19(phase === "base" && !current && !output && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerBaseIncomplete");
 			const built = inspectCarrierOfflineBuild(handle);
-			need$18(built.record.templateHash === config.templateHash && built.record.contextHash === p.context.sha256 && (!sqlAcceptance || sqlBuilt === handle), "CarrierConsumerBuildBinding");
+			need$19(built.record.templateHash === config.templateHash && built.record.contextHash === p.context.sha256 && (!sqlAcceptance || sqlBuilt === handle), "CarrierConsumerBuildBinding");
 			output = built;
 			outputNodes = built.graph.inventory.nodes;
 			append("built", { record: built.record });
@@ -174522,7 +174612,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		},
 		prepareResult() {
 			check();
-			need$18(phase === "result" && !current && !preparedResult, "CarrierConsumerResultOrder");
+			need$19(phase === "result" && !current && !preparedResult, "CarrierConsumerResultOrder");
 			const { record, graph } = output;
 			const claim = carrierCheckpointSelection(p, admission.binding, Object.fromEntries([
 				"nonce",
@@ -174530,7 +174620,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				"artifactId",
 				"artifactDigest"
 			].map((k) => [k, admission.receipt[k]]))).claim;
-			need$18(sqlAcceptance, "CarrierConsumerSqlRequired");
+			need$19(sqlAcceptance, "CarrierConsumerSqlRequired");
 			const consumerPrefix = {
 				events: [...events],
 				lastHash: previous,
@@ -174554,7 +174644,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				claim
 			});
 			preparedResult = Buffer.from(JSON.stringify(result));
-			need$18(preparedResult.length <= t.bounds.resultBytes, "CarrierConsumerResultSize");
+			need$19(preparedResult.length <= t.bounds.resultBytes, "CarrierConsumerResultSize");
 			reserveLocal({
 				...zero$5(),
 				logicalBytes: preparedResult.length
@@ -174563,7 +174653,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		},
 		async close() {
 			if (closed) return;
-			need$18(!current, "CarrierConsumerActive");
+			need$19(!current, "CarrierConsumerActive");
 			fsyncSync(fd);
 			closeSync(fd);
 			closed = true;
@@ -174585,7 +174675,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 }
 function assertCarrierConsumer(value) {
 	const s = handles.get(value);
-	need$18(s, "CarrierConsumerHandle");
+	need$19(s, "CarrierConsumerHandle");
 	s.check();
 	return value;
 }
@@ -174611,7 +174701,7 @@ var init_ci_carrier_consumer = __esmMin((() => {
 		sha256: sha$6(v),
 		bytesLength: Buffer.byteLength(v)
 	} : v]));
-	same = (a, b, c) => need$18(nonrootHash(a) === nonrootHash(b), c);
+	same = (a, b, c) => need$19(nonrootHash(a) === nonrootHash(b), c);
 }));
 //#endregion
 //#region node_modules/@aws-sdk/client-sts/dist-cjs/index.js
@@ -176357,30 +176447,30 @@ function carrierSessionPolicy(plan) {
 		Version: "2012-10-17",
 		Statement
 	});
-	need$18(Buffer.byteLength(Policy) <= 2048, "CarrierSessionPolicySize");
+	need$19(Buffer.byteLength(Policy) <= 2048, "CarrierSessionPolicySize");
 	return Policy;
 }
 function oidcLocation(env) {
-	need$18(env.ACTIONS_ID_TOKEN_REQUEST_URL === process.env.ACTIONS_ID_TOKEN_REQUEST_URL && env.ACTIONS_ID_TOKEN_REQUEST_TOKEN === process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN, "CarrierOidcEnvironment");
+	need$19(env.ACTIONS_ID_TOKEN_REQUEST_URL === process.env.ACTIONS_ID_TOKEN_REQUEST_URL && env.ACTIONS_ID_TOKEN_REQUEST_TOKEN === process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN, "CarrierOidcEnvironment");
 	const u = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL), uuid = "[a-fA-F0-9-]{36}";
-	need$18(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && /^[a-z0-9-]+\.actions\.githubusercontent\.com$/.test(u.hostname) && new RegExp("^/[A-Za-z0-9_-]+/_apis/distributedtask/hubs/build/plans/" + uuid + "/jobs/" + uuid + "/idtoken$").test(u.pathname), "CarrierOidcEndpoint");
+	need$19(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && /^[a-z0-9-]+\.actions\.githubusercontent\.com$/.test(u.hostname) && new RegExp("^/[A-Za-z0-9_-]+/_apis/distributedtask/hubs/build/plans/" + uuid + "/jobs/" + uuid + "/idtoken$").test(u.pathname), "CarrierOidcEndpoint");
 	const ks = [...u.searchParams.keys()];
-	need$18(new Set(ks).size === ks.length && ks.every((k) => ["api-version", "audience"].includes(k)) && u.searchParams.get("api-version") === "2.0" && (!u.searchParams.has("audience") || u.searchParams.get("audience") === "sts.amazonaws.com"), "CarrierOidcEndpoint");
+	need$19(new Set(ks).size === ks.length && ks.every((k) => ["api-version", "audience"].includes(k)) && u.searchParams.get("api-version") === "2.0" && (!u.searchParams.has("audience") || u.searchParams.get("audience") === "sts.amazonaws.com"), "CarrierOidcEndpoint");
 	u.searchParams.set("audience", "sts.amazonaws.com");
 	return u;
 }
 function blobLocation(value, region) {
 	const u = new URL(value);
-	need$18(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && ["prod-" + region + "-starport-layer-bucket.s3." + region + ".amazonaws.com", "prod-" + region + "-starport-layer-bucket.s3-" + region + ".amazonaws.com"].includes(u.hostname), "CarrierBlobEndpoint");
+	need$19(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && ["prod-" + region + "-starport-layer-bucket.s3." + region + ".amazonaws.com", "prod-" + region + "-starport-layer-bucket.s3-" + region + ".amazonaws.com"].includes(u.hostname), "CarrierBlobEndpoint");
 	const q = u.searchParams, date = q.get("X-Amz-Date"), expiry = q.get("X-Amz-Expires");
-	need$18(new Set(q.keys()).size === [...q.keys()].length && q.get("X-Amz-Algorithm") === "AWS4-HMAC-SHA256" && /^\d{8}T\d{6}Z$/.test(date ?? "") && /^[1-9][0-9]*$/.test(expiry ?? "") && Number(expiry) <= 604800 && q.get("X-Amz-SignedHeaders") === "host" && /^[a-f0-9]{64}$/.test(q.get("X-Amz-Signature") ?? "") && q.get("X-Amz-Credential")?.endsWith("/" + date.slice(0, 8) + "/" + region + "/s3/aws4_request"), "CarrierBlobSignature");
+	need$19(new Set(q.keys()).size === [...q.keys()].length && q.get("X-Amz-Algorithm") === "AWS4-HMAC-SHA256" && /^\d{8}T\d{6}Z$/.test(date ?? "") && /^[1-9][0-9]*$/.test(expiry ?? "") && Number(expiry) <= 604800 && q.get("X-Amz-SignedHeaders") === "host" && /^[a-f0-9]{64}$/.test(q.get("X-Amz-Signature") ?? "") && q.get("X-Amz-Credential")?.endsWith("/" + date.slice(0, 8) + "/" + region + "/s3/aws4_request"), "CarrierBlobSignature");
 	const at = Date.parse(date.slice(0, 4) + "-" + date.slice(4, 6) + "-" + date.slice(6, 8) + "T" + date.slice(9, 11) + ":" + date.slice(11, 13) + ":" + date.slice(13, 15) + "Z");
-	need$18(at <= Date.now() + 3e4 && Date.now() < at + Number(expiry) * 1e3, "CarrierBlobExpired");
+	need$19(at <= Date.now() + 3e4 && Date.now() < at + Number(expiry) * 1e3, "CarrierBlobExpired");
 	return u;
 }
 function createCarrierTransport({ consumer, env }, seams = {}) {
 	assertCarrierConsumer(consumer);
-	need$18(Object.keys(seams).every((k) => k === "requestHandler" || k === "oidcLocation"), "CarrierTransportSeams");
+	need$19(Object.keys(seams).every((k) => k === "requestHandler" || k === "oidcLocation"), "CarrierTransportSeams");
 	const { config, binding } = consumer.admission, p = config.plan, t = p.template, q = t.scope, keys = carrierObjectKeys(t), agent = seams.requestHandler ? null : new Agent({
 		keepAlive: false,
 		maxSockets: 1,
@@ -176395,25 +176485,25 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 	const streams = /* @__PURE__ */ new Set(), downloads = /* @__PURE__ */ new Map(), clients = [], secretBuffers = /* @__PURE__ */ new Set();
 	const check = () => {
 		consumer.check();
-		need$18(!closed && !held && Date.now() < credentialDeadline, "CarrierTransportHeld");
+		need$19(!closed && !held && Date.now() < credentialDeadline, "CarrierTransportHeld");
 	};
 	const timeout = () => AbortSignal.timeout(Math.max(1, Math.min(3e4, p.deadlineMs - Date.now(), credentialDeadline - Date.now())));
 	async function exchange(request, options = {}) {
 		check();
 		const c = current;
-		need$18(c && !c.dispatched, "CarrierTransportReservation");
+		need$19(c && !c.dispatched, "CarrierTransportReservation");
 		const expected = c.service === "oidc" ? c.oidc.hostname : c.service === "blob" ? c.location.hostname : (c.service === "ecr" ? "api.ecr" : c.service) + "." + q.region + ".amazonaws.com";
-		need$18(request.protocol === "https:" && request.hostname === expected && !request.port, "CarrierTransportEndpoint");
-		need$18(request.path === (c.service === "oidc" ? c.oidc.pathname : c.service === "blob" ? c.location.pathname : c.service === "s3" ? "/" + q.bucket + "/" + c.key : "/"), "CarrierTransportPath");
-		need$18(request.method === (c.service === "oidc" || c.service === "blob" || c.action === "GetObject" ? "GET" : c.action === "PutObject" ? "PUT" : "POST"), "CarrierTransportMethod");
+		need$19(request.protocol === "https:" && request.hostname === expected && !request.port, "CarrierTransportEndpoint");
+		need$19(request.path === (c.service === "oidc" ? c.oidc.pathname : c.service === "blob" ? c.location.pathname : c.service === "s3" ? "/" + q.bucket + "/" + c.key : "/"), "CarrierTransportPath");
+		need$19(request.method === (c.service === "oidc" || c.service === "blob" || c.action === "GetObject" ? "GET" : c.action === "PutObject" ? "PUT" : "POST"), "CarrierTransportMethod");
 		if (c.service === "s3") {
-			need$18(request.headers["x-amz-expected-bucket-owner"] === q.account && Object.keys(request.query ?? {}).every((k) => k === "x-id"), "CarrierTransportS3Owner");
-			if (c.action === "PutObject") need$18(request.headers["if-none-match"] === "*" && request.headers["x-amz-server-side-encryption"] === "aws:kms" && request.headers["x-amz-server-side-encryption-aws-kms-key-id"] === q.kmsKeyArn && request.headers["x-amz-server-side-encryption-bucket-key-enabled"] === "true", "CarrierTransportS3Protection");
+			need$19(request.headers["x-amz-expected-bucket-owner"] === q.account && Object.keys(request.query ?? {}).every((k) => k === "x-id"), "CarrierTransportS3Owner");
+			if (c.action === "PutObject") need$19(request.headers["if-none-match"] === "*" && request.headers["x-amz-server-side-encryption"] === "aws:kms" && request.headers["x-amz-server-side-encryption-aws-kms-key-id"] === q.kmsKeyArn && request.headers["x-amz-server-side-encryption-bucket-key-enabled"] === "true", "CarrierTransportS3Protection");
 		}
-		if (c.service === "ecr") need$18(request.headers["x-amz-target"] === "AmazonEC2ContainerRegistry_V20150921." + c.action && Object.keys(request.query ?? {}).length === 0, "CarrierTransportEcrTarget");
+		if (c.service === "ecr") need$19(request.headers["x-amz-target"] === "AmazonEC2ContainerRegistry_V20150921." + c.action && Object.keys(request.query ?? {}).length === 0, "CarrierTransportEcrTarget");
 		const body = request.body === void 0 ? Buffer.alloc(0) : Buffer.from(request.body);
 		c.requestBytes += body.length;
-		need$18(c.requestBytes <= c.reservation.caps.requestBytes, "CarrierTransportRequestLimit");
+		need$19(c.requestBytes <= c.reservation.caps.requestBytes, "CarrierTransportRequestLimit");
 		c.reservation.finalGuard();
 		c.reservation.charge(body.length);
 		c.dispatched = true;
@@ -176421,7 +176511,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 			...options,
 			abortSignal: options.abortSignal ?? timeout()
 		})).response;
-		need$18(r && Number.isInteger(r.statusCode) && r.body instanceof Readable, "CarrierTransportResponse");
+		need$19(r && Number.isInteger(r.statusCode) && r.body instanceof Readable, "CarrierTransportResponse");
 		streams.add(r.body);
 		r.body.once("close", () => streams.delete(r.body));
 		const digest = createHash("sha256"), chunks = [];
@@ -176430,16 +176520,16 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 			try {
 				for await (const v of r.body) {
 					check();
-					need$18(v instanceof Uint8Array, "CarrierTransportBody");
+					need$19(v instanceof Uint8Array, "CarrierTransportBody");
 					const b = Buffer.from(v);
 					received += b.length;
 					c.responseBytes += b.length;
 					c.reservation.charge(b.length);
-					need$18(c.responseBytes <= c.reservation.caps.responseBytes, "CarrierTransportResponseLimit");
+					need$19(c.responseBytes <= c.reservation.caps.responseBytes, "CarrierTransportResponseLimit");
 					digest.update(b);
 					yield b;
 				}
-				if (r.headers?.["content-length"] !== void 0) need$18(/^(?:0|[1-9][0-9]*)$/.test(String(r.headers["content-length"])) && Number(r.headers["content-length"]) === received, "CarrierTransportLength");
+				if (r.headers?.["content-length"] !== void 0) need$19(/^(?:0|[1-9][0-9]*)$/.test(String(r.headers["content-length"])) && Number(r.headers["content-length"]) === received, "CarrierTransportLength");
 			} finally {
 				r.body.destroy();
 			}
@@ -176447,14 +176537,14 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 		try {
 			if (c.consume && r.statusCode === 200) c.consumed = await c.consume(stream);
 			else for await (const b of stream) {
-				need$18(received <= 33554432, "CarrierTransportMetadataLimit");
+				need$19(received <= 33554432, "CarrierTransportMetadataLimit");
 				chunks.push(b);
 			}
 		} finally {
 			await stream.return?.();
 		}
 		c.responseHash = digest.digest("hex");
-		need$18(r.statusCode === 200, "CarrierTransportHttp");
+		need$19(r.statusCode === 200, "CarrierTransportHttp");
 		c.status = 200;
 		const raw = Buffer.concat(chunks);
 		if (c.service === "ecr" || c.service === "oidc") c.raw = raw;
@@ -176470,7 +176560,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 		maxAttempts: 1,
 		credentials: async () => {
 			check();
-			need$18(credentials, "CarrierNoAmbientCredentials");
+			need$19(credentials, "CarrierNoAmbientCredentials");
 			return credentials;
 		},
 		requestHandler: {
@@ -176492,7 +176582,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 	clients.push(sts, s3);
 	async function call(purpose, service, action, input, send, { consume, key, location } = {}) {
 		check();
-		need$18(!current, "CarrierTransportSerial");
+		need$19(!current, "CarrierTransportSerial");
 		const request = structuredClone(input), reservation = await consumer.beforeRequest(purpose, action, request);
 		current = {
 			service,
@@ -176508,7 +176598,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 		const c = current;
 		try {
 			const result = await send(request, c);
-			need$18(c.status === 200 && c.responseHash, "CarrierTransportIncomplete");
+			need$19(c.status === 200 && c.responseHash, "CarrierTransportIncomplete");
 			await reservation.complete(Object.fromEntries(Object.entries(result).filter(([k]) => k !== "Body")), c.responseHash);
 			result.Body?.destroy();
 			return consume ? c.consumed : result;
@@ -176574,7 +176664,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 					}
 				}, { abortSignal: timeout() })).response.body.destroy();
 				const token = parseAcquisitionJson(c.raw, 131072);
-				need$18(typeof token.value === "string" && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token.value), "CarrierOidcToken");
+				need$19(typeof token.value === "string" && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token.value), "CarrierOidcToken");
 				c.service = "sts";
 				c.dispatched = false;
 				let response, command = new import_dist_cjs$1.AssumeRoleWithWebIdentityCommand({
@@ -176589,7 +176679,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 					c.raw?.fill(0);
 				}
 				const v = response.Credentials;
-				need$18(v && typeof v.AccessKeyId === "string" && /^ASIA[A-Z0-9]{16}$/.test(v.AccessKeyId) && typeof v.SecretAccessKey === "string" && v.SecretAccessKey.length === 40 && typeof v.SessionToken === "string" && v.SessionToken.length > 0 && v.Expiration instanceof Date && v.Expiration.getTime() >= p.deadlineMs && v.Expiration.getTime() <= Date.now() + 2705e3, "CarrierSessionCredentials");
+				need$19(v && typeof v.AccessKeyId === "string" && /^ASIA[A-Z0-9]{16}$/.test(v.AccessKeyId) && typeof v.SecretAccessKey === "string" && v.SecretAccessKey.length === 40 && typeof v.SessionToken === "string" && v.SessionToken.length > 0 && v.Expiration instanceof Date && v.Expiration.getTime() >= p.deadlineMs && v.Expiration.getTime() <= Date.now() + 2705e3, "CarrierSessionCredentials");
 				credentialDeadline = Math.min(p.deadlineMs, v.Expiration.getTime());
 				credentials = {
 					accessKeyId: v.AccessKeyId,
@@ -176612,7 +176702,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 				let n = 0;
 				for await (const b of stream) {
 					n += b.length;
-					need$18(n <= t.bounds.grantBytes, "CarrierGrantBytes");
+					need$19(n <= t.bounds.grantBytes, "CarrierGrantBytes");
 					all.push(b);
 				}
 				consumer.reserveLocal({
@@ -176642,7 +176732,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 				layerDigest: d.digest
 			})).downloadUrl, q.region);
 			downloads.set(d.digest, location);
-			need$18(downloads.has(d.digest), "CarrierBlobLocation");
+			need$19(downloads.has(d.digest), "CarrierBlobLocation");
 			downloads.delete(d.digest);
 			return call("baseBlob", "blob", "S3BlobGet", {
 				repositoryName: t.base.repositoryName,
@@ -176777,16 +176867,16 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 			for await (const b of stream) {
 				consumer.check();
 				count += b.length;
-				need$18(count <= d.size, "CarrierBaseSize");
+				need$19(count <= d.size, "CarrierBaseSize");
 				digest.update(b);
 				let at = 0;
 				while (at < b.length) {
 					const r = await fd.write(b, at, b.length - at);
-					need$18(r.bytesWritten > 0, "CarrierBaseWrite");
+					need$19(r.bytesWritten > 0, "CarrierBaseWrite");
 					at += r.bytesWritten;
 				}
 			}
-			need$18(count === d.size && "sha256:" + digest.digest("hex") === d.digest, "CarrierBaseDigest");
+			need$19(count === d.size && "sha256:" + digest.digest("hex") === d.digest, "CarrierBaseDigest");
 			await fd.sync();
 		} finally {
 			await fd.close();
@@ -176800,7 +176890,7 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 		});
 		const embedded = decodeImageDescriptorData(d, manifests.has(d.mediaType) ? "manifest" : "blob");
 		const old = nodes.get(d.digest);
-		if (old) need$18(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseConflict");
+		if (old) need$19(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseConflict");
 		nodes.set(d.digest, {
 			digest: d.digest,
 			size: d.size,
@@ -176811,7 +176901,7 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 	const visit = async (wanted) => {
 		consumer.check();
 		if (done.has(wanted.digest)) return;
-		need$18(!visiting.has(wanted.digest) && visiting.size <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "CarrierBaseCycle");
+		need$19(!visiting.has(wanted.digest) && visiting.size <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "CarrierBaseCycle");
 		visiting.add(wanted.digest);
 		const { image, raw } = normalizeImageDigestResponse(await transport.baseManifest(wanted), {
 			registryId: t.base.account,
@@ -176921,7 +177011,7 @@ async function publishBuilt({ built, consumer, transport }) {
 			});
 			offset += b.length;
 		}
-		need$18(offset === d.size, "CarrierUploadSize");
+		need$19(offset === d.size, "CarrierUploadSize");
 		await transport.complete({
 			uploadId: initiated.uploadId,
 			layerDigests: [d.digest]
@@ -176934,7 +177024,7 @@ async function publishBuilt({ built, consumer, transport }) {
 		let bytes = 0;
 		for await (const b of state.store.open(d)) {
 			bytes += b.length;
-			need$18(bytes <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "CarrierUploadManifest");
+			need$19(bytes <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "CarrierUploadManifest");
 			raw.push(b);
 		}
 		const body = Buffer.concat(raw, bytes), doc = parseAcquisitionJson(body, IMAGE_TRANSITION_LIMITS.maxManifestBytes);
@@ -176948,12 +177038,12 @@ async function publishBuilt({ built, consumer, transport }) {
 		done.add(d.digest);
 	};
 	await put(state.roots[0].root);
-	need$18(done.size === nodes.filter((d) => manifests.has(d.mediaType)).length, "CarrierPublicationIncomplete");
+	need$19(done.size === nodes.filter((d) => manifests.has(d.mediaType)).length, "CarrierPublicationIncomplete");
 	return image;
 }
 async function runCarrierBeforeCopy(env = process.env, seams = {}) {
-	need$18(process.platform === "linux" && process.arch === "arm64", "CarrierWorkerNativeArm64");
-	need$18(Object.keys(seams).every((k) => [
+	need$19(process.platform === "linux" && process.arch === "arm64", "CarrierWorkerNativeArm64");
+	need$19(Object.keys(seams).every((k) => [
 		"host",
 		"startup",
 		"transport"
@@ -176961,11 +177051,11 @@ async function runCarrierBeforeCopy(env = process.env, seams = {}) {
 	const config = inspectCarrierWorkerConfig(env.MEM9_CARRIER_WORKER_CONFIG);
 	assertCarrierSqlDatabasePin(config.plan.template.sqlFixture);
 	const pgLocal = carrierSqlFixtureBudget(config.plan.template).packageAndImportLocal.ci;
-	for (const [key, value] of Object.entries(pgLocal)) need$18(config.plan.template.fundedLocal.ci[key] >= value, "CarrierWorkerPgLocalBudget");
+	for (const [key, value] of Object.entries(pgLocal)) need$19(config.plan.template.fundedLocal.ci[key] >= value, "CarrierWorkerPgLocalBudget");
 	const runtimeFixed = carrierSqlRuntimeFixedBudget().total;
-	for (const key of Object.keys(pgLocal)) need$18(config.plan.template.fundedLocal.ci[key] >= pgLocal[key] + runtimeFixed[key], "CarrierWorkerSqlRuntimeBudget");
-	need$18(env.INPUT_GRANT_COMMITMENT === config.grantHash && env.INPUT_CONTEXT_COMMITMENT === config.plan.context.sha256, "CarrierDispatchCommitments");
-	need$18(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierOwnerScanRequired");
+	for (const key of Object.keys(pgLocal)) need$19(config.plan.template.fundedLocal.ci[key] >= pgLocal[key] + runtimeFixed[key], "CarrierWorkerSqlRuntimeBudget");
+	need$19(env.INPUT_GRANT_COMMITMENT === config.grantHash && env.INPUT_CONTEXT_COMMITMENT === config.plan.context.sha256, "CarrierDispatchCommitments");
+	need$19(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierOwnerScanRequired");
 	carrierSessionPolicy(config.plan);
 	let consumer, transport, context, base, derived, built, result, databasePackage, fixture, published = false, problem;
 	try {

@@ -111,6 +111,23 @@ function template(value) {
   requireValue(object(value.Resources) && object(value.Parameters) && object(value.Outputs));
   return value;
 }
+// Exact observed presentation delta only. Source and raw observations remain
+// untouched; all authorization-bearing paths still undergo full AST equality.
+function completedTemplateEqual(actual, source) {
+  if (isDeepStrictEqual(actual, source)) return;
+  const expected = structuredClone(source);
+  for (const path of [['Description'], ['Parameters', 'ProjectName', 'Description'], ['Parameters', 'OIDCProviderArn', 'Description']]) {
+    const value = path.reduce((v, key) => v?.[key], source);
+    const observed = path.reduce((v, key) => v?.[key], actual);
+    requireValue(typeof value === 'string' && typeof observed === 'string');
+    if (observed === value) continue;
+    const position = value.indexOf('\u2014');
+    requireValue(position >= 0 && value.indexOf('\u2014', position + 1) === -1 &&
+      observed === value.slice(0, position) + '?' + value.slice(position + 1));
+    path.slice(0, -1).reduce((v, key) => v[key], expected)[path.at(-1)] = observed;
+  }
+  equal(actual, expected);
+}
 function pairs(rows, name, value, optional = []) {
   requireValue(Array.isArray(rows));
   const result = {};
@@ -197,7 +214,7 @@ export function createRetainedOperatorInventory(options) {
     requireValue(!Object.keys(value).some(k => k.startsWith('Fn::')));
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, render(v, document, parameters, depth + 1)]).filter(([, v]) => v !== noValue));
   }
-  async function owner(name) {
+  async function owner(name, completedUpdate = false) {
     const response = await cf('describe-stacks', name); fields(response, ['Stacks'], ['NextToken']);
     requireValue(response.NextToken === undefined && Array.isArray(response.Stacks) && response.Stacks.length === 1);
     const stack = response.Stacks[0];
@@ -225,6 +242,11 @@ export function createRetainedOperatorInventory(options) {
     const fetched = await cf('get-template', stack.StackId, '--template-stage', 'Original'); fields(fetched, ['TemplateBody'], ['StagesAvailable']);
     if ('StagesAvailable' in fetched) requireValue(Array.isArray(fetched.StagesAvailable) && unique(fetched.StagesAvailable).every(v => ['Original', 'Processed'].includes(v)));
     const live = template(fetched.TemplateBody), ids = declaredRoles(live, name);
+    if (completedUpdate) {
+      requireValue(name === DEPLOYMENT && stack.StackStatus === 'UPDATE_COMPLETE');
+      completedTemplateEqual(live, source);
+      equal(Object.keys(parameters).sort(), Object.keys(source.Parameters).sort());
+    }
     equal(summaries.filter(s => s.ResourceType === 'AWS::IAM::Role').map(s => s.LogicalResourceId).sort(), ids);
     // Only role declarations and their conditions are frozen. The intended
     // managed-policy and independent CI inline-policy updates remain possible.
@@ -325,7 +347,16 @@ export function createRetainedOperatorInventory(options) {
     const result = queue.then(async () => { checkSource(); try { return await task(); } catch (error) { usable = false; throw error; } });
     queue = result.catch(() => {}); return result;
   };
+  let completedCatalog;
   return Object.freeze({
+    verifyCompletedDeploymentRoleCatalog: () => serialized(async () => {
+      const ownership = await owner(DEPLOYMENT, true), roles = [];
+      for (const id of ownership.ids) {const role = await getRole(ROLE_NAMES[id]); roles.push({logicalId:id, ...role.record});}
+      const recheck = await owner(DEPLOYMENT, true);
+      equal(ownership, recheck);
+      const current = {owner:ownership.stackId, parameters:ownership.parameters, roles};
+      checkSource(); if (completedCatalog) equal(current, completedCatalog); else completedCatalog = current;
+    }),
     verify: () => serialized(async () => {
       usable = false;
       const namespace = await owner(NAMESPACE), deployment = await owner(DEPLOYMENT);

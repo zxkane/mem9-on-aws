@@ -1,10 +1,18 @@
-import {it,expect,vi,afterEach} from 'vitest';
+import {it,expect,vi,afterEach,beforeEach} from 'vitest';
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
 import * as pulumi from '@pulumi/pulumi';
 import {NONROOT_POSTAPPLY_FUNCTIONS as functions,NONROOT_POSTAPPLY_RESOURCES as resources} from '../scripts/lib/nonroot-postapply.mjs';
 import {installNonrootDeploymentCapture} from './nonroot-deployment-capture';
 const {capture}=vi.hoisted(()=>({capture:vi.fn(async()=> 'a'.repeat(64))}));
 vi.mock('../scripts/lib/nonroot-postapply-capture.mjs',()=>({captureSstPostApplyOutputs:capture}));
+beforeEach(()=>vi.stubGlobal('$util',pulumi));
 afterEach(()=>{vi.unstubAllEnvs();vi.unstubAllGlobals();vi.clearAllMocks();});
+it('does not require the Pulumi package while SST evaluates config before platform installation',()=>{
+ const source=readFileSync(new URL('./nonroot-deployment-capture.ts',import.meta.url),'utf8');
+ const emitted=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2023}}).outputText;
+ expect(emitted).not.toMatch(/(?:from|import)\s*['"]@pulumi\/pulumi['"]/);
+});
 it('real Pulumi transformations wait for asynchronously registered resources and nested Outputs',async()=>{
  vi.stubEnv('GITHUB_JOB','deploy-prod');vi.stubEnv('MEM9_CI_ACQUISITION_CONFIG',JSON.stringify({version:3,startup:{notAfter:Date.now()+10000}}));
  vi.stubGlobal('$app',{name:'mem9-on-aws',stage:'prod'});vi.stubGlobal('$cli',{command:'deploy',paths:{root:'/synthetic',work:'/synthetic/.sst'}});

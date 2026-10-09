@@ -15716,6 +15716,11 @@
       "bytesLength": 6696
     },
     {
+      "path": "scripts/lib/production-control-capacity.mjs",
+      "sha256": "3817376e3e52f6e29ab85c7212accb86c31babf60df8e7d9df88e64c57c380f9",
+      "bytesLength": 5881
+    },
+    {
       "path": "scripts/lib/production-control-source.mjs",
       "sha256": "8434d1209ab8e967e24d2846c37736e250444259e465f08a4ba918686cb634b9",
       "bytesLength": 9594
@@ -15737,8 +15742,8 @@
     },
     {
       "path": "scripts/lib/production-image-graph.mjs",
-      "sha256": "efa0a371e9d95b1799f94c09495e1106f097c39bc11d5c83594641c93c21888e",
-      "bytesLength": 39236
+      "sha256": "b653e56916723a3109f1f6c5257f3236dc383fbd15e35848b497f1794b0ad6ff",
+      "bytesLength": 39750
     },
     {
       "path": "scripts/lib/production-image-response.mjs",
@@ -15878,7 +15883,7 @@
   ],
   "output": {
     "path": ".github/actions/ci-carrier-before-copy/dist/index.mjs",
-    "sha256": "61b6903e6095ee0decfd3bcb0161be4c2ff4817e7c124c9637d891c3792f4281",
-    "bytesLength": 6160460
+    "sha256": "525b62f94727334bb8750c1b76973327cd5f3bb6d59bac05abc760c6d6dd1fb0",
+    "bytesLength": 6163913
   }
 }

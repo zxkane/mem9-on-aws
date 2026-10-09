@@ -1,3 +1,4 @@
+import {inspectFutureControlCapacity,isFutureControlCapacityProfile,measureFutureControlCapacity} from './production-control-capacity.mjs';
 /** Portable R4 funding codec with the R5 fixed source reader. Pure data only: no
  * file access, network, clock reads, publication or business authorization.
  * Funding plans precede the final proof and never embed a grant/debit hash. */
@@ -146,12 +147,13 @@ export function inspectFutureCallProfiles(value){
  return profiles;
 }
 
-function sumCalls(calls,localBudget=zero(),arithmetic={counter,addCounters}){
+function sumCalls(calls,localBudget=zero(),arithmetic={counter,addCounters},controlCapacity){
  const addCounters=arithmetic.addCounters;let total={...local(localBudget,arithmetic)};
- for(const c of calls){const bytes=(c.requestBytes+c.responseBytes)*c.count;need(integer(bytes),'FutureBudgetOverflow');total=addCounters(total,{...zero(),ecrRequests:c.ecr?c.count:0,logicalBytes:bytes,httpBodyBytes:bytes});}
+ if(controlCapacity)total=addCounters(total,measureFutureControlCapacity(calls,controlCapacity));
+ for(const c of calls){if(controlCapacity&&isFutureControlCapacityProfile(c))continue;const bytes=(c.requestBytes+c.responseBytes)*c.count;need(integer(bytes),'FutureBudgetOverflow');total=addCounters(total,{...zero(),ecrRequests:c.ecr?c.count:0,logicalBytes:bytes,httpBodyBytes:bytes});}
  if(calls.length)total=addCounters(total,{...zero(),httpBodyBytes:UNKNOWN});return total;
 }
-function readSlot(slot,arithmetic){exact(slot,['profiles','localBudget']);const profiles=inspectFutureCallProfiles(slot.profiles);return {...slot,profiles,budget:sumCalls(profiles,slot.localBudget,arithmetic)};}
+function readSlot(slot,arithmetic){exact(slot,['profiles','localBudget',...(Object.hasOwn(slot,'controlCapacity')?['controlCapacity']:[])]);const profiles=inspectFutureCallProfiles(slot.profiles);if(slot.controlCapacity)inspectFutureControlCapacity(slot.controlCapacity);return {...slot,profiles,budget:sumCalls(profiles,slot.localBudget,arithmetic,slot.controlCapacity)};}
 function handshake(bytes){
  need(positive(bytes)&&bytes<=MiB,'FutureHandshakeCap');
  const calls=[op('request','PutObject',16*KiB,16*KiB),op('response','GetObject',0,Math.max(bytes,16*KiB),12)];
@@ -210,15 +212,17 @@ function profileTemplateCheck(c){
   }
  }else need(c.consumers.every(row=>!row.profiles?.some(p=>p.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT')),'FutureRootDeliveryRequired');
  if(c.version===2)rootTemplateCheck(c.owner.roots,c.consumers);
+ const targets=c.consumers.filter(row=>row.scope.kind==='target');
+ if(targets.some(row=>Object.hasOwn(row,'controlCapacity')))need(targets.length===5&&targets.every(row=>Object.hasOwn(row,'controlCapacity')),'FutureControlCapacityCoverage');
  for(const row of c.consumers){
   if(row.scope.kind==='source')sourceSlot(row,arithmetic);
-  else {exact(row,['scope','profiles','localBudget','handshake',...(c.owner.delivery?['rootRequest']:[])]);exact(row.handshake,['terminalResponseBytes']);inspectFutureCallProfiles(row.profiles);local(row.localBudget,arithmetic);handshake(row.handshake.terminalResponseBytes);}
+  else {exact(row,['scope','profiles','localBudget','handshake',...(c.owner.delivery?['rootRequest']:[]),...(Object.hasOwn(row,'controlCapacity')?['controlCapacity']:[])]);exact(row.handshake,['terminalResponseBytes']);inspectFutureCallProfiles(row.profiles);if(row.controlCapacity){need(c.version===2&&c.cumulativeLimitsHash===NONROOT_REMAINING_WORK_LIMITS_HASH_V2,'FutureControlCapacityRevision');measureFutureControlCapacity(row.profiles,row.controlCapacity);}local(row.localBudget,arithmetic);handshake(row.handshake.terminalResponseBytes);}
  }
- readSlot(c.finalization,arithmetic);
+ need(!Object.hasOwn(c.finalization,'controlCapacity'),'FutureFinalizationCapacityUnsupported');readSlot(c.finalization,arithmetic);
 }
 
 function profileTemplateTerms(c){
- const arithmetic=futureArithmetic(c),addCounters=arithmetic.addCounters; const consumers=c.consumers.map(row=>{if(row.scope.kind==='source')return sourceSlot(row,arithmetic);const work=readSlot({profiles:row.profiles,localBudget:row.localBudget},arithmetic),h=handshake(row.handshake.terminalResponseBytes),root=row.rootRequest?ciRootRequestBudget():zero();return {scope:row.scope,...work,localBudget:addCounters(work.localBudget,{...zero(),logicalBytes:root.logicalBytes}),handshake:h,...(row.rootRequest?{rootRequest:row.rootRequest}:{}),budget:addCounters(addCounters(work.budget,h.budget),root)};});
+ const arithmetic=futureArithmetic(c),addCounters=arithmetic.addCounters; const consumers=c.consumers.map(row=>{if(row.scope.kind==='source')return sourceSlot(row,arithmetic);const work=readSlot({profiles:row.profiles,localBudget:row.localBudget,...(row.controlCapacity?{controlCapacity:row.controlCapacity}:{})},arithmetic),h=handshake(row.handshake.terminalResponseBytes),root=row.rootRequest?ciRootRequestBudget():zero();return {scope:row.scope,...work,localBudget:addCounters(work.localBudget,{...zero(),logicalBytes:root.logicalBytes}),handshake:h,...(row.rootRequest?{rootRequest:row.rootRequest}:{}),budget:addCounters(addCounters(work.budget,h.budget),root)};});
  const publication={...FUTURE_OWNER_PUBLICATION,budget:sumCalls(publicationCalls)},claims=c.consumers.map(row=>row.scope.kind==='source'?sourceOwnerClaim(row.scope.checkpoint,row.reader.terminalResponseBytes):ownerClaim(row.scope.checkpoint,row.handshake.terminalResponseBytes));
  let ownerBudget=addCounters(publication.budget,c.owner.localBudget);for(const claim of claims)ownerBudget=addCounters(ownerBudget,claim.budget);
  const roots=c.version===2?rootTemplateTerms(c):undefined;if(roots)ownerBudget=addCounters(ownerBudget,roots.budget);

@@ -196,6 +196,12 @@ export function createGithubMaintenanceController({
   }
 
   return {
+    async verifyProductionBoundaryActive() {
+      assertRepositoryIdentity();
+      const value = await invokeGhCommand(['variable','get','WORKLOAD_BOUNDARY_PROD_ENABLED','--repo',repository,'--json','value','--jq','.value'], 'production boundary activation read failed');
+      if (value !== 'true') throw new Error('production boundary activation is not already enabled');
+      return true;
+    },
     async activateProductionBoundary() {
       assertRepositoryIdentity();
       await setVariable(
@@ -394,6 +400,8 @@ export async function executeBoundaryRollout({
   deployBoundary,
   deployEnforcement,
   activateProduction,
+  verifyProductionBoundaryActive,
+  verifyFinalizationBoundary,
   verifyFinalGithubInterlock,
   resumeDeploymentWorkflows,
   reviewedCommit,
@@ -432,6 +440,8 @@ export async function executeBoundaryRollout({
     deployBoundary,
     deployEnforcement,
     activateProductionBoundary: activateProduction,
+    verifyProductionBoundaryActive,
+    verifyFinalizationBoundary,
     verifyFinalGithubInterlock,
     resumeDeployments: resumeDeploymentWorkflows,
     signal,

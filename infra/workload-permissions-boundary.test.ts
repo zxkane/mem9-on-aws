@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as pulumi from "@pulumi/pulumi";
 import {
   WORKLOAD_BOUNDARY_POLICY_NAME,
   registerWorkloadRoleBoundary,
@@ -135,6 +136,8 @@ describe("workload role boundary transform", () => {
       (globalThis as Record<string, unknown>).$config = (value: unknown) =>
         value;
       (globalThis as Record<string, unknown>).$app = { stage: "prod" };
+      (globalThis as Record<string, unknown>).$cli = { command: "deploy" };
+      (globalThis as Record<string, unknown>).$util = pulumi;
       (globalThis as Record<string, unknown>).aws = {
         ec2: {
           getVpcOutput: () => {
@@ -219,6 +222,8 @@ describe("workload role boundary transform", () => {
         }
         for (const name of [
           "$app",
+          "$cli",
+          "$util",
           "$config",
           "aws",
           "sst",
