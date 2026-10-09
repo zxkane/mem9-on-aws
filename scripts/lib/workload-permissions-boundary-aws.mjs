@@ -302,9 +302,11 @@ export function createAwsCliAdapter({
     if (response.NextToken || response.Stacks?.length !== 1) deploymentError();
     const stack = response.Stacks[0];
     const prefix = `arn:${partition}:cloudformation:${OPERATOR_STACK_REGION}:${accountId}:stack/${DEPLOY_ROLE_NAME}/`;
+    // Stable prior state may be recovered. Update success still requires the
+    // deployment command's waiter and the full permanent-enforcement checks.
     if (stack.StackName !== DEPLOY_ROLE_NAME || !stack.StackId?.startsWith(prefix) ||
       !/^[A-Za-z0-9-]+$/.test(stack.StackId.slice(prefix.length)) ||
-      !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(stack.StackStatus) || stack.ParentId || stack.RootId || stack.RoleARN) deploymentError();
+      !["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"].includes(stack.StackStatus) || stack.ParentId || stack.RootId || stack.RoleARN) deploymentError();
     const fields = (rows, key, value) => {
       if (!Array.isArray(rows)) deploymentError();
       const result = new Map();

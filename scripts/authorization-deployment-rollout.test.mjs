@@ -14,7 +14,7 @@ const workload = "mem9-on-aws-prod-synthetic-worker";
 const options = {...identity, boundaryArn, deployRoleName: DEPLOY_ROLE_NAME,
   reviewedCommit: "a".repeat(40), resumeCommand: "synthetic-resume"};
 
-function fixture({incomplete, badScope, drift, failRelease, failEnforcement} = {}) {
+function fixture({incomplete, badScope, drift, failRelease, failEnforcement, failedUpdateState} = {}) {
   const calls = [], quarantined = new Set();
   let roleReads = 0, resumed = false;
   const adapter = {
@@ -50,7 +50,10 @@ function fixture({incomplete, badScope, drift, failRelease, failEnforcement} = {
     async verifyProductionRuntimeBindings() {return [workload];},
     async getRole() {return {permissionsBoundaryArn: boundaryArn};},
     async putRoleBoundary() {throw Error("unexpected boundary attachment");},
-    async deployPermanentEnforcement() {calls.push("enforcement");},
+    async deployPermanentEnforcement() {
+      calls.push("enforcement");
+      if (failedUpdateState) throw Error(`synthetic stack-update-complete waiter: ${failedUpdateState}`);
+    },
     async verifyPermanentEnforcement({roleNames}) {
       expect(roleNames).toEqual(names); calls.push("verify-enforcement");
       return !failEnforcement;
@@ -70,6 +73,12 @@ function fixture({incomplete, badScope, drift, failRelease, failEnforcement} = {
 }
 
 describe("authorization maintenance deployment-role coverage", () => {
+  it.each(["UPDATE_ROLLBACK_COMPLETE", "UPDATE_ROLLBACK_FAILED", "UPDATE_IN_PROGRESS"])("never activates or releases quarantine when the update waiter rejects %s", async failedUpdateState => {
+    const f = fixture({failedUpdateState});
+    await expect(runBoundaryRollout(f.adapter, options)).rejects.toThrow(/stack-update-complete/);
+    expect(f.calls).not.toContain("activate"); expect(f.calls).not.toContain("release-all");
+    expect([...f.quarantined].sort()).toEqual(names); expect(f.resumed()).toBe(false);
+  });
   it("quarantines, reads and verifies every declared deployment role before coordinated release", async () => {
     const f = fixture();
     await expect(runBoundaryRollout(f.adapter, options)).resolves.toMatchObject({status: "complete"});
