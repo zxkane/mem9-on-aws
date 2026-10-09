@@ -230,6 +230,8 @@ export function createAwsCliAdapter({
   activateProductionBoundary = async () => {
     throw new Error("production boundary activation is not configured");
   },
+  verifyProductionBoundaryActive = async () => {throw new Error('production activation verification is not configured');},
+  verifyFinalizationBoundary = async () => {throw new Error('native boundary verification is not configured');},
   verifyFinalGithubInterlock = async () => {
     throw new Error("final GitHub interlock is not configured");
   },
@@ -582,6 +584,40 @@ export function createAwsCliAdapter({
 
   const adapter = {
     resolveDeploymentRoles,
+
+    async verifyCompletedDeployment() {
+      await retainedOperators.verifyCompletedDeploymentRoleCatalog();
+      return resolveDeploymentRoles();
+    },
+
+    verifyProductionBoundaryActive,
+    verifyFinalizationBoundary,
+
+    async readFinalizationState({roleNames}) {
+      if (!Array.isArray(roleNames) || !roleNames.length || roleNames.length > MAX_SERVICE_ITEMS ||
+          new Set(roleNames).size !== roleNames.length) deploymentError();
+      const roles = [];
+      for (const name of [...new Set([...deploymentRoleNames, ...roleNames])].sort()) {
+        const {Role: role} = await invokeAwsCommand(['iam','get-role','--role-name',name]);
+        if (role?.RoleName !== name || role.Arn !== `arn:${partition}:iam::${accountId}:role/${name}` ||
+            typeof role.RoleId !== 'string' || !role.RoleId) deploymentError();
+        roles.push({name, id:role.RoleId, arn:role.Arn, trust:role.AssumeRolePolicyDocument,
+          boundary:role.PermissionsBoundary ?? null, maximumSession:role.MaxSessionDuration ?? null, tags:role.Tags ?? []});
+      }
+      const policies = [];
+      for (const roleName of deploymentRoleNames) {
+        const attached = await collectBoundedPages({decodePage:p=>({items:p?.policies,nextToken:p?.marker}),
+          fetchPage:marker=>adapter.listAttachedPolicies({roleName,marker}),label:'finalization attached policies'});
+        const versions = [];
+        for (const p of attached.toSorted((a,b)=>a.arn.localeCompare(b.arn))) {
+          const metadata = await adapter.getManagedPolicy({policyArn:p.arn});
+          if (!/^v[1-9][0-9]*$/.test(metadata?.defaultVersionId ?? '')) deploymentError();
+          versions.push({arn:p.arn,version:metadata.defaultVersionId});
+        }
+        policies.push({roleName,versions,documents:await loadRolePolicyDocuments(adapter,roleName)});
+      }
+      return canonical({roles,policies});
+    },
 
     async verifyRetainedOperators() {
       await retainedOperators.verify();

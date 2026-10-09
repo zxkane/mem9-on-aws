@@ -2151,6 +2151,73 @@ export async function runBoundaryRollout(
   }
 }
 
+/** Fixed post-update route. Its protected owner must authenticate the HELD
+ * predecessor and native runtime evidence. No deployment or repair is attempted.
+ * The ordinary rollout above deliberately retains its existing behavior. */
+export async function runBoundaryPostUpdateFinalization(adapter, {
+  partition, accountId, boundaryArn, reviewedCommit, deadlineAt,
+}) {
+  if (boundaryArn !== expectedRoleBoundaryArn('ordinary-workload', {partition, accountId}) ||
+      !/^[a-f0-9]{40}$/.test(reviewedCommit ?? '') || !Number.isSafeInteger(deadlineAt) ||
+      deadlineAt > Date.now() + 3_000_000) throw new Error('post-update finalization binding is invalid');
+  for (const name of ['verifyCompletedDeployment','verifyFinalizationBoundary','verifyProductionBoundaryActive',
+    'verifyRetainedOperators','verifyRetainedOperatorEnforcement','verifyFinalGithubInterlock',
+    'readFinalizationState','deleteQuarantines']) {
+    if (typeof adapter[name] !== 'function') throw new Error('post-update finalization dependency is missing');
+  }
+  const bounded = createDeadlineAdapter(adapter, deadlineAt);
+  const deployRoles = [DEPLOY_ROLE_NAME, `${DEPLOY_ROLE_NAME}-preview`, `${DEPLOY_ROLE_NAME}-prod`].sort();
+  const must = value => {if (value !== true) throw new Error('post-update finalization verification failed');};
+  let quarantineRemoved = false;
+  const readState = async () => {
+    must(await bounded.verifyRetainedOperators());
+    if (!sameList(await bounded.verifyCompletedDeployment(), deployRoles)) throw new Error('deployment roles changed');
+    let scope;
+    for (const roleName of deployRoles) {
+      const actual = await discoverPassRoleScope(bounded, {roleName, partition, accountId});
+      if (scope && !sameList(scope, actual)) throw new Error('deployment PassRole scopes disagree');
+      scope = actual;
+    }
+    const roles = await discoverMatchingRoles(bounded, scope);
+    if (!roles.length) throw new Error('no workload roles matched the deployed PassRole scope');
+    const liveRoles = await bounded.verifyProductionRuntimeBindings();
+    requireLiveRoleCoverage(liveRoles, roles);
+    for (const roleName of roles) await requireBoundary(bounded, roleName, {partition, accountId});
+    const current = await bounded.readFinalizationState({roleNames:roles});
+    return {scope, roles, liveRoles, current};
+  };
+  try {
+    await bounded.verifyBoundaryRegion();
+    must(await bounded.verifyQuarantine());
+    must(await bounded.verifyProductionBoundaryActive());
+    must(await bounded.verifyFinalizationBoundary());
+    const before = await readState();
+    must(await bounded.verifyPermanentEnforcement({boundaryArn, roleNames:deployRoles}));
+    must(await bounded.verifyRetainedOperatorEnforcement({roleNames:deployRoles}));
+    // Repeat current-state reads, not the expensive simulation matrix. Nothing
+    // between these snapshots may repair IAM or change production activation.
+    must(await bounded.verifyFinalizationBoundary());
+    must(await bounded.verifyProductionBoundaryActive());
+    await bounded.verifyFinalGithubInterlock({reviewedCommit});
+    const after = await readState();
+    if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error('post-update finalization state changed');
+    // The matrix can take minutes. Recheck GitHub adjacent to release as well.
+    await bounded.verifyFinalGithubInterlock({reviewedCommit});
+    must(await bounded.verifyQuarantine());
+    // Original coordinated deletion owns the separate recovery reserve.
+    await adapter.deleteQuarantines({roleNames:deployRoles, policyName:QUARANTINE_POLICY_NAME});
+    quarantineRemoved = true;
+    await bounded.resumeDeployments();
+    return {verifiedRoleCount:after.roles.length, status:'complete'};
+  } catch (error) {
+    if (error && typeof error === 'object') {
+      error.quarantineRemoved = quarantineRemoved;
+      error.resumeCommand = ROLLOUT_RESUME_COMMAND;
+    }
+    throw error;
+  }
+}
+
 export function redactedRolloutFailure(error) {
   const attempted =
     error && typeof error === "object" && error.quarantineAttempted === true;
