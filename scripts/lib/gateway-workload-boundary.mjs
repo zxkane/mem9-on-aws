@@ -96,3 +96,11 @@ export function gatewayBoundaryProbeCases(contract) {
   }
   return cases;
 }
+
+/** Source predicates require actual Lambda credentials. Preserve every
+ * original case/expectation; dispatch only these four cases to the native gate. */
+export function gatewayBoundaryVerificationPlan(contract){
+  const all=gatewayBoundaryProbeCases(contract),runtime=all.filter(p=>p.context.some(c=>c.startsWith('ContextKeyName=lambda:SourceFunctionArn,')));
+  if(runtime.length!==4||runtime.some(p=>p.expected!=='explicitDeny'))throw Error('GatewayRuntimeCaseCoverage');
+  return {simulation:all.filter(p=>!runtime.includes(p)),runtime};
+}

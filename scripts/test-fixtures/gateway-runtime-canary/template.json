@@ -1,0 +1,33 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Operator-only synthetic Gateway source-condition verification. Render with the closed resource compiler; never deploy through the application pipeline.",
+  "Metadata": {"OperatorOnly": true, "Compiler": "gateway-runtime-canary-v1"},
+  "Parameters": {
+    "BoundaryMode": {"Type": "String", "AllowedValues": ["comparison", "original"], "Default": "comparison"}
+  },
+  "Conditions": {"UseOriginalBoundary": {"Fn::Equals": [{"Ref": "BoundaryMode"}, "original"]}},
+  "Resources": {
+    "ComparisonBoundary": {"Type": "AWS::IAM::ManagedPolicy", "Properties": {}},
+    "CanaryRole": {"Type": "AWS::IAM::Role", "Properties": {
+      "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]},
+      "MaxSessionDuration": 3600
+    }},
+    "SyntheticKey": {"Type": "AWS::KMS::Key", "DeletionPolicy": "Delete", "UpdateReplacePolicy": "Delete", "Properties": {
+      "KeySpec": "SYMMETRIC_DEFAULT", "KeyUsage": "ENCRYPT_DECRYPT", "MultiRegion": false,
+      "PendingWindowInDays": 7, "BypassPolicyLockoutSafetyCheck": false
+    }},
+    "CanaryIdentityPolicy": {"Type": "AWS::IAM::Policy", "Properties": {}},
+    "CanaryLogGroup": {"Type": "AWS::Logs::LogGroup", "DeletionPolicy": "Delete", "UpdateReplacePolicy": "Delete", "Properties": {"RetentionInDays": 7}},
+    "CanaryFunction": {"Type": "AWS::Lambda::Function", "DependsOn": ["CanaryIdentityPolicy", "CanaryLogGroup"], "Properties": {
+      "Runtime": "nodejs24.x", "Architectures": ["arm64"], "Handler": "index.handler",
+      "MemorySize": 256, "Timeout": 30, "ReservedConcurrentExecutions": 1
+    }}
+  },
+  "Outputs": {
+    "FunctionArn": {"Value": {"Fn::GetAtt": ["CanaryFunction", "Arn"]}},
+    "RoleArn": {"Value": {"Fn::GetAtt": ["CanaryRole", "Arn"]}},
+    "KeyArn": {"Value": {"Fn::GetAtt": ["SyntheticKey", "Arn"]}},
+    "ComparisonBoundaryArn": {"Value": {"Ref": "ComparisonBoundary"}},
+    "LogGroupName": {"Value": {"Ref": "CanaryLogGroup"}}
+  }
+}

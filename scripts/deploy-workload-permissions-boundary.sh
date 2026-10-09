@@ -505,9 +505,17 @@ verify_gateway_boundary_policy() {
   if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
       WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
       node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway <<<"$boundary_policy"; then return 1; fi
+  if [[ "$verify_only" != "true" ]] && ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+      WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+      WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION="$default_version" \
+      node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-runtime <<<"$boundary_policy"; then
+    gateway_runtime_gate_failed=true
+    echo "Gateway source-condition runtime verification is required; quarantine remains held." >&2
+    return 1
+  fi
   probes="$(WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
       WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
-      node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-probes </dev/null)" || return 1
+      node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-simulation-probes </dev/null)" || return 1
   while IFS= read -r row; do
     decrypt_probe_resource="$(jq -er .resource <<<"$row")" || return 1
     mapfile -t gateway_probe_args < <(jq -r '.context[]' <<<"$row")
@@ -636,7 +644,7 @@ if [[ $describe_exit -eq 0 ]]; then
   if [[ "$force_guarded_recovery" != "true" ]]; then
     if [[ "$verify_only" == "true" ]]; then
       if verify_all_boundaries; then
-        echo "Retained workload permissions-boundary stack verified."
+        echo "Read-only boundary documents and IAM simulations verified; runtime source conditions require guarded owner verification."
         exit 0
       fi
       exit 1
@@ -646,6 +654,10 @@ if [[ $describe_exit -eq 0 ]]; then
     fi
   fi
   if [[ "$verify_only" == "true" ]]; then
+    exit 1
+  fi
+  if [[ "${gateway_runtime_gate_failed:-false}" == "true" ]]; then
+    echo "Missing or invalid runtime evidence does not authorize a boundary rewrite." >&2
     exit 1
   fi
 

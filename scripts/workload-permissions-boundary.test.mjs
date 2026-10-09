@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { createRetainedOperatorFixture } from "./test-fixtures/retained-operator.mjs";
+import {mockGatewaySourceGate} from './test-fixtures/gateway-runtime-canary/mock-source-gate.mjs';
 import { expectedRetainedOperatorProtectionPolicy, retainedOperatorProtectionPolicyName } from "./lib/retained-operator-protection.mjs";
 import {
   DENY_DANGEROUS_POLICY_NAME,
@@ -764,6 +765,8 @@ async function runBoundaryDeployMock({
   deployedPolicy,
   guarded = false,
   gatewayMissing = false,
+  gatewayRuntimeRejected = false,
+  policyRevision = 'r1',
   matching = false,
   policyIdentityReadbackFails = false,
   policyRevisionReadbackFails = false,
@@ -797,12 +800,13 @@ async function runBoundaryDeployMock({
   const simulationCompletePath = join(directory, "simulation-complete");
   const expectedBoundaryPolicy = expectedBoundaryPolicyDocument({
     ...boundaryContract,
+    policyRevision,
     ...(decisionArtifactBucketName
       ? { decisionArtifactBucketName }
       : {}),
   });
   const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
-  await writeFile(gatewayExpectedPath, JSON.stringify(expectedGatewayBoundaryPolicyDocument(boundaryContract)));
+  await writeFile(gatewayExpectedPath, JSON.stringify(expectedGatewayBoundaryPolicyDocument({...boundaryContract,policyRevision})));
   await writeFile(gatewayProbesPath, JSON.stringify(gatewayBoundaryProbeCases(boundaryContract)));
   const baselineBeforeMutation = JSON.stringify(baselineBoundaryPolicy);
   boundaryStatement(baselineBoundaryPolicy.Statement, "actionCeiling").NotAction.push("iam:DeleteRole");
@@ -1144,7 +1148,7 @@ case "$command" in
       if [[ "$MOCK_POLICY_REVISION_READBACK_FAILS" == "true" ]]; then
         printf '%s\\n' 'invalid'
       else
-        printf '%s\\n' 'r1'
+        printf '%s\\n' "$MOCK_CURRENT_POLICY_REVISION"
       fi
     else
       jq -cn \
@@ -1394,7 +1398,9 @@ esac
     await chmod(gitPath, 0o755);
   }
 
+  let runtimeGate;
   try {
+    if(!verifyOnly||guarded)runtimeGate=await mockGatewaySourceGate({path:join(directory,'gateway.sock'),policyPath:gatewayExpectedPath,reject:gatewayRuntimeRejected});
     const result = spawnSync(
       "bash",
       [
@@ -1419,6 +1425,8 @@ esac
           MOCK_GATEWAY_EXPECTED: gatewayExpectedPath,
           MOCK_GATEWAY_PROBES: gatewayProbesPath,
           MOCK_GATEWAY_MISSING: String(gatewayMissing),
+          MOCK_CURRENT_POLICY_REVISION: policyRevision,
+          MEM9_BOOTSTRAP_REQUEST_SOCKET: runtimeGate?.path??'',
           MOCK_CALLS: callsPath,
           MOCK_CREATED: createdPath,
           MOCK_DEPLOYED: deployedPath,
@@ -1477,6 +1485,7 @@ esac
       result,
     };
   } finally {
+    await runtimeGate?.close();
     await rm(directory, { force: true, recursive: true });
   }
 }
@@ -8198,18 +8207,33 @@ describe("operator entry point", { timeout: 10000 }, () => {
     expect(repaired.calls.some(call=>call.startsWith('cloudformation update-stack'))).toBe(true);
   });
 
-  it("gates the active boundary with runtime KMS semantics", async () => {
+  it('R2 recovery reuses the actual nondefault policy revision and cached source receipt without a stack rewrite',async()=>{
+    const f=await runBoundaryDeployMock({matching:true,guarded:true,policyRevision:'r'+'7'.repeat(20)});
+    expect(f.result.status,f.result.stderr).toBe(0);
+    expect(f.calls.some(c=>/^cloudformation (?:update|create)-stack/.test(c))).toBe(false);
+    const simulations=f.calls.filter(c=>c.startsWith('iam simulate-custom-policy')&&c.includes('--permissions-boundary-policy-input-list'));
+    expect(simulations).toHaveLength(46);
+    expect(simulations.some(c=>c.includes('Function-fixture')&&c.includes('ContextKeyName=lambda:SourceFunctionArn'))).toBe(false);
+  });
+  it('R2 missing native evidence holds without manufacturing a new policy revision',async()=>{
+    const f=await runBoundaryDeployMock({matching:true,guarded:true,policyRevision:'r'+'7'.repeat(20),gatewayRuntimeRejected:true});
+    expect(f.result.status).toBe(1);expect(f.result.stderr).toContain('does not authorize a boundary rewrite');
+    expect(f.calls.some(c=>/^cloudformation (?:update|create)-stack/.test(c))).toBe(false);
+  });
+
+  it("checks the active boundary read-only with KMS simulation semantics and no native broker", async () => {
     const { calls, result } = await runBoundaryDeployMock({
       matching: true,
       verifyOnly: true,
     });
     expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('runtime source conditions require guarded owner verification');
     const simulations = calls.filter(
       (call) =>
         call.startsWith("iam simulate-custom-policy") &&
         call.includes("--permissions-boundary-policy-input-list"),
     );
-    expect(simulations).toHaveLength(50);
+    expect(simulations).toHaveLength(46);
     const projectLambda = simulations.find(
       (call) =>
         call.includes("function:mem9-on-aws-regression-probe") &&

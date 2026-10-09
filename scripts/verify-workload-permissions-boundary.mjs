@@ -6,7 +6,7 @@ import {
   verifyGatewayBoundaryPolicyDocument,
   verifyQuarantinePolicy,
 } from "./lib/workload-permissions-boundary.mjs";
-import {gatewayBoundaryProbeCases} from './lib/gateway-workload-boundary.mjs';
+import {gatewayBoundaryProbeCases,gatewayBoundaryVerificationPlan} from './lib/gateway-workload-boundary.mjs';
 
 try {
   let input = "";
@@ -30,6 +30,13 @@ try {
   if (process.argv[2] === '--gateway-probes') {
     process.stdout.write(JSON.stringify(gatewayBoundaryProbeCases(contract))+'\n');
     process.exit(0);
+  }
+  if(process.argv[2]==='--gateway-simulation-probes'){
+    process.stdout.write(JSON.stringify(gatewayBoundaryVerificationPlan(contract).simulation)+'\n');process.exit(0);
+  }
+  if(process.argv[2]==='--gateway-runtime'){
+    const {requestGatewayRuntimeSourceGate}=await import('./lib/gateway-runtime-source-gate.mjs');
+    await requestGatewayRuntimeSourceGate({boundary:input,contract,policyVersion:process.env.WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION});process.exit(0);
   }
   const gateway = process.argv[2] === '--gateway';
   const valid = quarantine
