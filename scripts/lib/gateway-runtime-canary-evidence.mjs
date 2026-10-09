@@ -14,6 +14,66 @@ const doc=v=>typeof v==='string'?JSON.parse(v):v;
 const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 const bytes=(text,maximum)=>{need(typeof text==='string'&&text.length<=4*Math.ceil(maximum/3),'Bytes');const raw=Buffer.from(text,'base64');need(raw.length>0&&raw.length<=maximum&&raw.toString('base64')===text,'Bytes');return raw;};
 
+const internalReasons=new Set([
+ ...'Account BootstrapPolicyTooLarge Handler ManagedPolicyUnnecessary OperatorPolicyTooLarge OriginalPolicy OwnerRole Plan PlanChanged PolicyRevision Region Scope SourceStatements TemplateInput TemplateTooLarge VerificationId Vpc BoundaryNotPropagated CleanupIncomplete CleanupKeyIdentity Clock Deadline ForeignBoundary LifecycleInput NativeAdapter PhaseEvidence PlanBinding PolicyOrCodeChanged ResourceIdentity StackFailed StackIdentity StateDrift StateHash StateShape TemplateBinding TestOptions UnexpectedResourcePolicy StackDeadline OperationFailed'.split(' ').map(v=>'GatewayRuntimeCanary'+v),
+ ...'AttachedPolicies Boundary BoundaryDocument Bytes CodeArchive CodeBytes CodeDescriptor CodeEntry CodeSha256 CodeTrailingData Environment EvidencePin Fields Function HandlerBytes IdentityPolicy IndependentPins InvocationBinding InvocationTime InvokeRequest InvokeResponse InvokeTime Key KeyGrants KeyPolicy KeyState Kind Nonce PermissionDrift Phase PolicyVersionDrift PositiveControl ReadbackTime ReplayedInvoke ReplayedRequest Request Results Role RoleRecreated RoleTags Runtime RuntimeDrift Scope Sequence ServiceAuthorization ServiceBinding ServiceTime SourcePolicy StateDrift Trust Window DiagnosticInput DiagnosticSize'.split(' ').map(v=>'GatewayRuntimeEvidence'+v),
+ ...'AttachedInventory Boundary BoundaryRequest CleanupKeyInventory CleanupScope CodeDownload CodeLocation CodeSize ComparisonBoundary CreateRepeated CreateRequest DeleteRequest DeployedTemplate DirectoryChanged Encryption ExecutableLayers FunctionExists FunctionIdentity GrantInventory Input InvokePayload InvokeResponse KeyDeletion KeyDeletionWindow KeyIdentity KeyInventory KeyMissing KeyTags LogInventory LogsExist NativeCompletion NativeKeyCleanup OriginalBoundary OriginalSessions Paths PhaseSequence Plan PolicyExists PolicyIdentity PolicyInventory PolicyScope PolicyVersion PrivateDirectory ResourceInventory ResourceType RoleExists Scope ScopedEnvironment StackExists StackIdentity StackScope TestOptions UnexpectedStackAbsence Uninitialized UnknownCreation AlreadyCreated ObservationFailed ServiceError TransportCleanupHeld DiagnosticWriter DiagnosticWriteFailed DiagnosticLimit'.split(' ').map(v=>'GatewayCanaryAws'+v),
+]);
+const own=(v,k)=>v&&typeof v==='object'?Object.getOwnPropertyDescriptor(v,k)?.value:undefined;
+/** Never forward an arbitrary error message, even when it resembles our prefix. */
+export const gatewayCanaryInternalReason=error=>internalReasons.has(own(error,'message'))?own(error,'message'):'GatewayRuntimeCanaryOperationFailed';
+const oneOf=(v,allowed)=>allowed.includes(v)?v:'unrecognized';
+const diagnosticTime=v=>Number.isSafeInteger(v)&&v>0&&v<=8640000000000000?v:null;
+const diagnosticStatus=v=>Number.isInteger(v)&&v>=100&&v<=599?v:null;
+const uuid=v=>typeof v==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(v)?v:null;
+const stringHash=v=>typeof v==='string'&&v.length<=256?sha(v):null;
+const serviceErrors=['AccessDeniedException','AccessDenied','UnauthorizedOperation','DryRunOperation','ValidationException','ThrottlingException','TooManyRequestsException','ServiceException','ResourceNotFoundException','KMSInvalidStateException','InvalidCiphertextException','NotFoundException','RequestLimitExceeded','ExpiredTokenException','InvalidClientTokenId'];
+const handlerReasons=new Set('Runtime Input Ciphertext Identity Scope Credentials Deadline Sdk ResponseIdentity DecryptResponse Plaintext'.split(' ').map(v=>'GatewayCanary'+v));
+const functionErrorTypes=['Error','TypeError','ReferenceError','SyntaxError','RangeError','EvalError','URIError','TimeoutError','Runtime.ImportModuleError','Runtime.UserCodeSyntaxError','Runtime.HandlerNotFound','Runtime.ExitError','Runtime.InvalidEntrypoint','Runtime.Unknown','Runtime.UnhandledPromiseRejection','Runtime.OutOfMemory','Sandbox.Timedout'];
+
+/** Content-free data, not acceptance evidence. A payload hash covers exactly
+ * payloadHashedBytes (at most 16 KiB); oversized bodies are never parsed here.
+ * The native owner writes this <=4 KiB record within its existing journal cap. */
+export function gatewayCanaryPhaseDiagnostic({verificationId,templateHash,phase,stage,observation,startedMs,completedMs,response,error}){
+ need(/^[a-f0-9]{12}$/.test(verificationId)&&hex(templateHash)&&['A1','B','A2'].includes(phase)&&
+  ['readback-before','invoke','response-validation','readback-after'].includes(stage)&&['start','response','failure'].includes(observation),'DiagnosticInput');
+ const payload=own(response,'Payload'),metadata=own(error,'$metadata')??own(response,'$metadata');
+ let payloadBytes=null,payloadHashedBytes=0,payloadHash=null,payloadFormat='missing',decoded;
+ if(payload instanceof Uint8Array){
+  payloadBytes=payload.byteLength;payloadHashedBytes=Math.min(payloadBytes,16384);
+  const prefix=payload.subarray(0,payloadHashedBytes);payloadHash=sha(prefix);
+  if(payloadBytes>16384)payloadFormat='oversized';
+  else try{decoded=JSON.parse(Buffer.from(prefix).toString('utf8'));payloadFormat=decoded&&typeof decoded==='object'&&!Array.isArray(decoded)?'object':'non-object';}
+  catch{payloadFormat='malformed-json';}
+ }else if(payload!==undefined)payloadFormat='invalid-type';
+ const results=own(decoded,'results'),errorClass=own(error,'code')??own(error,'name')??(error instanceof SyntaxError?'SyntaxError':undefined);
+ const functionErrorType=own(decoded,'errorType'),handlerMessage=own(decoded,'errorMessage');
+ const result={version:1,kind:'gateway-runtime-canary-phase-diagnostic',event:'phase-diagnostic',verificationId,templateHash,phase,stage,
+  observation,reason:error?gatewayCanaryInternalReason(error):null,
+  localStartedMs:diagnosticTime(startedMs),localCompletedMs:diagnosticTime(completedMs),
+  requestId:uuid(own(metadata,'requestId')),requestIdHash:stringHash(own(metadata,'requestId')),httpStatus:diagnosticStatus(own(metadata,'httpStatusCode')),
+  errorClass:error?oneOf(errorClass,[...serviceErrors,'ECLEANUP','ETIMEDOUT','ECONNRESET','AbortError','TimeoutError','CredentialsProviderError','SyntaxError']):null,
+  errorClassHash:error?stringHash(errorClass):null,
+  functionError:own(response,'FunctionError')===undefined?'none':oneOf(own(response,'FunctionError'),['Handled','Unhandled']),
+  functionErrorType:functionErrorType===undefined?null:oneOf(functionErrorType,functionErrorTypes),
+  functionErrorTypeHash:typeof functionErrorType==='string'?sha(functionErrorType):null,
+  handlerReason:handlerMessage===undefined?null:handlerReasons.has(handlerMessage)?handlerMessage:'unrecognized',
+  handlerReasonHash:typeof handlerMessage==='string'?sha(handlerMessage):null,
+  payloadBytes,payloadHashedBytes,payloadHash,payloadFormat,
+  serverRequestId:uuid(own(decoded,'invocationRequestId')),serverRequestIdHash:stringHash(own(decoded,'invocationRequestId')),
+  serverStartedMs:diagnosticTime(own(decoded,'startedMs')),serverCompletedMs:diagnosticTime(own(decoded,'completedMs')),
+  serviceResultCount:Array.isArray(results)?results.length:null,
+  services:[0,1].map(index=>{
+   const r=Array.isArray(results)?results[index]:undefined;
+   return {index,service:oneOf(own(r,'service'),['kms','ec2']),action:oneOf(own(r,'action'),['Decrypt','DescribeSubnets']),
+    outcome:oneOf(own(r,'outcome'),['success','service-error','unexpected-success','unknown']),
+    errorClass:own(r,'errorCode')===undefined?null:oneOf(own(r,'errorCode'),serviceErrors),errorClassHash:stringHash(own(r,'errorCode')),
+    requestId:uuid(own(r,'requestId')),requestIdHash:stringHash(own(r,'requestId')),httpStatus:diagnosticStatus(own(r,'httpStatus')),
+    startedMs:diagnosticTime(own(r,'startedMs')),completedMs:diagnosticTime(own(r,'completedMs'))};
+  })};
+ need(Buffer.byteLength(JSON.stringify(result))<=4096,'DiagnosticSize');return freeze(result);
+}
+
 export function gatewayCanaryInvocation(input){
  exact(input,['nonce','ciphertextBase64']);need(hex(input.nonce),'Nonce');bytes(input.ciphertextBase64,6144);
  return freeze({version:1,nonce:input.nonce,ciphertextBase64:input.ciphertextBase64});

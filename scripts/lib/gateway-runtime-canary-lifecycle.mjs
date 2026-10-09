@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {verifyGatewayRuntimeCanaryPlan,gatewayCanaryDocumentHash,GATEWAY_CANARY_LIMITS as L} from './gateway-runtime-canary-resources.mjs';
+import {gatewayCanaryInternalReason as safeError} from './gateway-runtime-canary-evidence.mjs';
 
 const check=(ok,reason)=>{if(!ok)throw Error('GatewayRuntimeCanary'+reason);};
 const sha=value=>createHash('sha256').update(value).digest('hex');
@@ -12,14 +13,13 @@ const OPS=['assertAbsent','createStack','describeStack','readState','changeBound
 const STATE=['stackId','roleArn','roleId','functionArn','keyArn','boundaryArn','originalPolicyHash','comparisonPolicyHash',
   'handlerHash','codeHash','configurationHash','identityPolicyHash','keyPolicyHash','keyGrantsHash'];
 const UUID='[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}';
-const safeError=error=>/^GatewayRuntimeCanary[A-Za-z]+$/.test(error?.message??'')?error.message:'GatewayRuntimeCanaryOperationFailed';
 
 /** Finite orchestration, not an AWS client or a business-authority issuer.
  * ops is a trusted, same-process native adapter, never serialized configuration.
  * It authenticates the source, code, raw service responses and transport stop;
  * readState includes hashes derived from complete native readbacks, not caller
  * assertions. collectPhase reuses one prepared ciphertext/context for all three
- * phases and preserves every signed response in its existing evidence journal.
+ * phases and journals bounded diagnostics before validating each response.
  * verifyPhase is the independently owned handler/evidence verifier. It must
  * reject non-service errors and altered bindings, not merely return a flag.
  * Returned observations still require the native acceptance/provenance gate.
@@ -38,7 +38,7 @@ export async function runGatewayRuntimeCanaryLifecycle(input,test={}){
   const now=test.now??Date.now,wait=test.wait??((ms,signal)=>sleep(ms,undefined,{signal}));
   const started=now();check(Number.isSafeInteger(started)&&started>=0,'Clock');
   const normal=AbortSignal.any([AbortSignal.timeout(L.operationMs),...(input.signal?[input.signal]:[])]);
-  let attempted=false,cleanupComplete=false,stackId,keyArn,reference,failed,unknown=false,transportUnclean=false;
+  let attempted=false,cleanupComplete=false,stackId,keyArn,reference,failed,unknown=false,transportUnclean=false,diagnosticWriteFailed=false;
   const phases=[];
   const stackPattern=new RegExp('^'+RegExp.escape(s.stackArnPattern.slice(0,-1))+UUID+'$');
   const keyPattern=new RegExp('^'+RegExp.escape(s.keyArnPattern.slice(0,-1))+UUID+'$');
@@ -115,7 +115,8 @@ export async function runGatewayRuntimeCanaryLifecycle(input,test={}){
     }
   }catch(error){failed=safeError(error);unknown=error?.unknown===true;
     transportUnclean=error?.code==='ECLEANUP'||error?.cleanupComplete===false;
-    try{await write({event:'held',reason:failed,unknown});}catch{}
+    diagnosticWriteFailed=error?.diagnosticWriteFailed===true;
+    try{await write({event:'held',reason:failed,unknown,...(diagnosticWriteFailed?{diagnosticWriteFailed:true}:{})});}catch{}
   }finally{
     if(transportUnclean)cleanupComplete=false;
     else if(attempted){
@@ -140,7 +141,10 @@ export async function runGatewayRuntimeCanaryLifecycle(input,test={}){
       }
     }else cleanupComplete=true;
   }
+  // Resource cleanup is still attempted when its transport is joined. Missing
+  // diagnostics cannot be certified as a complete audited lifecycle afterward.
+  if(diagnosticWriteFailed)cleanupComplete=false;
   return freeze({version:1,kind:'gateway-runtime-canary-observations',status:!failed&&cleanupComplete&&phases.length===3?'OBSERVATIONS_COMPLETE':'HELD',
     verificationId:s.verificationId,templateHash:plan.templateHash,stackId:stackId??null,phases,cleanupComplete,
-    cleanupUnconfirmed:transportUnclean,reason:failed??null,unknown});
+    cleanupUnconfirmed:transportUnclean,reason:failed??null,unknown,...(diagnosticWriteFailed?{diagnosticWriteFailed:true}:{})});
 }
