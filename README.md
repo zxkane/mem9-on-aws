@@ -1018,6 +1018,33 @@ migration is idempotent and treats quarantine as installed until proven
 otherwise. Never manually remove
 `mem9-on-aws-workload-boundary-quarantine` during recovery.
 
+The operator-only Gateway source-condition canary uses
+`scripts/lib/gateway-runtime-canary-resources.mjs` to render the fixture in
+`scripts/test-fixtures/gateway-runtime-canary/`. The raw template is a compiler
+input, not an independently deployable template. This path is outside the SST
+application and does not request an application deployment from code-only CI.
+Its private inputs bind the authenticated operator role, original Gateway
+boundary, reviewed handler, application region and one synthetic verification
+identifier. No production secret, database configuration or memory enters it.
+
+The canary owns one Proxy Lambda/role, a comparison boundary, a synthetic KMS
+key and a log group. It runs the same requests under comparison, original and
+comparison boundaries. The comparison removes exactly the two source-function
+denies; every other statement stays unchanged. The function makes a synthetic
+KMS decrypt request and an EC2 `DescribeSubnets` authorization check with
+`DryRun=true`. The VPC filter is a request constraint, not an IAM resource
+boundary. Original non-source policy checks still apply independently.
+
+The fixed lifecycle separates provisioning, observation and policy-bootstrap
+permissions. If the measured provisioning policy exceeds the STS inline
+limit, its one temporary managed policy is used only as a session restriction;
+it is never attached to an IAM identity or updated to another version. Cleanup
+deletes the function, role, comparison policy and log group, confirms the
+synthetic key's seven-day pending deletion, then removes the temporary session
+policy after resource/transport cleanup. Unknown outcomes retain evidence and
+hold recovery. Runtime observations do not themselves authorize a workload
+rollout or replace the existing guarded resume procedure.
+
 An ownership stack in `UPDATE_ROLLBACK_COMPLETE` is repaired only by the guarded
 rollout; read-only verification rejects it even if the current policy happens to
 match. For `UPDATE_ROLLBACK_FAILED`, first use CloudFormation's reviewed
