@@ -205,8 +205,10 @@ export function createRetainedOperatorInventory(options) {
       'DeletionTime', 'RollbackConfiguration', 'StackStatusReason', 'DisableRollback', 'NotificationARNs', 'TimeoutInMinutes', 'Capabilities', 'Tags',
       'EnableTerminationProtection', 'DriftInformation', 'RetainExceptOnCreate', 'DeletionMode', 'LastOperations', 'DetailedStatus']);
     const prefix = `arn:${partition}:cloudformation:us-west-2:${accountId}:stack/${name}/`;
+    // A completed deployment rollback preserves the prior owner state for a
+    // guarded update. This inventory does not certify the desired post-update state.
     requireValue(stack.StackName === name && typeof stack.StackId === 'string' && stack.StackId.startsWith(prefix) && /^[A-Za-z0-9-]+$/u.test(stack.StackId.slice(prefix.length)) &&
-      ['CREATE_COMPLETE', 'UPDATE_COMPLETE'].includes(stack.StackStatus));
+      (['CREATE_COMPLETE', 'UPDATE_COMPLETE'].includes(stack.StackStatus) || name === DEPLOYMENT && stack.StackStatus === 'UPDATE_ROLLBACK_COMPLETE'));
     const parameters = pairs(stack.Parameters, 'ParameterKey', 'ParameterValue', ['UsePreviousValue', 'ResolvedValue']);
     const source = sources[name];
     requireValue(Object.keys(parameters).every(k => Object.hasOwn(source.Parameters, k)) && parameters.ApplicationRegion === applicationRegion);
