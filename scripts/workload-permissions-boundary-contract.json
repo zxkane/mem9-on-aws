@@ -7,7 +7,8 @@
     "boundaryStackName": "workload-permissions-boundary-mem9-on-aws",
     "denyDangerousPolicyName": "mem9-on-aws-deny-dangerous",
     "deployRoleName": "github-actions-mem9-on-aws",
-    "quarantinePolicyName": "mem9-on-aws-workload-boundary-quarantine"
+    "quarantinePolicyName": "mem9-on-aws-workload-boundary-quarantine",
+    "gatewayBoundaryPolicyName": "mem9-on-aws-gateway-boundary"
   },
   "deploymentWorkflows": [
     {

@@ -15,6 +15,7 @@ Parameters:
     Description: Exact operator-owned bucket containing reviewed decisions.
   ApplicationRegion:
     Type: String
+    MaxLength: 24
     AllowedPattern: "^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$"
     Description: Region containing the mem9-on-aws workload resources.
   BedrockProjectArn:
@@ -321,7 +322,175 @@ Resources:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-preview-human-acceptance
 
+  GatewayPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: mem9-on-aws-gateway-boundary
+      Description: Maximum permissions for the two Gateway Lambda role families
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: "*"
+            Resource: "*"
+          - Sid: !Sub G${PolicyRevision}
+            Effect: Deny
+            NotAction:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - secretsmanager:GetSecretValue
+              - ssm:GetParameters
+              - kms:Decrypt
+              - ec2:AssignPrivateIpAddresses
+              - ec2:CreateNetworkInterface
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeSubnets
+              - ec2:UnassignPrivateIpAddresses
+            Resource: "*"
+          - Effect: Deny
+            Action: "*"
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9IdentityInterceptorFnRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-${!aws:PrincipalTag/Stage}-Mem9IdentityInterceptorFnRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-${!aws:PrincipalTag/Stage}-Mem9IdentityInterceptorFnRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9ProxyFnRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-${!aws:PrincipalTag/Stage}-Mem9ProxyFnRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-${!aws:PrincipalTag/Stage}-Mem9ProxyFnRole-*
+          - Effect: Deny
+            Action: "*"
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalTag/Project: mem9-on-aws
+          - Effect: Deny
+            Action: logs:*
+            NotResource:
+              - !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/aws/lambda/mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9IdentityInterceptorFnFunction-*
+              - !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/aws/lambda/mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9ProxyFnFunction-*
+          - Effect: Deny
+            Action: secretsmanager:GetSecretValue
+            NotResource:
+              - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-identity-signing-keys-*
+              - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-tenant-api-key-*
+          - Effect: Deny
+            Action: secretsmanager:GetSecretValue
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                secretsmanager:ResourceTag/Stage: ${aws:PrincipalTag/Stage}
+          - Effect: Deny
+            Action: ssm:GetParameters
+            NotResource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/namespace/transport-signing-keys
+          - Effect: Deny
+            Action: ssm:GetParameters
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                ssm:resourceTag/Stage: ${aws:PrincipalTag/Stage}
+          - Effect: Deny
+            Action: ssm:GetParameters
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: "*Mem9IdentityInterceptorFnRole-*"
+          - Effect: Deny
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-tenant-api-key-*
+            Condition:
+              StringLike:
+                aws:PrincipalArn: "*Mem9IdentityInterceptorFnRole-*"
+          - Effect: Deny
+            Action: kms:Decrypt
+            NotResource: !Sub arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/*
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringNotLikeIfExists:
+                kms:EncryptionContext:SecretARN:
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-identity-signing-keys-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-tenant-api-key-*
+                kms:EncryptionContext:PARAMETER_ARN: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/namespace/transport-signing-keys
+                kms:EncryptionContext:aws:lambda:FunctionArn:
+                  - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9IdentityInterceptorFnFunction-*
+                  - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9ProxyFnFunction-*
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringNotEqualsIfExists:
+                kms:ViaService:
+                  - !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+                  - !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
+              StringNotLikeIfExists:
+                kms:EncryptionContext:aws:lambda:FunctionArn:
+                  - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9IdentityInterceptorFnFunction-*
+                  - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-${!aws:PrincipalTag/Stage}-Mem9ProxyFnFunction-*
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                kms:EncryptionContext:SecretARN: "false"
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                kms:EncryptionContext:PARAMETER_ARN: "false"
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: "*Mem9IdentityInterceptorFnRole-*"
+                kms:EncryptionContext:SecretARN: !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-tenant-api-key-*
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringLike:
+                aws:PrincipalArn: "*Mem9IdentityInterceptorFnRole-*"
+              "Null":
+                kms:EncryptionContext:PARAMETER_ARN: "false"
+          - Effect: Deny
+            Action: kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                lambda:SourceFunctionArn: "false"
+              StringNotEqualsIfExists:
+                kms:ViaService:
+                  - !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+                  - !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
+          - Effect: Deny
+            Action: ec2:*
+            Resource: "*"
+            Condition:
+              StringNotLike:
+                aws:PrincipalArn: "*Mem9ProxyFnRole-*"
+          - Effect: Deny
+            Action: ec2:*
+            Resource: "*"
+            Condition:
+              "Null":
+                lambda:SourceFunctionArn: "false"
+
 Outputs:
+  GatewayPolicyArn:
+    Description: ARN of the retained Gateway Lambda boundary
+    Value: !Ref GatewayPermissionsBoundary
   PolicyArn:
     Description: ARN of the retained workload permissions boundary
     Value: !Ref WorkloadPermissionsBoundary

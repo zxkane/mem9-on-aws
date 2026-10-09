@@ -61,6 +61,7 @@ if ! contract_identifiers="$(jq -ce '
     .identifiers
     | select(
         (.boundaryPolicyName | type) == "string" and
+        (.gatewayBoundaryPolicyName | type) == "string" and
         (.boundaryStackName | type) == "string" and
         (.denyDangerousPolicyName | type) == "string" and
         (.deployRoleName | type) == "string" and
@@ -73,6 +74,7 @@ if ! contract_identifiers="$(jq -ce '
 fi
 stack_name="$(jq -r '.boundaryStackName' <<<"$contract_identifiers")"
 policy_name="$(jq -r '.boundaryPolicyName' <<<"$contract_identifiers")"
+gateway_policy_name="$(jq -r '.gatewayBoundaryPolicyName' <<<"$contract_identifiers")"
 deploy_role_name="$(jq -r '.deployRoleName' <<<"$contract_identifiers")"
 quarantine_policy_name="$(jq -r '.quarantinePolicyName' <<<"$contract_identifiers")"
 node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || true)"
@@ -217,9 +219,10 @@ policy_arn=""
 policy_revision="r1"
 force_guarded_recovery=false
 read_policy_arn() {
+  local logical_resource="${1:-WorkloadPermissionsBoundary}"
   aws cloudformation describe-stack-resources \
     --stack-name "$stack_name" \
-    --logical-resource-id WorkloadPermissionsBoundary \
+    --logical-resource-id "$logical_resource" \
     --region "$region" \
     --query 'StackResources[0].PhysicalResourceId' \
     --output text 2>/dev/null || true
@@ -255,7 +258,8 @@ verify_boundary_policy_at_base() {
   for source_path in \
     "scripts/lib/authorization-archive-policy.mjs" \
     "scripts/lib/authorization-maintenance-isolation.mjs" \
-    "scripts/lib/retained-operator-protection.mjs"; do
+    "scripts/lib/retained-operator-protection.mjs" \
+    "scripts/lib/gateway-workload-boundary.mjs"; do
     if GIT_NO_REPLACE_OBJECTS=1 git cat-file -e "${base_ref}:${source_path}" 2>/dev/null; then
       verifier_sources+=("$source_path")
       needs_dependencies=true
@@ -364,7 +368,7 @@ verify_boundary_policy() {
       --policy-input-list "$allow_decrypt_policy"
       --permissions-boundary-policy-input-list "$boundary_policy"
       --action-names kms:Decrypt
-      --resource-arns "*"
+      --resource-arns "${decrypt_probe_resource:-*}"
       --output json
     )
     if [[ $# -gt 0 ]]; then
@@ -374,14 +378,14 @@ verify_boundary_policy() {
         [[ -z "$simulation" ]]; then
       return 1
     fi
-    jq -e --arg expected "$expected_decision" '
+    jq -e --arg expected "$expected_decision" --arg resource "${decrypt_probe_resource:-*}" '
       try (
         select(type == "object")
         | .EvaluationResults as $results
         | ($results | type) == "array"
         and ($results | length) == 1
         and $results[0].EvalActionName == "kms:Decrypt"
-        and $results[0].EvalResourceName == "*"
+        and $results[0].EvalResourceName == $resource
         and $results[0].EvalDecision == $expected
         and (
           $expected != "explicitDeny"
@@ -485,6 +489,38 @@ verify_boundary_policy() {
     echo "Workload permissions-boundary default version changed during verification." >&2
     return 1
   fi
+}
+
+verify_gateway_boundary_policy() {
+  local gateway_arn default_version boundary_policy version_after probes row decrypt_probe_resource
+  local allow_decrypt_policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"kms:Decrypt","Resource":"*"}]}'
+  local -a gateway_probe_args
+  gateway_arn="$(read_policy_arn GatewayPermissionsBoundary)"
+  [[ "$gateway_arn" == "arn:${partition}:iam::${account_id}:policy/${gateway_policy_name}" ]] || {
+    echo "Gateway boundary identity read-back failed." >&2; return 1;
+  }
+  default_version="$(aws iam get-policy --policy-arn "$gateway_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  [[ "$default_version" =~ ^v[1-9][0-9]*$ ]] || return 1
+  boundary_policy="$(aws iam get-policy-version --policy-arn "$gateway_arn" --version-id "$default_version" --query PolicyVersion.Document --output json 2>/dev/null)" || return 1
+  if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+      WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+      node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway <<<"$boundary_policy"; then return 1; fi
+  probes="$(WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+      WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+      node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-probes </dev/null)" || return 1
+  while IFS= read -r row; do
+    decrypt_probe_resource="$(jq -er .resource <<<"$row")" || return 1
+    mapfile -t gateway_probe_args < <(jq -r '.context[]' <<<"$row")
+    verify_decrypt_probe "$(jq -er .expected <<<"$row")" "${gateway_probe_args[@]}" || {
+      echo "Gateway boundary KMS simulation failed." >&2; return 1;
+    }
+  done < <(jq -c '.[]' <<<"$probes")
+  version_after="$(aws iam get-policy --policy-arn "$gateway_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  [[ "$version_after" == "$default_version" ]] || { echo "Gateway boundary changed during verification." >&2; return 1; }
+}
+
+verify_all_boundaries() {
+  verify_boundary_policy && verify_gateway_boundary_policy
 }
 
 verify_guarded_update() {
@@ -599,12 +635,12 @@ if [[ $describe_exit -eq 0 ]]; then
   }
   if [[ "$force_guarded_recovery" != "true" ]]; then
     if [[ "$verify_only" == "true" ]]; then
-      if verify_boundary_policy; then
+      if verify_all_boundaries; then
         echo "Retained workload permissions-boundary stack verified."
         exit 0
       fi
       exit 1
-    elif verify_boundary_policy >/dev/null 2>&1; then
+    elif verify_all_boundaries >/dev/null 2>&1; then
       echo "Retained workload permissions-boundary stack verified."
       exit 0
     fi
@@ -704,7 +740,7 @@ policy_revision="$(read_policy_revision)" || {
   echo "Boundary policy revision read-back failed." >&2
   exit 1
 }
-if ! verify_boundary_policy; then
+if ! verify_all_boundaries; then
   exit 1
 fi
 
