@@ -2,6 +2,8 @@ import {describe,it,expect} from 'vitest';
 import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createServer} from 'node:http';
+import {runBoundedCommand} from './lib/bounded-subprocess.mjs';
 import {compileGatewayRuntimeCanaryScope,renderGatewayRuntimeCanaryTemplate} from './lib/gateway-runtime-canary-resources.mjs';
 import {expectedGatewayBoundaryPolicyDocument} from './lib/gateway-workload-boundary.mjs';
 import {createGatewayCanaryAwsAdapter,inspectGatewayCanaryAwsEvidence} from './lib/gateway-runtime-canary-aws.mjs';
@@ -75,6 +77,64 @@ describe('native Gateway canary AWS adapter',()=>{
     await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/ObservationFailed/);
     expect(f.calls.filter(c=>c.operation)).toHaveLength(1);
   });
+  it.for([254,255].flatMap(status=>['','aws: [ERROR]: '].flatMap(prefix=>['',' (reached max retries: 0)',' (reached max retries: 2)'].map(annotation=>({status,prefix,annotation})))))('accepts only matching AWS formatter fields: %j',async({status,prefix,annotation},test)=>{
+    const f=await fixture(test,({operation,action})=>{
+      if(operation==='logs')return{stdout:JSON.stringify({logGroups:[]})};
+      const code=operation==='cloudformation'?'ValidationError':operation==='iam'?'NoSuchEntity':'ResourceNotFoundException';
+      const name=action==='describe-stacks'?'DescribeStacks':action==='get-role'?'GetRole':action==='get-policy'?'GetPolicy':'GetFunctionConfiguration';
+      const message=operation==='cloudformation'?`Stack with id ${scope.stackName} does not exist`:'synthetic resource absent';
+      throw Object.assign(Error('synthetic service response'),{code:status,stderr:`\n${prefix}An error occurred (${code}) when calling the ${name} operation${annotation}: ${message}\n`});
+    });
+    await expect(f.ops.assertAbsent({scope,signal:new AbortController().signal})).resolves.toBeUndefined();
+    expect(f.calls.filter(c=>c.operation)).toHaveLength(5);
+  });
+  it.for([
+    ['aws: [WARNING]: ','DescribeStacks',' (reached max retries: 0)',scope.stackName],
+    ['unrelated diagnostic: ','DescribeStacks',' (reached max retries: 0)',scope.stackName],
+    ['aws: [ERROR]: ','GetPolicy',' (reached max retries: 0)',scope.stackName],
+    ['aws: [ERROR]: ','DescribeStacks',' (reached max retries: -1)',scope.stackName],
+    ['aws: [ERROR]: ','DescribeStacks',' (reached max retries: 0 extra)',scope.stackName],
+    ['aws: [ERROR]: ','DescribeStacks',' (reached max retries: 0)','unrelated'],
+  ])('rejects mismatched or malformed AWS formatter fields: %j',async([prefix,operation,annotation,stack],test)=>{
+    const f=await fixture(test,()=>{throw Object.assign(Error('synthetic service response'),{code:254,stderr:`\n${prefix}An error occurred (ValidationError) when calling the ${operation} operation${annotation}: Stack with id ${stack} does not exist\n`});});
+    await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/GatewayCanaryAws/);
+  });
+  // Opt in with the installed pinned CLI; every request is unsigned and loopback-only.
+  it.skipIf(!process.env.MEM9_TEST_AWS_CLI).for(['NoSuchEntity','AccessDenied'])('parses real pinned CLI output from synthetic localhost IAM: %s',async(code,test)=>{
+    const requests=[],server=createServer((request,response)=>{
+      let body='';request.on('data',chunk=>{body+=chunk;});
+      request.on('end',()=>{
+        requests.push({method:request.method,url:request.url,authorization:request.headers.authorization,body});
+        response.writeHead(code==='NoSuchEntity'?404:403,{'content-type':'text/xml'});
+        response.end(`<ErrorResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/"><Error><Type>Sender</Type><Code>${code}</Code><Message>synthetic missing policy</Message></Error><RequestId>synthetic-request</RequestId></ErrorResponse>`);
+      });
+    });
+    test.onTestFinished(async()=>{server.closeAllConnections();await new Promise((resolve,reject)=>server.close(error=>error?reject(error):resolve()));});
+    await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+    let result;
+    const f=await fixture(test,async({operation,action,request})=>{
+      if(operation==='logs')return{stdout:JSON.stringify({logGroups:[]})};
+      if(action!=='get-policy')absent(operation,action==='describe-stacks'?'DescribeStacks':action==='get-role'?'GetRole':'GetFunctionConfiguration',scope.stackName);
+      expect(request).toEqual({PolicyArn:scope.comparisonArn});
+      result=await runBoundedCommand(process.env.MEM9_TEST_AWS_CLI,[
+        '--endpoint-url',`http://127.0.0.1:${server.address().port}`,'--no-sign-request','--no-cli-pager',
+        '--region','us-east-1','--cli-connect-timeout','1','--cli-read-timeout','2',
+        'iam','get-policy','--policy-arn',request.PolicyArn,
+      ],{env:{...f.env,HOME:f.directory,AWS_MAX_ATTEMPTS:'1',AWS_RETRY_MODE:'standard',AWS_EC2_METADATA_V1_DISABLED:'true',BOTO_CONFIG:'/dev/null'},timeoutMs:5000,maxBufferBytes:16384});
+      throw Object.assign(Error('GatewayCanaryAwsServiceError'),{code:result.status,stderr:result.stderr});
+    });
+    const version=await runBoundedCommand(process.env.MEM9_TEST_AWS_CLI,['--version'],{env:{PATH:process.env.PATH},timeoutMs:5000,maxBufferBytes:4096});
+    expect(version.status).toBe(0);expect(version.stdout).toMatch(/^aws-cli\/2\.34\.53 /);
+    const observed=f.ops.assertAbsent({scope,signal:new AbortController().signal});
+    if(code==='NoSuchEntity')await expect(observed).resolves.toBeUndefined();
+    else await expect(observed).rejects.toThrow(/GatewayCanaryAwsObservationFailed/);
+    expect(result.status).toBe(254);
+    expect(result.stderr).toContain(`aws: [ERROR]: An error occurred (${code}) when calling the GetPolicy operation (reached max retries: 0): synthetic missing policy`);
+    expect(requests).toHaveLength(1);expect(requests[0].method).toBe('POST');expect(requests[0].url).toBe('/');
+    expect(requests[0].authorization).toBeUndefined();
+    expect(Object.fromEntries(new URLSearchParams(requests[0].body))).toEqual({Action:'GetPolicy',Version:'2010-05-08',PolicyArn:scope.comparisonArn});
+    expect(()=>inspectGatewayCanaryAwsEvidence(f.ops)).toThrow(/NativeCompletion/);
+  },15000);
   it('rejects replacement templates before issuing a mutation',async test=>{
     const f=await fixture(test,()=>{throw Error('must not call');});
     await expect(f.ops.createStack({StackName:scope.stackName,TemplateBody:plan.templateBody+' ',signal:new AbortController().signal})).rejects.toThrow();

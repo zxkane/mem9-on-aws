@@ -22,7 +22,7 @@ const optionalKeys=(v,keys)=>v&&typeof v==='object'&&Object.keys(v).every(k=>key
 const single=(rows,predicate,why)=>{need(Array.isArray(rows),why);const found=rows.filter(predicate);need(found.length===1,why);return found[0];};
 function serviceError(error,operation){
   if(![254,255].includes(error?.code)||typeof error.stderr!=='string')return null;
-  const match=/An error occurred \(([A-Za-z0-9]+)\) when calling the ([A-Za-z0-9]+) operation: ([\s\S]*)/.exec(error.stderr);
+  const match=/^\s*(?:aws: \[ERROR\]: )?An error occurred \(([A-Za-z0-9]+)\) when calling the ([A-Za-z0-9]+) operation(?: \(reached max retries: [0-9]+\))?: ([\s\S]*)$/.exec(error.stderr);
   return match&&match[2]===operation?{code:match[1],message:match[3]}:null;
 }
 
