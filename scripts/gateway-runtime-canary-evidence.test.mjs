@@ -1,7 +1,37 @@
 import {it,expect} from 'vitest';
 import {createHash} from 'node:crypto';
 import {evidenceFixture,codeZip,handlerSource} from './gateway-runtime-canary.fixture.mjs';
-import {validateGatewayRuntimeCanaryEvidence as verify,verifyGatewayCanaryCode,verifyGatewayCanaryPhase} from './lib/gateway-runtime-canary-evidence.mjs';
+import {validateGatewayRuntimeCanaryEvidence as verify,verifyGatewayCanaryCode,verifyGatewayCanaryPhase,gatewayCanaryPhaseDiagnostic,gatewayCanaryInternalReason} from './lib/gateway-runtime-canary-evidence.mjs';
+
+const diagnosticInput={verificationId:'abcdef012345',templateHash:'a'.repeat(64),phase:'B',stage:'response-validation',observation:'response',startedMs:1000,completedMs:2000};
+it('diagnostic payload hashing is bounded and labels partial hashing explicitly',()=>{
+ const raw=Buffer.alloc(20000,65),value=gatewayCanaryPhaseDiagnostic({...diagnosticInput,response:{Payload:raw}});
+ expect(value.payloadBytes).toBe(20000);expect(value.payloadHashedBytes).toBe(16384);expect(value.payloadFormat).toBe('oversized');
+ expect(value.payloadHash).toBe(createHash('sha256').update(raw.subarray(0,16384)).digest('hex'));
+ expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(4096);
+});
+it.each(['GatewayCanaryInput','GatewayCanaryIdentity','GatewayCanaryCredentials','GatewayCanaryDeadline','GatewayCanarySdk'])('retains fixed handler reason %s with no stack or message field',reason=>{
+ const secret='do-not-log-plaintext-key-or-url',value=gatewayCanaryPhaseDiagnostic({...diagnosticInput,response:{FunctionError:'Unhandled',Payload:Buffer.from(JSON.stringify({errorType:'Error',errorMessage:reason,stackTrace:[secret],secret}))}});
+ expect(value.handlerReason).toBe(reason);expect(value.functionErrorType).toBe('Error');
+ expect(JSON.stringify(value)).not.toContain(secret);expect(value).not.toHaveProperty('errorMessage');expect(value).not.toHaveProperty('stackTrace');
+});
+it('diagnostics hash unknown handler errors and ignore hostile unknown fields and accessors',()=>{
+ const secret='secret-value',raw=Buffer.from(JSON.stringify({errorType:secret,errorMessage:secret,results:[{service:secret,action:secret,outcome:secret,errorCode:secret,requestId:secret}],unknown:{credentials:secret,url:secret,plaintext:secret}}));
+ const response={Payload:raw,FunctionError:'Unhandled',$metadata:{requestId:secret,httpStatusCode:200}};
+ Object.defineProperty(response,'errorMessage',{get(){throw Error('accessor must not run');}});
+ const value=gatewayCanaryPhaseDiagnostic({...diagnosticInput,response});
+ expect(value.functionErrorType).toBe('unrecognized');expect(value.handlerReason).toBe('unrecognized');
+ expect(value.handlerReasonHash).toBe(createHash('sha256').update(secret).digest('hex'));
+ expect(value.services[0].outcome).toBe('unrecognized');expect(value.requestId).toBe(null);
+ expect(JSON.stringify(value)).not.toContain(secret);expect(value.payloadHash).toBe(createHash('sha256').update(raw).digest('hex'));
+ const error=Object.defineProperty({},'message',{get(){throw Error('must not read getter');}});
+ expect(gatewayCanaryInternalReason(error)).toBe('GatewayRuntimeCanaryOperationFailed');
+});
+it.each([undefined,'invalid',{},Buffer.from('not-json'),Buffer.from('[]')])('classifies malformed diagnostic payload without promoting it to evidence',Payload=>{
+ const value=gatewayCanaryPhaseDiagnostic({...diagnosticInput,response:{Payload}});
+ expect(['missing','invalid-type','malformed-json','non-object']).toContain(value.payloadFormat);
+ expect(value).not.toHaveProperty('authority');expect(value).not.toHaveProperty('securityPass');
+});
 it('verifies raw handler observations, full stable readbacks and actual ZIP for A→B→A',async()=>{const f=await evidenceFixture(),v=verify(f.evidence,f.expected);expect(v.authority).toBe(false);expect(v.coverage).toEqual(['kms-source-condition','ec2-source-condition']);expect(v).not.toHaveProperty('EvalDecision');expect(Object.isFrozen(v)).toBe(true);});
 it.each(['missing-pin','changed-pin','manual-pass','order','missing-A2','role-id','code','layers','identity','key-policy','key-grant','boundary-version','boundary','context','request-id','invoke-error','wrong-key','runtime','time','strict-allowed','ec2-wrong-error'])('rejects %s even with a consistent envelope checksum',async defect=>{
  const f=await evidenceFixture(),e=structuredClone(f.evidence),x=structuredClone(f.expected),b=e.rounds[1];
