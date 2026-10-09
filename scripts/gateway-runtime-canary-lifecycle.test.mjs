@@ -33,6 +33,17 @@ function fixture(change={}){
   return{input,test,calls,records,keyArn,stackId};
 }
 describe('finite Gateway canary lifecycle',()=>{
+  it.each(['GatewayRuntimeEvidenceServiceAuthorization','GatewayRuntimeEvidenceFields','GatewayCanaryAwsInvokeResponse','GatewayCanaryAwsServiceError'])('retains closed internal reason %s without replay',async reason=>{
+    const f=fixture({ops:{async collectPhase(){throw Error(reason);}}});
+    const r=await runGatewayRuntimeCanaryLifecycle(f.input,f.test);
+    expect(r.reason).toBe(reason);expect(f.records.find(v=>v.event==='held').reason).toBe(reason);
+    expect(r.status).toBe('HELD');expect(r.cleanupComplete).toBe(true);
+  });
+  it.each(['GatewayRuntimeEvidenceSECRET','GatewayRuntimeCanarySECRET','GatewayCanaryAwsSECRET','GatewayRuntimeEvidenceFields secret'])('never logs an unrecognized internal-looking message %s',async reason=>{
+    const f=fixture({ops:{async collectPhase(){throw Error(reason);}}});
+    const r=await runGatewayRuntimeCanaryLifecycle(f.input,f.test);
+    expect(r.reason).toBe('GatewayRuntimeCanaryOperationFailed');expect(JSON.stringify(f.records)).not.toContain(reason);
+  });
   it('runs comparison A1, original B, comparison A2 on unchanged identity/code and then cleans',async()=>{
     const f=fixture(),r=await runGatewayRuntimeCanaryLifecycle(f.input,f.test);
     expect(r.status).toBe('OBSERVATIONS_COMPLETE');expect(r.cleanupComplete).toBe(true);

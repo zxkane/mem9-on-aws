@@ -5,7 +5,7 @@ import {LambdaClient,InvokeCommand} from '@aws-sdk/client-lambda';
 import {fromIni} from '@aws-sdk/credential-providers';
 import {runBoundedCommand} from './bounded-subprocess.mjs';
 import {compileGatewayRuntimeCanaryScope,gatewayCanaryDocumentHash as hash} from './gateway-runtime-canary-resources.mjs';
-import {GATEWAY_CANARY_PLAINTEXT,gatewayCanaryInvocation,verifyGatewayCanaryCode,validateGatewayCanaryResult,validateGatewayRuntimeCanaryEvidence} from './gateway-runtime-canary-evidence.mjs';
+import {GATEWAY_CANARY_PLAINTEXT,gatewayCanaryInvocation,verifyGatewayCanaryCode,validateGatewayCanaryResult,validateGatewayRuntimeCanaryEvidence,gatewayCanaryPhaseDiagnostic,gatewayCanaryInternalReason} from './gateway-runtime-canary-evidence.mjs';
 
 const owners=new WeakMap(),DAY=86400000;
 async function execute(command,args,options){
@@ -31,7 +31,7 @@ function serviceError(error,operation){
  * callers cannot substitute a serialized lifecycle result or a test adapter. */
 export function inspectGatewayCanaryAwsEvidence(ops){
   const state=owners.get(ops);
-  need(state&&!state.testing&&!state.transportHeld&&state.cleanupVerified&&state.rounds.length===3,'NativeCompletion');
+  need(state&&!state.testing&&!state.transportHeld&&!state.diagnosticWriteFailed&&state.cleanupVerified&&state.rounds.length===3,'NativeCompletion');
   const evidence=state.evidence();
   need(state.cleanup?.length===1&&state.cleanup[0].Arn===evidence.keyArn&&state.cleanup[0].KeyState==='PendingDeletion','NativeKeyCleanup');
   const expected={evidenceHash:hash(evidence),handlerHash:state.plan.handlerHash,
@@ -43,17 +43,20 @@ export function inspectGatewayCanaryAwsEvidence(ops){
 /** Fixed operator adapter. sessions is the original scoped-session owner with
  * check() and environment(lane), not an environment object from JSON. The
  * provision and observe lanes are kept separate. No default AWS credentials,
- * endpoint override, shell command, retrying mutation or automatic reissuance. */
+ * endpoint override, shell command, retrying mutation or automatic reissuance.
+ * recordPhaseDiagnostic is the original owner's bounded journal callback. */
 export async function createGatewayCanaryAwsAdapter(input,test={}){
-  need(optionalKeys(input,['plan','sessions','directory','awsExecutable'])&&Object.keys(input).length===4,'Input');
+  need(optionalKeys(input,['plan','sessions','directory','awsExecutable','recordPhaseDiagnostic'])&&Object.keys(input).length===5,'Input');
   need(optionalKeys(test,['execute','fetch','invoke']),'TestOptions');
-  const {sessions,directory,awsExecutable}=input,plan=freeze(structuredClone(input.plan)),s=plan.scope;
+  const {sessions,directory,awsExecutable,recordPhaseDiagnostic}=input,plan=freeze(structuredClone(input.plan)),s=plan.scope;
+  need(typeof recordPhaseDiagnostic==='function','DiagnosticWriter');
   same(s,compileGatewayRuntimeCanaryScope(Object.fromEntries(['accountId','applicationRegion','verificationId','vpcId','ownerRoleArn'].map(k=>[k,s[k]]))),'Scope');
   need(sha(plan.templateBody)===plan.templateHash&&hash(JSON.parse(plan.templateBody))===hash(plan.template),'Plan');
   need(sessions&&typeof sessions.check==='function'&&typeof sessions.environment==='function','OriginalSessions');
   need(isAbsolute(directory)&&await realpath(directory)===directory&&isAbsolute(awsExecutable),'Paths');
   const initial=await lstat(directory);need(initial.isDirectory()&&initial.uid===process.getuid()&&(initial.mode&0o777)===0o700,'PrivateDirectory');
   const state={plan,testing:Object.keys(test).length>0,rounds:[],cleanupVerified:false,cleanup:null};
+  const diagnostics=new Map();
   let stackId,keyArn,codeZip,request,created=false,lastRead,deleteStartedMs,startedMs=Date.now();
   const cli=test.execute??execute;
   async function env(lane){
@@ -201,25 +204,53 @@ export async function createGatewayCanaryAwsAdapter(input,test={}){
     },
     async collectPhase({phase,signal}){
       need(['A1','B','A2'][state.rounds.length]===phase&&lastRead&&codeZip,'PhaseSequence');
+      need(!diagnostics.has(phase),'DiagnosticLimit');
+      let stage='readback-before',begin=Date.now(),response,diagnosticFailed=false;
+      const diagnostic=async(observation,error)=>{
+        const count=(diagnostics.get(phase)??0)+1;need(count<=5,'DiagnosticLimit');diagnostics.set(phase,count);
+        try{await recordPhaseDiagnostic(gatewayCanaryPhaseDiagnostic({verificationId:s.verificationId,templateHash:plan.templateHash,phase,stage,observation,startedMs:begin,completedMs:Date.now(),response,error}));}
+        catch(cause){diagnosticFailed=true;state.diagnosticWriteFailed=true;throw Object.assign(Error('GatewayCanaryAwsDiagnosticWriteFailed'),
+          {diagnosticWriteFailed:true,unknown:cause?.unknown===true},
+          cause?.code==='ECLEANUP'||cause?.cleanupComplete===false?{code:'ECLEANUP',cleanupComplete:false}:{});}
+      };
+      try{
+      await diagnostic('start');
       if(!request){
         const encrypted=await call('observe','kms','encrypt',{KeyId:keyArn,Plaintext:Buffer.from(GATEWAY_CANARY_PLAINTEXT).toString('base64'),EncryptionAlgorithm:'SYMMETRIC_DEFAULT',EncryptionContext:{'aws:lambda:FunctionArn':s.functionArn}},signal);
         need(encrypted.KeyId===keyArn&&encrypted.EncryptionAlgorithm==='SYMMETRIC_DEFAULT','Encryption');
         request=gatewayCanaryInvocation({nonce:randomBytes(32).toString('hex'),ciphertextBase64:encrypted.CiphertextBlob});
       }
-      const before=(await readback(signal)).raw,environment=await env('observe'),payload=Buffer.from(JSON.stringify(request));
+      const before=(await readback(signal)).raw;
+      stage='invoke';begin=Date.now();await diagnostic('start');
+      const environment=await env('observe'),payload=Buffer.from(JSON.stringify(request));
       const invokeRequest={FunctionName:s.functionArn,InvocationType:'RequestResponse',Payload:payload};
-      const begin=Date.now();let response;
+      begin=Date.now();
       if(test.invoke)response=await test.invoke(invokeRequest,signal);
       else{
         const credentials=fromIni({profile:'cc-tracked',filepath:environment.AWS_SHARED_CREDENTIALS_FILE,configFilepath:environment.AWS_CONFIG_FILE,ignoreCache:true});
         const client=new LambdaClient({region:s.applicationRegion,endpoint:'https://lambda.'+s.applicationRegion+'.amazonaws.com',credentials,maxAttempts:1,requestHandler:{connectionTimeout:10000,requestTimeout:45000}});
         try{response=await client.send(new InvokeCommand(invokeRequest),{abortSignal:signal});}finally{client.destroy();}
       }
-      await sessions.check();need(response.Payload instanceof Uint8Array&&response.Payload.byteLength<=16384,'InvokePayload');
-      const invoke={startedMs:begin,completedMs:Date.now(),request:{...invokeRequest,Payload:payload.toString('base64')},response:{...response,Payload:Buffer.from(response.Payload).toString('base64')}};
+      await sessions.check();const invokeCompletedMs=Date.now();stage='response-validation';await diagnostic('response');
+      need(response.Payload instanceof Uint8Array&&response.Payload.byteLength<=16384,'InvokePayload');
+      const invoke={startedMs:begin,completedMs:invokeCompletedMs,request:{...invokeRequest,Payload:payload.toString('base64')},response:{...response,Payload:Buffer.from(response.Payload).toString('base64')}};
       need(response.StatusCode===200&&!response.FunctionError&&response.$metadata?.requestId,'InvokeResponse');
       validateGatewayCanaryResult(JSON.parse(Buffer.from(response.Payload).toString()),{scope:s,keyArn,request,phase});
+      stage='readback-after';await diagnostic('start');
       const after=(await readback(signal)).raw,round=freeze({phase,before,invoke,after});state.rounds.push(round);return round;
+      }catch(error){
+        // Capture the first failure before an asynchronous diagnostic writer can
+        // fail. A later journal fault cannot replace its reason or erase unknown.
+        const unsafe=error?.code==='ECLEANUP'||error?.cleanupComplete===false;
+        const failure=Object.assign(Error(gatewayCanaryInternalReason(error)),{unknown:error?.unknown===true},
+          unsafe?{code:'ECLEANUP',cleanupComplete:false}:{},diagnosticFailed?{diagnosticWriteFailed:true}:{});
+        if(unsafe)state.transportHeld=true;
+        if(!diagnosticFailed)try{await diagnostic('failure',error);}catch(recordError){
+          failure.diagnosticWriteFailed=true;
+          if(recordError?.code==='ECLEANUP'||recordError?.cleanupComplete===false){state.transportHeld=true;failure.code='ECLEANUP';failure.cleanupComplete=false;}
+        }
+        throw failure;
+      }
     },
     async discoverOwnedKeys({signal}){await resources(signal);return keyArn?[keyArn]:[];},
     async deleteStack({signal,...body}){
