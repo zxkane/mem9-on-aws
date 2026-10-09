@@ -22,6 +22,39 @@ async function create(f) {
 }
 
 describe('retained operator ownership inventory', () => {
+  it('accepts a completed deployment-stack rollback as input and preserves ownership across the next update', async () => {
+    const f = fixture(); const { inventory } = await create(f);
+    f.stacks[deploymentStack].StackStatus = 'UPDATE_ROLLBACK_COMPLETE';
+    expect(await inventory.verify()).toEqual(retained);
+    await expect(inventory.verifyDeploymentRoleCatalog()).resolves.toBeUndefined();
+    f.stacks[deploymentStack].StackStatus = 'UPDATE_COMPLETE';
+    expect(await inventory.verify()).toEqual(retained);
+    await expect(inventory.verifyDeploymentRoleCatalog()).resolves.toBeUndefined();
+    f.roles[humanRole].RoleId += 'REPLACED';
+    await expect(inventory.verify()).rejects.toThrow();
+  });
+
+  it.each(['UPDATE_ROLLBACK_FAILED', 'UPDATE_ROLLBACK_IN_PROGRESS', 'UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS', 'UPDATE_IN_PROGRESS', 'UPDATE_FAILED', 'ROLLBACK_COMPLETE'])('refuses deployment-stack %s as recovery input', async status => {
+    const f = fixture(); const { inventory } = await create(f);
+    f.stacks[deploymentStack].StackStatus = status;
+    await expect(inventory.verify()).rejects.toThrow();
+    await expect(inventory.verifyDeploymentRoleCatalog()).rejects.toThrow();
+  });
+
+  it('does not extend completed-rollback input acceptance to the namespace owner', async () => {
+    const f = fixture(); const { inventory } = await create(f);
+    f.stacks[namespaceStack].StackStatus = 'UPDATE_ROLLBACK_COMPLETE';
+    await expect(inventory.verify()).rejects.toThrow();
+  });
+
+  it('still rejects altered retained policy in a completed deployment-stack rollback', async () => {
+    const f = fixture(); const { inventory } = await create(f);
+    f.stacks[deploymentStack].StackStatus = 'UPDATE_ROLLBACK_COMPLETE';
+    const policy = Object.values(f.inline[humanRole])[0];
+    policy.Statement[0].Resource = '*';
+    await expect(inventory.verify()).rejects.toThrow();
+  });
+
   it('rejects unknown configuration fields before invoking a provider', async () => {
     const f = fixture(); const { createRetainedOperatorInventory } = await create(f);
     for (const extra of [{ roleNames: retained }, { sourceTemplates: {} }])

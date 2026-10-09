@@ -29,7 +29,7 @@ function enforcementPolicies() {
     [`arn:aws:iam::${accountId}:policy/synthetic-scaffold`,render(template.Resources.ScaffoldPolicy.Properties.PolicyDocument)]]);
 }
 
-function fixture() {
+function fixture({deployEnforcement} = {}) {
   const calls = [], quarantined = new Set();
   const operators = createRetainedOperatorFixture();
   const stack = operators.stacks[DEPLOY_ROLE_NAME];
@@ -77,13 +77,48 @@ function fixture() {
   };
   const deadlineAt = Date.now() + 60000;
   const adapter = createAwsCliAdapter({identity: {partition: "aws", accountId}, applicationRegion,
-    invokeAws, consistencyAttempts: 1, sleep: async () => {}, deadlineAt});
+    invokeAws, consistencyAttempts: 1, sleep: async () => {}, deadlineAt,
+    ...(deployEnforcement ? {deployEnforcement} : {})});
   return {adapter, calls, stack, roles, quarantined, failDelete: name => {failDelete = name;},
     failRestore: name => {failRestore = name;}, missingDeny: name => {missingDenyFor = name;},
     deadlineAt, onRecoveryRead: fn => {recoveryRead = fn;}};
 }
 
 describe("authenticated deployment-role adapter", () => {
+  it("accepts completed rollback only as stable input and checks the same roles after successful update", async () => {
+    const update = vi.fn(async () => { f.stack.StackStatus = "UPDATE_COMPLETE"; });
+    const f = fixture({deployEnforcement: update});
+    f.stack.StackStatus = "UPDATE_ROLLBACK_COMPLETE";
+    await expect(f.adapter.resolveDeploymentRoles()).resolves.toEqual(names);
+    expect(f.calls.some(c => /put|delete|update/.test(c[1]))).toBe(false);
+    for (const name of names) f.quarantined.add(name);
+    await f.adapter.deployPermanentEnforcement();
+    expect(update).toHaveBeenCalledTimes(1);
+    await expect(f.adapter.resolveDeploymentRoles()).resolves.toEqual(names);
+    await expect(f.adapter.verifyPermanentEnforcement({boundaryArn, roleNames: names})).resolves.toBe(true);
+    expect([...f.quarantined].sort()).toEqual(names);
+    f.roles.get(names[1]).RoleId += "REPLACED";
+    await expect(f.adapter.resolveDeploymentRoles()).rejects.toThrow();
+  });
+  it.each(["UPDATE_ROLLBACK_FAILED", "UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_IN_PROGRESS", "UPDATE_FAILED", "ROLLBACK_COMPLETE"])("rejects %s before deployment mutation", async status => {
+    const update = vi.fn(); const f = fixture({deployEnforcement: update});
+    f.stack.StackStatus = status;
+    await expect(f.adapter.resolveDeploymentRoles()).rejects.toThrow();
+    expect(update).not.toHaveBeenCalled();
+    expect(f.calls.some(c => /put|delete|update/.test(c[1]))).toBe(false);
+  });
+  it("does not turn failed update waiter or stale enforcement into success after rollback input", async () => {
+    const failure = Error("synthetic stack-update-complete waiter: UPDATE_ROLLBACK_COMPLETE");
+    const f = fixture({deployEnforcement: async () => { throw failure; }});
+    f.stack.StackStatus = "UPDATE_ROLLBACK_COMPLETE";
+    await f.adapter.resolveDeploymentRoles();
+    for (const name of names) f.quarantined.add(name);
+    f.missingDeny(names[1]);
+    await expect(f.adapter.deployPermanentEnforcement()).rejects.toBe(failure);
+    await expect(f.adapter.verifyPermanentEnforcement({boundaryArn, roleNames: names})).resolves.toBe(false);
+    expect(f.calls.some(c => c[1] === "delete-role-policy")).toBe(false);
+    expect([...f.quarantined].sort()).toEqual(names);
+  });
   it("resolves every owner-stack role including the retained disabled legacy role", async () => {
     const f = fixture();
     await expect(f.adapter.resolveDeploymentRoles()).resolves.toEqual(names);
