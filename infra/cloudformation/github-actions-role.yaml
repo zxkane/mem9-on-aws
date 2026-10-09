@@ -153,18 +153,6 @@ Resources:
               - iam:DeleteSAMLProvider
               - iam:DeleteServiceLinkedRole
             Resource: "*"
-          - Sid: DenyAccountLevel
-            Effect: Deny
-            Action:
-              - organizations:*
-              - account:*
-              - sso:*
-              - cloudtrail:DeleteTrail
-              - cloudtrail:StopLogging
-              - guardduty:DeleteDetector
-              - config:DeleteConfigRule
-              - config:StopConfigurationRecorder
-            Resource: "*"
           - Sid: DenyEcrRegistryScanningOwnershipStackMutation
             # Pull-request jobs can assume this role, so they must not use the
             # broad CloudFormation grants below to alter or delete the
@@ -202,7 +190,9 @@ Resources:
               - iam:SetDefaultPolicyVersion
               - iam:TagPolicy
               - iam:UntagPolicy
-            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: DenyOperatorOwnedStackMutation
             # Protect every out-of-band ownership/control stack whose policy is
             # relied on to constrain a pull-request-capable deploy session.
@@ -244,7 +234,9 @@ Resources:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
             Condition:
               ArnNotEquals:
-                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                iam:PermissionsBoundary:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: DenyUnboundedProjectRolePolicyWrites
             # iam:PermissionsBoundary describes the target role for policy
             # writes. This explicit deny protects against a future allow being
@@ -259,7 +251,9 @@ Resources:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
             Condition:
               ArnNotEquals:
-                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                iam:PermissionsBoundary:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: DenyLambdaRolePassToOtherServices
             # Boundary exceptions identify the reviewed Lambda role types by
             # generated or stable name. Prevent a PR-controlled lookalike from
@@ -511,6 +505,86 @@ Resources:
               # Its absence 403'd the pr-7 teardown's Mem9DbSg delete.
               - ec2:DescribeNetworkInterfaces
             Resource: "*"
+          - Sid: DenyAccountLevel
+            Effect: Deny
+            Action:
+              - organizations:*
+              - account:*
+              - sso:*
+              - cloudtrail:DeleteTrail
+              - cloudtrail:StopLogging
+              - guardduty:DeleteDetector
+              - config:DeleteConfigRule
+              - config:StopConfigurationRecorder
+            Resource: "*"
+          - Sid: GatewaySecretEndpointRead
+            Effect: Allow
+            Action: ec2:DescribeVpcEndpoints
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref ApplicationRegion
+          - Sid: GatewaySecretEndpointNetwork
+            # Existing VPC/subnet/SG dependencies of the two interface endpoints.
+            Effect: Allow
+            Action: ec2:CreateVpcEndpoint
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:vpc/*
+              - !Sub arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:subnet/*
+              - !Sub arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:security-group/*
+          - Sid: GatewaySecretEndpointCreate
+            Effect: Allow
+            Action: ec2:CreateVpcEndpoint
+            Resource: !Sub arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref ApplicationRegion
+                aws:RequestTag/Project: !Ref ProjectName
+                aws:RequestTag/Component: GatewaySecretsEndpoint
+                ec2:VpceServiceName:
+                  - !Sub com.amazonaws.${ApplicationRegion}.ssm
+                  - !Sub com.amazonaws.${ApplicationRegion}.secretsmanager
+              StringLike:
+                aws:RequestTag/Stage: [prod, pr-*]
+          - Sid: GatewaySecretEndpointLifecycle
+            Effect: Allow
+            Action:
+              - ec2:ModifyVpcEndpoint
+              - ec2:DeleteVpcEndpoints
+            Resource: !Sub arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:vpc-endpoint/*
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref ApplicationRegion
+                aws:ResourceTag/Project: !Ref ProjectName
+                aws:ResourceTag/Component: GatewaySecretsEndpoint
+              StringLike:
+                aws:ResourceTag/Stage: [prod, pr-*]
+          - Sid: DenyGatewayBoundaryOnOtherRoles
+            Effect: Deny
+            Action: [iam:CreateRole, iam:PutRolePermissionsBoundary, iam:PutRolePolicy, iam:AttachRolePolicy]
+            NotResource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*-Mem9IdentityInterceptorFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*-Mem9IdentityInterceptorFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*-Mem9IdentityInterceptorFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*-Mem9ProxyFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*-Mem9ProxyFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*-Mem9ProxyFnRole-*
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
+          - Sid: DenyGatewayRolesWrongBoundary
+            Effect: Deny
+            Action: [iam:CreateRole, iam:PutRolePermissionsBoundary, iam:PutRolePolicy, iam:AttachRolePolicy]
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*-Mem9IdentityInterceptorFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*-Mem9IdentityInterceptorFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*-Mem9IdentityInterceptorFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*-Mem9ProxyFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*-Mem9ProxyFnRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*-Mem9ProxyFnRole-*
+            Condition:
+              ArnNotEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: PassRoleConstrained
             # Current ECS and Lambda stacks pass task, execution, and function
             # roles. Scope PassRole to this project's role names + SST's
@@ -890,7 +964,9 @@ Resources:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
             Condition:
               ArnEquals:
-                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                iam:PermissionsBoundary:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: WorkloadBoundaryRead
             # Deployment preflight verifies the active default version, not only
             # the stable policy ARN, so operator drift fails every AWS deploy.
@@ -898,7 +974,9 @@ Resources:
             Action:
               - iam:GetPolicy
               - iam:GetPolicyVersion
-            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: WorkloadBoundarySimulation
             # SimulateCustomPolicy has no resource-level authorization. Preflight
             # uses it only with the repository-verified boundary document and a
@@ -920,7 +998,9 @@ Resources:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
             Condition:
               ArnEquals:
-                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                iam:PermissionsBoundary:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
           - Sid: EcsTaskRoleLifecycle
             # Read, detach, policy-delete, and role-delete remain available for
             # preview teardown. IAM removes a role's boundary association when

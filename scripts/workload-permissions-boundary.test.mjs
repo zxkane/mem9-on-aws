@@ -19,6 +19,11 @@ import {
   discoverPassRoleScope,
   compareBoundaryPolicyDocuments,
   expectedBoundaryPolicyDocument,
+  expectedGatewayBoundaryPolicyDocument,
+  GATEWAY_BOUNDARY_POLICY_NAME,
+  gatewayBoundaryArn,
+  gatewayRoleStage,
+  expectedRoleBoundaryArn,
   expectedRolePatterns,
   extractPassRoleScope,
   lambdaExecutionRoleTrustPolicy,
@@ -33,6 +38,7 @@ import {
   verifyPermanentEnforcementDocuments,
   verifyQuarantinePolicy,
 } from "./lib/workload-permissions-boundary.mjs";
+import {gatewayBoundaryProbeCases} from './lib/gateway-workload-boundary.mjs';
 import {
   AWS_CLI_TIMEOUT_MS,
   DEPLOY_COMMAND_TIMEOUT_MS,
@@ -757,6 +763,7 @@ async function runBoundaryDeployMock({
   decisionArtifactBucketEnv = decisionArtifactBucketName,
   deployedPolicy,
   guarded = false,
+  gatewayMissing = false,
   matching = false,
   policyIdentityReadbackFails = false,
   policyRevisionReadbackFails = false,
@@ -779,6 +786,8 @@ async function runBoundaryDeployMock({
   const deployedPath = join(directory, "deployed.json");
   const updatedPath = join(directory, "updated");
   const expectedPath = join(directory, "expected.json");
+  const gatewayExpectedPath = join(directory, 'gateway-expected.json');
+  const gatewayProbesPath = join(directory, 'gateway-probes.json');
   const boundarySimulationsPath = join(
     directory,
     "boundary-simulations.json",
@@ -793,6 +802,8 @@ async function runBoundaryDeployMock({
       : {}),
   });
   const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
+  await writeFile(gatewayExpectedPath, JSON.stringify(expectedGatewayBoundaryPolicyDocument(boundaryContract)));
+  await writeFile(gatewayProbesPath, JSON.stringify(gatewayBoundaryProbeCases(boundaryContract)));
   const baselineBeforeMutation = JSON.stringify(baselineBoundaryPolicy);
   boundaryStatement(baselineBoundaryPolicy.Statement, "actionCeiling").NotAction.push("iam:DeleteRole");
   expect(JSON.stringify(baselineBoundaryPolicy)).not.toBe(baselineBeforeMutation);
@@ -1153,7 +1164,13 @@ case "$command" in
   "cloudformation describe-stack-resources")
     query="$(arg --query "$@")"
     if [[ "$query" == "StackResources[0].PhysicalResourceId" ]]; then
-      if [[ "$MOCK_POLICY_IDENTITY_READBACK_FAILS" == "true" ]]; then
+      if [[ "$(arg --logical-resource-id "$@")" == "GatewayPermissionsBoundary" ]]; then
+        if [[ "$MOCK_GATEWAY_MISSING" == "true" && ! -f "$MOCK_UPDATED" && ! -f "$MOCK_CREATED" ]]; then
+          printf '%s\\n' None
+        else
+          printf '%s\\n' 'arn:aws:iam::123456789012:policy/mem9-on-aws-gateway-boundary'
+        fi
+      elif [[ "$MOCK_POLICY_IDENTITY_READBACK_FAILS" == "true" ]]; then
         printf '%s\\n' 'None'
       else
         printf '%s\\n' 'arn:aws:iam::123456789012:policy/mem9-on-aws-workload-boundary'
@@ -1179,7 +1196,9 @@ case "$command" in
     fi
     ;;
   "iam get-policy-version")
-    if [[ "$MOCK_POST_MUTATION_DRIFT" != "true" &&
+    if [[ "$(arg --policy-arn "$@")" == *"mem9-on-aws-gateway-boundary" ]]; then
+      cat "$MOCK_GATEWAY_EXPECTED"
+    elif [[ "$MOCK_POST_MUTATION_DRIFT" != "true" &&
           ( -f "$MOCK_UPDATED" || -f "$MOCK_CREATED" || "$MOCK_MATCHING" == "true" ) ]]; then
       cat "$MOCK_EXPECTED"
     else
@@ -1206,6 +1225,12 @@ case "$command" in
       resource_arns="$(option_json --resource-arns "$@")"
       output_values="$(option_json --output "$@")"
       context_entries="$(option_json --context-entries "$@")"
+      if [[ "$boundary_inputs" == "$(jq -cn --arg p "$(cat "$MOCK_GATEWAY_EXPECTED")" '[$p]')" ]]; then
+        decision="$(jq -er --argjson context "$context_entries" --argjson resources "$resource_arns" '.[] | select(.context==$context and [.resource]==$resources) | .expected' "$MOCK_GATEWAY_PROBES")" || exit 1
+        resource="$(jq -er '.[0]' <<<"$resource_arns")"
+        jq -cn --arg decision "$decision" --arg resource "$resource" '{EvaluationResults:[{EvalActionName:"kms:Decrypt",EvalResourceName:$resource,EvalDecision:$decision,MatchedStatements:(if $decision=="explicitDeny" then [{SourcePolicyId:"Permissions Boundary Policy"}] else [] end)}]}'
+        exit 0
+      fi
       probe_data="$(jq -er \
         --argjson policy_inputs "$policy_inputs" \
         --argjson boundary_inputs "$boundary_inputs" \
@@ -1290,7 +1315,7 @@ esac
       join(repositoryPath, "scripts/lib/workload-permissions-boundary.mjs"),
       mutatedLibrarySource,
     );
-    for (const dependency of ["authorization-archive-policy.mjs", "authorization-maintenance-isolation.mjs", "retained-operator-protection.mjs"]) {
+    for (const dependency of ["authorization-archive-policy.mjs", "authorization-maintenance-isolation.mjs", "retained-operator-protection.mjs", "gateway-workload-boundary.mjs"]) {
       await writeFile(join(repositoryPath, "scripts/lib", dependency), readFileSync(resolve(root, "scripts/lib", dependency), "utf8"));
     }
     // The real base owns its dependency manifest and lockfile as well as its
@@ -1338,7 +1363,7 @@ set -euo pipefail
 if [[ "\${1:-}" == "cat-file" ]]; then
   [[ "$MOCK_BASE_REF_AVAILABLE" == "true" ]] || exit 1
   case "\${3:-}" in
-    *:scripts/lib/authorization-archive-policy.mjs|*:scripts/lib/authorization-maintenance-isolation.mjs|*:scripts/lib/retained-operator-protection.mjs) exit 1 ;;
+    *:scripts/lib/authorization-archive-policy.mjs|*:scripts/lib/authorization-maintenance-isolation.mjs|*:scripts/lib/retained-operator-protection.mjs|*:scripts/lib/gateway-workload-boundary.mjs) exit 1 ;;
     *) exit 0 ;;
   esac
 fi
@@ -1391,6 +1416,9 @@ esac
           MOCK_BOUNDARY_SIMULATION_MALFORMED_PROBE:
             boundarySimulationMalformedProbe,
           MOCK_BOUNDARY_SIMULATIONS: boundarySimulationsPath,
+          MOCK_GATEWAY_EXPECTED: gatewayExpectedPath,
+          MOCK_GATEWAY_PROBES: gatewayProbesPath,
+          MOCK_GATEWAY_MISSING: String(gatewayMissing),
           MOCK_CALLS: callsPath,
           MOCK_CREATED: createdPath,
           MOCK_DEPLOYED: deployedPath,
@@ -2059,6 +2087,9 @@ function makeAdapter(options = {}) {
           ? roleTrustPolicies.get(roleName)
           : role(roleName).assumeRolePolicyDocument,
         permissionsBoundaryArn: value,
+        tags: options.roleTags?.[roleName] ?? (gatewayRoleStage(roleName) === undefined ? [] : [
+          {Key:'Stage',Value:gatewayRoleStage(roleName)}, {Key:'Project',Value:'mem9-on-aws'},
+        ]),
       };
     },
     async updateAssumeRolePolicy({ roleName, policyDocument }) {
@@ -3065,6 +3096,28 @@ describe("guarded rollout", () => {
       legacyLambdaTrustPolicy,
     ]),
   );
+
+  it("migrates only the known Gateway family from the original boundary", async()=>{
+    const name=productionRoleNames.proxy;
+    const adapter=makeAdapter({roles:[role(name)],liveRoleNames:[name],initialBoundaries:{[name]:boundaryArn}});
+    await runBoundaryRollout(adapter,options);
+    expect((await adapter.getRole({roleName:name})).permissionsBoundaryArn).toBe(gatewayBoundaryArn({partition,accountId}));
+    expect(adapter.calls.indexOf(`put-boundary:${name}`)).toBeGreaterThan(adapter.calls.indexOf('verify-quarantine:1'));
+  });
+  it.each([[],[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:'pr-7'}]].map(tags=>({tags})))("rejects Gateway tags before boundary writes",async ({tags})=>{
+    const name=productionRoleNames.proxy;
+    const adapter=makeAdapter({roles:[role(name)],liveRoleNames:[name],initialBoundaries:{[name]:boundaryArn},roleTags:{[name]:tags}});
+    await expect(runBoundaryRollout(adapter,options)).rejects.toThrow('Gateway role tag binding mismatch');
+    expect(adapter.calls).not.toContain(`put-boundary:${name}`);
+    expect(adapter.state.quarantineInstalled).toBe(true);
+  });
+  it("rejects a Gateway boundary on an ordinary workload",async()=>{
+    const name='mem9-on-aws-prod-task-role';
+    const adapter=makeAdapter({roles:[role(name)],initialBoundaries:{[name]:gatewayBoundaryArn({partition,accountId})}});
+    await expect(runBoundaryRollout(adapter,options)).rejects.toThrow('unexpected permissions boundary');
+    expect(adapter.calls).not.toContain(`put-boundary:${name}`);
+    expect(adapter.state.quarantineInstalled).toBe(true);
+  });
 
   it("TC104/112: validates retained operators before mutation and on each final check", async () => {
     const adapter = makeAdapter();
@@ -4444,7 +4497,7 @@ describe("stateful AWS CLI adapter", () => {
     });
   }
 
-  it("custom-simulates only the real deployed deny policy", async () => {
+  it("custom-simulates only the real deployed enforcement documents", async () => {
     const simulationCalls = [];
     const adapter = permanentVerificationAdapter(
       (results) => results,
@@ -4457,10 +4510,11 @@ describe("stateful AWS CLI adapter", () => {
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(true);
-    expect(simulationCalls).toHaveLength(17);
+    expect(simulationCalls).toHaveLength(20);
     for (const args of simulationCalls) {
       expect(JSON.parse(argument(args, "--policy-input-list"))).toEqual(
-        deployedDenyPolicyDocument(),
+        optionValues(args, "--context-entries").some(value=>value.startsWith("ContextKeyName=iam:PermissionsBoundary,"))
+          ? deployedManagedPolicyFixtures().find(p=>p.logicalId === "ScaffoldPolicy").document : deployedDenyPolicyDocument(),
       );
       expect(optionValues(args, "--action-names")).toHaveLength(1);
       expect(optionValues(args, "--resource-arns")).toHaveLength(1);
@@ -4507,6 +4561,9 @@ describe("stateful AWS CLI adapter", () => {
       ["s3:PutObject", `arn:aws:s3:${boundaryContract.applicationRegion}:${accountId}:accesspoint/propagation-probe/object/data-authorizations/probe`],
       ["s3:CreateAccessPoint", "*"],
       ["cloudformation:UpdateStack", `arn:aws:cloudformation:${boundaryContract.applicationRegion}:${accountId}:stack/decision-artifact-bucket-mem9-on-aws/propagation-probe`],
+      ['iam:CreatePolicyVersion', gatewayBoundaryArn({partition,accountId})],
+      ['iam:CreateRole', `arn:aws:iam::${accountId}:role/mem9-on-aws-quarantine-probe`],
+      ['iam:CreateRole', `arn:aws:iam::${accountId}:role/mem9-on-aws-prod-Mem9ProxyFnRole-propagation-probe`],
     ]);
   });
 
@@ -4529,7 +4586,7 @@ describe("stateful AWS CLI adapter", () => {
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(true);
-    expect(simulationCalls).toBe(17);
+    expect(simulationCalls).toBe(20);
   });
 
   it("accepts an RFC3986-encoded permanent deny policy document", async () => {
@@ -4538,7 +4595,8 @@ describe("stateful AWS CLI adapter", () => {
       1,
       (args) => {
         expect(argument(args, "--policy-input-list")).toBe(
-          JSON.stringify(deployedDenyPolicyDocument()),
+          JSON.stringify(optionValues(args, "--context-entries").some(value=>value.startsWith("ContextKeyName=iam:PermissionsBoundary,"))
+            ? deployedManagedPolicyFixtures().find(p=>p.logicalId === "ScaffoldPolicy").document : deployedDenyPolicyDocument()),
         );
       },
     );
@@ -5110,9 +5168,10 @@ describe("stateful AWS CLI adapter", () => {
     "iam:CreateRole", "iam:PutRolePolicy", "iam:DeleteRolePermissionsBoundary", "iam:PassRole",
     "ssm:PutParameter", "ssm:DeleteParameter", "ssm:LabelParameterVersion", "ssm:UnlabelParameterVersion",
     "s3:PutObject", "s3:PutBucketPolicy", "s3:PutObject", "s3:CreateAccessPoint", "cloudformation:UpdateStack",
+    "iam:CreatePolicyVersion", "iam:CreateRole", "iam:CreateRole",
   ];
-  const finalPermanentProbe = args => optionValues(args, "--action-names")[0] === "cloudformation:UpdateStack" &&
-    optionValues(args, "--resource-arns")[0] === `arn:aws:cloudformation:${boundaryContract.applicationRegion}:${accountId}:stack/decision-artifact-bucket-mem9-on-aws/propagation-probe`;
+  const finalPermanentProbe = args => optionValues(args, "--action-names")[0] === "iam:CreateRole" &&
+    optionValues(args, "--resource-arns")[0] === `arn:aws:iam::${accountId}:role/mem9-on-aws-prod-Mem9ProxyFnRole-propagation-probe`;
 
   it("rejects a failed final permanent-enforcement probe", async () => {
     const simulatedActions = [];
@@ -5423,7 +5482,7 @@ describe("stateful AWS CLI adapter", () => {
             EvaluationResults: actions.flatMap((action) =>
               resources.map((resource) => {
                 const permanentProbe =
-                  resource === boundaryArn ||
+                  resource === boundaryArn || resource === gatewayBoundaryArn({partition,accountId}) ||
                   resource.includes(
                     ":stack/workload-permissions-boundary-mem9-on-aws/",
                   ) ||
@@ -5630,6 +5689,7 @@ describe("stateful AWS CLI adapter", () => {
           if (deploymentRoleNames.includes(roleName)) return {Role: deploymentRoleMetadata(roleName)};
           return {
             Role: {
+              Tags: gatewayRoleStage(roleName) === undefined ? [] : [{Key:"Project",Value:"mem9-on-aws"},{Key:"Stage",Value:gatewayRoleStage(roleName)}],
               PermissionsBoundary: boundaries.has(roleName)
                 ? { PermissionsBoundaryArn: boundaries.get(roleName) }
                 : undefined,
@@ -5702,8 +5762,9 @@ describe("stateful AWS CLI adapter", () => {
     for (const operation of ["put-role-policy", "delete-role-policy"])
       expect(calls.filter(args => args[0] === "iam" && args[1] === operation).map(args => argument(args, "--role-name")).sort())
         .toEqual(deploymentRoleNames);
-    expect([...boundaries.values()]).toEqual(
-      Array.from({ length: expectedVerifiedRoleCount }, () => boundaryArn),
+    expect(boundaries.size).toBe(expectedVerifiedRoleCount);
+    for(const [name,actual] of boundaries) expect(actual).toBe(
+      name === productionRoleNames.proxy ? gatewayBoundaryArn({partition,accountId}) : boundaryArn,
     );
     expect(
       calls.findIndex(
@@ -8128,6 +8189,15 @@ describe("operator entry point", { timeout: 10000 }, () => {
     },
   );
 
+  it("holds verify-only when the Gateway policy is absent, and creates it only through guarded update",async()=>{
+    const absent=await runBoundaryDeployMock({matching:true,gatewayMissing:true,verifyOnly:true});
+    expect(absent.result.status).toBe(1);expect(absent.result.stderr).toContain('Gateway boundary identity read-back failed');
+    expectVerifyOnlyAwsCallsReadOnly(absent.calls);
+    const repaired=await runBoundaryDeployMock({matching:true,gatewayMissing:true,guarded:true});
+    expect(repaired.result.status,repaired.result.stderr).toBe(0);
+    expect(repaired.calls.some(call=>call.startsWith('cloudformation update-stack'))).toBe(true);
+  });
+
   it("gates the active boundary with runtime KMS semantics", async () => {
     const { calls, result } = await runBoundaryDeployMock({
       matching: true,
@@ -8139,7 +8209,7 @@ describe("operator entry point", { timeout: 10000 }, () => {
         call.startsWith("iam simulate-custom-policy") &&
         call.includes("--permissions-boundary-policy-input-list"),
     );
-    expect(simulations).toHaveLength(18);
+    expect(simulations).toHaveLength(50);
     const projectLambda = simulations.find(
       (call) =>
         call.includes("function:mem9-on-aws-regression-probe") &&
@@ -9128,6 +9198,7 @@ describe("boundary and deploy-role templates", () => {
       denyDangerousPolicyName: DENY_DANGEROUS_POLICY_NAME,
       deployRoleName: DEPLOY_ROLE_NAME,
       quarantinePolicyName: QUARANTINE_POLICY_NAME,
+      gatewayBoundaryPolicyName: GATEWAY_BOUNDARY_POLICY_NAME,
     }).toEqual(contract.identifiers);
 
     const boundaryTemplate = parseCloudFormation(boundaryTemplatePath);
@@ -9231,7 +9302,7 @@ describe("boundary and deploy-role templates", () => {
       Sid: "WorkloadBoundaryRead",
       Effect: "Allow",
       Action: ["iam:GetPolicy", "iam:GetPolicyVersion"],
-      Resource: boundaryArn,
+      Resource: [boundaryArn, gatewayBoundaryArn({partition,accountId})],
     });
     expect(
       resolveTemplateValue(bySid(roleStatements, "WorkloadBoundarySimulation")),
@@ -9486,6 +9557,15 @@ describe("boundary and deploy-role templates", () => {
         expect(gate.env?.PAUSED).toBe(
           "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}",
         );
+        if (name === "infra-ci.yml" && jobName === "mnemo-nonroot-smoke") {
+          expect(gate.env?.BOUNDARY).toBe("${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}");
+          expect(gate.run).toBe('test "$PAUSED" != true && test "$BOUNDARY" = true');
+          expect(gate.if).toBeUndefined();
+          expect(gate["continue-on-error"]).toBeUndefined();
+          expect(job.if).toContain("needs.build-and-push-image.result == 'success'");
+          expect(job.if).toContain("github.event.pull_request.head.repo.full_name == github.repository");
+          continue;
+        }
         expect(gate.run).toContain('if [ "$PAUSED" = "true" ]; then');
         expect(gate.run).toContain(
           "::error::AWS deployments are paused for guarded IAM maintenance",

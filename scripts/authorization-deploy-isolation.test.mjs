@@ -133,8 +133,32 @@ describe('deployment authorization maintenance exclusions', () => {
     template.Resources.DenyPolicy.Properties.PolicyDocument.Statement = statements.filter(s => !sids.includes(s.Sid));
     const owner = statements.find(s => s.Sid === 'DenyOperatorOwnedStackMutation');
     expect(owner.Resource.pop()).toEqual({ Sub: 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/decision-artifact-bucket-${ProjectName}/*' });
-    // Hash of the full parsed pre-change source, including trusts, outputs and
-    // every existing action/resource/condition. No ignored old statements.
+    // Reviewed Gateway/endpoint delta, with all trusts and unrelated statements
+    // included. Reverse only that explicit delta to retain the original proof.
+    expect(createHash('sha256').update(JSON.stringify(template)).digest('hex'))
+      .toBe('e8431ed654f49a5971baefb61456bc016583f01a511d00cd903723d93f9eb354');
+    const deny = template.Resources.DenyPolicy.Properties.PolicyDocument.Statement;
+    const scaffold = template.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement;
+    const accountDeny = scaffold.find(s => s.Sid === 'DenyAccountLevel');
+    deny.splice(deny.findIndex(s => s.Sid === 'DenyIAMUserAndProvider') + 1, 0, accountDeny);
+    const added = ['DenyAccountLevel','GatewaySecretEndpointRead','GatewaySecretEndpointNetwork',
+      'GatewaySecretEndpointCreate','GatewaySecretEndpointLifecycle','DenyGatewayBoundaryOnOtherRoles','DenyGatewayRolesWrongBoundary'];
+    template.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement = scaffold.filter(s => !added.includes(s.Sid));
+    const oldArn={Sub:'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary'};
+    const gatewayArn={Sub:'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary'};
+    for(const [policy,sid,key] of [
+      ['DenyPolicy','DenyOperatorOwnedIamMutation','Resource'],
+      ['ComputePolicy','WorkloadBoundaryRead','Resource'],
+      ['DenyPolicy','DenyUnboundedProjectRoleCreation','ArnNotEquals'],
+      ['DenyPolicy','DenyUnboundedProjectRolePolicyWrites','ArnNotEquals'],
+      ['ComputePolicy','EcsTaskRoleCreateWithBoundary','ArnEquals'],
+      ['ComputePolicy','EcsTaskRolePolicyWritesWithBoundary','ArnEquals'],
+    ]) {
+      const statement=template.Resources[policy].Properties.PolicyDocument.Statement.find(s=>s.Sid===sid);
+      const target=key==='Resource'?statement:statement.Condition[key];
+      const field=key==='Resource'?'Resource':'iam:PermissionsBoundary';
+      expect(target[field]).toEqual([oldArn,gatewayArn]);target[field]=oldArn;
+    }
     expect(createHash('sha256').update(JSON.stringify(template)).digest('hex'))
       .toBe('7b95c6db189cbcc2f300cd16e4bf632e5ffae5eb8677665a6eab370c02a93aa1');
   });
@@ -144,7 +168,7 @@ describe('deployment authorization maintenance exclusions', () => {
     const { policies, vars } = render({ ...context, decisionArtifactBucketName: 'a'.repeat(33) });
     const measured = await verify(source, vars);
     expect(measured).toEqual(Object.fromEntries(Object.entries(policies).map(([key, policy]) => [key, JSON.stringify(policy).length])));
-    expect(measured.DenyPolicy).toBe(6100);
+    expect(measured.DenyPolicy).toBe(6053);
     await expect(verify(source.replace('DenyIAMUserAndProvider', 'a'.repeat(6500)), vars)).rejects.toThrow(/quota/u);
     await expect(verify(source.replace('!Sub arn:', '!Unsupported arn:'), vars)).rejects.toThrow(/invalid deployment template/u);
     await expect(verify(source, { ...vars, DecisionArtifactBucketName: 'a'.repeat(34) })).rejects.toThrow(/bucket name/u);
