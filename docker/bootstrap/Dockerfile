@@ -53,6 +53,10 @@ COPY scripts/lib/production-canary-transition.mjs /bootstrap/operator/scripts/li
 COPY scripts/lib/production-image-transition.mjs /bootstrap/operator/scripts/lib/production-image-transition.mjs
 COPY scripts/lib/production-canary-snapshot.mjs /bootstrap/operator/scripts/lib/production-canary-snapshot.mjs
 COPY scripts/lib/production-canary-paused-audit.mjs /bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs
+# Runtime certificate/launch parsing is pure. Host-side proof collectors and
+# source verifiers have a separate dependency closure and stay outside this image.
+COPY scripts/lib/production-nonroot-contracts.mjs scripts/lib/production-nonroot-runtime.mjs scripts/lib/production-nonroot-launch.mjs /bootstrap/operator/scripts/lib/
+COPY scripts/lib/nonroot-preview-source.mjs /bootstrap/operator/scripts/lib/nonroot-preview-source.mjs
 COPY scripts/lib/production-canary-verification.mjs /bootstrap/operator/scripts/lib/production-canary-verification.mjs
 COPY scripts/lib/production-canary-performance.mjs /bootstrap/operator/scripts/lib/production-canary-performance.mjs
 COPY scripts/lib/production-canary-report.mjs /bootstrap/operator/scripts/lib/production-canary-report.mjs
@@ -77,14 +81,22 @@ COPY package.json package-lock.json /bootstrap/operator/
 RUN cd /bootstrap/operator && npm ci --omit=dev
 RUN chmod +x /bootstrap/entrypoint.sh
 
+# The guarded launch is selected by the authenticated task plan. Keep these
+# files outside the preserved application entrypoints and DATA build recipe.
+COPY docker/bootstrap/nonroot-dispatch.mjs docker/bootstrap/nonroot-files.mjs docker/bootstrap/nonroot-identity.mjs /bootstrap/
+COPY scripts/build-nonroot-manifest.mjs /usr/local/lib/mem9/build-nonroot-manifest.mjs
+RUN chmod -R a+rX,go-w /bootstrap \
+    && node /usr/local/lib/mem9/build-nonroot-manifest.mjs
+
 # One-shot: applies schema + seeds the tenant, then exits 0. Not a server.
 USER node
 # Resolve the production entrypoints with the final filesystem and permissions.
 # Importing a module must not execute its CLI or contact AWS/the database.
-RUN --network=none node --input-type=module -e "\
-      await import('/bootstrap/operator/scripts/production-runtime-operator.mjs'); \
-      await import('/bootstrap/operator/scripts/production-consolidation-operator.mjs'); \
-      await import('/bootstrap/operator/scripts/consolidation-preview-fixture.mjs'); \
-      await import('/bootstrap/operator/scripts/lib/post-runtime-preview-route.mjs'); \
-      await import('/bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs');"
+RUN --network=none /usr/local/bin/node --input-type=module -e "\
+      const { readdir } = await import('node:fs/promises'); \
+      for (const directory of ['/bootstrap', '/bootstrap/operator', '/bootstrap/operator/scripts', '/bootstrap/operator/scripts/lib']) { \
+        for (const name of (await readdir(directory)).sort()) { \
+          if (name.endsWith('.mjs')) await import(directory + '/' + name); \
+        } \
+      }"
 ENTRYPOINT ["/bootstrap/entrypoint.sh"]

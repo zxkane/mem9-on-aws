@@ -84,7 +84,7 @@ describe('production continuous-consolidation configuration',()=>{
       const policy=JSON.parse(unwrap(task.executionRole.inlinePolicies[0].policy));
       expect(policy.Statement[0].Action).toEqual(['ssm:GetParameters']);
       expect(policy.Statement[0].Resource.sort()).toEqual(Object.values(unwrap(task.args.ssm)).sort());
-      expect(task.definition.tags).toMatchObject({Project:'mem9-on-aws',Stage:'prod'});
+      expect(unwrap(task.definition.tags)).toMatchObject({Project:'mem9-on-aws',Stage:'prod'});
     }
     expect(()=>productionConsolidationOperators(ecs as any,f.db as any,{...runtime,mode:'prepare'} as any,cfg)).toThrow('ProductionWorkerOperatorRequiresRuntime');
   });

@@ -20,8 +20,9 @@
 #                  Cloudflare zone that contains the hostname.
 #
 # Optional GitHub repo variables:
-#   RUNNER_LABEL — JSON array selecting a self-hosted runner, e.g.
-#                  ["self-hosted", "linux", "arm64"]. Unset → ubuntu-latest.
+#   RUNNER_LABEL — JSON runner selector. Native carrier checks require
+#                  ["ubuntu-24.04-arm"] on GitHub-hosted runners.
+#                  Unset → ubuntu-latest; native carrier checks reject x64.
 #   DEPLOYMENT_MAINTENANCE_PAUSED — set to true during the guarded workload-role
 #                  migration. Existing AWS jobs fail before assuming the deploy
 #                  role; the operator also waits for every prior run to finish.
@@ -57,6 +58,18 @@ on:
   # OAuth façade's HMAC state-signing key before the deploy.
   workflow_dispatch:
     inputs:
+      carrier_before_copy:
+        description: "Run only the independently funded premerge carrier build"
+        type: boolean
+        default: false
+      carrier_grant:
+        description: "Opaque prepaid carrier grant commitment"
+        type: string
+        default: ""
+      carrier_context:
+        description: "Opaque authenticated carrier context commitment"
+        type: string
+        default: ""
       runtime_cutover:
         description: "Run the guarded runtime credential cutover against an already verified deployment"
         type: boolean
@@ -68,7 +81,7 @@ on:
       runtime_cancellation_mode:
         description: Preview-only cancellation drill or resume; normal preserves ordinary cutover
         type: choice
-        options: [normal, cancel, resume]
+        options: [ normal, cancel, resume ]
         default: normal
       runtime_retained_data_run:
         description: "Preview only: prior successful pull-request CI run supplying retained data images"
@@ -79,8 +92,8 @@ on:
         type: boolean
         default: false
   pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, closed]
+    branches: [ main ]
+    types: [ opened, synchronize, reopened, closed ]
     paths:
       - "infra/**"
       - "docker/**"
@@ -106,7 +119,7 @@ on:
       - "infra/cloudformation/decision-artifact-bucket-import.yaml"
       - "infra/cloudformation/memory-namespace-operator-role.yaml"
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - "infra/**"
       - "docker/**"
@@ -137,7 +150,9 @@ on:
 concurrency:
   group: >-
     ${{
-      inputs.runtime_cutover
+      inputs.carrier_before_copy
+        && format('infra-carrier-{0}', github.ref)
+        || inputs.runtime_cutover
         && (inputs.runtime_stage == 'prod' && 'infra-deploy-prod' || format('infra-ci-{0}', inputs.runtime_stage))
         || (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         && 'infra-deploy-prod'
@@ -159,8 +174,35 @@ env:
   ECR_NS: mem9-on-aws
 
 jobs:
+  premerge-carrier-build:
+    name: Build premerge root-audit carrier
+    if: github.event_name == 'workflow_dispatch' && inputs.carrier_before_copy && !inputs.runtime_cutover
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      AWS_PREVIEW_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+      MEM9_CARRIER_WORKER_CONFIG: ${{ secrets.MEM9_CARRIER_WORKER_CONFIG }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build the prepaid carrier
+        uses: ./.github/actions/ci-carrier-before-copy
+        with:
+          grant_commitment: ${{ inputs.carrier_grant }}
+          context_commitment: ${{ inputs.carrier_context }}
+
   application-region:
     name: Resolve application region
+    if: ${{ !inputs.carrier_before_copy }}
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     permissions:
       contents: read
@@ -228,7 +270,7 @@ jobs:
   changes:
     name: Classify deployment changes
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    if: ${{ !inputs.carrier_before_copy && (github.event_name != 'pull_request' || github.event.action != 'closed') }}
     permissions:
       contents: read
     outputs:
@@ -268,7 +310,7 @@ jobs:
   typecheck:
     name: Typecheck & Unit Tests
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    if: github.event_name == 'push' || github.event.action != 'closed'
+    if: ${{ !inputs.carrier_before_copy && (github.event_name == 'push' || github.event.action != 'closed') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -329,6 +371,7 @@ jobs:
           python -m pip install --disable-pip-version-check 'cfn-lint>=1.39,<2'
           application_region="$(node scripts/resolve-application-region.mjs)"
           cfn-lint infra/cloudformation/ecr-registry-scanning.yaml --regions "$application_region"
+          cfn-lint infra/cloudformation/ecr-repositories.yaml --regions "$application_region"
           cfn-lint infra/cloudformation/github-actions-role.yaml --regions us-west-2
           cfn-lint infra/cloudformation/workload-permissions-boundary.yaml --regions us-west-2
           # Application region: this bucket is deployed there, not us-west-2.
@@ -397,17 +440,15 @@ jobs:
     environment: preview-ci
     # Depends on the image build so the preview pulls this PR's freshly-built
     # workload images.
-    needs: [changes, application-region, typecheck, build-and-push-image, build-human-acceptance-image]
+    needs:
+      - changes
+      - application-region
+      - typecheck
+      - build-and-push-image
+      - build-human-acceptance-image
+      - mnemo-nonroot-smoke
     if: >-
-      always()
-      && github.event_name == 'pull_request'
-      && github.event.action != 'closed'
-      && github.event.pull_request.base.ref == 'main'
-      && needs.changes.outputs.aws_mutation_required == 'true'
-      && needs.application-region.result == 'success'
-      && needs.typecheck.result == 'success'
-      && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped')
-      && (needs.build-human-acceptance-image.result == 'success' || needs.build-human-acceptance-image.result == 'skipped')
+      (always() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main' && needs.changes.outputs.aws_mutation_required == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success' && needs.build-and-push-image.result == 'success' && (needs.build-human-acceptance-image.result == 'success' || needs.build-human-acceptance-image.result == 'skipped')) && needs.mnemo-nonroot-smoke.result == 'success'
     # Full-stack fresh preview: Aurora (~13m) + the 3-container ECS task (the
     # ~1.2 GB qwen3 image pull + 180s health-check startPeriod, plus the tiny
     # llm-proxy sidecar) + the bootstrap DB-retry + run-task. No RDS Proxy
@@ -424,7 +465,9 @@ jobs:
       id-token: write
       contents: read
       pull-requests: write
+      actions: read
     env:
+      MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-preview
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
@@ -479,6 +522,18 @@ jobs:
       - name: Install preview acceptance dependencies
         if: steps.gate.outputs.skip != 'true'
         run: npm ci
+      - id: ci_smoke_source
+        name: Verify actual CI smoke source evidence (hard)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_CI_EVIDENCE_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: source
+        continue-on-error: false
 
       - name: Configure AWS credentials (OIDC)
         if: steps.gate.outputs.skip != 'true'
@@ -515,9 +570,32 @@ jobs:
         env:
           MEM9_PROD_HOSTED_ZONE_ID: ${{ secrets.MEM9_PROD_HOSTED_ZONE_ID }}
         run: bash scripts/verify-deploy-role-isolation.sh preview
+      - id: ci_smoke_target_preupdate_10
+        name: "Acquire smoke target receipt: Remove conflicting Pulumi installation"
+        if: success() && (steps.gate.outputs.skip != 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: ${{ format('pr-{0}', github.event.pull_request.number) }}
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/10
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: preupdate
+        continue-on-error: false
+      - id: ci_smoke_guard_b6fe80dd571f
+        name: "Verify smoke phase receipt: Remove conflicting Pulumi installation"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/10
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Remove conflicting Pulumi installation
-        if: steps.gate.outputs.skip != 'true'
+        if: success() && steps.ci_smoke_guard_b6fe80dd571f.outcome == 'success' && (steps.gate.outputs.skip != 'true')
         run: |
           # SST bundles its own Pulumi runtime; a globally-installed Pulumi can
           # win the PATH lookup and produce a version mismatch. Persistent
@@ -527,16 +605,27 @@ jobs:
           rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
           rm -rf ~/.config/sst/bin/ 2>/dev/null || true
           rm -rf ~/.config/sst/plugins/ 2>/dev/null || true
+        continue-on-error: false
+      - id: ci_smoke_guard_c096858251c1
+        name: "Verify smoke phase receipt: Deploy PR stage"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/11
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Deploy PR stage
         id: deploy
-        if: steps.gate.outputs.skip != 'true'
+        if: success() && steps.ci_smoke_guard_c096858251c1.outcome == 'success' && (steps.gate.outputs.skip != 'true')
         shell: bash
         # Deploy the workload images this PR just built. If the build was skipped (no
         # AWS_PREVIEW_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
         env:
-          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
-          MEM9_ECR_NAMESPACE: ${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}
+          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          MEM9_ECR_NAMESPACE: mem9-on-aws/preview
           # Bedrock Project id for the llm-proxy sidecar's OpenAI-Project cost
           # header (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh; empty → the proxy omits the
@@ -610,29 +699,75 @@ jobs:
             echo "::error::SST deployment failed (exit $EXIT)"
             exit "$EXIT"
           fi
+        continue-on-error: false
+      - id: ci_smoke_target_preupdate_12
+        name: "Acquire smoke target receipt: Drain preview service and previous bootstrap tasks"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: ${{ format('pr-{0}', github.event.pull_request.number) }}
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/12
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: preupdate
+        continue-on-error: false
+      - id: ci_smoke_guard_84741927318d
+        name: "Verify smoke phase receipt: Drain preview service and previous bootstrap tasks"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/12
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Drain preview service and previous bootstrap tasks
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_84741927318d.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs drain
+        continue-on-error: false
+      - id: ci_smoke_guard_29e4847e0dac
+        name: "Verify smoke phase receipt: Run schema-bootstrap task (preview)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/13
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Run schema-bootstrap task (preview)
         # Dedicated owner connection initializes schema, grants, exact tenant
         # bindings and readiness while the application service is stopped.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_29e4847e0dac.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs bootstrap
+        continue-on-error: false
+      - id: ci_smoke_guard_8f64e557fb5b
+        name: "Verify smoke phase receipt: Deploy PR namespace enforcement"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/14
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Deploy PR namespace enforcement
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_8f64e557fb5b.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
-          MEM9_ECR_NAMESPACE: ${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}
+          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          MEM9_ECR_NAMESPACE: mem9-on-aws/preview
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
           MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
           MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
@@ -647,36 +782,104 @@ jobs:
           MEM9_RUNTIME_READY: "1"
         run: |
           pnpm -C infra exec sst deploy --stage "$STAGE" --print-logs
+        continue-on-error: false
+      - id: ci_smoke_guard_cd67d7b9c2b5
+        name: "Verify smoke phase receipt: Reconcile namespace-enforced preview ECS deployment"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/15
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Reconcile namespace-enforced preview ECS deployment
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_cd67d7b9c2b5.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/reconcile-ecs-deployment.mjs --stage "$STAGE"
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_16
+        name: "Acquire smoke target receipt: Verify preview runtime credentials (hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: ${{ format('pr-{0}', github.event.pull_request.number) }}
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/16
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
+      - id: ci_smoke_guard_cd62acb846ea
+        name: "Verify smoke phase receipt: Verify preview runtime credentials (hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/16
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Verify preview runtime credentials (hard)
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_cd62acb846ea.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs verify
+        continue-on-error: false
+      - id: ci_smoke_guard_27385f4910fd
+        name: "Verify smoke phase receipt: Aurora administrator authority (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/17
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Aurora administrator authority (preview, hard)
         # Role/extension permission checks run inside ROLLBACK and the temporary
         # administrator is removed. Actual production retirement is a later gate.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_27385f4910fd.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs admin-probe
+        continue-on-error: false
+      - id: ci_smoke_guard_957871004264
+        name: "Verify smoke phase receipt: Continuous consolidation Scheduler E2E (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/18
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Continuous consolidation Scheduler E2E (preview, hard)
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_957871004264.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
           MEM9_DEPLOY_COMMIT: ${{ github.sha }}
         run: node scripts/consolidation-scheduler-e2e.mjs
+        continue-on-error: false
+      - id: ci_smoke_guard_763be94f5c5b
+        name: "Verify smoke phase receipt: Canary continuation fixture (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && needs.build-and-push-image.result == 'success')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/19
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Canary continuation fixture (preview, hard)
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && needs.build-and-push-image.result == 'success'
+        if: success() && steps.ci_smoke_guard_763be94f5c5b.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && needs.build-and-push-image.result == 'success')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
           MEM9_FIXTURE_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha }}
@@ -685,6 +888,17 @@ jobs:
           EXPECTED_FIXTURE_RUNNER_DIGEST: ${{ needs.build-and-push-image.outputs.fixture_runner_digest }}
           EXPECTED_FIXTURE_DATABASE_DIGEST: ${{ needs.build-and-push-image.outputs.fixture_database_digest }}
         run: node scripts/canary-fixture-e2e.mjs
+        continue-on-error: false
+      - id: ci_smoke_guard_fe17d75e647d
+        name: "Verify smoke phase receipt: MCP write-search E2E (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/20
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: MCP write-search E2E (preview, hard)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
@@ -693,52 +907,133 @@ jobs:
         # isolation must preserve this real write/search path before promotion.
         # STAGE comes from the deploy step's validated pr-N output (env, not
         # inlined into run:).
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_fe17d75e647d.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-mcp-e2e.sh
+        continue-on-error: false
+      - id: ci_smoke_guard_a56fa2ae6e3f
+        name: "Verify smoke phase receipt: Namespace connection attribution E2E (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/21
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Namespace connection attribution E2E (preview, hard)
         # Two temporary M2M clients write into different namespaces in this
         # stage's one Aurora database. Each must recall its own marker and must
         # not observe the other marker. The script rejects non-pr-N stages.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_a56fa2ae6e3f.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-memory-namespace-connection-e2e.sh
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_22
+        name: "Acquire smoke target receipt: Namespace performance E2E (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: ${{ format('pr-{0}', github.event.pull_request.number) }}
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/22
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
+      - id: ci_smoke_guard_8ee8e9762f08
+        name: "Verify smoke phase receipt: Namespace performance E2E (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/22
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Namespace performance E2E (preview, hard)
         # The stage-scoped bootstrap task runs inside the application VPC and
         # benchmarks the real M2M namespace-resolution transaction.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_8ee8e9762f08.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-memory-namespace-benchmark.sh
+        continue-on-error: false
+      - id: ci_smoke_guard_4b6c4ed07f45
+        name: "Verify smoke phase receipt: OAuth façade smoke (preview)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/23
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: OAuth façade smoke (preview)
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_4b6c4ed07f45.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-oauth-facade-smoke.sh
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_24
+        name: "Acquire smoke target receipt: Human namespace OAuth E2E (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: ${{ format('pr-{0}', github.event.pull_request.number) }}
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/24
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
+      - id: ci_smoke_guard_5938f53d50ce
+        name: "Verify smoke phase receipt: Human namespace OAuth E2E (preview, hard)"
+        shell: bash
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/24
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Human namespace OAuth E2E (preview, hard)
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_5938f53d50ce.outcome == 'success' && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
           EXPECTED_HUMAN_IMAGE_TAG: ${{ needs.build-human-acceptance-image.outputs.image_tag }}
         run: bash scripts/run-human-namespace-preview-e2e.sh
+        continue-on-error: false
 
       - name: Cancel outstanding runtime bootstrap invocations
         if: always() && (failure() || cancelled()) && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs cancel
+      - id: ci_smoke_guard_dcc375938714
+        name: "Verify smoke phase receipt: Comment deploy status"
+        shell: bash
+        if: success() && (always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-preview
+          MEM9_CI_SMOKE_STEP: deploy-preview/26
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Comment deploy status
-        if: always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        if: success() && steps.ci_smoke_guard_dcc375938714.outcome == 'success' && (always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
@@ -789,6 +1084,10 @@ jobs:
                 body,
               });
             }
+        continue-on-error: false
+      - name: Remove owned CI smoke source evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-source
 
   # ───────────────────────────────────────────────────────────────────────────
   # cleanup-failed-preview — teardown runs independently after a preview deploy
@@ -798,14 +1097,9 @@ jobs:
     name: Cleanup Failed PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: preview-ci
-    needs: [application-region, deploy-preview]
+    needs: [ application-region, deploy-preview ]
     if: >-
-      always() &&
-      github.event_name == 'pull_request' &&
-      github.event.action != 'closed' &&
-      github.event.pull_request.base.ref == 'main' &&
-      needs.deploy-preview.result != 'success' &&
-      needs.deploy-preview.outputs.stage != ''
+      always() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main' && needs.deploy-preview.result != 'success' && needs.deploy-preview.outputs.stage != ''
     # Inner worst case is 55m: two 15m removes and one 22m ENI wait, each with
     # a 60s kill-after allowance. Keep 15m for checkout, install, OIDC, unlock,
     # and process startup so the job timeout cannot pre-empt the final retry.
@@ -923,7 +1217,7 @@ jobs:
     name: Cleanup PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: preview-ci
-    needs: [application-region]
+    needs: [ application-region ]
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
     # Budget: 15m first remove + up to 20m ENI detach wait + 15m retry, plus
     # checkout/pnpm/install. The old 30m cut the FIRST remove off mid-flight (#146),
@@ -1134,11 +1428,9 @@ jobs:
     name: Verify production image source
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: prod
-    needs: [changes, application-region, typecheck]
+    needs: [ changes, application-region, typecheck ]
     if: >-
-      !inputs.runtime_cutover
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && (needs.changes.outputs.workload_changed == 'true' || needs.changes.outputs.aws_mutation_required == 'true')
+      !inputs.runtime_cutover && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.changes.outputs.workload_changed == 'true' || needs.changes.outputs.aws_mutation_required == 'true')
     timeout-minutes: 10
     permissions:
       id-token: write
@@ -1147,6 +1439,7 @@ jobs:
       pull-requests: read
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
+      MEM9_CI_ACQUISITION_CONFIG: ${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}
     outputs:
       image_transition: ${{ steps.source.outputs.image_transition }}
     steps:
@@ -1179,6 +1472,17 @@ jobs:
 
       - name: Install production image verifier dependencies
         run: npm ci
+      - id: ci_smoke_source
+        name: Verify actual CI smoke source evidence (hard)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_CI_EVIDENCE_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: source
+        continue-on-error: false
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
@@ -1199,20 +1503,17 @@ jobs:
       - name: Remove private image transition bundle
         if: always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''
         run: node scripts/verify-image-security-deployment.mjs --cleanup
+      - name: Remove owned CI smoke source evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-source
 
   build-and-push-image:
     name: Build & push workload images
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: ${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}
-    needs: [changes, application-region, typecheck, verify-production-image-transition]
+    needs: [ changes, application-region, typecheck, verify-production-image-transition ]
     if: >-
-      always()
-      && !inputs.runtime_cutover
-      && needs.changes.outputs.workload_changed == 'true'
-      && needs.application-region.result == 'success'
-      && needs.typecheck.result == 'success'
-      && (github.event_name == 'pull_request' || (needs.verify-production-image-transition.result == 'success' && needs.verify-production-image-transition.outputs.image_transition == 'false'))
-      && (
+      always() && !inputs.runtime_cutover && needs.changes.outputs.aws_mutation_required == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success' && (github.event_name == 'pull_request' || (needs.verify-production-image-transition.result == 'success' && needs.verify-production-image-transition.outputs.image_transition == 'false')) && (
         github.event_name == 'push'
         || github.event_name == 'workflow_dispatch'
         || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
@@ -1234,6 +1535,7 @@ jobs:
       bootstrap_digest: ${{ steps.bootstrap.outputs.digest }}
       fixture_runner_digest: ${{ steps.canary-runner.outputs.digest }}
       fixture_database_digest: ${{ steps.canary-database.outputs.digest }}
+      mnemo_digest: ${{ steps.mnemo.outputs.digest }}
     steps:
       - name: Deployment maintenance gate
         env:
@@ -1339,6 +1641,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Build & push mnemo-server (arm64)
+        id: mnemo
         if: steps.gate.outputs.skip != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -1353,7 +1656,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=mnemo-server
 
       - name: Smoke test mnemo-server EMF framing (non-TTY)
-        if: steps.gate.outputs.skip != 'true'
+        if: false
         env:
           MNEMO_IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/mnemo-server:${{ steps.tag.outputs.image_tag }}
         run: bash scripts/run-mnemo-emf-smoke.sh
@@ -1437,10 +1740,9 @@ jobs:
     name: Build image transition control
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: prod
-    needs: [application-region, verify-production-image-transition]
+    needs: [ application-region, verify-production-image-transition ]
     if: >-
-      needs.verify-production-image-transition.result == 'success'
-      && needs.verify-production-image-transition.outputs.image_transition == 'true'
+      needs.verify-production-image-transition.result == 'success' && needs.verify-production-image-transition.outputs.image_transition == 'true'
     timeout-minutes: 30
     permissions:
       id-token: write
@@ -1449,9 +1751,11 @@ jobs:
       pull-requests: read
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
+      MEM9_CI_ACQUISITION_CONFIG: ${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}
     outputs:
       image_tag: ${{ steps.tag.outputs.image_tag }}
       bootstrap_digest: ${{ steps.bootstrap.outputs.digest }}
+      control_capture: ${{ steps.publish_control_capture.outputs.commitment }}
     steps:
       - name: Deployment maintenance gate
         env:
@@ -1482,13 +1786,26 @@ jobs:
 
       - name: Install production image verifier dependencies
         run: npm ci
+      - id: ci_smoke_source
+        name: Verify actual CI smoke source evidence (hard)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_CI_EVIDENCE_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: source
+        continue-on-error: false
 
       - name: Configure AWS credentials (OIDC)
+        id: control_credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
           role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
+          output-credentials: true
 
       - name: Resolve image tag
         id: tag
@@ -1517,6 +1834,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/verify-image-security-deployment.mjs --build
 
+      - name: Verify CONTROL build context
+        env:
+          STAGE: prod
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/record-nonroot-control-build.mjs prepare
+
       - name: Build & push image transition bootstrap (arm64)
         id: bootstrap
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -1531,23 +1854,43 @@ jobs:
           cache-from: type=gha,scope=bootstrap
           cache-to: type=gha,mode=max,scope=bootstrap
 
+      - name: Record actual CONTROL build action
+        env:
+          STAGE: prod
+          GH_TOKEN: ${{ github.token }}
+          MEM9_CONTROL_BUILD_METADATA: ${{ steps.bootstrap.outputs.metadata }}
+          MEM9_EXPECTED_BOOTSTRAP_DIGEST: ${{ steps.bootstrap.outputs.digest }}
+        run: node scripts/record-nonroot-control-build.mjs capture
+
+      - name: Preserve private CONTROL build capture
+        id: publish_control_capture
+        env:
+          STAGE: prod
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_CREDENTIALS_EXPIRES: ${{ steps.control_credentials.outputs.aws-expiration }}
+        run: node scripts/record-nonroot-control-build.mjs publish
+
+      - name: Remove owned CONTROL build capture
+        if: always()
+        run: node scripts/record-nonroot-control-build.mjs cleanup
+
       - name: Remove private image transition bundle
         if: always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''
         run: node scripts/verify-image-security-deployment.mjs --cleanup
+      - name: Remove owned CI smoke source evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-source
 
   build-human-acceptance-image:
     name: Build human namespace acceptance image
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: preview-ci
-    needs: [changes, application-region, typecheck]
+    needs: [ changes, application-region, typecheck ]
     if: >-
-      always()
-      && github.event_name == 'pull_request'
-      && github.event.action != 'closed'
-      && github.event.pull_request.base.ref == 'main'
-      && needs.changes.outputs.aws_mutation_required == 'true'
-      && needs.application-region.result == 'success'
-      && needs.typecheck.result == 'success'
+      always() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main' && needs.changes.outputs.aws_mutation_required == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success'
     timeout-minutes: 20
     permissions:
       id-token: write
@@ -1627,26 +1970,27 @@ jobs:
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-prod — push to main → stage `prod`. Every credential-bearing
   # production job is directly gated by the protected `prod` Environment.
-  # Workload changes pin the newly-built tag; application-IaC-only changes reuse
-  # the currently deployed tag.
+  # Ordinary workload and application-IaC changes use this run's validated
+  # image build. Protected security transitions retain their separate control
+  # build and authenticated data-image selection.
   # ───────────────────────────────────────────────────────────────────────────
   deploy-prod:
     name: Deploy prod
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: prod
-    needs: [changes, application-region, typecheck, build-and-push-image, verify-production-image-transition, build-image-transition-control]
+    needs:
+      - changes
+      - application-region
+      - typecheck
+      - build-and-push-image
+      - verify-production-image-transition
+      - build-image-transition-control
+      - mnemo-nonroot-smoke
     if: >-
-      always()
-      && !inputs.runtime_cutover
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && needs.changes.outputs.aws_mutation_required == 'true'
-      && needs.application-region.result == 'success'
-      && needs.typecheck.result == 'success'
-      && needs.verify-production-image-transition.result == 'success'
-      && (
+      (always() && !inputs.runtime_cutover && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.aws_mutation_required == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success' && needs.verify-production-image-transition.result == 'success' && (
         (needs.verify-production-image-transition.outputs.image_transition == 'true' && needs.build-image-transition-control.result == 'success' && needs.build-and-push-image.result == 'skipped')
-        || (needs.verify-production-image-transition.outputs.image_transition == 'false' && needs.build-image-transition-control.result == 'skipped' && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped'))
-      )
+        || (needs.verify-production-image-transition.outputs.image_transition == 'false' && needs.build-image-transition-control.result == 'skipped' && needs.build-and-push-image.result == 'success')
+      )) && (needs.verify-production-image-transition.outputs.image_transition == 'true' || needs.mnemo-nonroot-smoke.result == 'success')
     # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
     # infra/db.ts). The configured custom reconciliation budget
@@ -1659,6 +2003,8 @@ jobs:
       actions: read
       pull-requests: read
     env:
+      MEM9_CI_ACQUISITION_CONFIG: ${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}
+      MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-prod
       MEM9_EXPECT_IMAGE_TRANSITION: ${{ needs.verify-production-image-transition.outputs.image_transition }}
@@ -1730,6 +2076,17 @@ jobs:
 
       - name: Install production runtime operator dependencies
         run: npm ci
+      - id: ci_smoke_source
+        name: Verify actual CI smoke source evidence (hard)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_CI_EVIDENCE_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: source
+        continue-on-error: false
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
@@ -1744,7 +2101,11 @@ jobs:
           MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
           MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/verify-image-security-deployment.mjs
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-prod/9
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: preupdate
 
       - name: Preflight — verify role is assumable
         env:
@@ -1801,21 +2162,53 @@ jobs:
             exit 1
           fi
           echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+      - id: ci_smoke_guard_fa0799abaf3a
+        name: "Verify smoke phase receipt: Remove conflicting Pulumi installation"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/13
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Remove conflicting Pulumi installation
         run: |
           sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
           rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
           rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
+        if: success() && steps.ci_smoke_guard_fa0799abaf3a.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_guard_c95d33d5886c
+        name: "Verify smoke phase receipt: Verify namespace cutover phase"
+        shell: bash
+        if: success() && (vars.MEM9_NAMESPACE_REQUIRED == '1')
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/14
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Verify namespace cutover phase
-        if: vars.MEM9_NAMESPACE_REQUIRED == '1'
+        if: success() && steps.ci_smoke_guard_c95d33d5886c.outcome == 'success' && (vars.MEM9_NAMESPACE_REQUIRED == '1')
         shell: bash
         env:
           STAGE: prod
         run: >-
-          bash scripts/run-memory-namespace-task.sh assert-phase
-          --expected-phase constraints_complete
+          bash scripts/run-memory-namespace-task.sh assert-phase --expected-phase constraints_complete
+        continue-on-error: false
+      - id: ci_smoke_guard_d4fd95d1d638
+        name: "Verify smoke phase receipt: Recover stale SST prod lock"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/15
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Recover stale SST prod lock
         # Recovers from "Concurrent update detected" left by a previous
@@ -1870,6 +2263,31 @@ jobs:
             echo "::error::prod lock is fresh (age ${AGE_MINUTES} min <= ${STALE_LOCK_AGE_MINUTES}). Refusing to unlock — a concurrent deploy may be running."
             exit 1
           fi
+        if: success() && steps.ci_smoke_guard_d4fd95d1d638.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_target_preconfigure_16
+        name: "Acquire smoke target receipt: Seed OAuth HMAC key (workflow_dispatch only)"
+        if: success() && (github.event_name == 'workflow_dispatch' && inputs.seed_oauth_hmac)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          STAGE: prod
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-prod/16
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: preconfigure
+        continue-on-error: false
+      - id: ci_smoke_guard_373171275c38
+        name: "Verify smoke phase receipt: Seed OAuth HMAC key (workflow_dispatch only)"
+        shell: bash
+        if: success() && (github.event_name == 'workflow_dispatch' && inputs.seed_oauth_hmac)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/16
+          MEM9_CI_SMOKE_PHASE: preconfigure
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Seed OAuth HMAC key (workflow_dispatch only)
         # The OAuth façade's HMAC state-signing key. Empty → the façade returns
@@ -1879,13 +2297,14 @@ jobs:
         # (SST secrets are build-time `.value` links). Idempotent — re-running
         # rotates the key (existing signed states expire in 10 min anyway).
         # Runs ONLY on a manual dispatch with seed_oauth_hmac=true.
-        if: github.event_name == 'workflow_dispatch' && inputs.seed_oauth_hmac
+        if: success() && steps.ci_smoke_guard_373171275c38.outcome == 'success' && (github.event_name == 'workflow_dispatch' && inputs.seed_oauth_hmac)
         shell: bash
         run: |
           set -euo pipefail
           KEY=$(openssl rand -base64 32)
           pnpm -C infra exec sst secret set OauthStateHmacKey "$KEY" --stage prod
           echo "::notice::OauthStateHmacKey seeded for prod (re-linked by the deploy below)"
+        continue-on-error: false
 
       - name: Refresh image upgrade authorization before configure
         env:
@@ -1893,12 +2312,28 @@ jobs:
           MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
           MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/verify-image-security-deployment.mjs --deploy
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-prod/17
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: preconfigure
+      - id: ci_smoke_guard_8ba1cc950ac8
+        name: "Verify smoke phase receipt: Resolve production runtime deployment mode"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/18
+          MEM9_CI_SMOKE_PHASE: preconfigure
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Resolve production runtime deployment mode
         env:
           STAGE: prod
         run: node scripts/run-production-runtime.mjs configure
+        if: success() && steps.ci_smoke_guard_8ba1cc950ac8.outcome == 'success' && (true)
+        continue-on-error: false
 
       - name: Refresh image upgrade authorization before SST
         env:
@@ -1906,7 +2341,21 @@ jobs:
           MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
           MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/verify-image-security-deployment.mjs --deploy
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-prod/19
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: presst
+      - id: ci_smoke_guard_77accca5fcd3
+        name: "Verify smoke phase receipt: Deploy prod stage"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/20
+          MEM9_CI_SMOKE_PHASE: presst
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Deploy prod stage
         shell: bash
@@ -1961,11 +2410,49 @@ jobs:
             echo "::error::SST prod deployment failed (exit $EXIT)"
             exit "$EXIT"
           fi
+          node scripts/record-nonroot-deployment.mjs complete
+        if: success() && steps.ci_smoke_guard_77accca5fcd3.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_target_preupdate_21
+        name: "Acquire smoke target receipt: Reconcile prod ECS deployment"
+        if: success() && (true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          STAGE: prod
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-prod/21
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: preupdate
+        continue-on-error: false
+      - id: ci_smoke_guard_82ddffea5b1b
+        name: "Verify smoke phase receipt: Reconcile prod ECS deployment"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/21
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Reconcile prod ECS deployment
         env:
           STAGE: prod
         run: node scripts/reconcile-ecs-deployment.mjs --stage "$STAGE"
+        if: success() && steps.ci_smoke_guard_82ddffea5b1b.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_guard_17ff5412dd0d
+        name: "Verify smoke phase receipt: Run schema-bootstrap task (prod)"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/22
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: Run schema-bootstrap task (prod)
         shell: bash
@@ -1977,6 +2464,31 @@ jobs:
         env:
           STAGE: prod
         run: bash scripts/run-bootstrap-task.sh
+        if: success() && steps.ci_smoke_guard_17ff5412dd0d.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_23
+        name: "Acquire smoke target receipt: MCP write-search E2E (prod, hard)"
+        if: success() && (true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          STAGE: prod
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-prod/23
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
+      - id: ci_smoke_guard_5668528d817f
+        name: "Verify smoke phase receipt: MCP write-search E2E (prod, hard)"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/23
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: MCP write-search E2E (prod, hard)
         # HARD gate on prod: the full section 6/6a chain must round-trip
@@ -1988,25 +2500,39 @@ jobs:
         env:
           STAGE: prod
         run: bash scripts/run-mcp-e2e.sh
+        if: success() && steps.ci_smoke_guard_5668528d817f.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_guard_fef6cdb6b1a0
+        name: "Verify smoke phase receipt: OAuth façade smoke (prod)"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: deploy-prod
+          MEM9_CI_SMOKE_STEP: deploy-prod/24
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
 
       - name: OAuth façade smoke (prod)
         env:
           STAGE: prod
         run: bash scripts/run-oauth-facade-smoke.sh
+        if: success() && steps.ci_smoke_guard_fef6cdb6b1a0.outcome == 'success' && (true)
+        continue-on-error: false
 
       - name: Remove private image transition bundle
         if: always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''
         run: node scripts/verify-image-security-deployment.mjs --cleanup
+      - name: Remove owned CI smoke source evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-source
 
   report-prod-failure:
     name: Report prod deploy failure
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    needs: [changes, deploy-prod]
+    needs: [ changes, deploy-prod ]
     if: >-
-      always() &&
-      !inputs.runtime_cutover &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      (
+      always() && !inputs.carrier_before_copy && !inputs.runtime_cutover && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (
         needs.changes.result != 'success'
         || (
           needs.changes.outputs.aws_mutation_required == 'true'
@@ -2068,6 +2594,8 @@ jobs:
       actions: read
       pull-requests: read
     env:
+      MEM9_CI_ACQUISITION_CONFIG: ${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}
+      MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-prod
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
@@ -2126,38 +2654,46 @@ jobs:
         run: |-
           npm ci
           pnpm -C infra install --frozen-lockfile
-      - name: Require the verified deployment revision
+      - id: ci_smoke_source
+        name: Verify actual CI smoke source evidence (hard)
         env:
           GH_TOKEN: ${{ github.token }}
+          MEM9_CI_EVIDENCE_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: source
+        continue-on-error: false
+      - id: ci_smoke_guard_d9615ea5ee84
+        name: "Verify smoke phase receipt: Run guarded runtime cutover"
         shell: bash
-        run: |-
-          node --input-type=module <<'JS'
-          import {execFileSync} from 'node:child_process';
-          const stage=process.env.STAGE,sha=process.env.GITHUB_SHA;
-          if(stage!=='prod'){
-            const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));
-            if(pr.isCrossRepository||pr.state!=='OPEN'||pr.headRefOid!==sha)throw Error('PreviewRevisionMismatch');
-          }
-          const runs=JSON.parse(execFileSync('gh',['run','list','--workflow','Infra CI','--commit',sha,'--limit','20','--json','databaseId,status,conclusion'],{encoding:'utf8'}));
-          let verified=false;
-          for(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){
-            const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));
-            if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}
-          }
-          if(!verified)throw Error('VerifiedDeploymentRequired');
-          JS
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: runtime-cutover-prod
+          MEM9_CI_SMOKE_STEP: runtime-cutover-prod/7
+          MEM9_CI_SMOKE_PHASE: source
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
       - name: Run guarded runtime cutover
         uses: ./.github/actions/runtime-cutover
         with:
           role-arn: ${{ secrets.AWS_PROD_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
           cleanup-preview: "false"
+          ci-smoke-route: runtime-cutover-prod
+          ci-smoke-call-path: runtime-cutover-prod/7
+        if: success() && steps.ci_smoke_guard_d9615ea5ee84.outcome == 'success' && (true)
+        continue-on-error: false
       - name: Restore interrupted production runtime
         if: failure() || cancelled()
         uses: ./.github/actions/runtime-recovery
         with:
           role-arn: ${{ secrets.AWS_PROD_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
+      - name: Remove owned CI smoke source evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-source
   runtime-cutover-preview:
     name: Preview runtime credential rehearsal (${{ inputs.runtime_stage }})
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
@@ -2173,6 +2709,7 @@ jobs:
       actions: read
       pull-requests: read
     env:
+      MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
       MEM9_NAMESPACE_REQUIRED: "1"
       MEM9_RUNTIME_READY: "1"
       MEM9_DURABLE_INGEST_ENABLED: "1"
@@ -2219,39 +2756,54 @@ jobs:
         run: |-
           npm ci
           pnpm -C infra install --frozen-lockfile
-      - name: Require the verified deployment revision
+      - id: ci_smoke_source
+        name: Verify actual CI smoke source evidence (hard)
         env:
           GH_TOKEN: ${{ github.token }}
+          MEM9_CI_EVIDENCE_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+          MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: source
+        continue-on-error: false
+      - id: ci_smoke_guard_921d03b91e6e
+        name: "Verify smoke phase receipt: Prepare guarded runtime cutover"
         shell: bash
-        run: |-
-          node --input-type=module <<'JS'
-          import {execFileSync} from 'node:child_process';
-          const stage=process.env.STAGE,sha=process.env.GITHUB_SHA;
-          if(stage!=='prod'){
-            const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));
-            if(pr.isCrossRepository||pr.state!=='OPEN'||pr.headRefOid!==sha)throw Error('PreviewRevisionMismatch');
-          }
-          const runs=JSON.parse(execFileSync('gh',['run','list','--workflow','Infra CI','--commit',sha,'--limit','20','--json','databaseId,status,conclusion'],{encoding:'utf8'}));
-          let verified=false;
-          for(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){
-            const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));
-            if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}
-          }
-          if(!verified)throw Error('VerifiedDeploymentRequired');
-          JS
+        if: success() && (inputs.runtime_cancellation_mode != 'resume')
+        env:
+          MEM9_CI_SMOKE_ROUTE: runtime-cutover-preview
+          MEM9_CI_SMOKE_STEP: runtime-cutover-preview/6
+          MEM9_CI_SMOKE_PHASE: source
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
       - name: Prepare guarded runtime cutover
-        if: inputs.runtime_cancellation_mode != 'resume'
+        if: success() && steps.ci_smoke_guard_921d03b91e6e.outcome == 'success' && (inputs.runtime_cancellation_mode != 'resume')
         uses: ./.github/actions/runtime-cutover
         with:
           role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
           phase: prepare
+          ci-smoke-route: runtime-cutover-preview
+          ci-smoke-call-path: runtime-cutover-preview/6
+        continue-on-error: false
+      - id: ci_smoke_guard_a94fb5280ae4
+        name: "Verify smoke phase receipt: Arm preview cancellation rehearsal"
+        shell: bash
+        if: success() && (inputs.runtime_cancellation_mode == 'cancel')
+        env:
+          MEM9_CI_SMOKE_ROUTE: runtime-cutover-preview
+          MEM9_CI_SMOKE_STEP: runtime-cutover-preview/7
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
       - name: Arm preview cancellation rehearsal
         id: cancel_arm
-        if: inputs.runtime_cancellation_mode == 'cancel'
+        if: success() && steps.ci_smoke_guard_a94fb5280ae4.outcome == 'success' && (inputs.runtime_cancellation_mode == 'cancel')
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/run-production-runtime.mjs arm-cancellation
+        continue-on-error: false
       - name: Refresh preview resume credentials
         if: inputs.runtime_cancellation_mode == 'resume'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
@@ -2259,11 +2811,32 @@ jobs:
           role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ needs.application-region.outputs.region }}
           mask-aws-account-id: true
+      - id: ci_smoke_guard_2965a7ceae9b
+        name: "Verify smoke phase receipt: Resume verified cancellation rehearsal"
+        shell: bash
+        if: success() && (inputs.runtime_cancellation_mode == 'resume')
+        env:
+          MEM9_CI_SMOKE_ROUTE: runtime-cutover-preview
+          MEM9_CI_SMOKE_STEP: runtime-cutover-preview/9
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
       - name: Resume verified cancellation rehearsal
-        if: inputs.runtime_cancellation_mode == 'resume'
+        if: success() && steps.ci_smoke_guard_2965a7ceae9b.outcome == 'success' && (inputs.runtime_cancellation_mode == 'resume')
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/run-production-runtime.mjs resume
+        continue-on-error: false
+      - id: ci_smoke_guard_a28ca7f1c60f
+        name: "Verify smoke phase receipt: Finish guarded runtime cutover"
+        shell: bash
+        if: success() && (true)
+        env:
+          MEM9_CI_SMOKE_ROUTE: runtime-cutover-preview
+          MEM9_CI_SMOKE_STEP: runtime-cutover-preview/10
+          MEM9_CI_SMOKE_PHASE: preupdate
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
       - name: Finish guarded runtime cutover
         uses: ./.github/actions/runtime-cutover
         env:
@@ -2274,12 +2847,27 @@ jobs:
           region: ${{ needs.application-region.outputs.region }}
           phase: finish
           cleanup-preview: "true"
+          ci-smoke-route: runtime-cutover-preview
+          ci-smoke-call-path: runtime-cutover-preview/10
+        if: success() && steps.ci_smoke_guard_a28ca7f1c60f.outcome == 'success' && (true)
+        continue-on-error: false
+      - id: ci_smoke_guard_7d373d02392f
+        name: "Verify smoke phase receipt: Retained data and current control acceptance (preview, hard)"
+        shell: bash
+        if: success() && (success() && inputs.runtime_retained_data_run != '')
+        env:
+          MEM9_CI_SMOKE_ROUTE: runtime-cutover-preview
+          MEM9_CI_SMOKE_STEP: runtime-cutover-preview/11
+          MEM9_CI_SMOKE_PHASE: prereadiness
+        run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+        continue-on-error: false
       - name: Retained data and current control acceptance (preview, hard)
-        if: success() && inputs.runtime_retained_data_run != ''
+        if: success() && steps.ci_smoke_guard_7d373d02392f.outcome == 'success' && (success() && inputs.runtime_retained_data_run != '')
         env:
           GH_TOKEN: ${{ github.token }}
           MEM9_RETAINED_PREVIEW_DATA_RUN_ID: ${{ inputs.runtime_retained_data_run }}
         run: node scripts/run-retained-data-preview.mjs
+        continue-on-error: false
       - name: Restore interrupted preview runtime
         if: (failure() || cancelled()) && !(cancelled() && steps.cancel_arm.outputs.armed == 'true')
         uses: ./.github/actions/runtime-recovery
@@ -2292,3 +2880,74 @@ jobs:
         with:
           role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
+      - name: Remove owned CI smoke source evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-source
+  mnemo-nonroot-smoke:
+    name: Mnemo nonroot smoke
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: ${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}
+    needs:
+      - application-region
+      - build-and-push-image
+    if: needs.build-and-push-image.result == 'success' && needs.build-and-push-image.outputs.mnemo_digest != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+      STAGE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'prod' }}
+      MEM9_DEPLOY_ROLE_ARN: ${{ github.event_name == 'pull_request' && secrets.AWS_PREVIEW_ROLE_ARN || secrets.AWS_PROD_ROLE_ARN }}
+      MNEMO_DIGEST: ${{ needs.build-and-push-image.outputs.mnemo_digest }}
+      MEM9_CI_EVIDENCE_KMS_KEY_ARN: ${{ secrets.MEM9_CI_EVIDENCE_KMS_KEY_ARN }}
+      MEM9_CI_SMOKE_LINEAGE: ${{ secrets.MEM9_CI_SMOKE_LINEAGE }}
+    outputs:
+      commitment: ${{ steps.publish.outputs.commitment }}
+    steps:
+      - name: Deployment maintenance gate
+        shell: bash
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+          BOUNDARY: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+        run: test "$PAUSED" != true && test "$BOUNDARY" = true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - name: Install smoke verification dependencies
+        run: npm ci
+      - name: Authenticate smoke build and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-ci-smoke-isolation.mjs prepare-smoke
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
+        with:
+          platforms: arm64
+      - name: Configure smoke registry credentials
+        id: smoke_credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ github.event_name == 'pull_request' && secrets.AWS_PREVIEW_ROLE_ARN || secrets.AWS_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+          output-credentials: true
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd
+      - name: Acquire exact smoke image digests
+        run: node scripts/verify-ci-smoke-isolation.mjs acquire-smoke
+      - name: Run isolated fourteen-check smoke
+        run: bash scripts/run-mnemo-nonroot-smoke.sh --input "$RUNNER_TEMP/mem9-ci-smoke-input.json" --output-dir "$RUNNER_TEMP/mem9-ci-smoke-evidence"
+      - name: Verify and preserve private smoke evidence
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_CI_CREDENTIALS_EXPIRES: ${{ steps.smoke_credentials.outputs.aws-expiration }}
+        run: node scripts/verify-ci-smoke-isolation.mjs publish-smoke
+      - name: Remove owned smoke evidence
+        if: always()
+        run: node scripts/verify-ci-smoke-isolation.mjs cleanup-smoke

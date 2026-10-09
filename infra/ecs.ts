@@ -56,6 +56,7 @@ import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
 import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import {applyNonrootDataTask,applyProductionNonrootTask,applyProductionNonrootService,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 import {productionRuntimeEnabled,protectLegacyRuntimeCredentials} from "./production-runtime";
 import { RECALL_TIMEOUT_MS, RECALL_RESPONSE_RESERVE_MS } from "./gateway/request-limits.mjs";
 
@@ -508,6 +509,11 @@ export function ecs(
           args.executionRoleArn=runtime.executionRoleArn;
           args.family=$interpolate`${cluster.nodes.cluster.name}-Mem9RuntimeServer`;
         }
+        if(/^pr-[1-9][0-9]*$/.test($app.stage)){
+          for(const component of ['mnemo-server','qwen3-embed','llm-proxy'] as const)applyNonrootDataTask(args,component);
+          args.trackLatest=false;
+        }
+        applyProductionNonrootTask(args,'backend');
       },
       ...(runtime||productionRuntimeEnabled() ? {executionRole: (args: Record<string, any>) => {
         if(runtime?.executionRoleArn){
@@ -546,6 +552,7 @@ export function ecs(
         args.tags = { ...(args.tags ?? {}), ...tags };
         if (runtime) args.desiredCount = runtime.ready ? 1 : 0;
         if(runtime?.executionRoleArn)args.deploymentCircuitBreaker={enable:true,rollback:process.env.MEM9_PRODUCTION_RUNTIME_MODE==="active"};
+        if(/^pr-[1-9][0-9]*$/.test($app.stage))args.deploymentCircuitBreaker={enable:true,rollback:false};
         // Fargate compute is billed to tasks, not just to this tagged Service.
         // Propagate Project/Stage to every new task so Cost Explorer can
         // attribute vCPU and memory charges. Managed tags add the ECS
@@ -578,13 +585,14 @@ export function ecs(
         // registry before Route53 has propagated the Cloud Map service (fixes the
         // cold-deploy "ServiceNotFound").
         opts.dependsOn = [...(opts.dependsOn ?? []), discoverySettle];
+        applyProductionNonrootService(args);
       },
     },
   });
-  const taskDefinitionArn = service.nodes.taskDefinition.apply(
+  const taskDefinitionArn = verifiedProductionNonrootTaskArn(service.nodes.taskDefinition.apply(
     (taskDefinition) =>
       (taskDefinition as { arn: Output<string> }).arn,
-  ) as Output<string>;
+  ) as Output<string>,'backend');
 
   new aws.ssm.Parameter("EcsClusterName", {
     name: `${prefix}/ecs/cluster-name`,

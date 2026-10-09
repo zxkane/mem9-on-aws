@@ -1,3 +1,4 @@
+import {normalizeImageDigestResponse,imageResponseFromLegacyEvidence} from './production-image-response.mjs';
 import {createHash} from 'node:crypto';
 
 const fail=()=>{throw Error('CanaryMaterialInvalid');};
@@ -17,17 +18,7 @@ export function verifyCanaryFixtureImageIndex(response,expected){
   return verifyImageIndex(response,expected);
 }
 function verifyImageIndex(response,{account,repositoryName,rootDigest}){
-  if(!/^[0-9]{12}$/.test(account??'')||
-    !digest(rootDigest)||response?.failures?.length||!Array.isArray(response?.images)||!response.images.length||response.images.length>100)fail();
-  const bodies=new Set();
-  for(const image of response.images){
-    if(image.registryId!==account||image.repositoryName!==repositoryName||image.imageId?.imageDigest!==rootDigest||
-      typeof image.imageManifest!=='string'||Buffer.byteLength(image.imageManifest)>4194304||
-      'sha256:'+createHash('sha256').update(image.imageManifest).digest('hex')!==rootDigest)fail();
-    bodies.add(image.imageManifest);
-  }
-  if(bodies.size!==1)fail();
-  let index;try{index=JSON.parse([...bodies][0]);}catch{fail();}
+  let index;try{index=JSON.parse(normalizeImageDigestResponse(imageResponseFromLegacyEvidence(response),{registryId:account,repositoryName,imageDigest:rootDigest}).raw.toString());}catch{fail();}
   if(index.schemaVersion!==2||!['application/vnd.oci.image.index.v1+json','application/vnd.docker.distribution.manifest.list.v2+json'].includes(index.mediaType)||!Array.isArray(index.manifests))fail();
   const selected=index.manifests.filter(m=>m?.platform?.os==='linux'&&m.platform.architecture==='arm64');
   if(selected.length!==1||!digest(selected[0].digest)||selected[0].digest===rootDigest||

@@ -1,6 +1,8 @@
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {inspectImageTransitionDescriptorCommitment} from './production-image-transition.mjs';
 import {parseStrictJson} from './authorization-archive-policy.mjs';
+import {types} from 'node:util';
+import {inspectNonrootDescriptor} from './production-nonroot-contracts.mjs';
 
 export const DATA_COMPONENTS=Object.freeze(['llm-proxy','mnemo-server','qwen3-embed']);
 export const DATA_RELEASE_MAX_AUTHORIZATION_MS=86400000;
@@ -19,11 +21,20 @@ export function inspectDataRelease(raw,expected){
   let data;
   try{
     if(typeof raw==='string'){if(Buffer.byteLength(raw)>4096)fail();data=JSON.parse(raw);}
-    else data=structuredClone(raw);
+    else {
+      if(raw&&typeof raw==='object'){
+        if(types.isProxy(raw))fail();
+        const descriptors=Object.getOwnPropertyDescriptors(raw);
+        if(Object.values(descriptors).some(d=>!Object.hasOwn(d,'value')))fail();
+        data=descriptors.version?.value===3?inspectNonrootDescriptor(raw):structuredClone(raw);
+      }else data=structuredClone(raw);
+    }
   }catch{fail();}
   const imageTransition=data?.version===2;
+  const nonrootTransition=data?.version===3;
+  if(nonrootTransition)try{data=inspectNonrootDescriptor(typeof raw==='string'?raw:data);}catch{fail();}
   if(imageTransition&&typeof raw==='string')try{data=parseStrictJson(raw);}catch{fail();}
-  if(!exact(data,imageTransition?[...keys,'transition']:keys)||![1,2].includes(data.version)||!expected||
+  if(!exact(data,imageTransition||nonrootTransition?[...keys,'transition']:keys)||![1,2,3].includes(data.version)||!expected||
     Object.keys(expected).some(k=>!['stage','account','region','controlSourceTree','bindings'].includes(k))||
     !['prod'].includes(data.stage)&&!/^pr-[1-9][0-9]*$/.test(data.stage??'')||
     data.stage!==expected.stage||!/^\d{12}$/.test(data.account??'')||data.account!==expected.account||

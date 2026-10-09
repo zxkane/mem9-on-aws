@@ -51,10 +51,10 @@ function pax(bytes){
   need(['path','linkpath','size','mtime','atime','ctime','uid','gid','uname','gname','comment','charset'].includes(key)||/^SCHILY\.xattr\.[A-Za-z0-9_.-]+$/.test(key),'ImagePaxUnsupported');result[key]=value;at+=n;
  }return result;
 }
-function resolved(nodes,path,{parent=false,missing=true}={}){
+function resolved(nodes,path,{parent=false,missing=true,onLink}={}){
  let rest=normalize(path).split('/').filter(Boolean),prefix=[],hops=0;
  while(rest.length){const part=rest.shift();prefix.push(part);const name=prefix.join('/'),node=nodes.get(name);
-  if(node?.type==='symlink'&&(!parent||rest.length)){need(++hops<=L.maxVirtualLinkHops,'ImageVirtualLinkLoop');rest=[...normalize(node.link,{link:true,base:prefix.slice(0,-1).join('/')}).split('/').filter(Boolean),...rest];prefix=[];continue;}
+  if(node?.type==='symlink'&&(!parent||rest.length)){need(++hops<=L.maxVirtualLinkHops,'ImageVirtualLinkLoop');onLink?.(name,node);rest=[...normalize(node.link,{link:true,base:prefix.slice(0,-1).join('/')}).split('/').filter(Boolean),...rest];prefix=[];continue;}
   if(rest.length&&node)need(node.type==='directory','ImageVirtualParent');
   if(!node&&!missing)imageFailure('ImageVirtualLinkMissing');
  }return prefix.join('/');
@@ -122,7 +122,7 @@ export async function inspectImageFilesystem(graph,{component,requirements=[],bu
  const packages=[],databases=[];for(const group of groups.values()){const db=await packageDatabase(group.content,image.layers,image.diffIds,readBlob,budget,group.requirements);packages.push(...db.packages);databases.push(db);}
  const entries=[...nodes].sort(([a],[b])=>a.localeCompare(b)).map(([path,node])=>({path,...node}));
  const evidence=freeze({version:1,graphHash:graph.graphHash,limitsHash:IMAGE_TRANSITION_LIMITS_HASH,component,rootDigest:state.roots.find(r=>r.component===component).root.digest,arm64Digest:image.manifest.digest,entriesHash:hash(entries),entryCount:entries.length,requirementsHash:hash(requirements),packages});
- const context=Object.freeze({evidence});verified.set(context,{evidence,databases,side:state.side,graph,requirements:structuredClone(requirements)});return context;
+ const context=Object.freeze({evidence});verified.set(context,{evidence,databases,entries:freeze(entries),side:state.side,graph,requirements:structuredClone(requirements)});return context;
 }
 /** A new copy requires this exact live source graph, not destination or archive
  * evidence with the same public hashes. The caller supplies policy-bound pins. */
@@ -132,6 +132,57 @@ export function assertImageFilesystemSource(context,graph,{requirementsHash}={})
  return structuredClone(state.evidence);
 }
 export function inspectImageFilesystemEvidence(context){need(verified.has(context),'ImageFilesystemContextRequired');return structuredClone(verified.get(context).evidence);}
+/** Read-only metadata from the actual verified virtual filesystem. This does
+ * not create authority or expose a host filesystem path. Archive reconstruction
+ * cannot claim a new live extraction through this accessor. */
+export function inspectImageFilesystemEntries(context){
+ const state=verified.get(context);need(state&&state.kind!=='archived-filesystem-evidence'&&state.entries,'ImageFilesystemContextRequired');
+ need(hash(state.entries)===state.evidence.entriesHash,'ImageFilesystemEntriesChanged');return structuredClone(state.entries);
+}
+/** File facts come from the verified final overlay and actual layer bytes.
+ * No host path is opened and no archived JSON object creates this handle. */
+export function inspectImageFilesystemFile(context,path){
+ const state=verified.get(context);need(state&&state.kind!=='archived-filesystem-evidence'&&state.entries,'ImageFilesystemContextRequired');
+ need(typeof path==='string'&&path.startsWith('/')&&path!=='/'&&posix.normalize(path)===path&&!path.endsWith('/'),'ImageRuntimeFilePath');
+ const nodes=new Map(state.entries.map(({path,...node})=>[path,node])),links=[];
+ const effectiveId=(node,key)=>{
+  const raw=node.pax?.[key];if(raw===undefined)return node[key];
+  need(typeof raw==='string'&&/^(?:0|[1-9][0-9]*)$/.test(raw)&&Number.isSafeInteger(Number(raw)),'ImageRuntimeFileOwner');return Number(raw);
+ };
+ const metadata=(name,node)=>({path:'/'+name,type:node.type,...(node.implicit?{implicit:true}:{}),
+  ...(node.mode===undefined?{}:{mode:node.mode}),...(effectiveId(node,'uid')===undefined?{}:{uid:effectiveId(node,'uid')}),
+  ...(effectiveId(node,'gid')===undefined?{}:{gid:effectiveId(node,'gid')}),
+  privilegeAttributes:Object.keys(node.pax??{}).filter(key=>key==='SCHILY.xattr.security.capability').sort(),
+  ...(node.type==='symlink'?{link:node.link}:{})});
+ const name=resolved(nodes,normalize(path,{link:true}),{missing:false,onLink:(name,node)=>links.push(metadata(name,node))}),node=nodes.get(name);
+ // Runtime executable/CA proofs reject hardlink inode-metadata ambiguity.
+ need(node?.type==='file'&&node.content,'ImageRuntimeFileRequired');
+ const parentRecords=new Map();
+ for(const start of [normalize(path,{link:true}),name,...links.map(link=>link.path.slice(1))]){
+  let parent=posix.dirname(start);
+  while(parent!=='.'&&parent!=='/'){
+   const original=nodes.get(parent);
+   if(original){need(['directory','symlink'].includes(original.type),'ImageVirtualParent');parentRecords.set(parent,metadata(parent,original));}
+   else{const actual=resolved(nodes,parent,{missing:false}),entry=nodes.get(actual);need(entry?.type==='directory','ImageVirtualParent');parentRecords.set(actual,metadata(actual,entry));}
+   parent=posix.dirname(parent);
+  }
+ }
+ return freeze({...metadata(name,node),path,resolvedPath:'/'+name,sha256:node.content.sha256,size:node.content.size,
+  layerDigest:node.content.layerDigest,symlinkChain:links,parents:[...parentRecords.values()].sort((a,b)=>a.path.localeCompare(b.path)),rootMetadata:'not-recorded'});
+}
+
+/** Bounded reads for source modules, passwd and loader metadata. Large
+ * executables use their verified content hash, not an unbounded Buffer. */
+export async function readImageFilesystemFile(context,path,{maxBytes=L.maxBufferPerStreamBytes}={}){
+ need(Number.isSafeInteger(maxBytes)&&maxBytes>=0&&maxBytes<=L.maxBufferPerStreamBytes,'ImageRuntimeFileLimit');
+ const fact=inspectImageFilesystemFile(context,path);need(fact.size<=maxBytes,'ImageRuntimeFileLimit');
+ const state=verified.get(context),graph=imageGraphState(state.graph),image=graph.images.get(state.evidence.component),nodes=new Map(state.entries.map(({path,...node})=>[path,node]));
+ const node=nodes.get(fact.resolvedPath.slice(1)),content=node.content,layer=image.layers[content.layer];
+ const cursor=new Cursor(unpacked(layer,image.diffIds[content.layer],d=>graph.store.open(d),graph.budget));
+ try{await cursor.skip(content.offset);const bytes=await cursor.read(content.size);await cursor.drain();
+  need(createHash('sha256').update(bytes).digest('hex')===fact.sha256,'ImageRuntimeFileChanged');return bytes;
+ }finally{await cursor.close();}
+}
 export function imageFilesystemRequirements(context){need(verified.has(context)&&verified.get(context).kind!=='archived-filesystem-evidence','ImageFilesystemContextRequired');return structuredClone(verified.get(context).requirements);}
 export function imageFilesystemVerificationKind(context){need(verified.has(context),'ImageFilesystemContextRequired');return verified.get(context).kind??'live-filesystem-evidence';}
 export function imageFilesystemVerificationBinding(context){need(verified.has(context),'ImageFilesystemContextRequired');const value=verified.get(context).archiveBinding;return value?structuredClone(value):null;}

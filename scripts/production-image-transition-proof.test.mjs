@@ -263,6 +263,20 @@ process.stdout.write(result.proofHash);`;
   f.input.scans.destination[component][0]=JSON.stringify(r);
   await expect(buildImageTransitionProof(f.input,f)).rejects.toThrow();
  });
+ it.each(['3/31',' 3/31','3/31 ',' 3/31 '])('accepts numeric build-stage label %j without rewriting raw evidence',async label=>{
+  const f=await imageTransitionFixture();
+  const log=f.input.buildEvidence.logText.replace('#1 [runtime 2/4] RUN apt-get dist-upgrade -y',`#1 [${label}] RUN apt-get dist-upgrade -y`);
+  expect(log).not.toBe(f.input.buildEvidence.logText);
+  f.input.buildEvidence.logText=log;f.input.buildEvidence.logHash=f.sha(log);f.expected.buildEvidenceHash=f.hash(f.input.buildEvidence);
+  const built=await buildImageTransitionProof(f.input,f);
+  expect(built.proof.buildEvidence.logText).toBe(log);expect(built.proof.buildEvidence.logHash).toBe(f.sha(log));
+ });
+ it.each([' 3 /31','3/ 31','builder 3/31',' runtime 3/31','other'])('rejects nonnumeric or differently named build-stage label %j',async label=>{
+  const f=await imageTransitionFixture();
+  const log=f.input.buildEvidence.logText.replace('#1 [runtime 2/4] RUN apt-get dist-upgrade -y',`#1 [${label}] RUN apt-get dist-upgrade -y`);
+  f.input.buildEvidence.logText=log;f.input.buildEvidence.logHash=f.sha(log);f.expected.buildEvidenceHash=f.hash(f.input.buildEvidence);
+  await expect(buildImageTransitionProof(f.input,f)).rejects.toThrow();
+ });
  it.each(['pull','cache','upgrade','root-digest'])('checks actual %s build proof after the evidence hash is independently pinned',async kind=>{
   const f=await imageTransitionFixture();let log=f.input.buildEvidence.logText;
   if(kind==='pull')log=log.replace('--pull ','');if(kind==='cache')log=log.replace('#1 DONE 1s','#1 CACHED');

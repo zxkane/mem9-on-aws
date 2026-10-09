@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "kind": "deployed-control-zero-findings-policy",
+  "scanner": "ecr-basic",
+  "repositoryName": "mem9-on-aws/bootstrap",
+  "scanDigest": "arm64",
+  "allowedFindings": 0,
+  "exceptions": [],
+  "maxPages": 100,
+  "maxFindings": 10000,
+  "maxPageBytes": 8388608,
+  "maxEvidenceBytes": 33554432,
+  "maxTokenBytes": 8192,
+  "maxScanAgeMs": 86400000,
+  "maxObservationAgeMs": 300000
+}

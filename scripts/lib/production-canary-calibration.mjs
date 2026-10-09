@@ -4,6 +4,7 @@ import {normalizeCanaryTask} from './production-canary-material.mjs';
 import {verifyCanaryReport} from './production-canary-report.mjs';
 import {inspectCanaryTransitionCertificate} from './production-canary-transition.mjs';
 import {inspectImageTransitionCertificate} from './production-image-transition.mjs';
+import {inspectNonrootCompatibilityCertificate} from './production-nonroot-runtime.mjs';
 import {verifyCurrentCanaryCapacity} from './production-current-capacity.mjs';
 
 const fail=()=>{throw Error('ProductionBudgetCalibrationIndeterminate');};
@@ -13,7 +14,7 @@ const integer=(v,min=0)=>Number.isSafeInteger(v)&&v>=min;
  * data/material compatibility certificate. Performance and census stay fresh.
  */
 export function calibrateProductionContinuation(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows=1000,basisPoints=5000,now=Date.now()}){
-  if(compatibility?.version===4)return calibrateCurrentImage(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows,basisPoints,now});
+  if(compatibility?.version===4||compatibility?.version===5)return calibrateCurrentImage(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows,basisPoints,now});
   const transition=compatibility?.version===3?inspectCanaryTransitionCertificate(compatibility):null;
   const old=inspectContinuationReceiptSet(original),current=state?.verified,context={attemptId,compatibility};
   verifyContinuationReceiptSet(original,current,context);
@@ -73,7 +74,7 @@ export function calibrateProductionContinuation(state,original,capacity,census,{
 /** An image-security upgrade cannot reuse historical throughput. Its complete
  * single apply delta supplies the rate; the historical set remains immutable. */
 function calibrateCurrentImage(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows,basisPoints,now}){
-  inspectImageTransitionCertificate(compatibility);
+  if(compatibility.version===5)inspectNonrootCompatibilityCertificate(compatibility);else inspectImageTransitionCertificate(compatibility);
   const old=inspectContinuationReceiptSet(original),current=state?.verified,context={attemptId,compatibility};
   const extension=verifyContinuationReceiptSet(original,current,context),{newActions,newTimes}=extension;
   if(state.phase!=='calibrating'||state.benchmarkRemaining!==0||state.executorRequested!==true||

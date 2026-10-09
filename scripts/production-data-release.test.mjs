@@ -1,6 +1,7 @@
 import {it,expect} from 'vitest';
 import {inspectDataRelease,requireActiveDataRelease} from './lib/production-data-release.mjs';
 import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
+import {NONROOT_LIMITS_HASH} from './lib/production-nonroot-contracts.mjs';
 const now=1800000000000,hex=n=>n.toString(16).padStart(64,'0');
 function fixture(){
  const data={version:1,stage:'prod',account:'123456789012',region:'ap-northeast-1',controlSourceTree:'a'.repeat(40),
@@ -67,4 +68,15 @@ it('does not renew image-security expiry during historical inspection',()=>{
 it('rejects duplicate decoded JSON keys in the explicit image-security descriptor',()=>{
  const f=imageRelease(),raw=JSON.stringify(f.data).replace('{','{"version":2,');
  expect(()=>inspectDataRelease(raw,f.expected)).toThrow();
+});
+function nonrootRelease(){const f=fixture();f.data.version=3;f.data.transition={version:2,kind:'image-security-nonroot-upgrade',proofHash:hex(30),predecessorHash:hex(31),limitsHash:NONROOT_LIMITS_HASH};return f;}
+it('parses only the explicit descriptor-v3 nonroot transition without issuing authority',()=>{
+ const f=nonrootRelease(),r=requireActiveDataRelease(JSON.stringify(f.data),f.expected,{now});expect(r.data).toEqual(f.data);expect(r).not.toHaveProperty('context');expect(r).not.toHaveProperty('authorized');
+});
+it.each(['old-transition','unknown-transition','extra','duplicate','accessor'])('rejects v3 %s without widening legacy shapes',defect=>{
+ const f=nonrootRelease();let raw=f.data,calls=0;
+ if(defect==='old-transition')f.data.transition.version=1;if(defect==='unknown-transition')f.data.transition.kind='other';if(defect==='extra')f.data.approved=true;
+ if(defect==='duplicate')raw=JSON.stringify(raw).replace('{','{"version":3,');
+ if(defect==='accessor')Object.defineProperty(f.data,'account',{enumerable:true,get(){calls++;return '123456789012';}});
+ expect(()=>inspectDataRelease(raw,f.expected)).toThrow();expect(calls).toBe(0);
 });

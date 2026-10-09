@@ -3,6 +3,7 @@ import type {EcsOutputs} from "./ecs";
 import type {MaintenanceIdentityOutputs} from "./namespace-identity";
 import {accountId,applicationRegion,workloadImage} from "./ecr";
 import {disableTaskContainerPseudoTerminal} from "./ecs-task-definition";
+import {applyNonrootDataTask,applyProductionNonrootTask,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 import {isConsolidationPreview,previewGeneration,previewConfiguration,previewAcceptanceContext} from "../scripts/lib/consolidation-preview-config.mjs";
 import {verifiedPostRuntimePreview} from './post-runtime-preview';
 import type {PostRuntimePreviewContext} from '../scripts/lib/consolidation-preview-config.mjs';
@@ -27,7 +28,7 @@ export interface ConsolidationWorker {
   image?:Input<string>;
   sourceTag?:Input<string>;
   dataRelease?:Output<VerifiedDataRelease&{parameterVersion:number}>;
-  task:sst.aws.Task;
+  task:Pick<sst.aws.Task,'taskDefinition'|'nodes'|'assignPublicIp'|'securityGroups'|'subnets'>;
 }
 export interface ConsolidationWorkerConfig {
   generation:Input<string>;
@@ -97,7 +98,9 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
         MEM9_WORKER_SLICE_SECONDS:config.production?'180':kind==="executor"?"450":"180",
         ...(config.production?{MEM9_WORKER_MAX_SECONDS:kind==='planner'?'780':'240'}:{})},
       ssm:secrets,permissions:[],logging:{retention:"1 month"},
-      transform:{taskDefinition:args=>{disableTaskContainerPseudoTerminal(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};},
+      transform:{taskDefinition:args=>{disableTaskContainerPseudoTerminal(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};
+          if(isConsolidationPreview($app.stage))applyNonrootDataTask(args,kind);
+          applyProductionNonrootTask(args,kind);},
         taskRole:args=>{args.assumeRolePolicy=trust;},
         executionRole:args=>{
           args.assumeRolePolicy=trust;
@@ -109,6 +112,8 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
           ]})}];
         }},
     });
-    return {kind,containerName,generation:config.generation,production:config.production,enabled:config.enabled,admission:config.admission,image:config.image,sourceTag:config.sourceTag,dataRelease:config.dataRelease,task};
+    const invocationTask={taskDefinition:verifiedProductionNonrootTaskArn(task.taskDefinition,kind),nodes:task.nodes,
+      assignPublicIp:task.assignPublicIp,securityGroups:task.securityGroups,subnets:task.subnets};
+    return {kind,containerName,generation:config.generation,production:config.production,enabled:config.enabled,admission:config.admission,image:config.image,sourceTag:config.sourceTag,dataRelease:config.dataRelease,task:invocationTask};
   });
 }

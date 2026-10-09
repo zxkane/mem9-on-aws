@@ -1,0 +1,12 @@
+name: Premerge carrier build
+description: Run the separately prepaid beforeCopy carrier in this Node process
+inputs:
+  grant_commitment:
+    description: Opaque owner-funded grant commitment
+    required: true
+  context_commitment:
+    description: Opaque authenticated context commitment
+    required: true
+runs:
+  using: node24
+  main: dist/index.mjs

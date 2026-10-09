@@ -35,6 +35,7 @@ interface ServiceRecord {
 interface ParamRecord {
   name: string;
   value: unknown;
+  type?: string;
 }
 interface GenericRecord {
   kind: string;
@@ -129,6 +130,12 @@ function installGlobals(stage: string) {
     // hardcoded 12-digit account number in committed code.
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    kms: {
+      getKeyOutput: ({ keyId }: { keyId: string }) => {
+        expect(keyId).toBe("alias/aws/ssm");
+        return { arn: out("arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") };
+      },
+    },
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
@@ -208,12 +215,14 @@ function installGlobals(stage: string) {
     },
     ssm: {
       Parameter: class {
-        constructor(_logicalName: string, args: { name: unknown }) {
+        arn: ReturnType<typeof out<string>>;
+        constructor(_logicalName: string, args: { name: unknown; type?: string }) {
           const name =
             typeof args.name === "object" && args.name && "value" in args.name
               ? (args.name as { value: string }).value
               : (args.name as string);
-          params.push({ name, value: (args as { value?: unknown }).value });
+          this.arn = out(`arn:aws:ssm:ap-northeast-1:123456789012:parameter${name}`);
+          params.push({ name, value: (args as { value?: unknown }).value, type: args.type });
         }
       },
     },
@@ -825,6 +834,7 @@ describe("ecs stack", () => {
       "/mem9-on-aws/prod/ecs/service-dns-name",
       "/mem9-on-aws/prod/ecs/service-name",
       "/mem9-on-aws/prod/ecs/task-definition",
+      "/mem9-on-aws/prod/observability/slack-webhook-url",
     ]);
     const taskDefinition = params.find((p) => p.name.endsWith("/task-definition"));
     const imageTag = params.find((p) => p.name.endsWith("/image-tag"));
@@ -864,15 +874,30 @@ describe("ecs stack", () => {
     expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(false);
   });
 
-  it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
+  it("preserves the SST webhook in SecureString and gives Lambda only its exact ARN and read permissions", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
 
     expect(created.filter((resource) => resource.kind === "Secret")).toHaveLength(1);
     const fn = createdOf("Function");
-    const environment = fn.environment as Record<string, unknown>;
-    expect(environment.SLACK_WEBHOOK_URL).toMatchObject({ isSecret: true });
+    const environment = materialize(fn.environment);
+    const parameterArn = "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/observability/slack-webhook-url";
+    const parameter = params.find(row => row.name === "/mem9-on-aws/prod/observability/slack-webhook-url");
+    expect(parameter?.type).toBe("SecureString");
+    expect(parameter?.value).toMatchObject({ isSecret: true });
+    expect(materialize(parameter?.value)).toBe(process.env.SST_SECRET_SlackWebhookUrl);
+    expect(environment).toEqual({ SLACK_WEBHOOK_URL_PARAMETER_ARN: parameterArn, STAGE: "prod", MEM9_SECRET_ACCOUNT_ID: "123456789012" });
+    expect(JSON.stringify(environment)).not.toContain(process.env.SST_SECRET_SlackWebhookUrl);
+    const permissions = materialize(fn.permissions) as Array<{ actions: string[]; resources: string[]; conditions?: unknown[] }>;
+    expect(permissions.flatMap(row => row.actions).sort()).toEqual(["kms:Decrypt", "sqs:SendMessage", "ssm:GetParameters"]);
+    expect(permissions.filter(row => row.actions.some(action => action.startsWith("ssm:") || action.startsWith("kms:")))).toEqual([
+      { actions: ["ssm:GetParameters"], resources: [parameterArn] },
+      { actions: ["kms:Decrypt"], resources: ["arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"], conditions: [
+        { test: "StringEquals", variable: "kms:ViaService", values: ["ssm.ap-northeast-1.amazonaws.com"] },
+        { test: "ArnEquals", variable: "kms:EncryptionContext:PARAMETER_ARN", values: [parameterArn] },
+      ] },
+    ]);
   });
 
   it("does NOT create metric filters, dashboards, or alarms on pr-* stages", async () => {

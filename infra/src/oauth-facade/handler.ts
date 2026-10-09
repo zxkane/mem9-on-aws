@@ -34,6 +34,7 @@
 import { randomBytes } from "node:crypto";
 
 import { loadConfig, type FacadeConfig } from "./config.js";
+import { RUNTIME_SECRET_CACHE_MS } from "../../gateway/runtime-secrets.mjs";
 import {
   handleSlackInteraction,
   type SlackDeps,
@@ -977,13 +978,19 @@ export async function route(
   };
 }
 
-/** Lambda handler — resolve config (env + SSM) once per cold start, then route. */
+/** Refresh cached config without serving a stale secret after a read failure. */
 let configPromise: Promise<FacadeConfig> | undefined;
+let configExpiresMs = 0;
 
 function getConfig(): Promise<FacadeConfig> {
-  if (!configPromise) {
-    configPromise = loadConfig().catch((err) => {
+  if (!configPromise || Date.now() >= configExpiresMs) {
+    configExpiresMs = Infinity;
+    configPromise = loadConfig().then(config => {
+      configExpiresMs = Date.now() + RUNTIME_SECRET_CACHE_MS;
+      return config;
+    }).catch((err) => {
       configPromise = undefined;
+      configExpiresMs = 0;
       throw err;
     });
   }
@@ -1221,4 +1228,5 @@ export async function handler(
 /** Test-only: drop the cold-start config singleton between cases. */
 export function __resetForTests(): void {
   configPromise = undefined;
+  configExpiresMs = 0;
 }

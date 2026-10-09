@@ -7,6 +7,7 @@ import {GetRoleCommand,PutRolePolicyCommand,GetRolePolicyCommand,SimulateCustomP
 import {setTimeout as delay} from 'node:timers/promises';
 import {createHash} from 'node:crypto';
 import {rolloutStage} from './production-runtime-config.mjs';
+import {expectedRoleBoundaryArn,verifyGatewayBoundaryPolicyDocument} from './workload-permissions-boundary.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
@@ -169,6 +170,7 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
   const boundary=(await send(clients.iam,new GetPolicyCommand({PolicyArn:boundaryArn}))).Policy;
   const version=(await send(clients.iam,new GetPolicyVersionCommand({PolicyArn:boundaryArn,VersionId:boundary.DefaultVersionId}))).PolicyVersion;
   const boundaryDocument=decode(version.Document),known=new Set(inventory.roles),roles=[];
+  const boundaryStates=new Map([[boundaryArn,{document:boundaryDocument,version:boundary.DefaultVersionId}]]);
   let Marker;
   for(let page=0;page<100;page++){
     const result=await send(clients.iam,new ListRolesCommand({MaxItems:100,Marker}));
@@ -185,7 +187,17 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
     // This audit runs before creating the new consumers. A role name alone is
     // never authority to exclude an existing principal from discovery.
     const full=(await send(clients.iam,new GetRoleCommand({RoleName:role.RoleName}))).Role;
-    if(full.PermissionsBoundary?.PermissionsBoundaryArn!==boundaryArn)fail('CredentialReaderBoundaryMismatch');
+    const selectedBoundary=expectedRoleBoundaryArn(role.RoleName,{partition:'aws',accountId:meta.account});
+    if(full.PermissionsBoundary?.PermissionsBoundaryArn!==selectedBoundary)fail('CredentialReaderBoundaryMismatch');
+    if(selectedBoundary!==boundaryArn && (!Array.isArray(full.Tags)||new Set(full.Tags.map(t=>t.Key)).size!==full.Tags.length||
+      full.Tags.find(t=>t.Key==='Project')?.Value!=='mem9-on-aws'||full.Tags.find(t=>t.Key==='Stage')?.Value!==meta.stage))fail('CredentialReaderBoundaryMismatch');
+    if(!boundaryStates.has(selectedBoundary)){
+      const metadata=(await send(clients.iam,new GetPolicyCommand({PolicyArn:selectedBoundary}))).Policy;
+      const current=(await send(clients.iam,new GetPolicyVersionCommand({PolicyArn:selectedBoundary,VersionId:metadata.DefaultVersionId}))).PolicyVersion;
+      const document=decode(current.Document),revision=document.Statement?.find(s=>typeof s.Sid==='string'&&/^Gr[0-9]+$/.test(s.Sid))?.Sid.slice(1);
+      if(!verifyGatewayBoundaryPolicyDocument(document,{partition:'aws',accountId:meta.account,applicationRegion:meta.region,policyRevision:revision}))fail('CredentialReaderBoundaryMismatch');
+      boundaryStates.set(selectedBoundary,{document,version:metadata.DefaultVersionId});
+    }
     const policies=[],attached=[];
     for(const [Command,key,destination] of [[ListRolePoliciesCommand,'PolicyNames',policies],[ListAttachedRolePoliciesCommand,'AttachedPolicies',attached]]){
       let marker;
@@ -203,12 +215,13 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
     if(!applicable.some(document=>document.Statement.some(s=>s.Effect==='Allow')))continue;
     const input={PolicyInputList:applicable.map(document=>JSON.stringify(document)),ActionNames:[action],ResourceArns:resources,
       ContextEntries:[{ContextKeyName:'aws:RequestedRegion',ContextKeyType:'string',ContextKeyValues:[meta.region]},
-        {ContextKeyName:'aws:PrincipalArn',ContextKeyType:'string',ContextKeyValues:[role.Arn]}]};
+        {ContextKeyName:'aws:PrincipalArn',ContextKeyType:'string',ContextKeyValues:[role.Arn]},
+        ...(full.Tags??[]).filter(t=>['Project','Stage'].includes(t.Key)).map(t=>({ContextKeyName:'aws:PrincipalTag/'+t.Key,ContextKeyType:'string',ContextKeyValues:[t.Value]}))]};
     const identity=await send(clients.iam,new SimulateCustomPolicyCommand(input));
     // A boundary cannot add an identity allow. Avoid manufacturing ambiguity
     // from its unrelated KMS/Lambda condition keys for roles with no SSM grant.
     if(simulationDecisions(identity,[action],resources).every(r=>r.decision==='explicitDeny'||(r.decision==='implicitDeny'&&!r.missing.length)))continue;
-    const scopedBoundary=policyForAction(boundaryDocument,action);
+    const scopedBoundary=policyForAction(boundaryStates.get(selectedBoundary).document,action);
     // A boundary with no applicable allow cannot add permission.
     if(!scopedBoundary?.Statement.some(s=>s.Effect==='Allow'))continue;
     const result=await send(clients.iam,new SimulateCustomPolicyCommand({...input,PermissionsBoundaryPolicyInputList:[JSON.stringify(scopedBoundary)]}));
@@ -216,7 +229,7 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
       r.decision==='allowed'||(r.decision!=='explicitDeny'&&r.missing.length)))fail('UninventoriedCredentialReader');
     }
   }
-  if((await send(clients.iam,new GetPolicyCommand({PolicyArn:boundaryArn}))).Policy.DefaultVersionId!==boundary.DefaultVersionId)fail('CredentialBoundaryChanged');
+  for(const [arn,state]of boundaryStates)if((await send(clients.iam,new GetPolicyCommand({PolicyArn:arn}))).Policy.DefaultVersionId!==state.version)fail('CredentialBoundaryChanged');
 }
 
 export async function stopLegacyWriters(clients,meta,inventory,{deadline=Date.now()+600000,sleep=delay}={}){

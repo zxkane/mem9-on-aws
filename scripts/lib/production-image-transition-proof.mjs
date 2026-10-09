@@ -131,11 +131,27 @@ function buildEvidence(input){
   need(tokens.filter(t=>t==='--pull').length===1&&tokens.filter(t=>t==='--push').length===1&&same(option(tokens,'--platform'),['linux/arm64'])&&option(tokens,'--tag').some(t=>t.endsWith('/'+tag)));
   need(same(option(tokens,'--no-cache-filter').flatMap(v=>v.split(',')).sort(),component==='mnemo-server'?['builder','runtime']:['runtime']));
   for(const stage of component==='mnemo-server'?['builder','runtime']:['runtime']){
-   const ids=new Set(rows.flatMap(row=>{const m=/^#([0-9]+) \[([^\]]+)\] RUN (.*)$/.exec(row);return m&&/(?:apk upgrade|apt-get dist-upgrade)/.test(m[3])&&(m[2].startsWith(stage+' ')||stage==='runtime'&&/^\d+\/\d+$/.test(m[2]))?[m[1]]:[];}));need(ids.size===1);
+   const ids=new Set(rows.flatMap(row=>{const m=/^#([0-9]+) \[([^\]]+)\] RUN (.*)$/.exec(row);return m&&/(?:apk upgrade|apt-get dist-upgrade)/.test(m[3])&&(m[2].startsWith(stage+' ')||stage==='runtime'&&/^\d+\/\d+$/.test(m[2].trim()))?[m[1]]:[];}));need(ids.size===1);
    const id=[...ids][0],terminal=rows.filter(row=>new RegExp('^#'+id+' (?:DONE|CACHED|ERROR)(?: |$)').test(row));need(terminal.length===1&&new RegExp('^#'+id+' DONE(?: |$)').test(terminal[0]));
   }
   const image=input.images[component];need(rows.some(row=>row.includes('pushing manifest for ')&&row.includes('/'+tag+'@'+image.rootDigest)&&row.endsWith(' done'))&&rows.some(row=>row.trim()==='"containerimage.digest": "'+image.rootDigest+'",')&&rows.some(row=>row.includes(' exporting manifest '+image.arm64Digest+' ')&&!row.includes('attestation')));
  }
+}
+
+/** Shared strict artifact predicates for the explicit nonroot route. This is
+ * evidence verification only: it creates no proof or authorization context. */
+export async function verifyImageTransitionArtifactSecurity(input,{predecessor,now}){
+ json(input);json(predecessor);need(exact(input,['images','artifacts','dataOrigin','scans','policy','vendors','buildEvidence','graph','filesystem']));
+ need(exact(input.images,COMPONENTS)&&exact(input.artifacts,COMPONENTS)&&exact(input.scans,['old','preview','destination']));
+ const artifacts={};
+ for(const name of COMPONENTS){
+  const a=input.artifacts[name];need(exact(a,['root','child']));
+  artifacts[name]=verifyDataReleaseArtifact(parseImageTransitionJson(a.root),parseImageTransitionJson(a.child),{account:predecessor.account,repositoryName:'mem9-on-aws/'+name,...input.images[name]});
+ }
+ buildEvidence(input);const normalized={};
+ for(const phase of ['old','preview','destination'])normalized[phase]=await scans(input,predecessor,phase,now);
+ policyEvidence(input,normalized,now);
+ return freeze({artifacts,normalized,artifactPolicyHash:hash(input.policy),policySourcesHash:hash(input.policy.policySources.map(s=>({path:s.path,hash:sha(s.text)}))),buildEvidenceHash:hash(input.buildEvidence)});
 }
 
 async function derive(input,expected,now,{graphVerification,filesystemVerification,allowArchive=false}){

@@ -24,7 +24,6 @@ import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 import {loadDeploymentDataRelease} from './lib/production-data-release-loader.mjs';
-import {installImageDeploymentBundle} from './lib/production-image-deployment-bundle.mjs';
 import {captureDataReleaseBuild} from './lib/production-data-evidence.mjs';
 import {inspectDataRelease} from './lib/production-data-release.mjs';
 
@@ -116,10 +115,20 @@ export async function productionCoordinatorDigest(){
 }
 
 export async function retainedDeploymentEnvironment(clients,context,{captureBuild=captureDataReleaseBuild}={}){
-  await installImageDeploymentBundle(clients,{env:context.env??process.env,expected:{stage:context.stage,account:context.account,region:context.region,controlSourceTree:context.controlSourceTree},controlRevision:context.controlRevision});
+  context={...context,env:context.env??process.env};
   const selected=await loadDeploymentDataRelease(clients,context);
   if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',MEM9_RETAINED_DATA_RELEASE_VERSION:'0'};
-  const evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
+  let evidence;
+  if(selected.data.version===3){
+    // This phase already replayed the reviewed recipe amendment and acquired
+    // current image bindings. The legacy equality-only reader neither accepts
+    // that amendment nor consumes the phase's prepaid network allocation.
+    const {nonrootAuthorizationBindings,nonrootDeploymentPhaseEvidence}=await import('./lib/production-nonroot-proof.mjs');
+    const phase=nonrootDeploymentPhaseEvidence(selected.nonrootDeploymentContext,{phase:'preconfigure',now:Date.now()});
+    const bound=nonrootAuthorizationBindings(selected.nonrootDeploymentContext);
+    if(phase.descriptorHash!==selected.hash||phase.parameterVersion!==selected.parameterVersion||bound.control.sourceTree!==context.controlSourceTree)throw Error('DataReleaseBuildEvidenceMismatch');
+    evidence={buildInputsHash:bound.buildInputsHash};
+  }else evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
   if(evidence.buildInputsHash!==selected.data.buildInputsHash)throw Error('DataReleaseBuildEvidenceMismatch');
   // Source/registry reads can take time. Do not export a revoked, replaced or
   // expired authorization after those independent checks have completed.

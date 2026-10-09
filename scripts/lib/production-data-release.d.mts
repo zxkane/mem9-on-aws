@@ -25,7 +25,8 @@ interface DataReleaseFields {
 }
 export type DataRelease = DataReleaseFields & (
   {version:1;transition?:never} |
-  {version:2;transition:{version:1;kind:'image-security-upgrade';proofHash:string;predecessorHash:string;limitsHash:string}}
+  {version:2;transition:{version:1;kind:'image-security-upgrade';proofHash:string;predecessorHash:string;limitsHash:string}} |
+  {version:3;transition:{version:2;kind:'image-security-nonroot-upgrade';proofHash:string;predecessorHash:string;limitsHash:string}}
 );
 export interface DataReleaseContext {
   stage:string;account:string;region:string;controlSourceTree:string;

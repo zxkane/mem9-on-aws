@@ -25,10 +25,11 @@
  *
  * Config via env (set in infra/gateway.ts):
  *   MEM9_SERVER_BASE_URL  e.g. http://mnemo.mem9-prod.local:8080 (Cloud Map DNS)
- *   MEM9_API_KEY          the tenant id (X-API-Key). Not logged.
+ *   Secret ARN references are resolved inside each invocation through a bounded cache.
  */
 
 import { PROXY_TIMEOUT_MS, LAMBDA_RESPONSE_RESERVE_MS } from "./request-limits.mjs";
+import { createRuntimeSecretReader } from "./runtime-secrets.mjs";
 import {
   acceptanceCorrelation,
   acceptanceToolCorrelation,
@@ -45,13 +46,7 @@ import {
 } from "./acceptance-diagnostics.mjs";
 
 const BASE_URL = requireEnv("MEM9_SERVER_BASE_URL").replace(/\/+$/, "");
-const API_KEY = requireEnv("MEM9_API_KEY");
-const IDENTITY_SIGNING_KEYS = parseSigningKeys(
-  requireEnv("MEM9_IDENTITY_SIGNING_KEYS"),
-);
-const TRANSPORT_SIGNING_KEYS = parseSigningKeys(
-  requireEnv("MEM9_TRANSPORT_SIGNING_KEYS"),
-);
+const readSecret = createRuntimeSecretReader();
 const TRANSPORT_ISSUER = requireEnv("MEM9_TRANSPORT_ISSUER");
 const ACCEPTANCE_STAGE = validateAcceptanceStage(
   process.env.MEM9_ACCEPTANCE_STAGE || "",
@@ -137,18 +132,19 @@ class Mem9HttpError extends Error {
 async function mem9FetchOnce(path, init, identity, budget) {
   budget.signal.throwIfAborted();
   const requestBody = typeof init.body === "string" ? init.body : "";
+  const { apiKey } = budget.secrets;
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
     signal: budget.signal,
     headers: {
-      "X-API-Key": API_KEY,
+      "X-API-Key": apiKey,
       "X-Mem9-Transport": createTransportEnvelope({
         issuer: TRANSPORT_ISSUER,
         method: init.method,
         path,
         body: requestBody,
         identity,
-        keys: TRANSPORT_SIGNING_KEYS,
+        keys: budget.secrets.transportKeys,
       }),
       ...(init.headers ?? {}),
     },
@@ -285,11 +281,16 @@ export const handler = async (event, context) => {
     throw new Error("target invocation is invalid");
   }
   const tool = resolveToolName(context);
+  let secrets;
+  try {
+    const [apiKey, identity, transport] = await Promise.all([readSecret("tenant"), readSecret("identity"), readSecret("transport")]);
+    secrets = { apiKey, identityKeys: parseSigningKeys(identity), transportKeys: parseSigningKeys(transport) };
+  } catch { throw new Error("GatewaySecretConfigurationUnavailable"); }
   const { [INTERNAL_AUTH_FIELD]: internalContext, ...input } = event;
   const identity = verifyInternalContext({
     context: internalContext,
     invocation: { tool, arguments: input },
-    keys: IDENTITY_SIGNING_KEYS,
+    keys: secrets.identityKeys,
   });
   const acceptance = acceptanceFromInternalContext(identity);
   if (acceptance) {
@@ -300,17 +301,18 @@ export const handler = async (event, context) => {
       correlation: acceptanceCorrelation({
         requestHash: identity.request_hash,
         kid: identity.kid,
-        keys: IDENTITY_SIGNING_KEYS,
+        keys: secrets.identityKeys,
       }),
       toolCorrelation: acceptanceToolCorrelation({
         tool,
         kid: identity.kid,
-        keys: IDENTITY_SIGNING_KEYS,
+        keys: secrets.identityKeys,
       }),
     });
   }
   try {
     return await withinProxyBudget(context, (budget) => {
+      budget.secrets = secrets;
       switch (tool) {
         case "add_memory":
           return addMemory(input, identity, budget);

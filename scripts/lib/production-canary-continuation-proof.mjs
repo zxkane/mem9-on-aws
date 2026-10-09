@@ -1,6 +1,7 @@
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {inspectCanaryTransitionCertificate} from './production-canary-transition.mjs';
 import {inspectImageTransitionCertificate} from './production-image-transition.mjs';
+import {inspectNonrootCompatibilityCertificate} from './production-nonroot-runtime.mjs';
 
 const fail=()=>{throw Error('CanaryContinuationEvidenceInvalid');};
 const integer=(n,min=0)=>Number.isSafeInteger(n)&&n>=min;
@@ -33,7 +34,8 @@ export function inspectContinuationReceiptSet(value){
 // canonical database begin operation validates the protected witness and full
 // material certificate before any new execution is admitted.
 export function verifyContinuationReceiptSet(original,current,{attemptId,compatibility,allowNew=true}){
-  if(compatibility?.version===4)inspectImageTransitionCertificate(compatibility);
+  if(compatibility?.version===5)inspectNonrootCompatibilityCertificate(compatibility);
+  else if(compatibility?.version===4)inspectImageTransitionCertificate(compatibility);
   else if(compatibility?.version===3||compatibility?.transition!==undefined)inspectCanaryTransitionCertificate(compatibility);
   const old=inspectContinuationReceiptSet(original),next=inspectContinuationReceiptSet(current);
   if(!hex(attemptId,32)||next.proof.attemptId!==attemptId||next.proof.parentProofHash!==hash(old.proof)||

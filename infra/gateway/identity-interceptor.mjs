@@ -9,6 +9,7 @@ import {
 } from "./namespace-auth.mjs";
 import { interceptScopes } from "./scope-interceptor.mjs";
 import { createAccessTokenVerifier } from "./access-token-verifier.mjs";
+import { createRuntimeSecretReader } from "./runtime-secrets.mjs";
 import {
   INTERNAL_ACCEPTANCE_FIELD,
   parseAcceptanceRequest,
@@ -31,7 +32,7 @@ const RESERVED_ARGUMENTS = new Set([
 ]);
 
 let registry;
-let signingKeys;
+const readSecret = createRuntimeSecretReader();
 let verifyAccessToken;
 const ACCEPTANCE_STAGE = validateAcceptanceStage(
   process.env.MEM9_ACCEPTANCE_STAGE || "",
@@ -41,9 +42,9 @@ function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function config() {
+async function config() {
   registry ??= parseClientRegistry(process.env.MEM9_CLIENT_REGISTRY);
-  signingKeys ??= parseSigningKeys(process.env.MEM9_IDENTITY_SIGNING_KEYS);
+  const signingKeys = parseSigningKeys(await readSecret("identity"));
   verifyAccessToken ??= createAccessTokenVerifier({
     issuer: registry.issuer,
     audience: registry.audience,
@@ -157,7 +158,7 @@ export const handler = async (event) => {
       registry: clientRegistry,
       signingKeys: keys,
       verifyAccessToken: verify,
-    } = config();
+    } = await config();
     const token = authorizationToken(event?.mcp?.gatewayRequest?.headers);
     await verify(token);
     const identity = classifyAccessToken(token, clientRegistry);

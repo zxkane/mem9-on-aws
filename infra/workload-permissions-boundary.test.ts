@@ -24,11 +24,13 @@ function materialize(value: unknown): unknown {
 }
 
 describe("workload role boundary transform", () => {
-  let roleTransform: ((args: Record<string, unknown>) => void) | undefined;
+  let roleTransform: ((args: Record<string, unknown>, opts?: unknown, name?: string) => void) | undefined;
 
   beforeEach(() => {
     vi.resetModules();
     roleTransform = undefined;
+    (globalThis as Record<string, unknown>).$app = {stage:"prod"};
+    (globalThis as Record<string, unknown>).$jsonStringify = (value:unknown) => out(JSON.stringify(materialize(value)));
     (globalThis as Record<string, unknown>).aws = {
       getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
       getPartitionOutput: () => ({ partition: out("aws") }),
@@ -80,6 +82,22 @@ describe("workload role boundary transform", () => {
     const expected = `arn:aws:iam::123456789012:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
     expect(materialize(implicitRole.permissionsBoundary)).toBe(expected);
     expect(materialize(explicitRole.permissionsBoundary)).toBe(expected);
+  });
+
+  it.each(["prod", "pr-7"])("selects Gateway only by fixed logical role and binds stage %s", stage => {
+    (globalThis as Record<string, unknown>).$app = {stage};
+    registerWorkloadRoleBoundary();
+    for (const name of ["Mem9ProxyFnRole", "Mem9IdentityInterceptorFnRole"]) {
+      const args:Record<string,unknown> = {permissionsBoundary:"wrong", tags:{Project:"wrong",Stage:"wrong",Existing:"kept"}};
+      roleTransform?.(args, {}, name);
+      expect(materialize(args.permissionsBoundary)).toBe("arn:aws:iam::123456789012:policy/mem9-on-aws-gateway-boundary");
+      expect(materialize(args.tags)).toEqual({Project:"mem9-on-aws",Stage:stage,Existing:"kept"});
+    }
+    for (const name of ["Mem9ServerExecutionRole", "Mem9ProxyFnRoleSuffix", "OtherMem9ProxyFnRole"]) {
+      const args:Record<string,unknown> = {name:`mem9-on-aws-${stage}-Mem9ProxyFnRole-fixture`,permissionsBoundary:"wrong"};
+      roleTransform?.(args, {}, name);
+      expect(materialize(args.permissionsBoundary)).toBe(`arn:aws:iam::123456789012:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`);
+    }
   });
 
   it("registers the role transform before any stack module is imported", () => {

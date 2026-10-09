@@ -1,5 +1,6 @@
 import {assertImageTransitionDataRelease,imageTransitionContextBindings} from './production-image-transition-proof.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
+import {nonrootAuthorizationBindings,assertNonrootDataRelease} from './production-nonroot-proof.mjs';
 
 const registrations=new WeakMap();
 const fail=code=>{throw Error(code);};
@@ -12,10 +13,10 @@ export function installImageAuthorization(clients,context,options){
  clientKey(clients);
  if(!options||typeof options!=='object'||Array.isArray(options)||Object.keys(options).some(k=>!['data','controlSourceTree','now'].includes(k)))fail('ImageAuthorizationOptionsInvalid');
  const {data,controlSourceTree,now=Date.now()}=options;
- const bindings=imageTransitionContextBindings(context);
- if(bindings.verificationMode!=='admission'||data?.version!==2)fail('ImageAuthorizationAdmissionRequired');
- assertImageTransitionDataRelease(context,{current:data,controlSourceTree,now,mode:'admission'});
- if(context.reviewHash!==data.policyHash)fail('ImageAuthorizationReviewRequired');
+ const nonroot=data?.version===3,bindings=nonroot?nonrootAuthorizationBindings(context):imageTransitionContextBindings(context);
+ if(bindings.verificationMode!=='admission'||![2,3].includes(data?.version))fail('ImageAuthorizationAdmissionRequired');
+ (nonroot?assertNonrootDataRelease:assertImageTransitionDataRelease)(context,{current:data,controlSourceTree,now,mode:'admission'});
+ if((nonroot?bindings.reviewHash:context.reviewHash)!==data.policyHash)fail('ImageAuthorizationReviewRequired');
  const dataHash=hash(data),prior=registrations.get(clients);
  if(prior){
   if(prior.dataHash!==dataHash||prior.controlSourceTree!==controlSourceTree)fail('ImageAuthorizationRebind');
@@ -34,7 +35,10 @@ export function getImageAuthorization(clients){return registrations.get(clients)
 export function resolveImageAuthorization(clients,explicitContext){
  const registered=getImageAuthorization(clients);
  if(registered&&explicitContext!==undefined&&explicitContext!==registered)fail('ImageAuthorizationConflict');
- if(explicitContext!==undefined){imageTransitionContextBindings(explicitContext);return explicitContext;}
+ if(explicitContext!==undefined){
+  if(typeof explicitContext?.kind==='string'&&explicitContext.kind.startsWith('nonroot-'))nonrootAuthorizationBindings(explicitContext);else imageTransitionContextBindings(explicitContext);
+  return explicitContext;
+ }
  return registered;
 }
 

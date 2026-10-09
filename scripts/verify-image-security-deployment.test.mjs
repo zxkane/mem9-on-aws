@@ -1,7 +1,7 @@
 import {it,expect} from 'vitest';
 import {imageTransitionFixture,imageTransitionServingFixture} from './production-image-transition.fixture.mjs';
 import {buildImageTransitionProof,imageTransitionContextBindings} from './lib/production-image-transition-proof.mjs';
-import {verifyImageSecurityDeployment} from './verify-image-security-deployment.mjs';
+import {verifyImageSecurityDeployment,parseImageDeploymentArguments} from './verify-image-security-deployment.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 import {readFileSync} from 'node:fs';
 import {parse} from 'yaml';
@@ -9,6 +9,17 @@ import {mkdtemp,readFile,stat,rm,writeFile} from 'node:fs/promises';
 import {join,dirname} from 'node:path';
 import {tmpdir} from 'node:os';
 import {writeImageDeploymentBundle,removeImageDeploymentBundle,readImageDeploymentBundle,restoreImageDeploymentBundle} from './lib/production-image-deployment-bundle.mjs';
+
+it.each([
+ [[], 'source',0],[['--build'],'source',35*60*1000],[['--deploy'],'preconfigure',0],
+ [['--deploy','--phase','preupdate'],'preupdate',0],[['--deploy','--phase','preconfigure'],'preconfigure',0],
+ [['--deploy','--phase','presst'],'presst',80*60*1000],[['--deploy','--phase','prereadiness'],'prereadiness',0],
+])('selects only the reserved window for args %j', (args,phase,minimumValidityMs)=>{
+ expect(parseImageDeploymentArguments(args)).toEqual({phase,minimumValidityMs});
+});
+it.each([['--deploy','--phase','unknown'],['--deploy','--phase'],['--build','--phase','presst'],['--deploy','--phase','presst','extra'],['--deploy','--phase','source']].map(args=>[args]))('rejects invalid window arguments %j',args=>{
+ expect(()=>parseImageDeploymentArguments(args)).toThrow('ImageDeploymentArgumentsInvalid');
+});
 
 it('writes a private bundle by reference and removes only its verified owned directory',async()=>{
  const scratch=await mkdtemp(join(tmpdir(),'mem9-bundle-test-')),environmentFile=join(scratch,'env'),masks=[];
@@ -35,13 +46,15 @@ it('preserves unrelated files instead of recursively clearing the bundle directo
 it('gates image publication and production deployment before their first AWS mutations',()=>{
  const workflow=parse(readFileSync(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8'));
  for(const name of ['verify-production-image-transition','build-image-transition-control','deploy-prod']){
-  const job=workflow.jobs[name],steps=job.steps,gate=steps.findIndex(s=>/^node scripts\/verify-image-security-deployment.mjs(?: --build)?$/.test(s.run??''));
+  const job=workflow.jobs[name],steps=job.steps,gate=steps.findIndex(s=>name==='deploy-prod'
+   ?s.uses==='./.github/actions/ci-smoke-gate'&&s.with?.mode==='target'&&s.with.phase==='preupdate'
+   :/^node scripts\/verify-image-security-deployment.mjs(?: --build)?$/.test(s.run??''));
   expect(gate).toBeGreaterThan(steps.findIndex(s=>s.uses?.startsWith('aws-actions/configure-aws-credentials@')));
   expect(steps.slice(0,gate).some(s=>s.run==='npm ci')).toBe(true);
   expect(steps.find(s=>s.uses?.startsWith('actions/checkout@')).with['fetch-depth']).toBe(0);
   expect(job.permissions).toMatchObject({actions:'read','pull-requests':'read'});
   expect(steps[gate].env).toMatchObject({STAGE:'prod',MEM9_DEPLOY_ROLE_ARN:'${{ secrets.AWS_PROD_ROLE_ARN }}',GH_TOKEN:'${{ github.token }}'});
-  const mutations=steps.map((s,i)=>({s,i})).filter(({s})=>s.with?.push===true||/sst (unlock|secret set|deploy)|run-bootstrap-task/.test(s.run??''));
+  const mutations=steps.map((s,i)=>({s,i})).filter(({s})=>s.with?.push===true||/sst (unlock|secret set|deploy)|run-bootstrap-task|record-nonroot-control-build\.mjs publish/.test(s.run??''));
   if(name==='verify-production-image-transition')expect(mutations).toEqual([]);else expect(mutations.length).toBeGreaterThan(0);
   for(const {i} of mutations)expect(gate).toBeLessThan(i);
   const cleanup=steps.find(s=>s.run==='node scripts/verify-image-security-deployment.mjs --cleanup');expect(cleanup?.if).toContain('always()');
@@ -54,16 +67,30 @@ it('gates image publication and production deployment before their first AWS mut
  expect(control.if).toContain("needs.verify-production-image-transition.outputs.image_transition == 'true'");expect(control.if).toContain("needs.verify-production-image-transition.result == 'success'");
  expect(control['timeout-minutes']).toBe(30);expect(deploy['timeout-minutes']).toBe(75);
  const controlBuild=control.steps.filter(s=>s.with?.push===true);expect(controlBuild).toHaveLength(1);expect(controlBuild[0].with.file).toBe('docker/bootstrap/Dockerfile');
- expect(control.steps[control.steps.indexOf(controlBuild[0])-1].run).toBe('node scripts/verify-image-security-deployment.mjs --build');
+ const buildIndex=control.steps.indexOf(controlBuild[0]);
+ expect(control.steps.slice(buildIndex-2,buildIndex).map(s=>s.run)).toEqual(['node scripts/verify-image-security-deployment.mjs --build','node scripts/record-nonroot-control-build.mjs prepare']);
+ expect(control.steps.slice(buildIndex+1,buildIndex+4).map(s=>s.run)).toEqual(['node scripts/record-nonroot-control-build.mjs capture','node scripts/record-nonroot-control-build.mjs publish','node scripts/record-nonroot-control-build.mjs cleanup']);
  for(const command of ['node scripts/run-production-runtime.mjs configure',null]){
   const at=deploy.steps.findIndex(s=>command?s.run===command:s.name==='Deploy prod stage');
-  expect(deploy.steps[at-1].run).toBe('node scripts/verify-image-security-deployment.mjs --deploy');
+  const guard=deploy.steps[at-1];
+  expect(guard.run).toBe('node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"');
+  expect(guard.if).toBe('success() && (true)');expect(guard.env.MEM9_CI_SMOKE_ROUTE).toBe('deploy-prod');
+  expect(guard.env.MEM9_CI_SMOKE_PHASE).toBe(command?'preconfigure':'presst');
+  expect(deploy.steps[at-2].uses).toBe('./.github/actions/ci-smoke-gate');
+  expect(deploy.steps[at-2].with).toEqual({mode:'target',phase:command?'preconfigure':'presst'});
  }
  expect(deploy.steps.find(s=>s.name==='Deploy prod stage').env.MEM9_EXPECTED_BOOTSTRAP_DIGEST).toBe('${{ needs.build-image-transition-control.outputs.bootstrap_digest }}');
  expect(deploy.if).toContain("needs.build-image-transition-control.result == 'success'");
 });
 it.each([35*60*1000,80*60*1000])('holds a deployment whose authorization cannot cover its %i ms operation window',async minimumValidityMs=>{
  const f=await fixture();await expect(verifyImageSecurityDeployment(f.deps,{...f.options,minimumValidityMs})).rejects.toThrow('ImageDeploymentWindowInsufficient');expect(f.calls).toHaveLength(1);
+});
+it.each(['preupdate','prereadiness'])('does not require another eighty-minute window at the %s checkpoint',async phase=>{
+ const f=await fixture();expect(f.s.data.expiresMs-f.f.now).toBeLessThan(80*60*1000);
+ const options=parseImageDeploymentArguments(['--deploy','--phase',phase]);
+ await expect(verifyImageSecurityDeployment(f.deps,{...f.options,...options})).resolves.toHaveProperty('bundle');
+ f.deps.clock=()=>f.s.data.expiresMs;
+ await expect(verifyImageSecurityDeployment(f.deps,{...f.options,...options})).rejects.toThrow();
 });
 async function fixture(){
  const f=await imageTransitionFixture(),proof=await buildImageTransitionProof(f.input,f),s=imageTransitionServingFixture(f,proof),b=imageTransitionContextBindings(s.authorizationContext),sha='8'.repeat(40),parents=[b.control.baseRevision,b.control.revision];

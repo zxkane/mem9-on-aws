@@ -9,6 +9,7 @@ import type {EcsOutputs} from './ecs';
 import {productionArtifactAdmission} from '../scripts/lib/production-artifacts.mjs';
 import {runtimeTaskTrust,runtimeExecutionPolicy} from './production-runtime';
 import {resolveVpc} from './vpc';
+import {applyProductionNonrootTask,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 
 export interface ProductionConsolidationConfig extends ConsolidationWorkerConfig {
   production:true;
@@ -45,9 +46,9 @@ export function productionConsolidationOperators(ecs:EcsOutputs,db:DbOutputs,run
         MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS:config.dataRelease?config.dataRelease.apply(value=>String(value.data.expiresMs)):'0'},ssm:secrets,permissions:[],logging:{retention:'1 month'},
       transform:{taskRole:args=>{args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());},
         executionRole:args=>{args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());args.inlinePolicies=[{name:'ProductionWorkerOperator',policy:$jsonStringify(runtimeExecutionPolicy(Object.values(secrets),[]))}];},
-        taskDefinition:args=>{args.tags={...(args.tags??{}),...tags};}},
+        taskDefinition:args=>{args.tags={...(args.tags??{}),...tags};applyProductionNonrootTask(args,kind);}},
     });
-    return [kind,{taskDefinition:task.taskDefinition,containerName:name,image:config.operatorImage}];
+    return [kind,{taskDefinition:verifiedProductionNonrootTaskArn(task.taskDefinition,kind),containerName:name,image:config.operatorImage}];
   }));
   new aws.ssm.Parameter('ProductionWorkerOperatorManifest',{name:'/mem9-on-aws/prod/consolidation-runtime/operator-manifest',type:'SecureString',tags,
     value:$jsonStringify({version:config.dataRelease?3:1,stage:'prod',region:applicationRegion(),account:accountId(),cluster:ecs.clusterName,clusterArn:ecs.cluster.nodes.cluster.arn,

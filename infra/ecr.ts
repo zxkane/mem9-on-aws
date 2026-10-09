@@ -1,6 +1,7 @@
 import {execFileSync} from 'node:child_process';
 import {DATA_COMPONENTS,requireActiveDataRelease} from '../scripts/lib/production-data-release.mjs';
 import {readImageDeploymentBundle,restoreImageDeploymentBundle} from '../scripts/lib/production-image-deployment-bundle.mjs';
+import {getNonrootTargetRegistration,getNonrootRetainedTaskBinding} from '../scripts/lib/production-nonroot-proof.mjs';
 
 /**
  * Shared helper for composing OUT-OF-BAND ECR image URIs.
@@ -33,7 +34,7 @@ export function accountId(): Output<string> {
   return accountIdOut;
 }
 
-type DataReleaseSelection=ReturnType<typeof requireActiveDataRelease>&{parameterVersion:number};
+type DataReleaseSelection=ReturnType<typeof requireActiveDataRelease>&{parameterVersion:number;nonrootDeploymentContext?:unknown};
 let retainedSelection:Output<DataReleaseSelection>|undefined;
 let retainedInput:string|undefined;
 
@@ -64,17 +65,35 @@ export function selectedDataRelease():Output<DataReleaseSelection>|undefined {
         const context={stage:$app.stage,account,region,controlSourceTree};
         const selection=requireActiveDataRelease(parameter.value,context);
         if(selection.hash!==expectedHash||requireActiveDataRelease(raw,context).hash!==selection.hash)throw Error('DataReleaseSelectionChanged');
-        if(selection.data.version===2){
+        let nonrootDeploymentContext:unknown;
+        if(selection.data.version===2||selection.data.version===3){
           const file=process.env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE,digest=process.env.MEM9_IMAGE_TRANSITION_BUNDLE_HASH;
           if(!file||!digest)throw Error('VerifiedImageTransitionRequired');
           const bundle=await readImageDeploymentBundle(file,digest);
-          await restoreImageDeploymentBundle(bundle,{parameter:{Name:name,Type:parameter.type,ARN:parameter.arn,Version:parameter.version,Value:parameter.value},expected:context,controlRevision});
+          const restored=await restoreImageDeploymentBundle(bundle,{parameter:{Name:name,Type:parameter.type,ARN:parameter.arn,Version:parameter.version,Value:parameter.value},expected:context,controlRevision,env:process.env});
+          if(selection.data.version===3)nonrootDeploymentContext=restored;
         }
-        return {...selection,parameterVersion:parameter.version};
+        return {...selection,parameterVersion:parameter.version,...(selection.data.version===3?{nonrootDeploymentContext}:{})};
       });
     }));
   }
   return retainedSelection;
+}
+
+/** Only the authenticated deployment context may select production target
+ * registrations. Never infer this authority from a version or environment flag. */
+export function selectedNonrootTaskRegistration(taskKey:string):Output<Record<string,unknown>|undefined>|undefined {
+ const retained=selectedDataRelease();
+ return retained?.apply(selection=>selection.data.version===3
+  ?getNonrootTargetRegistration(selection.nonrootDeploymentContext,taskKey) as Record<string,unknown>
+  :undefined);
+}
+
+export function selectedNonrootFallbackBinding():Output<unknown>|undefined {
+ const retained=selectedDataRelease();
+ return retained?.apply(selection=>selection.data.version===3
+  ?getNonrootRetainedTaskBinding(selection.nonrootDeploymentContext,'fallback')
+  :undefined);
 }
 
 export function selectedDataSourceTag(controlTag:string):string|Output<string>{
@@ -107,7 +126,7 @@ export function workloadImage(name: string, tag: string): Output<string> {
   if(name==='bootstrap'&&$app.stage==='prod'){
     const retained=selectedDataRelease();
     if(retained)return retained.apply(selection=>{
-      if(selection.data.version===2){
+      if(selection.data.version===2||selection.data.version===3){
         const digest=process.env.MEM9_EXPECTED_BOOTSTRAP_DIGEST;
         if(!/^sha256:[a-f0-9]{64}$/.test(digest??''))throw Error('VerifiedControlBuildRequired');
         return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/${namespace}/bootstrap@${digest}`;

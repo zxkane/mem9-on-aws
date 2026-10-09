@@ -323,6 +323,58 @@ main requires the always-running Runbook & Public-Content Scan check, and Infra
 CI runs its typecheck and tests before assuming production AWS credentials.
 Production jobs remain serialized and run their deployment smoke tests.
 
+### Isolated image acceptance
+
+The carrier build and native acceptance probes require a Linux ARM64 runner.
+Set the repository Actions variable `RUNNER_LABEL` to
+`["ubuntu-24.04-arm"]` to select a GitHub-hosted ARM64 runner through the existing
+workflow selector. An unset variable selects `ubuntu-latest`, which does not
+satisfy these native probes. Public repositories must use GitHub-hosted runners.
+
+The `Mnemo nonroot smoke` job tests the exact mnemo build digest against a
+digest-pinned, disposable PostgreSQL fixture. It verifies migration retries,
+TLS and SCRAM, health checks, EMF framing, process identity, capabilities,
+network isolation and cleanup before a deployment can consume its result.
+The old inline smoke remains in the historical DATA recipe and is disabled;
+the separate job supplies the required acceptance result.
+
+Configure these repository Actions Secrets for the guarded image workflow:
+
+| Secret | Required value |
+| --- | --- |
+| `MEM9_CI_SMOKE_LINEAGE` | JSON with `originRevision`, `originTree`, `baselineRevision`, and `baselineTree`, taken from the reviewed DATA build and workflow baseline. Each value is a complete Git object ID. |
+| `MEM9_CI_EVIDENCE_KMS_KEY_ARN` | The exact existing audit-bucket encryption key ARN in the application region, verified from the bucket/key records. This setting does not create a key. |
+| `MEM9_CI_PROD_ACQUISITION_CONFIG` | Owner-protected production allocation configuration: the existing ledger and catalog pins, current data descriptor/version, expiration, and private storage binding. |
+
+Set the allocation configuration before queuing CI. The owner reserves each
+named checkpoint in the existing ledger and publishes its allocation for the
+actual run, attempt and job. CI verifies that debit before consuming the slot.
+Missing configuration, an unmatched request, an expired allocation or reuse of
+a consumed slot stops the operation; CI cannot reset or refund the owner's
+budget. Preview verification has its own bounded, stage-scoped reader and does
+not depend on the production copy ledger or its allocation configuration.
+
+Complete evidence stays in the existing private audit bucket under
+`decisions/<stage>/ci-smoke/`, with its existing expiration policy. CI publishes
+only the source, job and digest commitments needed to locate and verify it.
+The source verifier first authenticates GitHub provenance, then uses a temporary
+session restricted to the single evidence object. Full evidence verification
+and reader cleanup precede normal deployment credentials. Each protected
+operation also requires its applicable, unexpired target receipt.
+
+The CONTROL build checks its actual Git/Docker context before building and
+records the successful build action afterward. Its private capture is stored
+under `decisions/prod/control-build/` and handed to the deployment job using a
+public commitment. The consumer retrieves the original capture and appends
+the actual completed job and build log. Job-local temporary directories are
+not shared. An uncertain publication retains its local intent and evidence;
+cleanup does not discard it or trigger another upload.
+
+Production DATA repositories retain image digests without automatic lifecycle
+expiry. Preview and bootstrap repositories keep their separate cleanup rules.
+Source validation, image retention and synthetic acceptance do not themselves
+activate a production memory batch or increase its mutation budget.
+
 After this change is merged, a repository administrator must reconcile the
 out-of-band GitHub settings once:
 
@@ -894,14 +946,26 @@ AWS Health and EventBridge. See
 
 ## Workload permissions-boundary rollout
 
-The application applies the fixed, operator-owned workload permissions boundary
-to every non-production Pulumi `aws.iam.Role`. Set the repository variable
+The application applies fixed, operator-owned permissions boundaries to
+non-production Pulumi `aws.iam.Role` resources. Only `Mem9ProxyFnRole` and
+`Mem9IdentityInterceptorFnRole` use `mem9-on-aws-gateway-boundary`; all other
+roles keep `mem9-on-aws-workload-boundary`. Both policies belong to the existing
+boundary owner stack. Gateway roles retain exact Project/Stage tags and Lambda-only
+PassRole restrictions; deployment code cannot select another boundary.
+Set the repository variable
 `WORKLOAD_BOUNDARY_PROD_ENABLED=false` before merging the implementation; the
 guarded migration later sets and verifies it as `true`. A missing or malformed
 value fails production synthesis instead of silently omitting the transform.
 The boundary stack and its migration remain out-of-band so a pull-request-capable
 deploy role cannot modify its own ceiling. Merging the implementation does not
 migrate the live account.
+
+The same guarded rollout migrates existing Gateway roles from the historical
+boundary while deploy roles are quarantined, then verifies the role/tag mapping
+and both policy documents and default versions. Its fixed Gateway KMS probes
+cover same-stage reads, CMK context/service restrictions, cold starts, and
+wrong-role, wrong-stage, wrong-secret and direct-KMS denials. No boundary swap
+or manual IAM attachment is a substitute for that workflow.
 
 Before migration, pull-request AWS jobs intentionally skip while
 `WORKLOAD_BOUNDARY_PROD_ENABLED=false`; only the non-AWS validation job runs.

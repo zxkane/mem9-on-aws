@@ -2,7 +2,7 @@ import {afterEach,it,expect,vi} from 'vitest';
 import {inspectDataRelease} from '../scripts/lib/production-data-release.mjs';
 const canaryEvidenceHash=(data:any)=>inspectDataRelease(data,{stage:data.stage,account:data.account,region:data.region,controlSourceTree:data.controlSourceTree}).hash;
 const tree='a'.repeat(40),now=1800000000000;
-vi.mock('node:child_process',()=>({execFileSync:()=>tree+'\n'}));
+vi.mock('node:child_process',async original=>({...await original(),execFileSync:()=>tree+'\n'}));
 const bundle=vi.hoisted(()=>({readImageDeploymentBundle:vi.fn(),restoreImageDeploymentBundle:vi.fn()}));
 vi.mock('../scripts/lib/production-image-deployment-bundle.mjs',()=>bundle);
 const out=(value:any):any=>({value,apply(fn:any){const next=value instanceof Promise?value.then(fn):fn(value);return next?.apply?next:out(next);}});
@@ -46,7 +46,7 @@ function imageTarget(){
 it('waits for current protected image authorization before selecting upgraded data images',async()=>{
  const f=imageTarget(),record={synthetic:true};bundle.readImageDeploymentBundle.mockResolvedValue(record);bundle.restoreImageDeploymentBundle.mockResolvedValue({});
  const ecr=await import('./ecr');expect(await unwrap(ecr.workloadImage('mnemo-server','mem9-aaaaaaa'))).toContain('@'+f.data.images['mnemo-server'].rootDigest);
- expect(bundle.restoreImageDeploymentBundle).toHaveBeenCalledWith(record,expect.objectContaining({parameter:expect.objectContaining({Version:1,Value:JSON.stringify(f.data)}),expected:expect.objectContaining({controlSourceTree:tree}),controlRevision:tree}));
+ expect(bundle.restoreImageDeploymentBundle).toHaveBeenCalledWith(record,expect.objectContaining({parameter:expect.objectContaining({Version:1,Value:JSON.stringify(f.data)}),expected:expect.objectContaining({controlSourceTree:tree}),controlRevision:tree,env:process.env}));
 });
 it('rejects image selection when the archive bundle no longer matches protected authorization',async()=>{
  imageTarget();bundle.readImageDeploymentBundle.mockResolvedValue({});bundle.restoreImageDeploymentBundle.mockRejectedValue(Error('ImageDeploymentBundleInvalid'));

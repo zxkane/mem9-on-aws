@@ -34,7 +34,7 @@ function embeddedConfigFixture(){
  }
  return f;
 }
-it('verifies embedded empty configs and still reads every referenced blob from its repository',async()=>{
+it('verifies embedded empty configs and still rechecks every node through its scoped byte adapter',async()=>{
  const f=embeddedConfigFixture(),g=await readImageGraph(f.roots,{...f});
  expect(g.inventory.attestations).toHaveLength(3);
  const reads=f.blobCalls.filter(({d})=>d.mediaType===IMAGE_MEDIA.emptyConfig);
@@ -51,7 +51,7 @@ it('rejects malformed, noncanonical, oversized or mismatched embedded descriptor
  }
  expect(()=>validateImageDescriptor({...valid,size:8388608,data:'A'.repeat(11184812)},'blob')).toThrow('ImageEmbeddedDataLimit');
 });
-it('does not let valid embedded data hide missing or changed registry bytes',async()=>{
+it('does not let valid embedded data hide missing or changed bytes in the supplied cache adapter',async()=>{
  for(const replacement of [undefined,Buffer.from('[]')]){
   const f=embeddedConfigFixture();f.data.set(digest('{}'),replacement);
   await expect(readImageGraph(f.roots,{...f})).rejects.toThrow();

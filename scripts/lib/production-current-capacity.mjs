@@ -2,6 +2,7 @@ import {DescribeTasksCommand,DescribeTaskDefinitionCommand} from '@aws-sdk/clien
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {normalizeCanaryTask} from './production-canary-material.mjs';
 import {ownsCanaryTask} from './production-canary-delivery.mjs';
+import {inspectNonrootCompatibilityCertificate} from './production-nonroot-runtime.mjs';
 
 const fail=()=>{throw Error('CurrentCanaryCapacityInvalid');};
 const integer=(v,min=0)=>Number.isSafeInteger(v)&&v>=min;
@@ -10,7 +11,8 @@ const exact=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).
 const clone=v=>JSON.parse(JSON.stringify(v));
 
 function route({delivery:d,launch,attemptId,dataRevision,compatibility:c}){
- if(!hex(attemptId,32)||!hex(dataRevision,40)||c?.version!==4||!hex(c.dataReleaseHash)||!hex(c.generation)||
+ if(c?.version===5)inspectNonrootCompatibilityCertificate(c);
+ if(!hex(attemptId,32)||!hex(dataRevision,40)||![4,5].includes(c?.version)||!hex(c.dataReleaseHash)||!hex(c.generation)||
    c.current?.release?.sourceTag!=='mem9-'+dataRevision.slice(0,7)||d?.kind!=='executor'||d.wave!=='apply'||d.exitCode!==0||
    !hex(d.invocation,32)||d.image!==c.current.release.workerImage)fail();
  const match=d.image?.match(/^([0-9]{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com\/mem9-on-aws\/llm-proxy@(sha256:[a-f0-9]{64})$/);
@@ -48,6 +50,12 @@ export function verifyCurrentCanaryCapacity(capacity,{delivery,launch,attemptId,
    d.record?.kind!=='executor'||d.record.stage!=='prod'||d.record.invocation!==d.invocation||!['complete','deadline'].includes(d.record.outcome)||
    d.record.failedSlices!==0||!integer(d.record.slices,1)||!integer(d.record.changedRows,1)||d.record.startedMs!==d.startedMs||d.record.finishedMs!==d.stoppedMs)fail();
  if(!ownsCanaryTask(task,launch)||launch.taskRoleArn!==definition.taskRoleArn||launch.executionRoleArn!==definition.executionRoleArn)fail();
+ if(c.version===5){
+  const container=definition.containerDefinitions[0],capabilities=container.linuxParameters?.capabilities;
+  if(container.user!=='1000:1000'||container.privileged===true||capabilities?.add?.length||
+   hash(capabilities?.drop)!==hash(['ALL'])||hash(container.entryPoint)!==hash(['/usr/bin/setpriv','--no-new-privs','--','node'])||
+   hash(container.command)!==hash(['/app/scripts/consolidation-worker.mjs'])||definition.runtimePlatform?.operatingSystemFamily!=='LINUX')fail();
+ }
  const catalog=new Map([[d.image,{registryId:expected.account,repositoryName:'mem9-on-aws/llm-proxy',rootDigest:expected.rootDigest,arm64Digest:expected.arm64Digest}]]);
  if(hash(normalizeCanaryTask(definition,{account:expected.account,region:expected.region,images:catalog}))!==c.material?.executor?.current)fail();
  const overrides=task.overrides?.containerOverrides;

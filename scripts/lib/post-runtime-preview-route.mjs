@@ -1,6 +1,9 @@
 import {isConsolidationPreview,validatePreviewContext} from './consolidation-preview-config.mjs';
+import {copyNonrootJson,nonrootHash} from './production-nonroot-contracts.mjs';
+import {verifyPreviewRegistrationReadback} from './nonroot-preview-source.mjs';
 
 export const POST_RUNTIME_OPERATOR='Mem9PostFixture';
+export const POST_RUNTIME_PURPOSES=Object.freeze(['preview-fixture-pause','preview-fixture-setup','preview-fixture-verify-planned','preview-fixture-verify-executed','preview-fixture-verify-repeated']);
 const fail=()=>{throw Error('InvalidPostRuntimePreviewRoute');};
 const exact=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===[...keys].sort().join();
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -29,7 +32,8 @@ export function postRuntimeExecutionPolicy(parameters,kmsKeyArn,region){
 export function inspectPostRuntimeRoute(value,scope){
   const keys=['version','kind','stage','account','region','generation','context','controlSourceTree','clusterArn','taskDefinitionArn','containerName','image',
     'taskRoleArn','executionRoleArn','subnets','securityGroup','host','port','database','kmsKeyArn','credentials'];
-  if(!exact(value,keys)||value.version!==1||value.kind!=='post-runtime-preview-operator'||!isConsolidationPreview(value.stage)||
+  if(value?.version===2)keys.push('launch');
+  if(!exact(value,keys)||![1,2].includes(value.version)||value.kind!=='post-runtime-preview-operator'||!isConsolidationPreview(value.stage)||
     !/^[0-9]{12}$/.test(value.account??'')||!/^[a-z]{2}(?:-[a-z]+)+-[0-9]$/.test(value.region??'')||
     !/^[a-f0-9]{64}$/.test(value.generation??'')||!/^[a-f0-9]{40}$/.test(value.controlSourceTree??'')||Buffer.byteLength(JSON.stringify(value))>4096)fail();
   validatePreviewContext(value.context);
@@ -51,6 +55,9 @@ export function inspectPostRuntimeRoute(value,scope){
   if(!new RegExp('^arn:aws:kms:'+value.region+':'+value.account+':key/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$').test(value.kmsKeyArn??''))fail();
   const refs=postRuntimeCredentialReferences(value.stage,value.account,value.region);
   if(!exact(value.credentials,Object.keys(refs))||Object.keys(refs).some(key=>value.credentials[key]!==refs[key]))fail();
+  if(value.version===2&&(!exact(value.launch,['version','purpose','definitionHash'])||value.launch.version!==1||
+    !['post-runtime-fixture',...POST_RUNTIME_PURPOSES].includes(value.launch.purpose)||!/^[a-f0-9]{64}$/.test(value.launch.definitionHash??'')))fail();
+  if(scope.requiredVersion!==undefined&&value.version!==scope.requiredVersion)fail();
   return structuredClone(value);
 }
 
@@ -65,20 +72,75 @@ export function validatePostRuntimeRoute(value,expected){
   return route;
 }
 
+/** New workflows use this entry point; historical v1 inspection stays strict. */
+export function validateGuardedPostRuntimeRoute(value,expected){
+  return validatePostRuntimeRoute(value,{...expected,requiredVersion:2});
+}
+
+export function bindGuardedPostRuntimeRoute(value,registration,observation){
+  const prior=inspectPostRuntimeRoute(value,value);
+  if(prior.version!==1)fail();
+  const observed=verifyPreviewRegistrationReadback(registration,observation);
+  const route={...prior,version:2,launch:{version:1,purpose:'post-runtime-fixture',definitionHash:nonrootHash(observed)}};
+  validatePostRuntimeDefinition(observed.taskDefinition,route,observed);return copyNonrootJson(route);
+}
+
+/** The protected parameter contains this closed map. Its legacy-shaped route
+ * holds common metadata only; it is never selected for an application launch. */
+export function inspectPostRuntimePurposeMap(input,scope){
+  const value=copyNonrootJson(input);
+  if(!exact(value,['version','kind','route','bindings'])||value.version!==1||value.kind!=='post-runtime-preview-purpose-map'||
+    Buffer.byteLength(JSON.stringify(value))>4096||!Array.isArray(value.bindings)||value.bindings.length<1||value.bindings.length>POST_RUNTIME_PURPOSES.length)fail();
+  const base=inspectPostRuntimeRoute(value.route,scope);if(base.version!==1)fail();
+  for(const b of value.bindings){
+    if(!exact(b,['purpose','taskDefinitionArn','definitionHash'])||!POST_RUNTIME_PURPOSES.includes(b.purpose)||!/^[a-f0-9]{64}$/.test(b.definitionHash??''))fail();
+    inspectPostRuntimeRoute({...base,taskDefinitionArn:b.taskDefinitionArn},scope);
+  }
+  if(new Set(value.bindings.map(b=>b.purpose)).size!==value.bindings.length||new Set(value.bindings.map(b=>b.taskDefinitionArn)).size!==value.bindings.length)fail();
+  return value;
+}
+export function selectGuardedPostRuntimeRoute(input,expected,purpose='preview-fixture-pause'){
+  const map=inspectPostRuntimePurposeMap(input,expected),base=validatePostRuntimeRoute(map.route,expected);
+  const selected=map.bindings.find(b=>b.purpose===purpose);if(!selected)throw Error('NonrootPreviewPurposeUnavailable');
+  return inspectPostRuntimeRoute({...base,version:2,taskDefinitionArn:selected.taskDefinitionArn,
+    launch:{version:1,purpose:purpose==='preview-fixture-pause'?'post-runtime-fixture':purpose,definitionHash:selected.definitionHash}},expected);
+}
+export function bindPostRuntimePurposeMap(base,records){
+  const route=inspectPostRuntimeRoute(base,base);if(route.version!==1||!Array.isArray(records))fail();
+  const bindings=records.map(r=>{
+    if(!exact(r,['purpose','registration','observation'])||!POST_RUNTIME_PURPOSES.includes(r.purpose))fail();
+    const observation=verifyPreviewRegistrationReadback(r.registration,r.observation);
+    const selected={...route,version:2,taskDefinitionArn:observation.taskDefinition.taskDefinitionArn,
+      launch:{version:1,purpose:r.purpose==='preview-fixture-pause'?'post-runtime-fixture':r.purpose,definitionHash:nonrootHash(observation)}};
+    inspectPostRuntimeRoute(selected,route);validatePostRuntimeDefinition(observation.taskDefinition,selected,observation);
+    return {purpose:r.purpose,taskDefinitionArn:selected.taskDefinitionArn,definitionHash:selected.launch.definitionHash};
+  });
+  return inspectPostRuntimePurposeMap({version:1,kind:'post-runtime-preview-purpose-map',route,bindings},route);
+}
+
 export function postRuntimeOperatorEnvironment(route){
+  const purpose=route.version===2?route.launch?.purpose:undefined;
+  const operation=purpose?.startsWith('preview-fixture-')?'consolidation-preview-'+purpose.slice('preview-fixture-'.length):'consolidation-preview-pause';
   return {AWS_REGION:route.region,MEM9_STAGE:route.stage,MEM9_DB_HOST:route.host,MEM9_DB_PORT:String(route.port),MEM9_DB_NAME:route.database,
-    MEM9_PREVIEW_GENERATION:route.generation,MEM9_BOOTSTRAP_OPERATION:'consolidation-preview-pause',MEM9_PRODUCTION_RUNTIME_MODE:'active',
+    MEM9_PREVIEW_GENERATION:route.generation,MEM9_BOOTSTRAP_OPERATION:operation,MEM9_PRODUCTION_RUNTIME_MODE:'active',
     MEM9_PREVIEW_ACCEPTANCE_CONTEXT:'post-runtime',MEM9_PREVIEW_RUNTIME_NONCE:route.context.runtimeNonce};
 }
 
-export function validatePostRuntimeDefinition(definition,route){
+export function validatePostRuntimeDefinition(definition,route,observation){
+  if(route.version===2){
+    const observed=copyNonrootJson(observation);
+    if(!exact(observed,['taskDefinition','tags'])||nonrootHash(observed)!==route.launch.definitionHash||
+      nonrootHash(observed.taskDefinition)!==nonrootHash(definition))fail();
+  }
   if(definition?.taskDefinitionArn!==route.taskDefinitionArn||definition.networkMode!=='awsvpc'||!sameSet(definition.requiresCompatibilities,['FARGATE'])||
     definition.runtimePlatform?.cpuArchitecture!=='ARM64'||definition.runtimePlatform.operatingSystemFamily!=='LINUX'||
     definition.cpu!=='256'||definition.memory!=='512'||definition.taskRoleArn!==route.taskRoleArn||definition.executionRoleArn!==route.executionRoleArn||
     definition.volumes?.length||definition.pidMode||definition.ipcMode||definition.containerDefinitions?.length!==1)fail();
   const c=definition.containerDefinitions[0];
-  if(c.name!==POST_RUNTIME_OPERATOR||c.image!==route.image||!equal(c.entryPoint,['node'])||
-    !equal(c.command,['/bootstrap/operator/scripts/consolidation-preview-fixture.mjs'])||c.user!=='node'||c.readonlyRootFilesystem!==true||
+  const entry=route.version===2?['/bin/setpriv','--no-new-privs','--','/usr/local/bin/node','/bootstrap/nonroot-dispatch.mjs',route.launch.purpose]:['node'];
+  const command=route.version===2?[]:['/bootstrap/operator/scripts/consolidation-preview-fixture.mjs'];
+  if(c.name!==POST_RUNTIME_OPERATOR||c.image!==route.image||!equal(c.entryPoint,entry)||
+    !equal(c.command,command)||c.user!==(route.version===2?'1000:1000':'node')||c.readonlyRootFilesystem!==true||
     c.privileged||c.mountPoints?.length||c.environmentFiles?.length||c.repositoryCredentials||c.extraHosts?.length||
     c.dnsServers?.length||c.dnsSearchDomains?.length||c.linuxParameters?.capabilities?.add?.length||
     !sameSet(c.linuxParameters?.capabilities?.drop,['ALL'])||Object.keys(c.linuxParameters??{}).some(k=>!['capabilities','initProcessEnabled'].includes(k)))fail();

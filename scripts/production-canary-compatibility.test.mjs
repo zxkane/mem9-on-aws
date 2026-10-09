@@ -3,6 +3,7 @@ import {canaryEvidenceHash as hash} from './lib/production-canary-verification.m
 import {validateCanaryCompatibility,inspectCanaryCompatibility} from './lib/production-canary-compatibility.mjs';
 import {readFile} from 'node:fs/promises';
 import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
+import {NONROOT_LIMITS_HASH} from './lib/production-nonroot-contracts.mjs';
 
 const hex=n=>n.toString(16).padStart(64,'0');
 it('the control image and coordinator closure include the V3/V4 consumer and host modules',async()=>{
@@ -98,6 +99,31 @@ function imageTransitionFixture(){
  const {projectionHash:ignored,...transition}=c.transition;f.config.dataRelease={data:{version:2,transition},hash:hex(44)};
  f.config.acceptance.continuation.certificateHash=hash(c);return f;
 }
+
+function nonrootFixture(){
+ const f=imageTransitionFixture(),c=f.certificate;c.version=5;
+ c.transition={...c.transition,version:2,kind:'image-security-nonroot-upgrade',limitsHash:NONROOT_LIMITS_HASH,runtimeEvidenceHash:hex(81),operatorEvidenceHash:hex(82),deploymentSourceHash:hex(83)};
+ f.config.dataRelease.data={version:3,transition:{version:2,kind:c.transition.kind,proofHash:c.transition.proofHash,predecessorHash:c.transition.predecessorHash,limitsHash:NONROOT_LIMITS_HASH}};
+ Object.assign(f.config.acceptance.continuation,{version:2,certificateHash:hash(c),readinessHash:c.transition.runtimeEvidenceHash,descriptorHash:c.dataReleaseHash});return f;
+}
+it('V5 binds descriptor V3 and witness V2 to actual-runtime and deployed-source commitments',()=>{
+ const f=nonrootFixture();expect(validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(f.certificate));
+});
+for(const defect of ['legacy-witness','wrong-readiness','wrong-descriptor','legacy-certificate','legacy-descriptor','different-proof','network-change','same-image','wrong-worker-image','wrong-backend-image'])it('V5 rejects '+defect,()=>{
+ const f=nonrootFixture(),c=f.certificate,w=f.config.acceptance.continuation;
+ if(defect==='legacy-witness'){w.version=1;delete w.readinessHash;delete w.descriptorHash;}
+ if(defect==='wrong-readiness')w.readinessHash=hex(999);if(defect==='wrong-descriptor')w.descriptorHash=hex(999);
+ if(defect==='legacy-certificate')c.version=4;if(defect==='legacy-descriptor')f.config.dataRelease.data.version=2;
+ if(defect==='different-proof')f.config.dataRelease.data.transition.proofHash=hex(999);if(defect==='network-change')c.material.network.current=hex(999);
+ if(defect==='same-image')c.images['qwen3-embed'].currentChild=c.images['qwen3-embed'].previousChild;
+ if(defect==='wrong-worker-image')c.current.release.workerImage=c.current.release.workerImage.replace('@'+c.images.worker.currentRoot,'@sha256:'+hex(999));
+ if(defect==='wrong-backend-image')c.current.backendBinding.containers[0].imageDigest='sha256:'+hex(999);
+ w.certificateHash=hash(c);expect(()=>validateCanaryCompatibility(c,f.parent,f.config,f.state)).toThrow();
+});
+it('legacy certificates cannot consume a V2 witness even if its hashes are self-consistent',()=>{
+ const f=imageTransitionFixture(),c=f.certificate;Object.assign(f.config.acceptance.continuation,{version:2,readinessHash:hex(81),descriptorHash:c.dataReleaseHash});
+ expect(()=>validateCanaryCompatibility(c,f.parent,f.config,f.state)).toThrow();
+});
 it('V4 binds typed descriptor commitments and the new images to the original parent and protected witness',()=>{
  const f=imageTransitionFixture(),before=structuredClone(f.certificate);
  expect(validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(before));expect(f.certificate).toEqual(before);

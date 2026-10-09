@@ -5,6 +5,7 @@ import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mj
 import {captureCurrentCanaryCapacity} from './lib/production-current-capacity.mjs';
 import {calibrateProductionContinuation} from './lib/production-canary-calibration.mjs';
 import {normalizeCanaryTask} from './lib/production-canary-material.mjs';
+import {asNonrootCertificate} from './production-nonroot-runtime.fixture.mjs';
 
 function fixture({queued=0}={}){
   const h=c=>c.repeat(64),attemptId='b'.repeat(32),calls=[],saved=[];
@@ -54,6 +55,10 @@ for(const queued of [0,1])it('V4 discovers sufficient real queued work or holds 
 it('V4 rejects insufficient remaining lifetime allowance before any operation',async()=>{
  const f=imageFixture({pairs:9});await expect(runProductionContinuationFlow(f.deps,f)).rejects.toThrow();expect(f.calls).toEqual([]);
 });
+for(const queued of [0,1])it('V5 discovers enough genuine work or holds without resetting the root: '+queued,async()=>{
+ const f=imageFixture({queued}),before=structuredClone(f.original);f.compatibility=asNonrootCertificate(f.compatibility);
+ const result=await runProductionContinuationFlow(f.deps,f,{maxDiscoveryWaves:2});expect(result.phase).toBe('held');expect(result.errorCode).toBe('InsufficientCurrentCapacityCandidates');expect(f.calls).not.toContain('canary');expect(f.calls).not.toContain('prepare');expect(f.original).toEqual(before);
+});
 it('V4 rechecks real queue availability after the baseline before canary admission',async()=>{
  const f=imageFixture(),admin=f.deps.admin;let sampled=false;
  f.deps.admin=async(op,args)=>{const value=await admin(op,args);return op==='status'&&sampled?{...value,queuedActions:1}:value;};
@@ -79,8 +84,13 @@ it('rejects a valid but undeclared N100 baseline before admitting execution',asy
     samples:Array.from({length:200},(_,i)=>({kind:i%2?'write_ack':'read',index:Math.floor(i/2),ok:true,startedMs:1000+i*250,finishedMs:1100+i*250,latencyMs:100}))});
   const result=await runProductionContinuationFlow(f.deps,f);expect(result.errorCode).toBe('ContinuationCohortInvalid');expect(f.calls).not.toContain('canary');expect(f.calls).not.toContain('verify-canary');
 });
-for(const scenario of ['legacy','current','partial','legacy-calibration'])it(scenario+' continuation preserves single-apply measurement and promotion gates',async()=>{
+for(const scenario of ['legacy','current','nonroot','partial','legacy-calibration'])it(scenario+' continuation preserves single-apply measurement and promotion gates',async()=>{
   const imageSecurity=scenario!=='legacy',f=imageSecurity?imageFixture():fixture({queued:1}),epoch=Date.now()-600000,h=c=>c.repeat(64),baseAdmin=f.deps.admin,newPairs=imageSecurity&&scenario!=='partial'?2:1;
+  if(scenario==='nonroot'){
+    f.compatibility=asNonrootCertificate(f.compatibility);const c=f.compatibility;
+    Object.assign(f.capacityDefinition.containerDefinitions[0],{user:'1000:1000',privileged:false,linuxParameters:{capabilities:{drop:['ALL']}},entryPoint:['/usr/bin/setpriv','--no-new-privs','--','node'],command:['/app/scripts/consolidation-worker.mjs']});
+    c.material.executor.current=hash(normalizeCanaryTask(f.capacityDefinition,{account:'123456789012',region:'ap-northeast-1',images:new Map([[c.current.release.workerImage,{registryId:'123456789012',repositoryName:'mem9-on-aws/llm-proxy',rootDigest:c.images.worker.currentRoot,arm64Digest:c.images.worker.currentChild}]])}));
+  }
   const current=structuredClone(f.inspected),times=[];
   for(let i=0;i<newPairs;i++){const id=h(String(f.original.replayActions.length+i+1));current.replayActions.push({namespace:'namespace',id,result:{action_id:id,status:'applied',changed_rows:2}});times.push(epoch+230000+i*5000);}
   current.receiptWindow={firstCommittedMs:1000,lastCommittedMs:times.at(-1),committedMs:[...f.original.receiptWindow.committedMs,...times]};

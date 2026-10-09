@@ -21,7 +21,13 @@
 
 import type { RuntimeCredentials } from "./runtime-credentials";
 import type { DbOutputs } from "./db";
-import { workloadImage } from "./ecr";
+import { workloadImage, accountId, applicationRegion } from "./ecr";
+import {execFileSync} from 'node:child_process';
+import {ECSClient,DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
+import {previewBootstrapContainer,previewBootstrapRegistration,previewRegistrationFromProviderArgs,buildNonrootPreviewPurposeMap} from '../scripts/lib/nonroot-preview-source.mjs';
+import {parseNonrootJson} from '../scripts/lib/production-nonroot-contracts.mjs';
+import {applyProductionNonrootTask,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
+import type {PreviewBootstrapPurpose,NonrootPreviewScope,NonrootPreviewMapInput} from '../scripts/lib/nonroot-preview-source.mjs';
 import { resolveVpc } from "./vpc";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { CognitoOutputs } from "./cognito";
@@ -34,6 +40,16 @@ const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
 export interface BootstrapOutputs {
   taskDefinitionArn: Output<string>;
+  previewPurposeBindings?:Output<string>;
+}
+
+function previewSourceTree():string {
+  // This is the actual reviewed checkout identity, never a caller-supplied hash.
+  execFileSync('git',['ls-files','--error-unmatch','infra/bootstrap.ts','scripts/lib/nonroot-preview-source.mjs'],{stdio:'pipe',timeout:10000});
+  execFileSync('git',['diff','--quiet'],{stdio:'pipe',timeout:10000});
+  execFileSync('git',['diff','--cached','--quiet'],{stdio:'pipe',timeout:10000});
+  const tree=execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8',timeout:10000}).trim();
+  if(!/^[a-f0-9]{40}$/.test(tree))throw Error('NonrootPreviewSource');return tree;
 }
 
 /**
@@ -71,7 +87,23 @@ export function bootstrap(
         }
       : undefined;
 
-  const image = workloadImage("bootstrap", IMAGE_TAG);
+  const numericPreview=/^pr-[1-9][0-9]*$/.test($app.stage);
+  let image=workloadImage("bootstrap",IMAGE_TAG);
+  if(numericPreview){
+    if(!/^pr-[a-f0-9]{7}$/.test(IMAGE_TAG))throw Error('NonrootPreviewImageTag');
+    image=aws.ecr.getImageOutput({repositoryName:'mem9-on-aws/preview/bootstrap',imageTag:IMAGE_TAG,registryId:accountId(),region:applicationRegion()}).imageDigest.apply(digest=>{
+      if(!/^sha256:[a-f0-9]{64}$/.test(digest))throw Error('NonrootPreviewImageDigest');
+      return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/mem9-on-aws/preview/bootstrap@${digest}`;
+    });
+  }
+  const defaultPurpose:PreviewBootstrapPurpose=production?.active?'bootstrap-runtime-verify':runtime?'bootstrap-runtime-bootstrap':'bootstrap-schema-seed';
+  const previewPurposes:PreviewBootstrapPurpose[]=[defaultPurpose];
+  if(runtime&&!production?.active){
+    previewPurposes.push('bootstrap-runtime-verify');
+    if(runtime.probeParameterArn)previewPurposes.push('bootstrap-admin-probe','bootstrap-admin-probe-cleanup');
+  }
+  if(consolidationPreview&&!production?.active)previewPurposes.push('preview-fixture-setup','preview-fixture-pause','preview-fixture-verify-planned','preview-fixture-verify-executed','preview-fixture-verify-repeated');
+  let previewGenerated:Output<string>|undefined;
 
   // The one-shot task. arm64, sized small (psql + jq are light — the DDL is
   // trivial). Injects the DB pieces + the DB secret (JSON {username,password}) +
@@ -122,6 +154,20 @@ export function bootstrap(
       taskDefinition: (args) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
         if(production?.active)args.executionRoleArn=production.bootstrapExecutionRoleArn;
+        if(numericPreview){
+          args.trackLatest=false;
+          // Each revision has a fixed purpose. Only its declared operation env
+          // changes; roles, secrets and the original application remain shared.
+          const raw=args.containerDefinitions as Output<string>;
+          if(!raw||typeof raw.apply!=='function')throw Error('NonrootPreviewContainerOutput');
+          args.containerDefinitions=raw.apply(text=>{
+            const values=parseNonrootJson(text);
+            if(!Array.isArray(values)||values.length!==1)throw Error('NonrootPreviewContainerSet');
+            return JSON.stringify([previewBootstrapContainer(values[0],defaultPurpose,$app.stage)]);
+          });
+          previewGenerated=$jsonStringify({...args});
+        }
+        applyProductionNonrootTask(args,'bootstrap');
       },
       ...(production?{executionRole:(args:Record<string,unknown>)=>{
         if(!production.active){protectLegacyRuntimeCredentials(args,true);return;}
@@ -131,6 +177,40 @@ export function bootstrap(
       ...(production?{taskRole:(args:Record<string,unknown>)=>protectLegacyRuntimeCredentials(args,true)}:{}),
     },
   });
+  const taskDefinitionArn=verifiedProductionNonrootTaskArn(task.taskDefinition,'bootstrap');
+
+  let previewPurposeBindings:Output<string>|undefined;
+  if(numericPreview){
+    // The underlying task output resolves after SST has invoked its transform.
+    // Reuse that exact family/roles/secret set for every additional revision.
+    previewPurposeBindings=task.nodes.taskDefinition.apply(()=>{
+      if(!previewGenerated)throw Error('NonrootPreviewGeneratedDefinitionMissing');
+      const scope=$jsonStringify({stage:$app.stage,account:accountId(),region:applicationRegion()}).apply(raw=>({...JSON.parse(raw),sourceTree:previewSourceTree()}) as NonrootPreviewScope);
+      return previewGenerated.apply(raw=>scope.apply(context=>{
+        const original=previewRegistrationFromProviderArgs(JSON.parse(raw));
+        const records=previewPurposes.map(purpose=>{
+          const registration=purpose===defaultPurpose?original:previewBootstrapRegistration(original,purpose,context);
+          const {containerDefinitions,tags:registrationTags,...fields}=registration;
+          const arn=purpose===defaultPurpose?task.taskDefinition:new aws.ecs.TaskDefinition('Mem9BootstrapPurpose'+purpose.split('-').map(p=>p[0].toUpperCase()+p.slice(1)).join(''),{
+            ...fields,containerDefinitions:JSON.stringify(containerDefinitions),
+            tags:Object.fromEntries((registrationTags as Array<{key:string;value:string}>).map(t=>[t.key,t.value])),trackLatest:false,skipDestroy:true,
+          } as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1]).arn;
+          return arn.apply(async taskDefinition=>{
+            const client=new ECSClient({region:context.region});
+            try{
+              const result=await client.send(new DescribeTaskDefinitionCommand({taskDefinition,include:['TAGS']}),{abortSignal:AbortSignal.timeout(30000)});
+              // Serialize only the SDK's data members; this retains every task
+              // field and tag, including service-derived attribute sets.
+              const observation=JSON.parse(JSON.stringify({taskDefinition:result.taskDefinition,tags:result.tags}));
+              return {purpose,registration,observation};
+            }finally{client.destroy();}
+          });
+        });
+        return $jsonStringify(records).apply(rawRecords=>JSON.stringify(buildNonrootPreviewPurposeMap({scope:context,defaultPurpose,records:JSON.parse(rawRecords)} as NonrootPreviewMapInput)));
+      }));
+    });
+    new aws.ssm.Parameter('BootstrapPurposeBindings',{name:`${prefix}/bootstrap/purpose-bindings`,type:'String',value:previewPurposeBindings,tags});
+  }
 
   // Export the run inputs so CI can `aws ecs run-task` after deploy. The cluster
   // name + task-def ARN + the task SG + private subnets are all the network config
@@ -139,7 +219,7 @@ export function bootstrap(
   new aws.ssm.Parameter("BootstrapTaskDefArn", {
     name: `${prefix}/bootstrap/task-def-arn`,
     type: "String",
-    value: task.taskDefinition,
+    value: taskDefinitionArn,
     tags,
   });
   new aws.ssm.Parameter("BootstrapClusterName", {
@@ -162,6 +242,7 @@ export function bootstrap(
   });
 
   return {
-    taskDefinitionArn: task.taskDefinition,
+    taskDefinitionArn,
+    ...(previewPurposeBindings?{previewPurposeBindings}:{}),
   };
 }

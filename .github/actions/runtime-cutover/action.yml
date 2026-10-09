@@ -13,6 +13,12 @@ inputs:
   phase:
     default: all
     description: all, prepare, or finish
+  ci-smoke-route:
+    required: true
+    description: Exact reviewed caller job key
+  ci-smoke-call-path:
+    required: true
+    description: Exact reviewed baseline composite invocation key
 runs:
   using: composite
   steps:
@@ -20,22 +26,62 @@ runs:
       shell: bash
       env:
         PHASE: ${{ inputs.phase }}
-      run: 'case "$PHASE" in all|prepare|finish) ;; *) exit 1 ;; esac'
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_CALL_PATH: ${{ inputs.ci-smoke-call-path }}
+      run: 'case "$PHASE" in all|prepare|finish) ;; *) exit 1 ;; esac
+
+        node scripts/verify-ci-smoke-isolation.mjs composite --route "$MEM9_CI_SMOKE_ROUTE" --call-path "$MEM9_CI_SMOKE_CALL_PATH" --phase "$PHASE"'
     - name: Refresh preparation credentials
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
+    - id: ci_smoke_child_target_2
+      name: "Acquire smoke target receipt: Verify deployed operator image"
+      if: success() && (true)
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MEM9_DEPLOY_ROLE_ARN: ${{ inputs.role-arn }}
+        STAGE: ${{ env.STAGE }}
+        MEM9_CI_SMOKE_CHECKPOINT: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/2
+      uses: ./.github/actions/ci-smoke-gate
+      with:
+        mode: target
+        phase: preupdate
+      continue-on-error: false
+    - id: ci_smoke_child_guard_02
+      name: "Verify smoke phase receipt: Verify deployed operator image"
+      shell: bash
+      if: success() && (true)
+      env:
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_STEP: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/2
+        MEM9_CI_SMOKE_PHASE: preupdate
+      run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+      continue-on-error: false
     - name: Verify deployed operator image
       env:
         GH_TOKEN: ${{ github.token }}
       shell: bash
       run: node scripts/run-production-runtime.mjs image
+      if: success() && steps.ci_smoke_child_guard_02.outcome == 'success' && (true)
+      continue-on-error: false
+    - id: ci_smoke_child_guard_03
+      name: "Verify smoke phase receipt: Prepare credentials and pinned fallback"
+      shell: bash
+      if: success() && (inputs.phase != 'finish')
+      env:
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_STEP: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/3
+        MEM9_CI_SMOKE_PHASE: preupdate
+      run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+      continue-on-error: false
     - name: Prepare credentials and pinned fallback
-      if: inputs.phase != 'finish'
+      if: success() && steps.ci_smoke_child_guard_03.outcome == 'success' && (inputs.phase != 'finish')
       shell: bash
       run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs prepare
+      continue-on-error: false
     - name: Refresh cutover credentials
       if: inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
@@ -43,10 +89,34 @@ runs:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
+    - id: ci_smoke_child_target_5
+      name: "Acquire smoke target receipt: Apply bounded credential cutover"
+      if: success() && (inputs.phase != 'prepare')
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MEM9_DEPLOY_ROLE_ARN: ${{ inputs.role-arn }}
+        STAGE: ${{ env.STAGE }}
+        MEM9_CI_SMOKE_CHECKPOINT: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/5
+      uses: ./.github/actions/ci-smoke-gate
+      with:
+        mode: target
+        phase: preupdate
+      continue-on-error: false
+    - id: ci_smoke_child_guard_05
+      name: "Verify smoke phase receipt: Apply bounded credential cutover"
+      shell: bash
+      if: success() && (inputs.phase != 'prepare')
+      env:
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_STEP: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/5
+        MEM9_CI_SMOKE_PHASE: preupdate
+      run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+      continue-on-error: false
     - name: Apply bounded credential cutover
-      if: inputs.phase != 'prepare'
+      if: success() && steps.ci_smoke_child_guard_05.outcome == 'success' && (inputs.phase != 'prepare')
       shell: bash
       run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs apply
+      continue-on-error: false
     - name: Refresh finalization credentials
       if: inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
@@ -54,14 +124,62 @@ runs:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
+    - id: ci_smoke_child_target_7
+      name: "Acquire smoke target receipt: Converge infrastructure and verify retirement"
+      if: success() && (inputs.phase != 'prepare')
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MEM9_DEPLOY_ROLE_ARN: ${{ inputs.role-arn }}
+        STAGE: ${{ env.STAGE }}
+        MEM9_CI_SMOKE_CHECKPOINT: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/7
+      uses: ./.github/actions/ci-smoke-gate
+      with:
+        mode: target
+        phase: preupdate
+      continue-on-error: false
+    - id: ci_smoke_child_guard_07
+      name: "Verify smoke phase receipt: Converge infrastructure and verify retirement"
+      shell: bash
+      if: success() && (inputs.phase != 'prepare')
+      env:
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_STEP: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/7
+        MEM9_CI_SMOKE_PHASE: preupdate
+      run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+      continue-on-error: false
     - name: Converge infrastructure and verify retirement
-      if: inputs.phase != 'prepare'
+      if: success() && steps.ci_smoke_child_guard_07.outcome == 'success' && (inputs.phase != 'prepare')
       shell: bash
       run: node scripts/run-production-runtime.mjs finalize
+      continue-on-error: false
+    - id: ci_smoke_child_target_8
+      name: "Acquire smoke target receipt: Verify ordinary deployment bootstrap invocation"
+      if: success() && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MEM9_DEPLOY_ROLE_ARN: ${{ inputs.role-arn }}
+        STAGE: ${{ env.STAGE }}
+        MEM9_CI_SMOKE_CHECKPOINT: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/8
+      uses: ./.github/actions/ci-smoke-gate
+      with:
+        mode: target
+        phase: prereadiness
+      continue-on-error: false
+    - id: ci_smoke_child_guard_08
+      name: "Verify smoke phase receipt: Verify ordinary deployment bootstrap invocation"
+      shell: bash
+      if: success() && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')
+      env:
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_STEP: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/8
+        MEM9_CI_SMOKE_PHASE: prereadiness
+      run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+      continue-on-error: false
     - name: Verify ordinary deployment bootstrap invocation
-      if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
+      if: success() && steps.ci_smoke_child_guard_08.outcome == 'success' && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')
       shell: bash
       run: bash scripts/run-bootstrap-task.sh
+      continue-on-error: false
     - name: Refresh preview rehearsal credentials
       if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
@@ -69,7 +187,31 @@ runs:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
+    - id: ci_smoke_child_target_10
+      name: "Acquire smoke target receipt: Verify preview extension upgrade and administrator backup recovery"
+      if: success() && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MEM9_DEPLOY_ROLE_ARN: ${{ inputs.role-arn }}
+        STAGE: ${{ env.STAGE }}
+        MEM9_CI_SMOKE_CHECKPOINT: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/10
+      uses: ./.github/actions/ci-smoke-gate
+      with:
+        mode: target
+        phase: prereadiness
+      continue-on-error: false
+    - id: ci_smoke_child_guard_10
+      name: "Verify smoke phase receipt: Verify preview extension upgrade and administrator backup recovery"
+      shell: bash
+      if: success() && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')
+      env:
+        MEM9_CI_SMOKE_ROUTE: ${{ inputs.ci-smoke-route }}
+        MEM9_CI_SMOKE_STEP: ${{ inputs.ci-smoke-call-path }}/.github/actions/runtime-cutover/action.yml/10
+        MEM9_CI_SMOKE_PHASE: prereadiness
+      run: node scripts/verify-ci-smoke-isolation.mjs guard --route "$MEM9_CI_SMOKE_ROUTE" --step "$MEM9_CI_SMOKE_STEP" --phase "$MEM9_CI_SMOKE_PHASE"
+      continue-on-error: false
     - name: Verify preview extension upgrade and administrator backup recovery
-      if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
+      if: success() && steps.ci_smoke_child_guard_10.outcome == 'success' && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')
       shell: bash
       run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs rehearse
+      continue-on-error: false

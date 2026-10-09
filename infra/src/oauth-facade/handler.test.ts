@@ -8,6 +8,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  __resetForTests,
   buildSlackDeps,
   handler,
   isAllowedClientRedirect,
@@ -22,6 +23,8 @@ import {
   verifyState,
 } from "./state.js";
 import type { FacadeConfig } from "./config.js";
+import * as configModule from "./config.js";
+import { RUNTIME_SECRET_CACHE_MS } from "../../gateway/runtime-secrets.mjs";
 
 const HOST = "abc123.lambda-url.ap-northeast-1.on.aws";
 const BASE = `https://${HOST}`;
@@ -89,7 +92,35 @@ function requestCookies(response: { cookies?: string[] }): string[] {
 }
 
 afterEach(() => {
+  __resetForTests();
   vi.restoreAllMocks();
+});
+
+it("coalesces default config reads, expires the cache, and refuses stale secrets on refresh failure", async () => {
+  let now = 1000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  let finish!: (value: FacadeConfig) => void;
+  const loader = vi.spyOn(configModule, "loadConfig")
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const event = ev("/.well-known/oauth-authorization-server");
+  const first = handler(event);
+  const concurrent = handler(event);
+  expect(loader).toHaveBeenCalledTimes(1);
+  finish(cfg());
+  expect((await first).statusCode).toBe(200);
+  expect((await concurrent).statusCode).toBe(200);
+  now += RUNTIME_SECRET_CACHE_MS - 1;
+  expect((await handler(event)).statusCode).toBe(200);
+  expect(loader).toHaveBeenCalledTimes(1);
+
+  now += 1;
+  loader.mockRejectedValueOnce(new Error("RuntimeSecretUnavailable"));
+  await expect(handler(event)).rejects.toThrow("RuntimeSecretUnavailable");
+  expect(loader).toHaveBeenCalledTimes(2);
+
+  loader.mockResolvedValueOnce(cfg({ hmacKey: "refreshed-fixture-key" }));
+  expect((await handler(event)).statusCode).toBe(200);
+  expect(loader).toHaveBeenCalledTimes(3);
 });
 
 describe.each(["managed", "oidc"] as const)("%s OAuth resource indicators", (authMode) => {

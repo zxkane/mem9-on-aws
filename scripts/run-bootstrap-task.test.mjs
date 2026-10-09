@@ -10,6 +10,7 @@ import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { runtimeRoleName } from "./lib/runtime-credentials.mjs";
+import {nonrootPreviewFixture} from './nonroot-preview.fixture.mjs';
 
 const script = resolve("scripts/run-bootstrap-task.sh");
 const temporaryPaths = [];
@@ -34,17 +35,26 @@ function runFixture({
   inherited = false,
   operation = "",
   launchFailure = false,
+  missingMap = false,
+  changedMap = false,
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-bootstrap-runner-"));
   temporaryPaths.push(directory);
   const bin = join(directory, "bin");
   const calls = join(directory, "calls.jsonl");
   mkdirSync(bin);
+  const guarded=/^pr-[1-9][0-9]*$/.test(stage)?nonrootPreviewFixture({stage,cluster:'mem9-on-aws-'+stage+'-Cluster-example',
+    purposes:[runtimeVerify?'bootstrap-runtime-verify':'bootstrap-schema-seed'],
+    environment:inherited?[{name:'MEM9_RUNTIME_BOOTSTRAP_DEADLINE',value:'1'},{name:'MEM9_RUNTIME_INVOCATION',value:'stale'}]:[],
+    logGroup:'/sst/cluster/mem9-pr-42/bootstrap/Mem9Bootstrap',logStreamPrefix:'/service'}):undefined;
+  const previewFile=join(directory,'preview.json');
+  writeFileSync(previewFile,JSON.stringify(guarded?{parameters:[...guarded.parameters.values()],observation:guarded.records[0].observation}:null),{mode:0o600});
+  writeFileSync(join(bin,'git'),'#!/usr/bin/env node\nif(process.argv[2]==="rev-parse")console.log("a".repeat(40));\n',{mode:0o755});
 
   writeFileSync(
     join(bin, "aws"),
     `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync,readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.AWS_CALLS, JSON.stringify(args) + "\\n");
 const option = (name) => {
@@ -53,7 +63,15 @@ const option = (name) => {
 };
 const command = args.slice(0, 2).join(" ");
 const fixture=JSON.parse(process.env.BOOTSTRAP_TEST_CONFIG);
-if (command === "ssm get-parameter") {
+const preview=JSON.parse(readFileSync(process.env.BOOTSTRAP_PREVIEW_FIXTURE,'utf8'));
+if(command === 'sts get-caller-identity'){
+ console.log(JSON.stringify({Account:'123456789012'}));
+}else if(command === 'ssm get-parameters'){
+ const start=args.indexOf('--names')+1,end=args.findIndex((v,i)=>i>=start&&v.startsWith('--')),names=args.slice(start,end<0?undefined:end);
+ const count=readFileSync(process.env.AWS_CALLS,'utf8').trim().split('\\n').map(JSON.parse).filter(a=>a[0]==='ssm'&&a[1]==='get-parameters').length;
+ const Parameters=names.map(Name=>{const p=preview?.parameters.find(p=>p.Name===Name);return p?{...p,Version:p.Version+(fixture.changedMap&&count>1?1:0)}:undefined;}).filter(Boolean);
+ console.log(JSON.stringify({Parameters,InvalidParameters:fixture.missingMap?[names[0]]:[]}));
+}else if (command === "ssm get-parameter") {
   const values = {
     "cluster-name": "mem9-pr-42-cluster",
     "task-def-arn": "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-bootstrap:7",
@@ -64,6 +82,15 @@ if (command === "ssm get-parameter") {
 } else if (command === "ecs describe-task-definition") {
   if(!fixture.readable){process.stderr.write("fixture metadata unavailable");process.exit(3);}
   if(fixture.malformed){process.stdout.write("not-json");process.exit(0);}
+  if(preview){
+    const o=preview.observation,c=o.taskDefinition.containerDefinitions[0];
+    if(fixture.wrongArn)o.taskDefinition.taskDefinitionArn='wrong-definition';
+    if(fixture.metadataStage!==process.env.STAGE)c.environment.find(e=>e.name==='MEM9_STAGE').value=fixture.metadataStage;
+    if(fixture.marker!=='1'&&fixture.runtimeVerify)c.environment.find(e=>e.name==='MEM9_RUNTIME_BOOTSTRAP_VERSION').value=fixture.marker;
+    if(fixture.duplicate)c.environment.push(c.environment[0]);
+    if(fixture.containerCount!==1)o.taskDefinition.containerDefinitions.push({...c,name:'OtherContainer'});
+    console.log(JSON.stringify(o));process.exit(0);
+  }
   console.log(JSON.stringify({
     taskDefinition: {
       taskDefinitionArn:fixture.wrongArn?"wrong-definition":"arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-bootstrap:7",
@@ -141,7 +168,9 @@ if (command === "ssm get-parameter") {
         inherited,
         operation,
         launchFailure,
+        missingMap,changedMap,
       }),
+      BOOTSTRAP_PREVIEW_FIXTURE:previewFile,
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: stage,
     },
@@ -151,7 +180,7 @@ if (command === "ssm get-parameter") {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-  return { callRecords, result, before, after: Date.now() };
+  return { callRecords, result, before, after: Date.now(),guarded };
 }
 
 describe("schema bootstrap ECS runner", () => {
@@ -194,7 +223,7 @@ describe("schema bootstrap ECS runner", () => {
       expect(deadline).toBeLessThan(before + 900000);
       expect(result.stdout).toContain("runtime verification passed");
       expect(
-        callRecords.some((a) => a[0] === "ssm" && a[1] !== "get-parameter"),
+        callRecords.some((a) => a[0] === "ssm" && !['get-parameter','get-parameters'].includes(a[1])),
       ).toBe(false);
       nonces.push(env.MEM9_RUNTIME_INVOCATION);
     }
@@ -231,7 +260,7 @@ describe("schema bootstrap ECS runner", () => {
       "runtime-bootstrap",
       "runtime-admin-probe",
     ]) {
-      const { callRecords } = runFixture({ operation });
+      const { callRecords } = runFixture({ operation,stage:'prod' });
       const args = callRecords.find(
         (a) => a[0] === "ecs" && a[1] === "run-task",
       );
@@ -253,6 +282,16 @@ describe("schema bootstrap ECS runner", () => {
     expect(
       callRecords.some((a) => a[0] === "ecs" && a[1] === "describe-tasks"),
     ).toBe(false);
+  });
+  it('uses the guarded purpose revision and holds missing or changed maps without a legacy preview fallback',()=>{
+    const good=runFixture({runtimeVerify:true,exitCode:0});expect(good.result.status,good.result.stderr).toBe(0);
+    const run=good.callRecords.find(a=>a[0]==='ecs'&&a[1]==='run-task');
+    expect(run[run.indexOf('--task-definition')+1]).toBe(good.guarded.map.bindings[0].taskDefinitionArn);
+    expect(run).toContain('--disable-execute-command');
+    for(const flag of ['missingMap','changedMap']){
+      const f=runFixture({runtimeVerify:true,[flag]:true});expect(f.result.status).not.toBe(0);
+      expect(f.callRecords.some(a=>a[0]==='ecs'&&a[1]==='run-task')).toBe(false);
+    }
   });
 
   it("satisfies the real verifier configuration guard while preserving invalid deadline rejection", () => {

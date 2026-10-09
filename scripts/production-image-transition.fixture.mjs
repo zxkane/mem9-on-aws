@@ -11,20 +11,25 @@ import {IMAGE_MEDIA,createImageBudget,readImageGraph,verifyImageGraphCopies,insp
 import {inspectImageFilesystem,imageFilesystemProof} from './lib/production-image-filesystem.mjs';
 
 const sha=text=>createHash('sha256').update(text).digest('hex');
-export async function imageTransitionFixture({rootCounters}={}){
+export async function imageTransitionFixture({rootCounters,observationNow,layerBytes={},imageConfigurations={},workerContainerNames}={}){
  const legacy=transitionFixture();
+ if(workerContainerNames)for(const snapshot of [legacy.previous,legacy.current]){
+  for(const kind of ['planner','executor'])Object.assign(snapshot.definitions[kind].containerDefinitions[0],{name:workerContainerNames[kind],entryPoint:['node'],command:['/app/scripts/consolidation-worker.mjs']});
+  for(const c of snapshot.definitions.backend.containerDefinitions)if(imageConfigurations[c.name])Object.assign(c,{entryPoint:imageConfigurations[c.name].Entrypoint,command:imageConfigurations[c.name].Cmd});
+  legacy.refresh(snapshot);
+ }
  if(rootCounters){
   legacy.parent.changedRows=rootCounters.changedRows;legacy.parent.receipts=rootCounters.receipts;
   legacy.current.dataRelease.data.parentProofHash=hash(legacy.parent);
   legacy.current.dataRelease.hash=hash(legacy.current.dataRelease.data);
  }
  const bootstrap=buildCanaryMaterialTransition(legacy.input(),{expectedBootstrap:legacy.expectedBootstrap});
- const {account,region}=legacy.current,now=legacy.now,components=['llm-proxy','mnemo-server','qwen3-embed'];
+ const {account,region}=legacy.current,now=observationNow??legacy.now,components=['llm-proxy','mnemo-server','qwen3-embed'];
  const images={},artifacts={},native=graphFixture(),roots=[];
  const databaseText='P:zlib\nV:1.3.2-r1\nA:aarch64\n\n';
  for(const name of components){
-  const layer=native.put(tar([{path:name==='mnemo-server'?'lib/apk/db/installed':'app/'+name,body:name==='mnemo-server'?databaseText:'synthetic '+name}]),IMAGE_MEDIA.tar);
-  const config=native.put({architecture:'arm64',os:'linux',rootfs:{type:'layers',diff_ids:[layer.digest]}},IMAGE_MEDIA.config);
+  const layer=native.put(layerBytes[name]??tar([{path:name==='mnemo-server'?'lib/apk/db/installed':'app/'+name,body:name==='mnemo-server'?databaseText:'synthetic '+name}]),IMAGE_MEDIA.tar);
+  const config=native.put({architecture:'arm64',os:'linux',rootfs:{type:'layers',diff_ids:[layer.digest]},...(imageConfigurations[name]?{config:imageConfigurations[name]}:{})},IMAGE_MEDIA.config);
   const childDescriptor=native.put({schemaVersion:2,mediaType:IMAGE_MEDIA.manifest,config,layers:[layer]},IMAGE_MEDIA.manifest),arm64Digest=childDescriptor.digest;
   const payload=native.put({_type:'https://in-toto.io/Statement/v0.1',subject:[{name,digest:{sha256:arm64Digest.slice(7)}}],predicateType:'https://slsa.dev/provenance/v0.2',predicate:{synthetic:true}},IMAGE_MEDIA.attestation);
   const empty=native.put({},IMAGE_MEDIA.config),attestation=native.put({schemaVersion:2,mediaType:IMAGE_MEDIA.manifest,config:empty,layers:[payload]},IMAGE_MEDIA.manifest);

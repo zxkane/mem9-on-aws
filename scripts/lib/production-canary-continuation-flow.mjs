@@ -4,6 +4,7 @@ import {encodeBenchmarkRefs,encodeCanaryReport,verifyCanaryReport} from './produ
 import {verifyCanaryPerformance,verifyCanaryCohort} from './production-canary-performance.mjs';
 import {verifyProductionRecurringProof} from './production-recurring-verification.mjs';
 import {inspectImageTransitionCertificate} from './production-image-transition.mjs';
+import {inspectNonrootCompatibilityCertificate} from './production-nonroot-runtime.mjs';
 
 const fail=code=>{throw Error(code);};
 const errorCode=e=>/^[A-Za-z0-9_-]{1,128}$/.test(e?.message??'')?e.message:'ProductionContinuationFailed';
@@ -13,7 +14,7 @@ async function bounded(promise,ms){let timer;try{return await Promise.race([prom
 /** The adapter owns the operator fence and authenticates all AWS/source evidence. */
 export async function runProductionContinuationFlow(deps,{original,attemptId,compatibility},{maxDiscoveryWaves=8,samplesPerKind=150,joinTimeoutMs=60000}={}){
   const root=inspectContinuationReceiptSet(original).proof;
-  const imageTransition=compatibility?.version===4?inspectImageTransitionCertificate(compatibility):null;
+  const imageTransition=compatibility?.version===5?inspectNonrootCompatibilityCertificate(compatibility):compatibility?.version===4?inspectImageTransitionCertificate(compatibility):null;
   if(!/^[a-f0-9]{32}$/.test(attemptId??'')||compatibility?.parentProofHash!==hash(root)||root.changedRows>=20||
     !Number.isInteger(maxDiscoveryWaves)||maxDiscoveryWaves<1||maxDiscoveryWaves>8||samplesPerKind!==150||
     !Number.isSafeInteger(joinTimeoutMs)||joinTimeoutMs<1||joinTimeoutMs>60000)fail('ContinuationConfigurationInvalid');

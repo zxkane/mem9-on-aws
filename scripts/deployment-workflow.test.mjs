@@ -222,6 +222,7 @@ describe("workflow integration", () => {
         "infra-ci.yml:cleanup-preview",
         "infra-ci.yml:deploy-preview",
         "infra-ci.yml:deploy-prod",
+        "infra-ci.yml:mnemo-nonroot-smoke",
         "infra-ci.yml:runtime-cutover-preview",
         "reconcile-previews.yml:apply",
         "reconcile-previews.yml:auto",
@@ -365,7 +366,7 @@ describe("workflow integration", () => {
 
     expect(phaseGateIndex).toBeGreaterThanOrEqual(0);
     expect(phaseGateIndex).toBeLessThan(deployIndex);
-    expect(phaseGate.if).toBe("vars.MEM9_NAMESPACE_REQUIRED == '1'");
+    expect(phaseGate.if).toMatch(/^success\(\) && steps\.ci_smoke_guard_[a-f0-9]{12}\.outcome == 'success' && \(vars\.MEM9_NAMESPACE_REQUIRED == '1'\)$/);
     expect(phaseGate.env.STAGE).toBe("prod");
     expect(phaseGate.run).toContain(
       "run-memory-namespace-task.sh assert-phase --expected-phase constraints_complete",
@@ -740,14 +741,16 @@ describe("workflow integration", () => {
     ).toBe(true);
   });
 
-  it("reports preview reconciliation failures using the overall job status", () => {
-    const workflow = readFileSync(workflowPath, "utf8");
-    const statusComment = workflow.indexOf("name: Comment deploy status");
-    const commentBlock = workflow.slice(statusComment, statusComment + 500);
-
-    expect(statusComment).toBeGreaterThanOrEqual(0);
-    expect(commentBlock).toContain("DEPLOY_STATUS: ${{ job.status }}");
-    expect(commentBlock).not.toContain("steps.deploy.outcome");
+  it("publishes preview status only after guarded acceptance using the overall job status", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const steps = workflow.jobs["deploy-preview"].steps;
+    const index = steps.findIndex(step => step.name === "Comment deploy status");
+    expect(index).toBeGreaterThanOrEqual(1);
+    const comment = steps[index];
+    expect(comment.env.DEPLOY_STATUS).toBe("${{ job.status }}");
+    expect(comment.if).toContain("success() && steps." + steps[index - 1].id + ".outcome == 'success'");
+    expect(comment.if).toContain("steps.deploy.outputs.stage != ''");
+    expect(comment["continue-on-error"]).toBe(false);
   });
 });
 

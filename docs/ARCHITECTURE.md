@@ -312,6 +312,14 @@ network path. The private backend path has no ALB,
 certificate, VPC Lattice target, public Route 53 zone, or public mnemo-server
 endpoint.
 
+Proxy egress is limited to the backend security group on TCP 8080 and the
+stage-owned secret endpoint security group on TCP 443. SSM and Secrets Manager
+interface endpoints use their endpoint-specific DNS names with private DNS
+disabled; no hosted zone is added. Their policies allow only the proxy role's
+exact secret and transport-parameter references. The interceptor reads only the
+identity-signing secret. Both Lambdas receive secret references, and decryption
+permissions bind the existing key, service and secret or parameter context.
+
 The gateway trusts both implemented Cognito clients:
 
 - M2M `client_credentials` for CI and headless clients.
@@ -979,8 +987,11 @@ boundary attachment. It also lists the production project Lambdas,
 reads the production AgentCore Gateway, and requires every ECS task/execution,
 Lambda execution, and Gateway service role to belong to the migration inventory.
 That live binding set is re-read at every frozen-state verification. It attaches
-and reads back every role boundary, repairs and re-verifies the exact active
-boundary default policy version, activates and reads back the production
+and reads back every role boundary. The two Gateway Lambda families use the
+fixed Gateway boundary from the same owner stack; other roles retain the
+original workload boundary. The rollout validates Gateway Project/Stage tags,
+repairs and re-verifies both exact active policy documents and default versions,
+then activates and reads back the production
 transform variable. Immediately before quarantine deletion it requires the
 default branch to remain at the reviewed commit, both reviewed workflow blobs
 to remain exact, the pause variable to remain `true`, both workflows to remain
@@ -1143,8 +1154,9 @@ to the GitHub Actions deploy role.
   cleanup scan and Slack approval remain unavailable.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
-- Every application IAM role is synthesized with the fixed operator-owned
-  workload permissions boundary; live adoption uses the guarded migration.
+- Every application IAM role uses a fixed operator-owned boundary. The two
+  Gateway Lambda families use the narrower Gateway boundary; all other roles
+  retain the workload boundary. Live adoption uses the same guarded migration.
 - Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
 - Durable ingest emits job lifecycle, queue-age, sampler-heartbeat,
   phase-duration, retry, warning, truncation, and zero-fact metrics in

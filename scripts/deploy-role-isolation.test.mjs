@@ -369,13 +369,16 @@ describe("split GitHub OIDC deployment roles", () => {
       "docker/canary-fixture/database.Dockerfile",
     ]) {
       for (const line of readFileSync(resolve(root, dockerfile), "utf8").split("\n")) {
-        const match = line.match(/^COPY (scripts\/\S+) \S+$/u);
-        if (match) copiedScripts.add(match[1]);
+        const match = line.match(/^COPY (scripts\/\S+(?:\s+scripts\/\S+)*) \S+$/u);
+        if (match) for (const source of match[1].split(/\s+/u)) copiedScripts.add(source);
       }
     }
     expect([...WORKLOAD_COPY_INPUTS].filter((path) => path.startsWith("scripts/")).toSorted()).toEqual(
       [...copiedScripts].toSorted(),
     );
+    for (const name of ["contracts", "launch", "runtime"]) {
+      expect(classifyChangedPaths([`scripts/lib/production-nonroot-${name}.mjs`])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
+    }
     const classifierSource = readFileSync(
       resolve(root, "scripts/classify-infra-changes.mjs"),
       "utf8",

@@ -3,6 +3,7 @@ import {calibrateProductionContinuation} from './lib/production-canary-calibrati
 import {normalizeCanaryTask} from './lib/production-canary-material.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
+import {asNonrootCertificate} from './production-nonroot-runtime.fixture.mjs';
 const h=c=>c.repeat(64),account='123456789012',region='ap-northeast-1',now=1800000000000;
 function fixture(){
   const image=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/llm-proxy@sha256:${h('a')}`,child='sha256:'+h('b'),attemptId='b'.repeat(32),oldTime=now-10800000;
@@ -92,6 +93,24 @@ it('V4 measures the complete current apply delta while preserving the original r
 });
 it('V4 accepts the full remaining allowance without creating another budget',()=>{
  const f=currentImageFixture({pairs:5}),value=run(f);expect(value.capacityReceipts).toBe(5);expect(value.newChangedRows).toBe(10);expect(f.state.verified.verification.changedRows).toBe(20);
+});
+function nonrootCapacityFixture(){
+ const f=currentImageFixture();f.options.compatibility=asNonrootCertificate(f.options.compatibility);
+ const container=f.capacity.definition.containerDefinitions[0];Object.assign(container,{user:'1000:1000',privileged:false,linuxParameters:{capabilities:{drop:['ALL']}},entryPoint:['/usr/bin/setpriv','--no-new-privs','--','node'],command:['/app/scripts/consolidation-worker.mjs']});
+ const c=f.options.compatibility,image=c.current.release.workerImage;
+ c.material.executor.current=hash(normalizeCanaryTask(f.capacity.definition,{account,region,images:new Map([[image,{registryId:account,repositoryName:'mem9-on-aws/llm-proxy',rootDigest:c.images.worker.currentRoot,arm64Digest:c.images.worker.currentChild}]])}));
+ return f;
+}
+it('V5 calibrates only the current prefixed apply task and retains original spent/cap',()=>{
+ const f=nonrootCapacityFixture(),original=structuredClone(f.original),value=run(f);
+ expect(value.capacitySource).toBe('current-apply');expect(value.newChangedRows).toBe(4);expect(value.existingSpent).toBe(10);expect(f.original).toEqual(original);
+});
+for(const defect of ['unprefixed','root','added-capability','dropped-capability','old-capacity','replay'])it('V5 current capacity rejects '+defect,()=>{
+ const f=nonrootCapacityFixture(),container=f.capacity.definition.containerDefinitions[0],c=f.options.compatibility;
+ if(defect==='unprefixed')container.entryPoint=['node'];if(defect==='root')container.user='0:0';if(defect==='added-capability')container.linuxParameters.capabilities.add=['SYS_ADMIN'];if(defect==='dropped-capability')container.linuxParameters.capabilities.drop=[];
+ if(defect==='old-capacity')f.capacity=fixture().capacity;if(defect==='replay')f.capacity.delivery.wave='repeat-a';
+ if(!['old-capacity','replay'].includes(defect)){const image=c.current.release.workerImage;c.material.executor.current=hash(normalizeCanaryTask(f.capacity.definition,{account,region,images:new Map([[image,{registryId:account,repositoryName:'mem9-on-aws/llm-proxy',rootDigest:c.images.worker.currentRoot,arm64Digest:c.images.worker.currentChild}]])}));}
+ expect(()=>run(f)).toThrow();
 });
 for(const defect of ['one-pair','over-budget','historical-capacity','replay-capacity','cross-batch','subset','full-revision','task-window','read-window','write-window','old-image','wrong-definition','stale-census'])it('V4 calibration holds '+defect,()=>{
  const f=currentImageFixture({pairs:defect==='one-pair'?1:defect==='over-budget'?6:2});

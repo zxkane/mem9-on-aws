@@ -1,0 +1,22 @@
+**
+!docker/
+!docker/bootstrap/
+!docker/bootstrap/**
+!scripts/
+!scripts/*.mjs
+!scripts/lib/
+!scripts/lib/*.mjs
+!infra/
+!infra/gateway/
+!infra/gateway/service-auth.mjs
+!package.json
+!package-lock.json
+
+# Machine-local state is never part of a CONTROL build context.
+**/*.local.*
+**/CLAUDE.local.md
+**/.env
+**/.env.*
+**/.git
+**/node_modules
+**/.ssh

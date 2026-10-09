@@ -36,7 +36,7 @@ declare const $app: $App;
 
 declare function $transform<A>(
   resource: new (...args: never[]) => unknown,
-  cb: (args: A) => void,
+  cb: (args: A, opts: Record<string, unknown>, name: string) => void,
 ): void;
 
 declare function $config(input: unknown): unknown;
