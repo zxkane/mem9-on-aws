@@ -12,6 +12,7 @@ import {
   WORKLOAD_BOUNDARY_POLICY_NAME,
   WORKLOAD_BOUNDARY_STACK_NAME,
   expectedRolePatterns,
+  gatewayBoundaryArn,
   loadRolePolicyDocuments,
   quarantinePolicyDocument,
   validateProductionRuntimeBindings,
@@ -988,6 +989,7 @@ export function createAwsCliAdapter({
       ]);
       return {
         assumeRolePolicyDocument: response.Role?.AssumeRolePolicyDocument,
+        tags: response.Role?.Tags,
         permissionsBoundaryArn:
           response.Role?.PermissionsBoundary?.PermissionsBoundaryArn,
       };
@@ -1085,6 +1087,7 @@ export function createAwsCliAdapter({
             applicationRegion,
             decisionArtifactBucketName,
           });
+          return documents.map(document => JSON.parse(serializePolicyInput(document)));
         };
         const readDenyPolicyState = async ({ includeDocument = false } = {}) => {
           const attachedPolicies = await collectBoundedPages({
@@ -1129,17 +1132,25 @@ export function createAwsCliAdapter({
         return retry(
           async () => {
             try {
-              await verifyLivePolicyDocuments();
+              const documentsBefore = await verifyLivePolicyDocuments();
+              const scaffoldDocuments = documentsBefore.filter(document => document.Statement.some(statement => statement.Sid === "DenyGatewayBoundaryOnOtherRoles"));
+              if (scaffoldDocuments.length !== 1) return false;
               const denyPolicyBefore = await readDenyPolicyState({
                 includeDocument: true,
               });
               if (!denyPolicyBefore) return false;
-              for (const { action, resource } of probes) {
+              const gatewayArn = gatewayBoundaryArn({partition, accountId});
+              const actualProbes = [...probes,
+                {action:'iam:CreatePolicyVersion',resource:gatewayArn},
+                {action:'iam:CreateRole',resource:probeRoleArn,selectedBoundary:gatewayArn},
+                {action:'iam:CreateRole',resource:vpcProxyRoleArn,selectedBoundary:boundaryArn},
+              ];
+              for (const { action, resource, selectedBoundary } of actualProbes) {
                 const response = await invokeAwsCommand([
                   "iam",
                   "simulate-custom-policy",
                   "--policy-input-list",
-                  serializePolicyInput(denyPolicyBefore.document),
+                  serializePolicyInput(selectedBoundary ? scaffoldDocuments[0] : denyPolicyBefore.document),
                   "--action-names",
                   action,
                   "--resource-arns",
@@ -1148,6 +1159,7 @@ export function createAwsCliAdapter({
                   "ContextKeyName=iam:PassedToService," +
                     "ContextKeyValues=ecs-tasks.amazonaws.com," +
                     "ContextKeyType=string",
+                  ...(selectedBoundary ? [`ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=${selectedBoundary},ContextKeyType=string`] : []),
                 ]);
                 if (
                   (Object.hasOwn(response, "IsTruncated") &&
@@ -1178,7 +1190,8 @@ export function createAwsCliAdapter({
               ) {
                 return false;
               }
-              await verifyLivePolicyDocuments();
+              const documentsAfter = await verifyLivePolicyDocuments();
+              if (JSON.stringify(canonical(documentsAfter)) !== JSON.stringify(canonical(documentsBefore))) return false;
               const finalDenyPolicy = await readDenyPolicyState();
               return (
                 finalDenyPolicy?.defaultVersionId ===

@@ -3,8 +3,10 @@
 import {
   boundaryPolicyDriftDiagnostic,
   verifyBoundaryPolicyDocument,
+  verifyGatewayBoundaryPolicyDocument,
   verifyQuarantinePolicy,
 } from "./lib/workload-permissions-boundary.mjs";
+import {gatewayBoundaryProbeCases,gatewayBoundaryVerificationPlan} from './lib/gateway-workload-boundary.mjs';
 
 try {
   let input = "";
@@ -25,15 +27,27 @@ try {
     partition: process.env.WORKLOAD_BOUNDARY_PARTITION,
     policyRevision: process.env.WORKLOAD_BOUNDARY_POLICY_REVISION,
   };
+  if (process.argv[2] === '--gateway-probes') {
+    process.stdout.write(JSON.stringify(gatewayBoundaryProbeCases(contract))+'\n');
+    process.exit(0);
+  }
+  if(process.argv[2]==='--gateway-simulation-probes'){
+    process.stdout.write(JSON.stringify(gatewayBoundaryVerificationPlan(contract).simulation)+'\n');process.exit(0);
+  }
+  if(process.argv[2]==='--gateway-runtime'){
+    const {requestGatewayRuntimeSourceGate}=await import('./lib/gateway-runtime-source-gate.mjs');
+    await requestGatewayRuntimeSourceGate({boundary:input,contract,policyVersion:process.env.WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION});process.exit(0);
+  }
+  const gateway = process.argv[2] === '--gateway';
   const valid = quarantine
     ? verifyQuarantinePolicy(input)
-    : verifyBoundaryPolicyDocument(input, contract);
+    : gateway ? verifyGatewayBoundaryPolicyDocument(input, contract) : verifyBoundaryPolicyDocument(input, contract);
   if (!valid) {
     const label = quarantine
       ? "Deploy-role quarantine"
       : "Workload permissions-boundary";
     process.stderr.write(`${label} policy read-back mismatch.\n`);
-    if (!quarantine) {
+    if (!quarantine && !gateway) {
       process.stderr.write(
         `${boundaryPolicyDriftDiagnostic(input, contract)}\n`,
       );

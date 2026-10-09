@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { AUTHORIZATION_ARCHIVE_PREFIX, parseStrictJson } from "./authorization-archive-policy.mjs";
 import { verifyAuthorizationMaintenanceIsolation } from "./authorization-maintenance-isolation.mjs";
+import { GATEWAY_BOUNDARY_POLICY_NAME, gatewayBoundaryArn, gatewayRoleArnPatterns, gatewayRoleStage, expectedGatewayBoundaryPolicyDocument } from './gateway-workload-boundary.mjs';
+export { GATEWAY_BOUNDARY_POLICY_NAME, gatewayBoundaryArn, gatewayRoleArnPatterns, gatewayRoleStage, expectedGatewayBoundaryPolicyDocument };
 
 const rolloutContract = JSON.parse(
   readFileSync(
@@ -12,6 +14,14 @@ export const QUARANTINE_POLICY_NAME =
   rolloutContract.identifiers.quarantinePolicyName;
 export const WORKLOAD_BOUNDARY_POLICY_NAME =
   rolloutContract.identifiers.boundaryPolicyName;
+if (rolloutContract.identifiers.gatewayBoundaryPolicyName !== GATEWAY_BOUNDARY_POLICY_NAME) throw new Error('Gateway boundary identifier mismatch');
+
+export function expectedRoleBoundaryArn(roleName, {partition, accountId}) {
+  assertIdentity({partition, accountId});
+  return gatewayRoleStage(roleName) === undefined
+    ? `arn:${partition}:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`
+    : gatewayBoundaryArn({partition, accountId});
+}
 export const WORKLOAD_BOUNDARY_STACK_NAME =
   rolloutContract.identifiers.boundaryStackName;
 export const DENY_DANGEROUS_POLICY_NAME =
@@ -902,6 +912,9 @@ export function boundaryPolicyDriftDiagnostic(document, contract) {
 export function verifyBoundaryPolicyDocument(document, contract) {
   return compareBoundaryPolicyDocuments(document, expectedBoundaryPolicyDocument(contract));
 }
+export function verifyGatewayBoundaryPolicyDocument(document, contract) {
+  return compareBoundaryPolicyDocuments(document, expectedGatewayBoundaryPolicyDocument(contract));
+}
 
 export function verifyQuarantinePolicy(document) {
   const decoded = decodePolicyDocument(document);
@@ -1157,6 +1170,7 @@ function requireStatement(
     effect,
     actions,
     resources,
+    notResources,
     conditionOperator,
     conditionKey,
     conditionValue,
@@ -1166,9 +1180,9 @@ function requireStatement(
   if (
     statement.Effect !== effect ||
     !sameStringSet(statement.Action, actions) ||
-    !sameStringSet(statement.Resource, resources) ||
+    !(notResources ? statement.Resource === undefined && sameStringSet(statement.NotResource, notResources) : sameStringSet(statement.Resource, resources)) ||
     statement.NotAction !== undefined ||
-    statement.NotResource !== undefined ||
+    (!notResources && statement.NotResource !== undefined) ||
     statement.Principal !== undefined ||
     statement.NotPrincipal !== undefined
   ) {
@@ -1208,6 +1222,8 @@ export function verifyPermanentEnforcementDocuments(
     throw new Error("permanent enforcement boundary ARN is unexpected");
   }
   const rolePatterns = expectedRolePatterns({ partition, accountId });
+  const gatewayArn = gatewayBoundaryArn({partition, accountId});
+  const gatewayPatterns = gatewayRoleArnPatterns({partition, accountId});
   const stackPrefix = `arn:${partition}:cloudformation:*:${accountId}:stack`;
 
   for (const effect of ["Allow", "Deny"]) {
@@ -1221,7 +1237,7 @@ export function verifyPermanentEnforcementDocuments(
       resources: rolePatterns,
       conditionOperator: effect === "Allow" ? "ArnEquals" : "ArnNotEquals",
       conditionKey: "iam:PermissionsBoundary",
-      conditionValue: boundaryArn,
+      conditionValue: [boundaryArn, gatewayArn],
     });
     requireStatement(documents, {
       sid:
@@ -1233,9 +1249,15 @@ export function verifyPermanentEnforcementDocuments(
       resources: rolePatterns,
       conditionOperator: effect === "Allow" ? "ArnEquals" : "ArnNotEquals",
       conditionKey: "iam:PermissionsBoundary",
-      conditionValue: boundaryArn,
+      conditionValue: [boundaryArn, gatewayArn],
     });
   }
+
+  const gatewayWriteActions = ['iam:CreateRole','iam:PutRolePermissionsBoundary','iam:PutRolePolicy','iam:AttachRolePolicy'];
+  requireStatement(documents, {sid:'DenyGatewayBoundaryOnOtherRoles',effect:'Deny',actions:gatewayWriteActions,
+    notResources:gatewayPatterns,conditionOperator:'ArnEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:gatewayArn});
+  requireStatement(documents, {sid:'DenyGatewayRolesWrongBoundary',effect:'Deny',actions:gatewayWriteActions,
+    resources:gatewayPatterns,conditionOperator:'ArnNotEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:gatewayArn});
 
   requireStatement(documents, {
     sid: "DenyWorkloadBoundaryRemoval",
@@ -1313,7 +1335,7 @@ export function verifyPermanentEnforcementDocuments(
       "iam:TagPolicy",
       "iam:UntagPolicy",
     ],
-    resources: [boundaryArn],
+    resources: [boundaryArn, gatewayArn],
   });
   requireStatement(documents, {
     sid: "DenyOperatorOwnedStackMutation",
@@ -1906,10 +1928,24 @@ function createDeadlineAdapter(adapter, deadlineAt) {
   });
 }
 
-async function requireBoundary(adapter, roleName, boundaryArn) {
+async function requireBoundary(adapter, roleName, identity) {
+  const boundaryArn = expectedRoleBoundaryArn(roleName, identity);
   const role = await adapter.getRole({ roleName });
   if (role?.permissionsBoundaryArn !== boundaryArn) {
     throw new Error("workload role boundary read-back mismatch");
+  }
+  requireGatewayRoleTags(roleName, role);
+}
+
+function requireGatewayRoleTags(roleName, role) {
+  const stage = gatewayRoleStage(roleName);
+  if (stage !== undefined) {
+    const tags = role.tags;
+    if (!Array.isArray(tags) || new Set(tags.map(t => t.Key)).size !== tags.length ||
+        tags.find(t => t.Key === 'Stage')?.Value !== stage ||
+        tags.find(t => t.Key === 'Project')?.Value !== 'mem9-on-aws') {
+      throw new Error('Gateway role tag binding mismatch');
+    }
   }
 }
 
@@ -1925,6 +1961,7 @@ export async function runBoundaryRollout(
     deadlineAt = Date.now() + ROLLOUT_TIMEOUT_MS,
   },
 ) {
+  if (boundaryArn !== expectedRoleBoundaryArn('ordinary-workload', {partition, accountId})) throw new Error('unexpected rollout boundary ARN');
   if (
     typeof reviewedCommit !== "string" ||
     !/^[0-9a-f]{40}$/u.test(reviewedCommit) ||
@@ -2006,19 +2043,23 @@ export async function runBoundaryRollout(
 
     for (const roleName of rolesBefore) {
       const current = await boundedAdapter.getRole({ roleName });
+      requireGatewayRoleTags(roleName, current);
       const currentBoundary = current?.permissionsBoundaryArn;
-      if (currentBoundary === boundaryArn) continue;
-      if (currentBoundary) {
+      const selectedBoundary = expectedRoleBoundaryArn(roleName, {partition, accountId});
+      if (currentBoundary === selectedBoundary) continue;
+      // Only the two fixed Gateway families may migrate from the historical
+      // boundary, and only here under the existing complete quarantine.
+      if (currentBoundary && !(gatewayRoleStage(roleName) !== undefined && currentBoundary === boundaryArn)) {
         throw new Error("workload role has an unexpected permissions boundary");
       }
       await boundedAdapter.putRoleBoundary({
         roleName,
-        permissionsBoundary: boundaryArn,
+        permissionsBoundary: selectedBoundary,
       });
-      await requireBoundary(boundedAdapter, roleName, boundaryArn);
+      await requireBoundary(boundedAdapter, roleName, {partition, accountId});
     }
     for (const roleName of rolesBefore) {
-      await requireBoundary(boundedAdapter, roleName, boundaryArn);
+      await requireBoundary(boundedAdapter, roleName, {partition, accountId});
     }
 
     const scopeBeforeEnforcement = await readDeploymentScope();
@@ -2056,7 +2097,7 @@ export async function runBoundaryRollout(
         );
       }
       for (const roleName of roles) {
-        await requireBoundary(boundedAdapter, roleName, boundaryArn);
+        await requireBoundary(boundedAdapter, roleName, {partition, accountId});
       }
       if (
         !(await boundedAdapter.verifyPermanentEnforcement({

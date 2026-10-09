@@ -25,7 +25,8 @@ function enforcementPolicies() {
       ? Object.hasOwn(values, value) ? values[value] : value.replace(/\$\{([^}]+)\}/g, (_, key) => values[key] ?? `unresolved:${key}`)
       : value;
   return new Map([[denyArn, render(template.Resources.DenyPolicy.Properties.PolicyDocument)],
-    [computeArn, render(template.Resources.ComputePolicy.Properties.PolicyDocument)]]);
+    [computeArn, render(template.Resources.ComputePolicy.Properties.PolicyDocument)],
+    [`arn:aws:iam::${accountId}:policy/synthetic-scaffold`,render(template.Resources.ScaffoldPolicy.Properties.PolicyDocument)]]);
 }
 
 function fixture() {
