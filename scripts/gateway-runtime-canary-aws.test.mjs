@@ -27,31 +27,53 @@ async function fixture(test,execute,options={}){
   const ops=await createGatewayCanaryAwsAdapter({plan:options.plan??plan,sessions,directory,awsExecutable:'/usr/local/bin/aws'},{execute:run,...(options.fetch?{fetch:options.fetch}:{}),...(options.invoke?{invoke:options.invoke}:{})});
   return{ops,calls,directory,env,sessions};
 }
-function absent(service,operation,name){
+function absent(service,operation,name,status=254){
   const code=service==='cloudformation'?'ValidationError':service==='iam'?'NoSuchEntity':'ResourceNotFoundException';
-  const error=Error('synthetic AWS response');error.code=255;error.stderr=`An error occurred (${code}) when calling the ${operation} operation: ${service==='cloudformation'?`Stack with id ${name} does not exist`:'synthetic resource absent'}`;throw error;
+  const error=Error('synthetic AWS response');error.code=status;error.stderr=`An error occurred (${code}) when calling the ${operation} operation: ${service==='cloudformation'?`Stack with id ${name} does not exist`:'synthetic resource absent'}`;throw error;
 }
 describe('native Gateway canary AWS adapter',()=>{
-  it('uses only scoped observe sessions and exact resource names for absence',async test=>{
+  it.for([254,255])('uses only scoped observe sessions and exact resource names for absence with CLI status %i',async(status,test)=>{
     const f=await fixture(test,({operation,action})=>{
       if(operation==='logs')return{stdout:JSON.stringify({logGroups:[]})};
-      absent(operation,action==='describe-stacks'?'DescribeStacks':action==='get-role'?'GetRole':action==='get-policy'?'GetPolicy':'GetFunctionConfiguration',scope.stackName);
+      absent(operation,action==='describe-stacks'?'DescribeStacks':action==='get-role'?'GetRole':action==='get-policy'?'GetPolicy':'GetFunctionConfiguration',scope.stackName,status);
     });
     await expect(f.ops.assertAbsent({scope,signal:new AbortController().signal})).resolves.toBeUndefined();
     expect(f.calls.filter(c=>c.lane).every(c=>c.lane==='observe')).toBe(true);
     const calls=f.calls.filter(c=>c.operation);expect(calls).toHaveLength(5);
     expect(calls[0].request).toEqual({StackName:scope.stackName});
     expect(calls.find(c=>c.action==='get-role').request).toEqual({RoleName:scope.roleName});
+    expect(calls.find(c=>c.action==='get-policy').request).toEqual({PolicyArn:scope.comparisonArn});
     expect(calls.every(c=>c.env===f.env)).toBe(true);
   });
-  it('does not treat access denied or a transport timeout as resource absence',async test=>{
-    const f=await fixture(test,()=>{const e=Error('denied');e.code=255;e.stderr='An error occurred (AccessDenied) when calling the DescribeStacks operation: denied';throw e;});
+  it.for([254,255])('does not treat stack access denied as resource absence with CLI status %i',async(status,test)=>{
+    const f=await fixture(test,()=>{const e=Error('denied');e.code=status;e.stderr='An error occurred (AccessDenied) when calling the DescribeStacks operation: denied';throw e;});
     await expect(f.ops.assertAbsent({scope,signal:new AbortController().signal})).rejects.toThrow(/GatewayCanaryAws/);
     expect(f.calls.filter(c=>c.operation)).toHaveLength(1);
   });
-  it('does not accept absence for a different CloudFormation stack',async test=>{
-    const f=await fixture(test,()=>absent('cloudformation','DescribeStacks','unrelated'));
-    await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow();
+  it.for([254,255])('requires NoSuchEntity for IAM policy absence with CLI status %i',async(status,test)=>{
+    const f=await fixture(test,({operation,action})=>{
+      if(action!=='get-policy')absent(operation,action==='describe-stacks'?'DescribeStacks':'GetRole',scope.stackName,status);
+      throw Object.assign(Error('denied'),{code:status,stderr:'An error occurred (AccessDenied) when calling the GetPolicy operation: denied'});
+    });
+    await expect(f.ops.assertAbsent({scope,signal:new AbortController().signal})).rejects.toThrow(/ObservationFailed/);
+    expect(f.calls.filter(c=>c.operation).map(c=>c.action)).toEqual(['describe-stacks','get-role','get-policy']);
+  });
+  it.for([254,255])('does not accept absence for a different CloudFormation stack with CLI status %i',async(status,test)=>{
+    const f=await fixture(test,()=>absent('cloudformation','DescribeStacks','unrelated',status));
+    await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/UnexpectedStackAbsence/);
+  });
+  it.for([254,255])('requires a matching operation in the formatted service error with CLI status %i',async(status,test)=>{
+    const f=await fixture(test,()=>absent('cloudformation','GetPolicy',scope.stackName,status));
+    await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/ObservationFailed/);
+  });
+  it.for([254,255])('does not infer absence from a bare service exit status %i',async(status,test)=>{
+    const f=await fixture(test,()=>{throw Object.assign(Error('synthetic failure'),{code:status,stderr:'NoSuchEntity'});});
+    await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/ObservationFailed/);
+  });
+  it.for(['ETIMEDOUT','ABORT_ERR',252,253])('does not treat transport or configuration failure %s as absence even with matching stderr',async(status,test)=>{
+    const f=await fixture(test,()=>absent('cloudformation','DescribeStacks',scope.stackName,status));
+    await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/ObservationFailed/);
+    expect(f.calls.filter(c=>c.operation)).toHaveLength(1);
   });
   it('rejects replacement templates before issuing a mutation',async test=>{
     const f=await fixture(test,()=>{throw Error('must not call');});
@@ -82,11 +104,21 @@ describe('native Gateway canary AWS adapter',()=>{
     await expect(f.ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).rejects.toThrow(/TransportCleanupHeld/);
     expect(f.calls.filter(c=>c.operation)).toHaveLength(1);
   });
-  it('recognizes genuine CLI status and service errors through the bounded runner',async test=>{
+  it.for([254,255])('recognizes synthetic CLI service status %i through the actual bounded runner',async(status,test)=>{
     const f=await fixture(test,()=>{throw Error('unused');}),script=join(f.directory,'synthetic-aws');
-    await writeFile(script,'#!/usr/bin/env node\nprocess.stderr.write("An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id '+scope.stackName+' does not exist\\n");process.exitCode=255;\n',{mode:0o700});
+    await writeFile(script,`#!/usr/bin/env node
+const args=process.argv.slice(2),action=args[args.indexOf('--cli-read-timeout')+3];
+if(action==='describe-log-groups')process.stdout.write('{"logGroups":[]}');
+else{
+  const codes={'describe-stacks':['ValidationError','DescribeStacks'],'get-role':['NoSuchEntity','GetRole'],'get-policy':['NoSuchEntity','GetPolicy'],'get-function-configuration':['ResourceNotFoundException','GetFunctionConfiguration']};
+  const [code,operation]=codes[action];
+  const message=action==='describe-stacks'?'Stack with id ${scope.stackName} does not exist':'synthetic resource absent';
+  process.stderr.write('An error occurred ('+code+') when calling the '+operation+' operation: '+message+'\\n');
+  process.exitCode=${status};
+}
+`,{mode:0o700});
     const ops=await createGatewayCanaryAwsAdapter({plan,sessions:f.sessions,directory:f.directory,awsExecutable:script});
-    await expect(ops.describeStack({StackName:scope.stackName,signal:new AbortController().signal})).resolves.toBeNull();
+    await expect(ops.assertAbsent({scope,signal:new AbortController().signal})).resolves.toBeUndefined();
     expect(()=>inspectGatewayCanaryAwsEvidence(ops)).toThrow();
   });
   for(const withLayers of [false,true])it('runs native lifecycle with real handler and simulated services; forbidden Layers='+withLayers,async test=>{
