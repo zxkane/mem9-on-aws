@@ -21,12 +21,12 @@ case "$OPERATION:$EVENT" in
     ;;
 esac
 if [[ "$OPERATION" == "benchmark" ]]; then
-  [[ "$SAMPLES" =~ ^[1-9][0-9]*$ && ${#SAMPLES} -le 3 &&
-     "$WARMUPS" =~ ^(0|[1-9][0-9]*)$ && ${#WARMUPS} -le 3 ]] &&
-    (( SAMPLES >= 20 && SAMPLES <= 500 && WARMUPS <= 100 )) || {
+  if ! [[ "$SAMPLES" =~ ^[1-9][0-9]*$ && ${#SAMPLES} -le 3 &&
+          "$WARMUPS" =~ ^(0|[1-9][0-9]*)$ && ${#WARMUPS} -le 3 ]] ||
+     ! (( SAMPLES >= 20 && SAMPLES <= 500 && WARMUPS <= 100 )); then
     echo "::error::benchmark counts are outside the fixed bounds"
     exit 2
-  }
+  fi
 elif [[ -v MEM9_NAMESPACE_BENCHMARK_SAMPLES || -v MEM9_NAMESPACE_BENCHMARK_WARMUPS ]]; then
   echo "::error::connection snapshots do not accept benchmark counts"
   exit 2
