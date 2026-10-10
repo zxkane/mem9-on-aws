@@ -2208,6 +2208,70 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
+      "id": "59b46b229807a1f0e833",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 125,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "f7e2424a9805c369dbd82a30ea224b7765556b854d0ebb84c59ed826dea6cbc2",
+      "statement": "INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,tags,metadata,memory_type) VALUES($1,$2,$3,$3,'Synthetic carrier fact','carrier-fixture','[]','{}','insight')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
+      "id": "adef5e37bafed476968e",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 126,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "b77b88a9f336c2540191e7604c95b14d3cdfdf267874d8a1dbb86a6ba62de205",
+      "statement": "SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2) ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "bb275f6aaa5c7a29c36d",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 130,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "708db43ff92452c6865181dd25bef0e819fbd7ba7eb477527035c802da874918",
+      "statement": "UPDATE public.memories SET metadata=$1,version=version+1 WHERE namespace_id=$2 AND id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
+      "id": "b117aab16f528b528ccf",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 131,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "1007de305366fb6290c06988936f44ae73b44f4a128be1a95d129258eb90a615",
+      "statement": "UPDATE public.memories SET state='deleted',superseded_by=$1,version=version+1 WHERE namespace_id=$2 AND id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
       "id": "7317e3a65a2fcb77ed87",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
       "line": 724,
