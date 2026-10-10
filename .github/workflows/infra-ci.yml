@@ -2921,6 +2921,18 @@ jobs:
           node-version: 24
       - name: Install smoke verification dependencies
         run: npm ci
+      - name: Prepare isolated smoke Docker
+        run: node scripts/verify-smoke-docker.mjs prepare
+      - name: Set up isolated smoke Docker
+        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
+        with:
+          version: v29.9.0
+          context: setup-docker-action
+          set-host: true
+          runtime-basedir: ${{ runner.temp }}/mem9-smoke-docker
+          daemon-config: '{"debug":false,"log-level":"info","features":{"containerd-snapshotter":true}}'
+      - name: Verify isolated smoke Docker
+        run: node scripts/verify-smoke-docker.mjs verify
       - name: Authenticate smoke build and source
         env:
           GH_TOKEN: ${{ github.token }}
