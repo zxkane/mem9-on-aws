@@ -23,6 +23,7 @@ export async function main(args,env){
  assert.equal(env.ACTIONS_RESULTS_URL,'https://example.com/synthetic-results');
  writeFileSync(env.TEST_CALL,JSON.stringify({args,pid:process.pid}));
  if(env.TEST_MAIN_FAIL==='1')throw Error(env.ACTIONS_RUNTIME_TOKEN);
+ if(env.TEST_MAIN_CODE)throw Object.assign(Error(env.TEST_MAIN_CODE),{code:env.TEST_ERROR_CODE,phase:env.TEST_READER_PHASE,reason:env.TEST_READER_REASON});
  return {phase:'synthetic-gate-returned'};
 }
 `);
@@ -66,4 +67,24 @@ it('does not accept caller argv or disclose a downstream error containing creden
  const failed=run({TEST_MAIN_FAIL:'1'});expect(failed.status).toBe(1);
  expect(failed.stdout+failed.stderr).not.toContain(env.ACTIONS_RUNTIME_TOKEN);
  expect(readFileSync(env.GITHUB_ENV,'utf8')).toBe('UNCHANGED=synthetic\n');
+});
+it('reports only fixed source/read-session error codes and reader phases',()=>{
+ const result=run({TEST_MAIN_CODE:'CiSmokeReadSessionHeld',TEST_READER_PHASE:'precheck',TEST_READER_REASON:'CiSmokeOidcEndpoint'});
+ expect(result.status).toBe(1);expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code:'CiSmokeReadSessionHeld',readerPhase:'precheck',reason:'CiSmokeOidcEndpoint'});
+ const checkout=run({TEST_MAIN_CODE:'CiSmokeCheckoutChanged'});
+ expect(JSON.parse(checkout.stderr)).toEqual({phase:'ci-smoke-held',code:'CiSmokeCheckoutChanged'});
+});
+it('does not echo arbitrary errors, phase values, reasons or code-like token strings',()=>{
+ for(const code of ['synthetic-runtime-token','CiSmokeReadSessionHeld-synthetic-runtime-token']){
+  const result=run({TEST_MAIN_CODE:code,TEST_READER_PHASE:'synthetic-runtime-token',TEST_READER_REASON:'synthetic-runtime-token'});
+  expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code:'CiSmokeActionFailed'});
+ }
+ const result=run({TEST_MAIN_CODE:'CiSmokeReadSessionHeld',TEST_READER_PHASE:'synthetic-runtime-token',TEST_READER_REASON:'synthetic-runtime-token'});
+ expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code:'CiSmokeReadSessionHeld'});
+ expect(result.stdout+result.stderr).not.toContain(env.ACTIONS_RUNTIME_TOKEN);
+});
+it('preserves a cleanup hold without disclosing its original error',()=>{
+ const result=run({TEST_MAIN_CODE:'synthetic-runtime-token',TEST_ERROR_CODE:'ECLEANUP'});
+ expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code:'ECLEANUP'});
+ expect(result.stdout+result.stderr).not.toContain(env.ACTIONS_RUNTIME_TOKEN);
 });

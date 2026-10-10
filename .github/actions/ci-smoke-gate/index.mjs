@@ -1,5 +1,30 @@
 import { main } from '../../../scripts/verify-ci-smoke-isolation.mjs';
 
+// Error text can contain credentials. Only these literal classifications may
+// leave the action; unknown errors retain the generic result.
+const safeCodes = new Set([
+  'CiSmokeHostIdentity', 'CiSmokeHostCommandFailed', 'CiSmokeCheckoutChanged',
+  'CiSmokeActualRoute', 'CiSmokeCurrentJobsIncomplete', 'CiSmokeSourceCommitment',
+  'CiSmokeSourceDigest', 'CiSmokeCurrentJobMissing', 'CiSmokeCurrentJobName',
+  'CiSmokeCurrentJobAmbiguous', 'CiSmokeCurrentJobTime', 'CiSmokeCurrentJobExpired',
+  'CiSmokeGithubRun', 'CiSmokeGithubJobsIncomplete', 'CiSmokeGithubJobAmbiguous',
+  'CiSmokeGithubJobSource', 'CiSmokeGithubBuildFailed', 'CiSmokeGithubBuildStepFailed',
+  'CiSmokeGithubSmokeFailed', 'CiSmokeGithubPublishFailed', 'CiSmokeGithubCommit',
+  'CiSmokeGithubMergeRelation', 'CiSmokeGithubCandidateTree', 'CiSmokeGithubSourceRelation',
+  'CiSmokeCommitmentAmbiguous', 'CiSmokeArchiveConfiguration', 'CiSmokeArchiveFields',
+  'CiSmokeArchivePolicyLimit', 'CiSmokeArchiveKmsScope', 'CiSmokeReadSessionHeld',
+  'CiSmokeReadSessionCleanupHeld',
+]);
+const readerPhases = new Set(['precheck', 'oidc', 'assume', 'identity', 'use']);
+const readerReasons = new Set([
+  'CiSmokeAwsExpiration', 'CiSmokeReadSessionInput', 'CiSmokeReadSessionEnvironment',
+  'CiSmokeOidcEndpoint', 'CiSmokeReadSessionDeadline', 'CiSmokeReadSessionAborted',
+  'CiSmokeReadSessionEndpoint', 'CiSmokeReadSessionBody', 'CiSmokeReadSessionBodyLimit',
+  'CiSmokeReadSessionHttp', 'CiSmokeReadSessionToken', 'CiSmokeReadSessionNoAmbientCredentials',
+  'CiSmokeReadSessionCredentials', 'CiSmokeReadSessionExpiration', 'CiSmokeReadSessionIdentity',
+  'CiSmokeReadSessionFailure',
+]);
+
 // The Node action handler supplies artifact credentials to this process.
 // Keep them here: no shell, child process, exported environment or argv input.
 try {
@@ -17,8 +42,14 @@ try {
   const args = [mode, '--route', env.GITHUB_JOB];
   if (mode === 'target') args.push('--phase', phase);
   console.log(JSON.stringify(await main(args, env)));
-} catch {
+} catch (error) {
   // Never echo caller input, credentials or an arbitrary exception message.
-  console.error(JSON.stringify({ phase: 'ci-smoke-held', code: 'CiSmokeActionFailed' }));
+  const code = error?.code === 'ECLEANUP' ? 'ECLEANUP' : safeCodes.has(error?.message) ? error.message : 'CiSmokeActionFailed';
+  const diagnostic = { phase: 'ci-smoke-held', code };
+  if (code === 'CiSmokeReadSessionHeld') {
+    if (readerPhases.has(error.phase)) diagnostic.readerPhase = error.phase;
+    if (readerReasons.has(error.reason)) diagnostic.reason = error.reason;
+  }
+  console.error(JSON.stringify(diagnostic));
   process.exitCode = 1;
 }
