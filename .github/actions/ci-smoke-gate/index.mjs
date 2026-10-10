@@ -14,7 +14,22 @@ const safeCodes = new Set([
   'CiSmokeCommitmentAmbiguous', 'CiSmokeArchiveConfiguration', 'CiSmokeArchiveFields',
   'CiSmokeArchivePolicyLimit', 'CiSmokeArchiveKmsScope', 'CiSmokeReadSessionHeld',
   'CiSmokeReadSessionCleanupHeld',
+  'CiSmokeSourceReceiptRequired', 'CiSmokeSourceReceiptChanged', 'CiSmokeSourceReceiptExpired',
+  'CiSmokeFields', 'CiSmokeCheckpointBinding', 'CiSmokeCheckpointPhase',
+  'PreviewAcquisitionScope', 'PreviewAcquisitionRole', 'PreviewAcquisitionSource',
+  'PreviewAcquisitionExpired', 'PreviewAcquisitionCallLimit', 'PreviewAcquisitionLocalScope',
+  'PreviewAcquisitionParameterScope', 'PreviewAcquisitionEcsScope', 'PreviewAcquisitionRoleScope',
+  'PreviewAcquisitionCaller', 'PreviewAcquisitionIncomplete', 'PreviewAcquisitionBundle',
+  'NonrootBudgetReadFailed', 'NonrootAcquisitionRequired', 'NonrootControlCheckout',
+  'NonrootPreviewParameterInventory', 'NonrootPreviewParameterBinding', 'NonrootPreviewParameterChanged',
+  'NonrootPreviewSourceScope', 'NonrootPreviewSourceChanged', 'NonrootPreviewNetwork',
+  'NonrootPreviewBackendInventory', 'NonrootPreviewBackendSelection', 'NonrootPreviewBackendDefinition',
+  'NonrootPreviewRetainedDataRequired', 'NonrootPreviewRetainedDataBinding', 'NonrootPreviewRetainedDataTime',
+  'NonrootPreviewReadbackChanged', 'NonrootPreviewTargetNotRegistered', 'NonrootPreviewPhaseExpired',
+  'NonrootPreviewWorkloadParameters', 'NonrootPreviewWorkloadParametersChanged',
+  'DataReleaseInvalid', 'DataReleaseAuthorizationExpired',
 ]);
+const targetStages = new Set(['source-receipt', 'checkpoint', 'acquisition', 'verification', 'seal', 'completion']);
 const readerPhases = new Set(['precheck', 'oidc', 'assume', 'identity', 'use']);
 const readerReasons = new Set([
   'CiSmokeAwsExpiration', 'CiSmokeReadSessionInput', 'CiSmokeReadSessionEnvironment',
@@ -46,6 +61,7 @@ try {
   // Never echo caller input, credentials or an arbitrary exception message.
   const code = error?.code === 'ECLEANUP' ? 'ECLEANUP' : safeCodes.has(error?.message) ? error.message : 'CiSmokeActionFailed';
   const diagnostic = { phase: 'ci-smoke-held', code };
+  if (targetStages.has(error?.ciSmokeTargetStage)) diagnostic.targetStage = error.ciSmokeTargetStage;
   if (code === 'CiSmokeReadSessionHeld') {
     if (readerPhases.has(error.phase)) diagnostic.readerPhase = error.phase;
     if (readerReasons.has(error.reason)) diagnostic.reason = error.reason;

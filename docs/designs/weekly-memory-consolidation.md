@@ -2475,3 +2475,22 @@ Request 1,000 roles per IAM service page to reduce repeated operator metadata
 checks in large accounts. Keep every page's identity verification and all existing
 inventory bounds. IAM may return a shorter page, so only its completion flag and
 marker determine whether another request is required.
+
+The preview CI guard consumes the provider's version-two receipt, including its
+operation commitment. It checks the exact protected route, step and effect against
+the facts in the authenticated bundle. Source-plan evidence can admit deployment
+preparation; bootstrap-only evidence cannot stand in for backend serving, worker
+registration or hard acceptance. Producer-to-guard tests use the actual provider
+and operation verifier so a format change cannot pass isolated tests while
+breaking the deployment path.
+
+Before a preview update, complete stage-scoped network records without a purpose
+map, or a structurally valid map for an earlier source tree, form an explicitly
+unbound inventory. An expired or earlier-source retained selection is inspected
+only as historical inventory, preserving its original descriptor and timestamps.
+This evidence admits source deployment only: it provides no service-drain,
+bootstrap, worker or readiness coverage. Other partial or inconsistent records
+remain errors. Post-update phases require current-source bindings and active
+retained authorization, and every observation retains its stable reread checks.
+The CI action reports only fixed target-stage and error classifications, never
+raw provider errors, parameter values or credentials.

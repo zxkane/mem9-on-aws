@@ -20,6 +20,11 @@ it('a real source plan plus observed absence admits only source-plan operations'
  expect(operations.map(o=>o.step)).toContain('deploy-preview/11');
  expect(operations.every(o=>!['workload-launch','credentialed-hard-acceptance'].includes(o.effect))).toBe(true);
 });
+it('historical source-update inventory cannot finish a runtime cutover',()=>{
+ const facts={'planned-source-controls':{sourceTree:'a'.repeat(40),files:[]},'stage-inventory':{state:'unbound',sourceUpdateOnly:true}};
+ const operations=previewOperationsForEvidence({phase:'preupdate',facts});
+ expect(operations.map(op=>op.step)).toEqual(['deploy-preview/10','deploy-preview/11','deploy-preview/14']);
+});
 it('binds exact operation requirements to their evidence and rejects a substituted operation or missing fact',()=>{
  const row=rows.find(r=>r.callPath==='deploy-preview/13'),facts=Object.fromEntries(previewOperationRequirements(row).map(key=>[key,{key}]));
  const phaseEvidence={phase:row.rule.phase,facts,operations:previewOperationsForEvidence({phase:row.rule.phase,facts})};

@@ -6,6 +6,7 @@ const need=(ok,code='NonrootPreviewOperationInvalid')=>{if(!ok)throw Error(code)
 const rows=()=>CI_SMOKE_POLICY.rows.filter(r=>['deploy-preview','runtime-cutover-preview'].includes(r.route)&&r.rule.kind==='protected'&&r.rule.phase!=='source');
 const plan='planned-source-controls',inventory='stage-inventory',backend='backend-registration',serving='backend-serving';
 const bootstrap=name=>'bootstrap-purpose:'+name;
+const sourceUpdates=new Set(['Remove conflicting Pulumi installation','Deploy PR stage','Deploy PR namespace enforcement']);
 const requirements={
  'Remove conflicting Pulumi installation':[plan],
  'Deploy PR stage':[plan,inventory],
@@ -42,6 +43,7 @@ export function previewOperationRequirements(value){
 export function previewOperationsForEvidence({phase,facts}){
  need(facts&&typeof facts==='object'&&!Array.isArray(facts));const operations=[];
  for(const row of rows()){
+  if(facts[inventory]?.sourceUpdateOnly===true&&(row.route!=='deploy-preview'||!sourceUpdates.has(row.name)))continue;
   const required=previewOperationRequirements(row);if(row.rule.phase!==phase||required.some(key=>!Object.hasOwn(facts,key)))continue;
   operations.push({route:row.route,step:row.callPath,phase,effect:row.rule.effect,requirements:required,
    evidenceHash:hash(required.map(key=>({coverage:key,evidenceHash:hash(facts[key])})))});

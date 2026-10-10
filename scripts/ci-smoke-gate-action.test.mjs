@@ -23,7 +23,7 @@ export async function main(args,env){
  assert.equal(env.ACTIONS_RESULTS_URL,'https://example.com/synthetic-results');
  writeFileSync(env.TEST_CALL,JSON.stringify({args,pid:process.pid}));
  if(env.TEST_MAIN_FAIL==='1')throw Error(env.ACTIONS_RUNTIME_TOKEN);
- if(env.TEST_MAIN_CODE)throw Object.assign(Error(env.TEST_MAIN_CODE),{code:env.TEST_ERROR_CODE,phase:env.TEST_READER_PHASE,reason:env.TEST_READER_REASON});
+ if(env.TEST_MAIN_CODE)throw Object.assign(Error(env.TEST_MAIN_CODE),{code:env.TEST_ERROR_CODE,phase:env.TEST_READER_PHASE,reason:env.TEST_READER_REASON,ciSmokeTargetStage:env.TEST_TARGET_STAGE});
  return {phase:'synthetic-gate-returned'};
 }
 `);
@@ -87,4 +87,14 @@ it('preserves a cleanup hold without disclosing its original error',()=>{
  const result=run({TEST_MAIN_CODE:'synthetic-runtime-token',TEST_ERROR_CODE:'ECLEANUP'});
  expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code:'ECLEANUP'});
  expect(result.stdout+result.stderr).not.toContain(env.ACTIONS_RUNTIME_TOKEN);
+});
+it.each(['NonrootPreviewParameterInventory','DataReleaseAuthorizationExpired','PreviewAcquisitionCallLimit','NonrootBudgetReadFailed'])('reports fixed target diagnostics for %s without credentials',code=>{
+ const result=run({INPUT_MODE:'target',INPUT_PHASE:'preupdate',TEST_MAIN_CODE:code,TEST_TARGET_STAGE:'verification'});
+ expect(result.status).toBe(1);
+ expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code,targetStage:'verification'});
+ expect(result.stdout+result.stderr).not.toContain(env.ACTIONS_RUNTIME_TOKEN);
+});
+it('never reflects arbitrary target errors or stage text',()=>{
+ const result=run({TEST_MAIN_CODE:'NonrootPreviewParameterInventory-synthetic-runtime-token',TEST_TARGET_STAGE:'synthetic-runtime-token'});
+ expect(JSON.parse(result.stderr)).toEqual({phase:'ci-smoke-held',code:'CiSmokeActionFailed'});
 });

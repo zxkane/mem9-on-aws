@@ -2,7 +2,7 @@ import {GetParametersCommand} from '@aws-sdk/client-ssm';
 import {DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
 import {inspectNonrootPreviewPurposeMap,verifyNonrootPreviewPurposeReadback} from './nonroot-preview-source.mjs';
 import {nonrootPreviewObservation} from './post-runtime-preview-aws.mjs';
-import {copyNonrootJson,nonrootHash as hash,NONROOT_HARDENING_POLICY} from './production-nonroot-contracts.mjs';
+import {copyNonrootJson,parseNonrootJson,nonrootHash as hash,NONROOT_HARDENING_POLICY} from './production-nonroot-contracts.mjs';
 import {readControlSourceFile} from './production-control-source.mjs';
 import {previewOperationsForEvidence} from './production-nonroot-preview-operations.mjs';
 import {collectPreviewWorkloadFacts} from './production-nonroot-preview-workloads.mjs';
@@ -47,16 +47,25 @@ export async function collectNonrootPreviewTarget(clients,{stage,account,region,
   const seen=[...rows.map(row=>row.Name),...missing];
   need(new Set(seen).size===seen.length&&hash(seen.slice().sort())===hash(names.slice().sort()),'NonrootPreviewParameterInventory');
   if(rows.length===0){need(phase==='preupdate','NonrootPreviewTargetNotRegistered');return {state:'absent',parameters:[],missing:names};}
-  need(missing.length===0,'NonrootPreviewParameterInventory');
-  const parameters=names.map(name=>{
+  const unbound=phase==='preupdate'&&missing.length===1&&missing[0]===names[0];
+  need(missing.length===0||unbound,'NonrootPreviewParameterInventory');
+  const parameters=names.filter(name=>!missing.includes(name)).map(name=>{
    const p=rows.find(row=>row.Name===name);
    need(p.ARN===`arn:aws:ssm:${region}:${account}:parameter${name}`&&p.Type===(name===names[2]?'StringList':'String')&&typeof p.Value==='string'&&Number.isSafeInteger(p.Version)&&p.Version>0,'NonrootPreviewParameterBinding');
    return {Name:p.Name,Type:p.Type,ARN:p.ARN,Version:p.Version,Value:p.Value};
   });
+  const network=names.slice(1).map(name=>parameters.find(p=>p.Name===name));
+  const [cluster,subnets,securityGroup]=network.map(p=>p.Value),subnetIds=subnets.split(',');
+  need(new RegExp('^mem9-on-aws-'+stage+'-[A-Za-z0-9_-]+$').test(cluster)&&subnetIds.length>0&&subnetIds.length<=16&&new Set(subnetIds).size===subnetIds.length&&subnetIds.every(s=>/^subnet-(?:[a-f0-9]{8}|[a-f0-9]{17})$/.test(s))&&/^sg-(?:[a-f0-9]{8}|[a-f0-9]{17})$/.test(securityGroup),'NonrootPreviewNetwork');
+  if(unbound)return {state:'unbound',parameters,missing:[names[0]],reason:'purpose-map-missing'};
+  const recorded=parseNonrootJson(parameters[0].Value,{maxBytes:4096});
+  const map=inspectNonrootPreviewPurposeMap(recorded,phase==='preupdate'?{...scope,sourceTree:recorded.sourceTree}:scope);
+  need(map.family===cluster+'-Mem9Bootstrap','NonrootPreviewNetwork');
+  if(map.sourceTree!==sourceTree)return {state:'unbound',parameters,missing:[],reason:'prior-source'};
   return {state:'registered',parameters,missing:[]};
  };
  const first=await read(),definitions=[];
- facts['stage-inventory']=copyNonrootJson(first);
+ facts['stage-inventory']=copyNonrootJson(first.state==='unbound'?{...first,sourceUpdateOnly:true}:first);
  if(first.state==='registered'){
   const [purpose,clusterParameter,subnetsParameter,securityGroupParameter]=first.parameters;
   const map=inspectNonrootPreviewPurposeMap(purpose.Value,scope),cluster=clusterParameter.Value,subnets=subnetsParameter.Value.split(','),securityGroup=securityGroupParameter.Value;
@@ -86,8 +95,16 @@ export async function collectNonrootPreviewTarget(clients,{stage,account,region,
  };
  if(sourceRevision){
   workloads=await readWorkloads();
-  Object.assign(facts,await collectPreviewWorkloadFacts({scope,sourceRevision,parameters:new Map(workloads.parameters.map(p=>[p.Name,p])),send,now:clock()}));
-  facts['stage-inventory']={bootstrap:first,workloads};
+  const observed=await collectPreviewWorkloadFacts({scope,sourceRevision,parameters:new Map(workloads.parameters.map(p=>[p.Name,p])),send,now:clock(),phase});
+  if(first.state==='unbound'||Object.hasOwn(observed,'prior-backend-observation')){
+   // Keep old state visible for the update, without admitting service drain,
+   // task launch or readiness from stale/expired registration material.
+   for(const key of Object.keys(facts))if(key!=='planned-source-controls')delete facts[key];
+   facts['stage-inventory']={bootstrap:first,workloads,priorWorkloads:observed,sourceUpdateOnly:true};
+  }else{
+   Object.assign(facts,observed);
+   facts['stage-inventory']={bootstrap:first,workloads};
+  }
  }
  let postRuntime;
  const readPostRuntime=async()=>{

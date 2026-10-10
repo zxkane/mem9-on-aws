@@ -11,6 +11,7 @@ import {ciSmokeHost,smokeHash as sha,smokeNeed as need,smokePrivateRead,smokePri
 import {CI_SMOKE_ARCHIVE_LIMITS,inspectCiSmokeCommitment,encodeCiSmokeEnvelope,decodeCiSmokeEnvelope,ciSmokeArchiveKey,ciSmokeArchiveLocation,putCiSmokeEnvelope,getCiSmokeEnvelope} from './lib/ci-smoke-private-archive.mjs';
 import {NONROOT_SMOKE_DATABASE_IMAGE,createCiSmokeProducerInput,expectedCiSmokeCommandCatalog} from './run-mnemo-nonroot-smoke.mjs';
 import {localImageMetadata} from './lib/mnemo-nonroot-smoke-helper.mjs';
+import {assertPreviewPhaseOperation} from './lib/production-nonroot-preview-operations.mjs';
 
 const modes=new Set(['prepare-smoke','acquire-smoke','publish-smoke','cleanup-smoke','source','source-precheck','guard','composite','target','cleanup-source']);
 const extraSourceRoutes=['verify-production-image-transition','build-image-transition-control'];
@@ -270,7 +271,7 @@ async function sourceReceipt(host,route){
 export function smokeGuardRow({route,step,phase}){
  const rows=CI_SMOKE_POLICY.rows.filter(r=>r.route===route&&r.callPath===step&&r.rule.kind==='protected'&&r.rule.phase===phase);need(rows.length===1,'CiSmokeGuardBinding');return rows[0];
 }
-export function verifySmokePhaseBundle(bundle,{sourceReceiptHash,phase,sourceTree,now=Date.now(),effect}){
+export function verifySmokePhaseBundle(bundle,{sourceReceiptHash,phase,sourceTree,now=Date.now(),effect,route,step}){
  const p=bundle?.phaseReceipt;need(p&&p.phase===phase&&bundle.phaseEvidence?.phase===phase&&p.sourceReceiptHash===sourceReceiptHash&&Number.isSafeInteger(p.observedMs)&&Number.isSafeInteger(p.expiresMs)&&p.observedMs<=now&&now<p.expiresMs&&p.expiresMs<=bundle.phaseEvidence.expiresMs&&p.phaseEvidenceHash===hash(bundle.phaseEvidence),'CiSmokePhaseReceiptRequired');
  if(bundle.kind==='image-security-nonroot-deployment-bundle'){
   exact(p,['version','kind','phase','sourceReceiptHash','descriptorHash','parameterVersion','proofHash','reviewHash','deploymentSourceHash','phaseEvidenceHash','observedMs','expiresMs']);need(p.version===1&&p.kind==='image-deployment-phase-receipt','CiSmokePhaseKind');
@@ -278,12 +279,16 @@ export function verifySmokePhaseBundle(bundle,{sourceReceiptHash,phase,sourceTre
   const data=parse(bundle.parameter.Value),review=bundle.operation.authorization.review;
   need(data.version===3&&hash(data)===p.descriptorHash&&bundle.parameter.Version===p.parameterVersion&&hash(review)===p.reviewHash&&p.expiresMs<=data.expiresMs&&p.expiresMs<=review.expiresMs,'CiSmokePhaseAuthority');
  }else{
-  exact(p,['version','kind','stage','account','region','sourceTree','phase','sourceReceiptHash','targetState','coverage','phaseEvidenceHash','observedMs','expiresMs']);need(p.version===1&&p.kind==='nonroot-preview-phase-receipt','CiSmokePhaseKind');
+  exact(p,['version','kind','stage','account','region','sourceTree','phase','sourceReceiptHash','targetState','coverage','operationsHash','phaseEvidenceHash','observedMs','expiresMs']);need(p.version===2&&p.kind==='nonroot-preview-phase-receipt','CiSmokePhaseKind');
   need(bundle.kind==='nonroot-preview-phase-bundle'&&bundle.source?.sourceTree===sourceTree&&p.sourceTree===sourceTree&&p.targetState===bundle.phaseEvidence.state,'CiSmokePreviewPhase');
+  const evidence=bundle.phaseEvidence;
+  need(evidence.version===2&&evidence.kind==='nonroot-preview-target-observation'&&['stage','account','region','sourceTree'].every(key=>p[key]===evidence[key]),'CiSmokePreviewPhase');
+  need(Array.isArray(p.coverage)&&hash(p.coverage)===hash(evidence.coverage)&&hash(p.coverage)===hash(Object.keys(evidence.facts??{}).sort()),'CiSmokePreviewCoverage');
   if(effect==='workload-launch'||effect==='credentialed-hard-acceptance')need(p.targetState==='registered','CiSmokePreviewTargetNotRegistered');
-  // The provider's coverage is explicit; bootstrap observation cannot certify
-  // every workload or acceptance route merely by reusing its receipt.
-  need(Array.isArray(p.coverage)&&p.coverage.includes('bootstrap-purpose-bindings'),'CiSmokePreviewCoverage');
+  // Consume the producer's exact operation evidence. A source plan can admit
+  // deployment preparation without certifying bootstrap or serving workloads.
+  const operation=assertPreviewPhaseOperation(bundle,{route,step,phase});
+  need(operation.effect===effect,'CiSmokePreviewOperationEffect');
  }
  return p;
 }
@@ -291,7 +296,7 @@ async function guard(host,args){
  const row=smokeGuardRow(args),receipt=await sourceReceipt(host,args.route);if(args.phase==='source')return {phase:'smoke-source-guarded'};
  const {readImageDeploymentBundle}=await import('./lib/production-image-deployment-bundle.mjs');
  const bundle=await readImageDeploymentBundle(host.env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE,host.env.MEM9_IMAGE_TRANSITION_BUNDLE_HASH);
- verifySmokePhaseBundle(bundle,{sourceReceiptHash:host.env.MEM9_CI_SMOKE_SOURCE_RECEIPT_HASH,phase:args.phase,sourceTree:receipt.checkout.tree,effect:row.rule.effect});return {phase:'smoke-target-guarded'};
+ verifySmokePhaseBundle(bundle,{sourceReceiptHash:host.env.MEM9_CI_SMOKE_SOURCE_RECEIPT_HASH,phase:args.phase,sourceTree:receipt.checkout.tree,effect:row.rule.effect,route:args.route,step:args.step});return {phase:'smoke-target-guarded'};
 }
 async function composite(host,args){
  await sourceReceipt(host,args.route);const call=CI_SMOKE_POLICY.shared.parentCalls.find(c=>c.route===args.route&&c.route+'/'+c.baselineIndex===args['call-path']);need(call,'CiSmokeCompositeBinding');
@@ -317,22 +322,30 @@ export function findCiSmokeCheckpoint(workflow,action,{route,phase,checkpoint}){
  need(matches.length===1,'CiSmokeCheckpointBinding');return {route,phase,checkpoint};
 }
 async function target(host,args){
+ let acquisition,stage='source-receipt';
+ try{
  const receipt=await sourceReceipt(host,args.route);
+ stage='checkpoint';
  const workflow=parseDocument(await host.run('git',['show','HEAD:.github/workflows/infra-ci.yml'])).toJS(),action=parseDocument(await host.run('git',['show','HEAD:.github/actions/runtime-cutover/action.yml'])).toJS();
  const scope=findCiSmokeCheckpoint(workflow,action,{route:args.route,phase:args.phase,checkpoint:host.env.MEM9_CI_SMOKE_CHECKPOINT});
  const {openCiSmokeAcquisition}=await import('./lib/ci-smoke-acquisition.mjs');
- const acquisition=await openCiSmokeAcquisition({env:host.env,scope,sourceReceipt:receipt,host});
- try{
+ stage='acquisition';
+ acquisition=await openCiSmokeAcquisition({env:host.env,scope,sourceReceipt:receipt,host});
+ stage='verification';
  const {main}=await import('./verify-image-security-deployment.mjs');
  const result=await main({...host.env,MEM9_DEPLOY_ROLE_ARN:host.env.MEM9_DEPLOY_ROLE_ARN??host.env.MEM9_CI_EVIDENCE_ROLE_ARN},['--deploy','--phase',args.phase],{metadataReads:acquisition});
- const resourceReceiptRef=await acquisition.sealControlResources?.({bundleRef:result.bundleRef});
+ stage='seal';const resourceReceiptRef=await acquisition.sealControlResources?.({bundleRef:result.bundleRef});
+ stage='completion';
  const completed=await acquisition.finish({bundleRef:result.bundleRef,...(resourceReceiptRef?{resourceReceiptRef}:{})});
  if(args.route==='deploy-prod'&&['preconfigure','presst'].includes(args.phase)){
   need(completed.receiptRef&&typeof completed.receiptRef.path==='string'&&hex(completed.receiptRef.sha256),'CiSmokeAcquisitionReceipt');
   await smokeEnvironment(host.env,{MEM9_CI_ACQUISITION_COMPLETION_FILE:completed.receiptRef.path,MEM9_CI_ACQUISITION_COMPLETION_HASH:completed.receiptRef.sha256});
  }
  return {phase:result.phase};
- }catch(error){await acquisition.hold?.();throw error;}
+ }catch(error){
+  if(error&&typeof error==='object'&&Object.isExtensible(error))error.ciSmokeTargetStage=stage;
+  await acquisition?.hold?.();throw error;
+ }
 }
 async function cleanupSmoke(host){
  const env=host.env,output=join(env.RUNNER_TEMP,'mem9-ci-smoke-evidence');

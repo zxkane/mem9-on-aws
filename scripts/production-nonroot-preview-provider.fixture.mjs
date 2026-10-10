@@ -7,6 +7,7 @@ import {createControlSourceContext} from './lib/production-control-source.mjs';
 import {PREVIEW_SOURCE_PLAN_FILES} from './lib/production-nonroot-preview-provider.mjs';
 import {nonrootPostRuntimeFixture} from './nonroot-preview.fixture.mjs';
 import {postRuntimeCredentialReferences,postRuntimeTaskTrust,postRuntimeExecutionPolicy} from './lib/post-runtime-preview-route.mjs';
+import {inspectDataRelease} from './lib/production-data-release.mjs';
 
 /** Synthetic checkout built with real Git object hashing. No cloud observation
  * or execution authority is produced by this source fixture. */
@@ -25,7 +26,7 @@ export function previewProviderSourceFixture(){
 }
 
 export function previewWorkloadFixture(scopeOverride){
- const scope=scopeOverride??{stage:'pr-7',account:'123456789012',region:'ap-northeast-1',sourceTree:'a'.repeat(40)},sourceRevision='b'.repeat(40),prefix=`/mem9-on-aws/${scope.stage}/`,cluster='mem9-on-aws-pr-7-Cluster-example',serviceName='mem9-on-aws-pr-7-Mem9Server-example';
+ const scope=scopeOverride??{stage:'pr-7',account:'123456789012',region:'ap-northeast-1',sourceTree:'a'.repeat(40)},sourceRevision='b'.repeat(40),prefix=`/mem9-on-aws/${scope.stage}/`,cluster='mem9-on-aws-pr-7-Cluster-example',serviceName='Mem9Server';
  const arn=`arn:aws:ecs:${scope.region}:${scope.account}:`,definitionArn=arn+'task-definition/'+cluster+'-Mem9Server:2',taskArn=arn+'task/'+cluster+'/'+'c'.repeat(32);
  const images=Object.fromEntries(['llm-proxy','mnemo-server','qwen3-embed'].map(name=>[name,`${scope.account}.dkr.ecr.${scope.region}.amazonaws.com/mem9-on-aws/preview/${name}:pr-${sourceRevision.slice(0,7)}`]));
  const definition={family:cluster+'-Mem9Server',taskDefinitionArn:definitionArn,revision:2,status:'ACTIVE',networkMode:'awsvpc',requiresCompatibilities:['FARGATE'],runtimePlatform:{cpuArchitecture:'ARM64',operatingSystemFamily:'LINUX'},
@@ -45,6 +46,23 @@ export function previewWorkloadFixture(scopeOverride){
   throw Error('Unexpected read');
  };
  return {scope,sourceRevision,definition,task,service,parameters,calls,send};
+}
+
+export function previewRetainedWorkloadFixture(scope,now=1800000000000){
+ const f=previewWorkloadFixture(scope),prefix=`/mem9-on-aws/${f.scope.stage}/`,hex=n=>n.toString(16).padStart(64,'0');
+ const retained={version:1,...f.scope,controlSourceTree:'d'.repeat(40),dataRevision:'e'.repeat(40),dataSourceTree:'f'.repeat(40),dataSourceTag:'pr-eeeeeee',
+  images:Object.fromEntries(['llm-proxy','mnemo-server','qwen3-embed'].map((name,i)=>[name,{rootDigest:'sha256:'+hex(i+1),arm64Digest:'sha256:'+hex(i+10)}])),
+  ...Object.fromEntries(['parentProofHash','backendBindingHash','generation','targetsHash','schemaDigest','operatorDigest','buildInputsHash','securityEvidenceHash','policyHash'].map((key,i)=>[key,hex(20+i)])),
+  runtimeNonce:'d'.repeat(32),authorizationId:'e'.repeat(32),issuedMs:now-2000,expiresMs:now-1000};
+ delete retained.sourceTree;
+ const observed=inspectDataRelease(retained,{stage:f.scope.stage,account:f.scope.account,region:f.scope.region,controlSourceTree:retained.controlSourceTree});
+ const selection={version:1,mode:'retained',controlTag:'pr-ddddddd',dataTag:retained.dataSourceTag,images:observed.images,dataReleaseHash:observed.hash,
+  arm64Digests:Object.fromEntries(Object.entries(retained.images).map(([name,value])=>[name,value.arm64Digest]))};
+ const name=prefix+'consolidation-runtime/data-release';
+ f.parameters.set(name,{Name:name,Value:JSON.stringify(retained),Type:'SecureString',Version:1});
+ f.parameters.get(prefix+'ecs/image-selection').Value=JSON.stringify(selection);
+ f.definition.containerDefinitions=f.definition.containerDefinitions.map(container=>({...container,image:observed.images[container.name]}));
+ return {...f,retained,selection,now};
 }
 
 export function previewPostRuntimeFixture(scope){
