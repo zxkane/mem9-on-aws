@@ -79,6 +79,17 @@ describe('stage-owned gateway secret network', () => {
       ...['!If','!Equals','!Not'].map(tag => ({tag,collection:'seq' as const,resolve:(value:unknown)=>value}))];
     const doc = parse(readFileSync(new URL('./cloudformation/github-actions-role.yaml', import.meta.url),'utf8'), {customTags});
     const statements = doc.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement;
+    const reads = statements.filter((s:any) => s.Sid === 'GatewaySecretEndpointRead');
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toEqual({
+      Sid: 'GatewaySecretEndpointRead', Effect: 'Allow',
+      Action: ['ec2:DescribeVpcEndpoints', 'ec2:DescribePrefixLists'],
+      Resource: '*', Condition: {StringEquals: {'aws:RequestedRegion': 'ApplicationRegion'}},
+    });
+    for (const action of ['ec2:CreateManagedPrefixList', 'ec2:ModifyManagedPrefixList', 'ec2:DeleteManagedPrefixList',
+      'ec2:CreateVpcEndpointServiceConfiguration', 'ec2:ModifyVpcEndpointServiceConfiguration']) {
+      expect(reads[0].Action).not.toContain(action);
+    }
     const create = statements.find((s:any) => s.Sid === 'GatewaySecretEndpointCreate');
     expect(create.Action).toBe('ec2:CreateVpcEndpoint');expect(create.Resource).toContain(':vpc-endpoint/*');
     expect(create.Condition.StringEquals['ec2:VpceServiceName']).toEqual(['com.amazonaws.${ApplicationRegion}.ssm','com.amazonaws.${ApplicationRegion}.secretsmanager']);

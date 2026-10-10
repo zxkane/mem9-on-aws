@@ -135,6 +135,9 @@ describe('deployment authorization maintenance exclusions', () => {
     expect(owner.Resource.pop()).toEqual({ Sub: 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/decision-artifact-bucket-${ProjectName}/*' });
     // Reviewed Gateway/endpoint delta, with all trusts and unrelated statements
     // included. Reverse only that explicit delta to retain the original proof.
+    const endpointRead = template.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement.find(s => s.Sid === 'GatewaySecretEndpointRead');
+    expect(endpointRead.Action).toEqual(['ec2:DescribeVpcEndpoints', 'ec2:DescribePrefixLists']);
+    endpointRead.Action = 'ec2:DescribeVpcEndpoints';
     expect(createHash('sha256').update(JSON.stringify(template)).digest('hex'))
       .toBe('e8431ed654f49a5971baefb61456bc016583f01a511d00cd903723d93f9eb354');
     const deny = template.Resources.DenyPolicy.Properties.PolicyDocument.Statement;

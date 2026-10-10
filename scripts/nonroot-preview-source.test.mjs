@@ -12,7 +12,9 @@ function fixture(){
   cpu:'256',memory:'512',taskRoleArn:role+'Task',executionRoleArn:role+'Execution',volumes:[],placementConstraints:[],
   containerDefinitions:[{name:'Mem9Bootstrap',image:'example.com/bootstrap@sha256:'+'a'.repeat(64),
    environment:[{name:'MEM9_STAGE',value:scope.stage},{name:'MEM9_RUNTIME_BOOTSTRAP_VERSION',value:'1'}],
-   secrets:[{name:'MEM9_DB_SECRET',valueFrom:'arn:aws:ssm:'+scope.region+':'+scope.account+':parameter/mem9-on-aws/pr-7/db'}],
+   secrets:[{name:'MEM9_DB_SECRET',valueFrom:'arn:aws:ssm:'+scope.region+':'+scope.account+':parameter/mem9-on-aws/pr-7/db'},
+    {name:'MEM9_TENANT_ID',valueFrom:'arn:aws:ssm:'+scope.region+':'+scope.account+':parameter/mem9-on-aws/pr-7/tenant'}],
+   portMappings:[{containerPortRange:'1-65535'}],
    linuxParameters:{initProcessEnabled:true},futureContainerSetting:{retained:true}}],tags:[{key:'Stage',value:scope.stage}]};
  const purposes=['bootstrap-runtime-bootstrap','bootstrap-runtime-verify','bootstrap-admin-probe'];
  const records=purposes.map((purpose,index)=>{
@@ -23,7 +25,66 @@ function fixture(){
  });
  return {scope,defaultPurpose:purposes[0],records};
 }
+function providerReadback(record){
+ const o=structuredClone(record.observation),t=o.taskDefinition;
+ t.volumes??=[];t.placementConstraints??=[];
+ for(const c of t.containerDefinitions){
+  c.cpu??=0;c.essential??=true;
+  for(const key of ['mountPoints','volumesFrom','systemControls'])c[key]??=[];
+  c.environment.reverse();c.secrets.reverse();
+  for(const p of c.portMappings)p.protocol??='tcp';
+  c.linuxParameters.capabilities.add??=[];
+ }
+ return o;
+}
 describe('source-bound fixed preview purpose revisions',()=>{
+ it('compares finite provider defaults and keyed order while retaining the full original readback hash',()=>{
+  const f=structuredClone(fixture());for(const r of f.records){delete r.registration.volumes;delete r.registration.placementConstraints;r.observation=providerReadback(r);}
+  const before=structuredClone(f),map=buildNonrootPreviewPurposeMap(f);
+  expect(f).toEqual(before);
+  for(const [i,r]of f.records.entries()){
+   expect(verifyPreviewRegistrationReadback(r.registration,r.observation)).toEqual(r.observation);
+   expect(map.bindings[i].definitionHash).toBe(hash(r.observation));
+   expect(verifyNonrootPreviewPurposeReadback(map,r.purpose,r.observation,scope)).toEqual(r.observation);
+   const reordered=structuredClone(r.observation);reordered.taskDefinition.containerDefinitions[0].environment.reverse();
+   expect(()=>verifyNonrootPreviewPurposeReadback(map,r.purpose,reordered,scope)).toThrow('NonrootPreviewReadbackChanged');
+  }
+ });
+ it.each([
+  ['cpu',o=>o.taskDefinition.containerDefinitions[0].cpu=1],
+  ['essential',o=>o.taskDefinition.containerDefinitions[0].essential=false],
+  ['mountPoints',o=>o.taskDefinition.containerDefinitions[0].mountPoints=[{sourceVolume:'extra',containerPath:'/extra'}]],
+  ['volumesFrom',o=>o.taskDefinition.containerDefinitions[0].volumesFrom=[{sourceContainer:'other'}]],
+  ['systemControls',o=>o.taskDefinition.containerDefinitions[0].systemControls=[{namespace:'net.ipv4.ip_forward',value:'1'}]],
+  ['volumes',o=>o.taskDefinition.volumes=[{name:'extra'}]],
+  ['placementConstraints',o=>o.taskDefinition.placementConstraints=[{type:'memberOf',expression:'attribute:extra == true'}]],
+  ['protocol',o=>o.taskDefinition.containerDefinitions[0].portMappings[0].protocol='udp'],
+  ['capability add',o=>o.taskDefinition.containerDefinitions[0].linuxParameters.capabilities.add=['SYS_ADMIN']],
+  ['environment value',o=>o.taskDefinition.containerDefinitions[0].environment.find(e=>e.name==='MEM9_STAGE').value='pr-8'],
+  ['secret reference',o=>o.taskDefinition.containerDefinitions[0].secrets[0].valueFrom+='-other'],
+  ['image',o=>o.taskDefinition.containerDefinitions[0].image='example.com/bootstrap@sha256:'+'b'.repeat(64)],
+  ['task role',o=>o.taskDefinition.taskRoleArn+='-other'],
+  ['execution role',o=>o.taskDefinition.executionRoleArn+='-other'],
+  ['entrypoint order',o=>o.taskDefinition.containerDefinitions[0].entryPoint.reverse()],
+  ['command',o=>o.taskDefinition.containerDefinitions[0].command=['unexpected']],
+  ['unknown default',o=>o.taskDefinition.enableFaultInjection=false],
+  ['unknown empty container field',o=>o.taskDefinition.containerDefinitions[0].futureEmptyField=[]],
+ ])('does not normalize a changed %s',(_name,mutate)=>{
+  const r=fixture().records[0],o=providerReadback(r);mutate(o);
+  expect(()=>verifyPreviewRegistrationReadback(r.registration,o)).toThrow();
+ });
+ it.each(['registration','observation'])('rejects duplicate keyed rows in %s before normalization',side=>{
+  for(const key of ['environment','secrets'])for(const changed of [false,true]){
+   const r=structuredClone(fixture().records[0]);r.observation=providerReadback(r);
+   const c=side==='registration'?r.registration.containerDefinitions[0]:r.observation.taskDefinition.containerDefinitions[0];
+   const duplicate={...c[key][0]};if(changed)duplicate[key==='environment'?'value':'valueFrom']+='-other';c[key].push(duplicate);
+   expect(()=>verifyPreviewRegistrationReadback(r.registration,r.observation)).toThrow('NonrootPreviewDuplicateName');
+  }
+ });
+ it.each(['cpu','essential','mountPoints','volumesFrom','systemControls'])('does not treat null %s as an absent default',key=>{
+  const r=structuredClone(fixture().records[0]);r.observation=providerReadback(r);r.registration.containerDefinitions[0][key]=null;
+  expect(()=>verifyPreviewRegistrationReadback(r.registration,r.observation)).toThrow();
+ });
  it('produces separate exact revisions in one family while preserving roles/secrets and unrelated fields',()=>{
   const f=fixture(),map=buildNonrootPreviewPurposeMap(f);expect(map.bindings.map(b=>b.taskDefinitionArn)).toEqual([arn(1),arn(2),arn(3)]);
   for(const [index,r]of f.records.entries()){
@@ -56,6 +117,7 @@ describe('source-bound fixed preview purpose revisions',()=>{
   ['compatibilities',d=>d.taskDefinition.compatibilities.pop()],
   ['tags',d=>d.tags[0].value='prod'],
   ['unknown response field',d=>d.taskDefinition.futureField=true],
+  ['inactive response',d=>d.taskDefinition.status='INACTIVE'],
  ])('rejects changed full readback: %s',(_label,change)=>{const f=fixture(),map=buildNonrootPreviewPurposeMap(f),d=structuredClone(f.records[0].observation);change(d);expect(()=>verifyNonrootPreviewPurposeReadback(map,f.defaultPurpose,d,scope)).toThrow();});
  it('rejects provider-readback differences before publishing a map',()=>{
   const f=fixture(),r=f.records[0];r.observation.taskDefinition.cpu='512';expect(()=>buildNonrootPreviewPurposeMap(f)).toThrow();

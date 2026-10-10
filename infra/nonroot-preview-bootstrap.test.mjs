@@ -25,7 +25,13 @@ function register(name,args){
  const done=resolve(args).then(resolved=>{
   const registration=previewRegistrationFromProviderArgs(resolved),{tags,...body}=registration;
   state.resources.push({kind:'definition',name,registration});
-  state.definitions.set(arn,{taskDefinition:{...body,taskDefinitionArn:arn,revision,status:'ACTIVE',
+  // Model provider defaults and unordered keyed rows independently of inputs.
+  const containerDefinitions=body.containerDefinitions.map(c=>({...structuredClone(c),cpu:c.cpu??0,essential:c.essential??true,
+   mountPoints:c.mountPoints??[],volumesFrom:c.volumesFrom??[],systemControls:c.systemControls??[],
+   environment:[...c.environment].reverse(),secrets:[...c.secrets].reverse(),
+   portMappings:c.portMappings.map(p=>({...p,protocol:p.protocol??'tcp'})),
+   linuxParameters:{...c.linuxParameters,capabilities:{...c.linuxParameters.capabilities,add:c.linuxParameters.capabilities.add??[]}}}));
+  state.definitions.set(arn,{taskDefinition:{...body,containerDefinitions,volumes:body.volumes??[],placementConstraints:body.placementConstraints??[],taskDefinitionArn:arn,revision,status:'ACTIVE',
    registeredAt:'2026-10-08T00:00:00.000Z',registeredBy:`arn:aws:sts::${account}:assumed-role/preview/session`,
    requiresAttributes:[{name:'ecs.capability.task-eni'}],compatibilities:['EC2','FARGATE']},tags});return arn;
  });
@@ -43,10 +49,10 @@ function setup(){
  vi.stubGlobal('sst',{aws:{Task:class{
   constructor(name,args){
    const container=$jsonStringify([{name,image:args.image,environment:resolve(args.environment).then(env=>Object.entries(env).map(([name,value])=>({name,value}))),
-    secrets:resolve(args.ssm).then(secrets=>Object.entries(secrets).map(([name,valueFrom])=>({name,valueFrom}))),linuxParameters:{initProcessEnabled:true}}]);
+    secrets:resolve(args.ssm).then(secrets=>Object.entries(secrets).map(([name,valueFrom])=>({name,valueFrom}))),linuxParameters:{initProcessEnabled:true},portMappings:[{containerPortRange:'1-65535'}]}]);
    const generated={family,networkMode:'awsvpc',requiresCompatibilities:['FARGATE'],cpu:'256',memory:'512',runtimePlatform:{cpuArchitecture:'ARM64',operatingSystemFamily:'LINUX'},
     taskRoleArn:`arn:aws:iam::${account}:role/preview-task`,executionRoleArn:`arn:aws:iam::${account}:role/preview-execution`,
-    trackLatest:true,containerDefinitions:container,volumes:[],placementConstraints:[]};
+    trackLatest:true,containerDefinitions:container,volumes:[]};
    args.transform.taskDefinition(generated);const definition=register(name,generated);
    this.taskDefinition=definition.arn;this.nodes={taskDefinition:out(definition)};
   }
@@ -69,6 +75,10 @@ describe('numeric-preview bootstrap purpose map producer',()=>{
   for(const def of defs){expect(def.family).toBe(family);expect(def.taskRoleArn).toBe(defs[0].taskRoleArn);expect(def.executionRoleArn).toBe(defs[0].executionRoleArn);
    expect(def.containerDefinitions[0].secrets).toEqual(defs[0].containerDefinitions[0].secrets);expect(def.containerDefinitions[0].command).toEqual([]);
    expect(def.containerDefinitions[0].user).toBe('1000:1000');}
+  const declared=defs[0].containerDefinitions[0],observed=state.definitions.get(map.bindings[0].taskDefinitionArn).taskDefinition.containerDefinitions[0];
+  for(const key of ['cpu','essential','mountPoints','volumesFrom','systemControls'])expect(declared).not.toHaveProperty(key);
+  expect(observed).toMatchObject({cpu:0,essential:true,mountPoints:[],volumesFrom:[],systemControls:[]});
+  expect(observed.environment.map(e=>e.name)).not.toEqual(declared.environment.map(e=>e.name));
   for(const b of map.bindings)expect(()=>verifyNonrootPreviewPurposeReadback(map,b.purpose,state.definitions.get(b.taskDefinitionArn),{stage,account,region,sourceTree})).not.toThrow();
   expect(state.calls).toHaveLength(9);expect(state.calls.every(c=>c.include.join()==='TAGS')).toBe(true);
   const parameter=state.resources.find(r=>r.name==='BootstrapPurposeBindings');expect(parameter.args.name).toBe('/mem9-on-aws/pr-7/bootstrap/purpose-bindings');

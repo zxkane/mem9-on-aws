@@ -53,7 +53,7 @@ function fixedContainer(container,selected,scope){
  const operation=operationByPurpose[selected];
  if(operation===null){need(!Object.hasOwn(env,'MEM9_BOOTSTRAP_OPERATION')&&!Object.hasOwn(env,'MEM9_RUNTIME_BOOTSTRAP_VERSION'));}
  else {need(env.MEM9_BOOTSTRAP_OPERATION===operation);if(selected.startsWith('bootstrap-'))need(env.MEM9_RUNTIME_BOOTSTRAP_VERSION==='1');}
- const expected=controlLaunchPolicy(selected,container);same(container,expected);
+ const expected=controlLaunchPolicy(selected,container);same(comparableContainer(container),comparableContainer(expected));
  return container;
 }
 
@@ -128,15 +128,45 @@ function checkedObservation(value){
  need(new Set(o.tags.map(t=>t.key)).size===o.tags.length);
  return o;
 }
-/** Before publishing any binding, compare the complete request material. New
- * response fields and defaults fail closed; no requiresAttributes erasure. */
+function keyedRows(rows,valueKey){
+ need(Array.isArray(rows));const seen=new Set();
+ for(const row of rows){exact(row,['name',valueKey]);need(typeof row.name==='string'&&row.name.length>0&&typeof row[valueKey]==='string');
+  need(!seen.has(row.name),'NonrootPreviewDuplicateName');seen.add(row.name);}
+ return rows.toSorted((a,b)=>a.name<b.name?-1:a.name>b.name?1:0);
+}
+function emptyDefault(value,key){if(!Object.hasOwn(value,key))value[key]=[];need(Array.isArray(value[key]));}
+/** Comparison copies only: ECS defaults optional CPU/essential fields and
+ * empty lists; environment and secret rows are keyed by unique names. Retain
+ * every other field and every explicit non-default value for exact comparison. */
+function comparableContainer(value){
+ const c=structuredClone(copy(value));need(object(c));
+ if(!Object.hasOwn(c,'cpu'))c.cpu=0;
+ if(!Object.hasOwn(c,'essential'))c.essential=true;
+ need(Number.isSafeInteger(c.cpu)&&c.cpu>=0&&typeof c.essential==='boolean');
+ for(const key of ['mountPoints','volumesFrom','systemControls'])emptyDefault(c,key);
+ if(Object.hasOwn(c,'environment'))c.environment=keyedRows(c.environment,'value');
+ if(Object.hasOwn(c,'secrets'))c.secrets=keyedRows(c.secrets,'valueFrom');
+ if(Object.hasOwn(c,'portMappings')){
+  need(Array.isArray(c.portMappings));for(const p of c.portMappings){need(object(p));if(!Object.hasOwn(p,'protocol'))p.protocol='tcp';}
+ }
+ if(c.linuxParameters?.capabilities!==undefined){need(object(c.linuxParameters.capabilities));emptyDefault(c.linuxParameters.capabilities,'add');}
+ return c;
+}
+function comparableRegistration(value){
+ const v=structuredClone(copy(value));need(object(v)&&Array.isArray(v.containerDefinitions));
+ for(const key of ['volumes','placementConstraints'])emptyDefault(v,key);
+ v.containerDefinitions=v.containerDefinitions.map(comparableContainer);return v;
+}
+/** Before publishing any binding, compare the complete request material using
+ * only the finite equivalences above. Return the untouched observation so its
+ * full hash still binds defaults, row order and all service-derived metadata. */
 export function verifyPreviewRegistrationReadback(registration,value){
  const body=copy(registration),o=checkedObservation(value),material={};
  need(object(body)&&Object.keys(body).every(k=>requestFields.includes(k)));
  for(const [key,v]of Object.entries(o.taskDefinition))if(!responseFields.includes(key))material[key]=v;
  material.tags=[...o.tags].sort((a,b)=>a.key.localeCompare(b.key));
  const expected={...body,tags:[...(body.tags??[])].sort((a,b)=>a.key.localeCompare(b.key))};
- same(material,expected);return o;
+ same(comparableRegistration(material),comparableRegistration(expected));return o;
 }
 
 export function inspectNonrootPreviewPurposeMap(value,scopeValue){
