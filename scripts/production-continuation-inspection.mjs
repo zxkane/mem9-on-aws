@@ -6,14 +6,15 @@ import {inspectNonrootCompatibilityCertificate} from './lib/production-nonroot-r
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {schemaAdministratorRole} from './lib/production-runtime-config.mjs';
 import {rootAuditSourceClosure,auditRootTransaction} from './lib/production-continuation-root.mjs';
+import {validateContinuationAbsence,readContinuationAbsence} from './lib/production-continuation-absence.mjs';
 
 const need=(ok,code='ContinuationInspectionInvalid')=>{if(!ok)throw Error(code);};
 const exact=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.toSorted().join());
 const hex=(value,n=64)=>typeof value==='string'&&new RegExp('^[a-f0-9]{'+n+'}$').test(value);
 const sha=value=>createHash('sha256').update(value).digest('hex');
 
-export function validateContinuationRootInput(input,{owner,invocation,env}){
- exact(input,['invocation','owner','runtimeNonce','rootBinding','rootConfig','certificate','parent','dependencyHash','deployed']);
+export function validateContinuationRootInput(input,{owner,invocation,env,operation='root-audit'}){
+ exact(input,['invocation','owner','runtimeNonce','rootBinding','rootConfig','certificate','parent','dependencyHash','deployed',...(operation==='absence-audit'?['absence']:[])]);
  need(input.invocation===invocation&&input.owner===owner&&hex(owner,32)&&hex(invocation,32)&&hex(input.runtimeNonce,32)&&hex(input.dependencyHash));
  const b=input.rootBinding,c=input.certificate,p=input.parent.verification,r=input.rootConfig;
  exact(input.parent,['verification']);exact(b,['parentProofHash','validationId','generation','spent','cap']);
@@ -30,6 +31,7 @@ export function validateContinuationRootInput(input,{owner,invocation,env}){
   need(env.MEM9_STAGE==='prod'&&env.MEM9_PRODUCTION_WORKER_OPERATOR==='control'&&r.host===env.MEM9_DB_HOST&&String(r.port)===env.MEM9_DB_PORT&&r.database===env.MEM9_DB_NAME,'ContinuationDatabaseBinding');
   need(env.MEM9_CONTROL_SOURCE_TAG==='mem9-'+input.deployed.revision.slice(0,7)&&env.MEM9_WORKER_GENERATION===c.generation&&env.MEM9_WORKER_IMAGE===r.workerImage&&env.MEM9_WORKER_SOURCE_TAG===r.sourceTag&&env.MEM9_RETAINED_DATA_RELEASE_HASH===c.dataReleaseHash,'ContinuationSource');
  }
+ if(operation==='absence-audit')validateContinuationAbsence(input);
  return input;
 }
 
@@ -78,7 +80,7 @@ export async function runContinuationInspection(env=process.env){
  }
  const envelope=parseContinuationInspection(env.MEM9_CONTINUATION_INSPECTION_REQUEST,{operation,invocation:env.MEM9_OPERATOR_INVOCATION});
  const remainingInspectionTime=()=>{const remaining=envelope.deadline-Date.now();need(remaining>0,'ContinuationInspectionDeadline');return remaining;};
- const input=validateContinuationRootInput(envelope.input,{owner:envelope.owner,invocation:envelope.invocation,env});
+ const input=validateContinuationRootInput(envelope.input,{owner:envelope.owner,invocation:envelope.invocation,env,operation});
  need(await rootAuditSourceClosure(name=>readFile(new URL('../'+name,import.meta.url),'utf8'))===input.dependencyHash,'RootSourceClosureChanged');
  const {auditPausedCanary}=await import('./lib/production-canary-paused-audit.mjs');
  const continuation=await import('./lib/production-canary-continuation.mjs'),snapshot=await import('./lib/production-canary-snapshot.mjs');
@@ -95,6 +97,7 @@ export async function runContinuationInspection(env=process.env){
   await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');transaction=true;
   result=await auditRootTransaction(db,input,{auditPausedCanary,...continuation,...snapshot,readRolloutState,verifyWorkerPrivileges,hash});
   if(operation==='capacity-census')result.census=await captureContinuationCensus(db,input,result.observedMs);
+  if(operation==='absence-audit')result.absence=await readContinuationAbsence(db,input,{...continuation,...snapshot,readRolloutState,schemaAdministratorRole,hash,now:Date.now,connection:{host:env.MEM9_DB_HOST,database:env.MEM9_DB_NAME}},{deadlineMs:envelope.deadline});
  }catch(cause){error=cause;}
  finally{
   try{if(transaction)await db.query('ROLLBACK');}catch(cause){error=cause;}

@@ -2,7 +2,7 @@
 export async function rootAuditSourceClosure(read){
  const {createHash}=await import('node:crypto'),{posix}=await import('node:path');
  const digest=v=>createHash('sha256').update(v).digest('hex');
- const pending=['scripts/lib/production-canary-paused-audit.mjs','scripts/lib/production-canary-continuation.mjs'],files=new Map();
+ const pending=['scripts/lib/production-canary-paused-audit.mjs','scripts/lib/production-canary-continuation.mjs','scripts/lib/production-continuation-absence.mjs'],files=new Map();
  while(pending.length){
   const name=pending.pop();if(files.has(name))continue;
   if(files.size>=256||name.startsWith('../')||!/^[-A-Za-z0-9_./]+\.(?:mjs|js)$/.test(name))throw Error('RootSourceClosureInvalid');

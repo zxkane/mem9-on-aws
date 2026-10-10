@@ -69,6 +69,7 @@ async function input(){
 }
 async function inspectionEntryFixture(operation){
  const value=await input();
+ if(operation==='absence-audit')value.absence={rejectedAttemptId:'b'.repeat(32),runtimeEpoch:1,runtimeHistoryHash:'1'.repeat(64),identityHash:'2'.repeat(64),rootIdentity:'3'.repeat(64),projectionHash:'4'.repeat(64)};
  value.dependencyHash=await rootAuditSourceClosure(name=>readFile(new URL('../'+name,import.meta.url),'utf8'));
  const started=Date.now(),deadline=started+60000,r=value.rootConfig;
  const envelope={version:1,operation,invocation:id,owner:id,deadline,input:value};
@@ -77,14 +78,25 @@ async function inspectionEntryFixture(operation){
   MEM9_CONTROL_SOURCE_TAG:'mem9-'+value.deployed.revision.slice(0,7),MEM9_WORKER_GENERATION:value.certificate.generation,
   MEM9_WORKER_IMAGE:r.workerImage,MEM9_WORKER_SOURCE_TAG:r.sourceTag,MEM9_RETAINED_DATA_RELEASE_HASH:value.certificate.dataReleaseHash}};
 }
-it.each(['root-audit','capacity-census'])('valid %s inputs reach the credential edge after asynchronous source verification',async operation=>{
+it.each(['missing-epoch','wrong-invocation','expired','extra-sql'])('actual absence entry rejects %s before credentials',async defect=>{
+ const {env}=await inspectionEntryFixture('absence-audit');let reads=0;
+ const request=JSON.parse(env.MEM9_CONTINUATION_INSPECTION_REQUEST);
+ if(defect==='missing-epoch')delete request.input.absence.runtimeEpoch;
+ if(defect==='wrong-invocation')env.MEM9_OPERATOR_INVOCATION='f'.repeat(32);
+ if(defect==='expired')request.deadline=Date.now()-1;
+ if(defect==='extra-sql')request.input.absence.sql='SELECT 1';
+ env.MEM9_CONTINUATION_INSPECTION_REQUEST=JSON.stringify(request);
+ Object.defineProperty(env,'MEM9_DB_SECRET',{get(){reads++;throw Error('UnexpectedCredential');}});
+ await expect(runContinuationInspection(env)).rejects.toThrow();expect(reads).toBe(0);
+});
+it.each(['root-audit','capacity-census','absence-audit'])('valid %s inputs reach the credential edge after asynchronous source verification',async operation=>{
  const {env}=await inspectionEntryFixture(operation);let credentialGets=0;
  Object.defineProperty(env,'MEM9_DB_SECRET',{get(){credentialGets++;throw Error('SyntheticCredentialEdge');}});
  const client=vi.spyOn(pg,'Client').mockImplementation(function(){throw Error('UnexpectedDatabaseClient');});
  try{await expect(runContinuationInspection(env)).rejects.toThrow('SyntheticCredentialEdge');expect(credentialGets).toBe(1);expect(client).not.toHaveBeenCalled();}
  finally{client.mockRestore();}
 });
-it.each(['root-audit','capacity-census'])('%s expires during asynchronous preparation before reading credentials',async operation=>{
+it.each(['root-audit','capacity-census','absence-audit'])('%s expires during asynchronous preparation before reading credentials',async operation=>{
  const {env,started,deadline}=await inspectionEntryFixture(operation);let clock=started,credentialGets=0;
  const time=vi.spyOn(Date,'now').mockImplementation(()=>clock),client=vi.spyOn(pg,'Client').mockImplementation(function(){throw Error('UnexpectedDatabaseClient');});
  Object.defineProperty(env,'MEM9_DB_SECRET',{get(){credentialGets++;throw Error('SyntheticCredentialEdge');}});
@@ -94,7 +106,7 @@ it.each(['root-audit','capacity-census'])('%s expires during asynchronous prepar
   expect(credentialGets).toBe(0);expect(client).not.toHaveBeenCalled();
  }finally{client.mockRestore();time.mockRestore();}
 });
-it.each(['root-audit','capacity-census'].flatMap(operation=>['before-connect','after-connect'].map(phase=>[operation,phase])))('%s retains its absolute deadline %s',async(operation,phase)=>{
+it.each(['root-audit','capacity-census','absence-audit'].flatMap(operation=>['before-connect','after-connect'].map(phase=>[operation,phase])))('%s retains its absolute deadline %s',async(operation,phase)=>{
  const {env,started,deadline}=await inspectionEntryFixture(operation);let clock=started,credentialGets=0;
  const time=vi.spyOn(Date,'now').mockImplementation(()=>clock);
  const db={connect:vi.fn(async()=>{if(phase==='after-connect')clock=deadline+1;}),query:vi.fn(async()=>({rows:[]})),end:vi.fn(async()=>{})};

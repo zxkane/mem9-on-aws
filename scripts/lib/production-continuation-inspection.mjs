@@ -4,19 +4,19 @@ import {deflateRawSync,inflateRawSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
 import {validatePublicationInspectionRequest} from './production-continuation-publication.mjs';
 
-export const CONTINUATION_INSPECTION_OPERATIONS=Object.freeze(['parse-begin','root-audit','capacity-census','publication-audit','publication-probe']);
+export const CONTINUATION_INSPECTION_OPERATIONS=Object.freeze(['parse-begin','root-audit','capacity-census','absence-audit','publication-audit','publication-probe']);
 const fail=code=>{throw Error(code);},need=(value,code='ContinuationInspectionInvalid')=>{if(!value)fail(code);};
 const hex=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
 const exact=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.toSorted().join());
 const clone=value=>JSON.parse(JSON.stringify(value));
 const sha=value=>createHash('sha256').update(value).digest('hex');
-const parameters=Object.freeze({'parse-begin':'MEM9_PRODUCTION_CONSOLIDATION_REQUEST','root-audit':'MEM9_CONTINUATION_INSPECTION_REQUEST','capacity-census':'MEM9_CONTINUATION_INSPECTION_REQUEST','publication-audit':'MEM9_PUBLICATION_REQUEST','publication-probe':'MEM9_PUBLICATION_REQUEST'});
-const families=Object.freeze({'parse-begin':'BeginAcceptance','root-audit':'ContinuationRootAudit','capacity-census':'ContinuationCensus','publication-audit':'PublicationAudit','publication-probe':'PublicationProbe'});
+const parameters=Object.freeze({'parse-begin':'MEM9_PRODUCTION_CONSOLIDATION_REQUEST','root-audit':'MEM9_CONTINUATION_INSPECTION_REQUEST','capacity-census':'MEM9_CONTINUATION_INSPECTION_REQUEST','absence-audit':'MEM9_CONTINUATION_INSPECTION_REQUEST','publication-audit':'MEM9_PUBLICATION_REQUEST','publication-probe':'MEM9_PUBLICATION_REQUEST'});
+const families=Object.freeze({'parse-begin':'BeginAcceptance','root-audit':'ContinuationRootAudit','capacity-census':'ContinuationCensus','absence-audit':'ContinuationAbsence','publication-audit':'PublicationAudit','publication-probe':'PublicationProbe'});
 
 /** No script/module/SQL/URL selector. The image's fixed dispatcher validates
  * identity and its manifest before it imports the fixed inspection module. */
 export function parseContinuationInspection(raw,{operation,invocation,now=Date.now(),admission=true}){
- need(['root-audit','capacity-census'].includes(operation)&&hex(invocation));
+ need(['root-audit','capacity-census','absence-audit'].includes(operation)&&hex(invocation));
  need(typeof raw==='string'&&Buffer.byteLength(raw)<=32768);
  let value=parseNonrootJson(raw,{maxBytes:32768});
  if(value.encoding!==undefined){

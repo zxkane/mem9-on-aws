@@ -424,6 +424,18 @@ export async function bindNonrootDeploymentContext(context,{parameter,deployment
 }
 
 export function getNonrootTargetRegistration(context,taskKey){const s=get(context);assertDeploymentCurrent(s,Date.now());need(Object.hasOwn(s.deployment.registrations,taskKey)&&!['fallback','preaudit'].includes(taskKey),'NonrootTaskNotRegisterable');return copyNonrootJson(s.deployment.registrations[taskKey]);}
+/** Published DATA workers have concrete registrations in the original proof.
+ * This lookup never resolves a CONTROL slot or permits deployment/registration
+ * from an authorization-only context. Live loaders still verify the exact
+ * descriptor version, task definition, image, network and role bindings. */
+export function getNonrootWorkerRegistration(context,taskKey,{now=Date.now()}={}){
+ const s=get(context);nonrootAuthorizationBindings(context);
+ need(['planner','executor'].includes(taskKey),'NonrootWorkerRequired');
+ need(s.origin==='archive'||s.contextKind==='deployment','NonrootPublishedAuthorizationRequired');
+ need(positive(now)&&now<nonrootAdmissionDeadline(context),'NonrootWorkerAuthorizationExpired');
+ need(Object.hasOwn(s.planned.targets,taskKey),'NonrootWorkerRequired');
+ return copyNonrootJson(s.planned.targets[taskKey]);
+}
 export function getNonrootRetainedTaskBinding(context,taskKey){const s=get(context);assertDeploymentCurrent(s,Date.now());need(taskKey==='fallback','NonrootRetainedTaskRequired');return copyNonrootJson(s.fallback);}
 export function assertNonrootTaskDefinitionReadback(context,taskKey,value){
  const s=get(context);assertDeploymentCurrent(s,Date.now());need(Object.hasOwn(s.deployment.registrations,taskKey),'NonrootTaskNotRegisterable');const raw=copyNonrootJson(value),wanted=s.deployment.registrations[taskKey];

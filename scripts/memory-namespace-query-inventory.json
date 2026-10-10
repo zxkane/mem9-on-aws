@@ -2475,6 +2475,38 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
+      "id": "3d165a693ae407b6d4d6",
+      "owner": "scripts/lib/production-continuation-absence.mjs",
+      "line": 45,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7c7754a8546424f0ed8301e5f9d0a49251b0bc0445db3b792478152fec87683d",
+      "statement": "SELECT count(*)::int AS count FROM public.memories WHERE namespace_id=$1 AND agent_id=$2",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-absence.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "cc82952125617747f64a",
+      "owner": "scripts/lib/production-continuation-absence.mjs",
+      "line": 51,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7cc790ee5cd96d282b3ad7398c3a1cd1c3351211a529786c2a69c9adbf280a9b",
+      "statement": "SELECT count(*)::int AS total,count(*) FILTER(WHERE state='active')::int AS active,encode(sha256(convert_to(coalesce(string_agg(encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex'),'' ORDER BY namespace_id,id),''),'UTF8')),'hex') AS fingerprint FROM public.memories m WHERE namespace_id=ANY($1)",
+      "classification": "namespace_bound",
+      "rationale": "The fixed read-only fingerprint query binds the complete original parent namespace list through ANY($1); it returns aggregate counts and a digest.",
+      "coverage": [
+        "scripts/production-continuation-absence.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=ANY($1)"
+    },
+    {
       "id": "a7ed6ed6cf6e5f2790df",
       "owner": "scripts/lib/production-runtime-rehearsal.mjs",
       "line": 25,
@@ -3072,9 +3104,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "778e072deb66bf2bcf5c",
+      "id": "d4be0c7564b7c36ad78a",
       "owner": "scripts/production-continuation-inspection.mjs",
-      "line": 46,
+      "line": 48,
       "tables": [
         "memories"
       ],
@@ -3088,9 +3120,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "aea90c447ab4ecc6045d",
+      "id": "a080afc7f2fa74f8bf2b",
       "owner": "scripts/production-continuation-inspection.mjs",
-      "line": 48,
+      "line": 50,
       "tables": [
         "memories"
       ],
@@ -3104,9 +3136,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "7f09b8652c04cf9bad13",
+      "id": "f1e2fcd69b1dbe7d673b",
       "owner": "scripts/production-continuation-inspection.mjs",
-      "line": 51,
+      "line": 53,
       "tables": [
         "memories"
       ],

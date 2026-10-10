@@ -65,7 +65,7 @@ export function resolveGuardPurpose(purpose,env){
  if(stage!=='prod'&&!isPreview)fail('NonrootPurpose');
  if(purpose==='continuation-inspection'){
   if(stage!=='prod'||env.MEM9_PRODUCTION_WORKER_OPERATOR!=='control'||
-   !['parse-begin','root-audit','capacity-census','publication-audit','publication-probe'].includes(env.MEM9_CONTINUATION_OPERATION))fail('NonrootPurpose');
+   !['parse-begin','root-audit','capacity-census','absence-audit','publication-audit','publication-probe'].includes(env.MEM9_CONTINUATION_OPERATION))fail('NonrootPurpose');
   return Object.freeze({kind:'module',module:base+'production-continuation-inspection.mjs',operation:env.MEM9_CONTINUATION_OPERATION});
  }
  if(purpose==='bootstrap-runtime-verify'){

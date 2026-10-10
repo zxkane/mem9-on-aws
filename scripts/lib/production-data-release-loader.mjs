@@ -3,7 +3,7 @@ import {inspectDataRelease,requireActiveDataRelease} from './production-data-rel
 import {assertImageTransitionDataRelease,imageTransitionContextBindings} from './production-image-transition-proof.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {resolveImageAuthorization} from './production-image-admission.mjs';
-import {nonrootAuthorizationBindings,assertNonrootDataRelease,getNonrootTargetRegistration} from './production-nonroot-proof.mjs';
+import {nonrootAuthorizationBindings,assertNonrootDataRelease,getNonrootTargetRegistration,getNonrootWorkerRegistration} from './production-nonroot-proof.mjs';
 import {requireMaintenanceAdmission} from './production-maintenance-admission.mjs';
 
 const exact=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===[...keys].sort().join();
@@ -109,7 +109,7 @@ export async function loadWorkerDataRelease(clients,meta,{controlRevision,contro
     (selected.data.version===3?assertNonrootDataRelease:assertImageTransitionDataRelease)(imageTransition,{current:selected.data,controlSourceTree,now,mode:'admission'});
     if(selected.data.version===3){
       if(nonrootAuthorizationBindings(imageTransition).parameterVersion!==p.Version)throw Error('ProductionDataReleaseVersionMismatch');
-      getNonrootTargetRegistration(imageTransition,'executor');
+      getNonrootWorkerRegistration(imageTransition,'executor',{now});
       requireMaintenanceAdmission(clients);
     }
   }else if(mode==='admission'&&imageTransition)throw Error('ImageTransitionDescriptorRequired');

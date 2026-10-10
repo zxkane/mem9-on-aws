@@ -1860,7 +1860,7 @@ not install continuation tables or return memory images.
 
 Non-root CONTROL diagnostics use the fixed `continuation-inspection` dispatcher
 purpose. Its closed operation set is `parse-begin`, `root-audit`,
-`capacity-census`, `publication-audit` and `publication-probe`. Every path keeps
+`capacity-census`, `absence-audit`, `publication-audit` and `publication-probe`. Every path keeps
 the fixed `setpriv` prefix, absolute Node executable, UID/GID 1000, dropped
 capabilities and image-manifest verification before credential access. Requests
 cannot supply code, a module path, SQL or a URL. The begin parser definition has
@@ -1868,11 +1868,20 @@ no task role, database secret or database endpoint; successful parsing is not
 continuation admission. Actual begin still uses `consolidation-control` and its
 existing witness, parent, receipt and lifetime-allowance checks.
 
+Postdeployment worker admission restores the authenticated published DATA
+authorization and its concrete planner/executor registrations. It retains the
+exact protected parameter version, source tag, image and role checks. This
+worker-only lookup cannot resolve a CONTROL image slot or replace the fresh
+deployment context required by deployment and registration paths.
+
 Root and capacity inspections bind the original parent and current control
 source. They execute fixed queries under the existing advisory lease and one
 `REPEATABLE READ READ ONLY` transaction. Capacity queries bind one namespace
 parameter at a time and aggregate every original target within that snapshot;
-they return counts, never memory bodies. The finite data envelope retains a
+they return counts, never memory bodies. Absence inspection also verifies all
+five continuation storage tables and the rejected attempt ID, original runtime
+history, full receipt/projection commitments and baseline fingerprint. It never
+initializes those tables or changes the original allowance. The finite data envelope retains a
 32 KiB decoded limit and bounded compression for ECS overrides. Publication
 keeps its existing held read-only audit, heartbeat and independent release
 probe. Owned tasks and definitions remain journaled; uncertain execution,

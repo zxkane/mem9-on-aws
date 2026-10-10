@@ -226,7 +226,7 @@ describe.skipIf(process.env.MEM9_NONROOT_CONTAINER_TEST!=='1')('v3 deployment bu
  it('worker admission rejects an authorization-only context and a later same-byte version',async()=>{
   const data=f.current,meta={version:3,stage:'prod',account:data.account,region:data.region,generation:data.generation,sourceTag:data.dataSourceTag,controlSourceTag:'mem9-'+f.d.main.mainRevision.slice(0,7),workerImage:`${data.account}.dkr.ecr.${data.region}.amazonaws.com/mem9-on-aws/llm-proxy@${data.images['llm-proxy'].rootDigest}`,dataReleaseHash:f.deploymentSource.descriptorHash,dataReleaseParameter:f.parameter.Name,dataReleaseParameterVersion:f.parameter.Version};
   const clients={ssm:{send:async()=>({Parameters:[f.parameter]})}},input={controlRevision:f.d.main.mainRevision,controlSourceTree:data.controlSourceTree,mode:'admission',now:f.f.now};
-  await expect(loadWorkerDataRelease(clients,meta,{...input,imageTransition:f.authorization})).rejects.toThrow('NonrootDeploymentContextRequired');
+  await expect(loadWorkerDataRelease(clients,meta,{...input,imageTransition:f.authorization})).rejects.toThrow('NonrootPublishedAuthorizationRequired');
   installImageAuthorization(clients,context,{data,controlSourceTree:data.controlSourceTree,now:f.f.now});
   expect((await loadWorkerDataRelease(clients,meta,input)).parameterVersion).toBe(f.parameter.Version);
   clients.ssm.send=async()=>({Parameters:[{...f.parameter,Version:99}]});

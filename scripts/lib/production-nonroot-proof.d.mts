@@ -16,6 +16,7 @@ export function assertNonrootDataRelease(context:unknown,options:{previous?:unkn
 export function bindNonrootDeploymentContext(context:unknown,options:{parameter:unknown;deploymentSource:unknown;phaseEvidence:unknown;evidence:Record<string,unknown>;now?:number}):Promise<unknown>;
 export function nonrootDeploymentPhaseEvidence(context:unknown,options:{phase:'preconfigure'|'presst'|'preupdate'|'prereadiness';now?:number}):NonrootRecord;
 export function getNonrootTargetRegistration(context:unknown,taskKey:string):NonrootRecord;
+export function getNonrootWorkerRegistration(context:unknown,taskKey:'planner'|'executor',options?:{now?:number}):NonrootRecord;
 export function getNonrootRetainedTaskBinding(context:unknown,taskKey:'fallback'):{taskDefinitionArn:string;definition:NonrootRecord;registrationBody?:NonrootRecord};
 export function assertNonrootTaskDefinitionReadback(context:unknown,taskKey:string,rawDefinition:unknown):string;
 export const NONROOT_PROOF_BINDINGS:Readonly<Record<string,string>>;
