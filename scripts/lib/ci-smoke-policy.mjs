@@ -2,6 +2,16 @@
 // evidence are independently authenticated; these names grant no authority.
 const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(freeze);Object.freeze(value);}return value;};
 export const CI_SMOKE_POLICY=freeze({
+ previewCredentialRenewal:{
+  normalAnchors:[16,17,18,19,20,21,22,23,24,26].map(index=>'deploy-preview/'+index),
+  recoveryAnchor:'deploy-preview/25',
+  normalCondition:"success() && steps.ci_smoke_source.outcome == 'success' && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+  recoveryCondition:"always() && (failure() || cancelled()) && steps.ci_smoke_source.outcome == 'success' && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+  checkClassification:{kind:'read-only',effect:'local-native-oidc-presence',sourceGateRequired:true,mayCallProvider:false},
+  renewalClassification:{kind:'read-only',effect:'existing-role-credential-refresh',sourceGateRequired:true,mayLaunchWorkload:false,mayMutateWorkloadOrInfrastructure:false},
+  presenceCheck:{shell:'bash',run:'if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then\n  printf \'%s\\n\' \'::error::Native GitHub OIDC context unavailable\'\n  exit 1\nfi','continue-on-error':false},
+  action:{uses:'aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd',with:{'role-to-assume':'${{ secrets.AWS_PREVIEW_ROLE_ARN }}','aws-region':'${{ env.AWS_REGION }}','mask-aws-account-id':true,'translate-env-variables':false,'unset-current-credentials':true,'role-duration-seconds':3600,'action-timeout-s':120},'continue-on-error':false},
+ },
  routes:[{"route":"deploy-preview","firstCredentialContainingStep":7,"baselineJobHash":"ee2c3b27a70a575c20c9872bfbd74f5e3f27d6902d5984f54e5d5139c13a13ee","baselinePredicateHash":"8e3c48e3ec6d043df5a6c51dbe8107d1ab1e5e5ee1d0d6a0eeb6538b56e99b66"},{"route":"deploy-prod","firstCredentialContainingStep":8,"baselineJobHash":"0db539998dfc7a16ac3be670b874fb4fb9419e0a4c1b360e06e7da8a97e2e118","baselinePredicateHash":"b54e5609398b5a45211e576d253588e18c2d35a05ef0d82b1eb309a8ce368181"},{"route":"runtime-cutover-prod","firstCredentialContainingStep":7,"baselineJobHash":"ef9fbd22eab6b983177051c6beaa50be6d11a15a1207c2435440efd7e51f6a3e","baselinePredicateHash":"d09d7f50d334b8e929aa3027c22b1465c73363bbb9d185a2a6ccddedecc7d641"},{"route":"runtime-cutover-preview","firstCredentialContainingStep":6,"baselineJobHash":"fa262bdf5ce8b468165a30a1f7ffa1163de5586adce97e5187191b83cf9a2aaf","baselinePredicateHash":"5db11cb0bb1df29e09aaf7f9b1962354b82eb7ee63b13a35be92d27dcc3f64bd"}],
  sourceJobs:{"verify-production-image-transition":"48c1c8ae6a77e5b8ee34106eb9269cba5c5a0a6565b2a5f0918e1a483455bc0e","build-image-transition-control":"b3c583dc8809a5bd8224a26e9f212769f3a11cb59aeb918728817ee74ec5d636"},
  baselineActionHashes:{".github/actions/runtime-cutover/action.yml":"588c6d2486e3ad679833dd3d3c6a8456a16917ef276ea39e8f4cbffa1cef32eb",".github/actions/runtime-recovery/action.yml":"6013fc992e1c6fd3b915eba368ec924173ce5499f0b888552b769f7cff07c2f9",".github/actions/runtime-cleanup/action.yml":"83b2bcc8e2e8ab6ca345643126dd3df97b4365fb832e667d9b975e5d9899c0ea"},

@@ -190,6 +190,21 @@ describe("workflow integration", () => {
       /\.ya?ml$/u.test(name),
     );
     const credentialJobs = [];
+    const previewCredentialSteps = [];
+    const expectedPreviewCredentialSteps = [
+      "Configure AWS credentials (OIDC)",
+      "ci_smoke_credentials_16",
+      "ci_smoke_credentials_17",
+      "ci_smoke_credentials_18",
+      "ci_smoke_credentials_19",
+      "ci_smoke_credentials_20",
+      "ci_smoke_credentials_21",
+      "ci_smoke_credentials_22",
+      "ci_smoke_credentials_23",
+      "ci_smoke_credentials_24",
+      "ci_smoke_credentials_25",
+      "ci_smoke_credentials_26",
+    ];
 
     for (const workflowFile of workflowFiles) {
       const workflow = parse(
@@ -204,6 +219,9 @@ describe("workflow integration", () => {
             continue;
           }
           credentialJobs.push(`${workflowFile}:${jobName}`);
+          if (workflowFile === "infra-ci.yml" && jobName === "deploy-preview") {
+            previewCredentialSteps.push(step.id ?? step.name);
+          }
           expect(
             step.with?.["mask-aws-account-id"],
             `${workflowFile}:${jobName}:${step.name ?? step.uses}`,
@@ -212,6 +230,7 @@ describe("workflow integration", () => {
       }
     }
 
+    expect(previewCredentialSteps).toEqual(expectedPreviewCredentialSteps);
     expect(credentialJobs.sort()).toEqual(
       [
         "infra-ci.yml:build-and-push-image",
@@ -220,7 +239,7 @@ describe("workflow integration", () => {
         "infra-ci.yml:build-human-acceptance-image",
         "infra-ci.yml:cleanup-failed-preview",
         "infra-ci.yml:cleanup-preview",
-        "infra-ci.yml:deploy-preview",
+        ...expectedPreviewCredentialSteps.map(() => "infra-ci.yml:deploy-preview"),
         "infra-ci.yml:deploy-prod",
         "infra-ci.yml:mnemo-nonroot-smoke",
         "infra-ci.yml:runtime-cutover-preview",

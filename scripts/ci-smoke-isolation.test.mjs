@@ -140,7 +140,9 @@ describe('all four promotion routes and shared composite',()=>{
   const b=baseline(),c=buildCiSmokePromotionRoutes(b);
   for(const row of CI_SMOKE_POLICY.rows.filter(r=>r.rule.kind==='safe-recovery'&&!r.callPath.includes('/.github/'))){
    const original=b.workflow.jobs[row.route].steps[Number(row.callPath.split('/')[1])];
-   expect(c.jobs[row.route].steps.find(s=>s.name===row.name)).toEqual(original);
+   const expected=row.callPath===CI_SMOKE_POLICY.previewCredentialRenewal.recoveryAnchor
+    ?{...original,if:'('+original.if+") && steps.ci_smoke_credentials_25.outcome == 'success'"}:original;
+   expect(c.jobs[row.route].steps.find(s=>s.name===row.name)).toEqual(expected);
   }
   c.jobs['deploy-prod'].steps.push({name:'hidden launch',run:'aws ecs run-task'});
   expect(()=>verifyCiSmokePromotionRoutes(b,c)).toThrow();

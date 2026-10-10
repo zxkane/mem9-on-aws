@@ -83,6 +83,18 @@ function targetCheckpoint(route,row,condition,role,stage){
   uses:gateUses,with:{mode:'target',phase:row.rule.phase},'continue-on-error':false};
 }
 
+function previewCredentialRenewal(row){
+ const rule=policy.previewCredentialRenewal,recovery=row?.callPath===rule.recoveryAnchor;
+ if(!row||!recovery&&!rule.normalAnchors.includes(row.callPath))return [];
+ need(row.route==='deploy-preview'&&(recovery?row.rule.kind==='safe-recovery':row.rule.phase==='prereadiness'),'CiSmokeRenewalScope');
+ const suffix=row.callPath.split('/').at(-1),checkId='ci_smoke_oidc_check_'+suffix,renewalId='ci_smoke_credentials_'+suffix;
+ const condition=recovery?rule.recoveryCondition:rule.normalCondition;
+ return [
+  {id:checkId,name:'Verify native OIDC context: '+row.callPath,if:condition,...copy(rule.presenceCheck)},
+  {id:renewalId,name:'Renew preview credentials: '+row.callPath,if:'('+condition+") && steps."+checkId+".outcome == 'success'",...copy(rule.action)},
+ ];
+}
+
 /** Pure reconstruction from an independently authenticated baseline. This is
  * also used by the source verifier, so unknown steps and hidden local actions
  * cannot escape classification merely by appearing after credentials. */
@@ -140,6 +152,11 @@ export function buildCiSmokePromotionRoutes({workflow,actions}){
    const call=policy.shared.parentCalls.find(c=>c.route===name&&c.baselineIndex===index);
    if(call){need(step.name===call.name&&step.uses==='./.github/actions/runtime-cutover','CiSmokeCompositeCaller');step.with={...step.with,...copy(call.withAdditions)};}
    const row=top.find(r=>r.callPath===name+'/'+index);
+   const renewal=previewCredentialRenewal(row);result.push(...renewal);
+   if(row?.callPath===policy.previewCredentialRenewal.recoveryAnchor){
+    need(renewal.length===2,'CiSmokeRenewalScope');
+    step.if='('+step.if+") && steps."+renewal[1].id+".outcome == 'success'";
+   }
    const existingPhases={
     'Verify protected image upgrade source':'preupdate',
     'Refresh image upgrade authorization before configure':'preconfigure',
