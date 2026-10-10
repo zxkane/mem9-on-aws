@@ -17,14 +17,29 @@ function enabled(expression,context){
   if(node.type==='BinaryExpression'&&node.operator==='==')return evaluate(node.left)===evaluate(node.right);
   if(node.type==='BinaryExpression'&&node.operator==='!=')return evaluate(node.left)!==evaluate(node.right);
   if(node.type==='CallExpression'&&node.callee.type==='Identifier'&&node.callee.name==='always'&&node.arguments.length===0)return true;
+  if(node.type==='CallExpression'&&node.callee.type==='Identifier'&&node.callee.name==='cancelled'&&node.arguments.length===0)return context.workflowCancelled===true;
   throw Error('Unsupported deployment condition: '+node.type);
  };
  return Boolean(evaluate(parseExpression(source)));
 }
+// GitHub's default success() includes the dependency chain, even when an
+// immediate dependency ran successfully after an intentionally skipped job.
+function scheduled(jobKey,context){
+ const job=workflow.jobs[jobKey],ancestors=new Set();
+ const visit=key=>{for(const parent of workflow.jobs[key].needs??[]){if(ancestors.has(parent))continue;ancestors.add(parent);visit(parent);}};
+ visit(jobKey);
+ if(!/\b(?:always|cancelled|failure|success)\s*\(/.test(job.if)){
+  for(const parent of ancestors){
+   if(!context.needs[parent])throw Error('Unmodeled dependency: '+parent);
+   if(context.needs[parent].result!=='success')return false;
+  }
+ }
+ return enabled(job.if,context);
+}
 function scenario(path,event='push',transition=false){
  const classification=classifyChangedPaths([path]);
  return {inputs:{runtime_cutover:false},github:{repository:'example/repository',event_name:event,event:{action:'synchronize',pull_request:{base:{ref:'main'},head:{repo:{full_name:'example/repository'}}}}},needs:{
-  changes:{outputs:{workload_changed:String(classification.workloadChanged),aws_mutation_required:String(classification.awsMutationRequired)}},
+  changes:{result:'success',outputs:{workload_changed:String(classification.workloadChanged),aws_mutation_required:String(classification.awsMutationRequired)}},
   'application-region':{result:'success'},typecheck:{result:'success'},
   'verify-production-image-transition':{result:event==='pull_request'?'skipped':'success',outputs:{image_transition:String(transition)}},
   'build-and-push-image':{result:'skipped'},'build-image-transition-control':{result:transition?'success':'skipped'},
@@ -32,6 +47,29 @@ function scenario(path,event='push',transition=false){
  }};
 }
 describe('deployment image dependency graph',()=>{
+ it('PR smoke runs after successful prerequisites with a skipped production ancestor',()=>{
+  const context=scenario('docker/mnemo-server/Dockerfile','pull_request');
+  context.needs['build-and-push-image']={result:'success',outputs:{mnemo_digest:'sha256:'+'a'.repeat(64)}};
+  expect(context.needs['verify-production-image-transition'].result).toBe('skipped');
+  expect(scheduled('build-and-push-image',context)).toBe(true);
+  expect(scheduled('mnemo-nonroot-smoke',context)).toBe(true);
+  context.needs['mnemo-nonroot-smoke'].result='success';
+  expect(scheduled('deploy-preview',context)).toBe(true);
+ });
+ it.each(['application-region','build-and-push-image'].flatMap(job=>['failure','cancelled','skipped'].map(result=>[job,result])))('smoke requires successful %s when its result is %s',(job,result)=>{
+  const context=scenario('docker/mnemo-server/Dockerfile','pull_request');
+  context.needs['build-and-push-image']={result:'success',outputs:{mnemo_digest:'sha256:'+'a'.repeat(64)}};
+  context.needs[job].result=result;
+  expect(scheduled('mnemo-nonroot-smoke',context)).toBe(false);
+ });
+ it.each(['cancelled','missing-digest','fork'])('smoke rejects %s',mode=>{
+  const context=scenario('docker/mnemo-server/Dockerfile','pull_request');
+  context.needs['build-and-push-image']={result:'success',outputs:{mnemo_digest:'sha256:'+'a'.repeat(64)}};
+  if(mode==='cancelled')context.workflowCancelled=true;
+  if(mode==='missing-digest')context.needs['build-and-push-image'].outputs.mnemo_digest='';
+  if(mode==='fork')context.github.event.pull_request.head.repo.full_name='untrusted/fork';
+  expect(scheduled('mnemo-nonroot-smoke',context)).toBe(false);
+ });
  for(const path of ['infra/ecs.ts','infra/bootstrap.ts'])for(const event of ['push','pull_request'])it(`${path} on ${event} reaches build, smoke and deployment`,()=>{
   const context=scenario(path,event);
   expect(context.needs.changes.outputs.workload_changed).toBe('false');

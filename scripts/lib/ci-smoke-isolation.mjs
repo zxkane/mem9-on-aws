@@ -30,7 +30,7 @@ const selected=(steps,name)=>{const matches=steps.filter(s=>s.name===name);need(
 export const CI_SMOKE_ROUTES=Object.freeze(policy.routes.map(r=>r.route));
 export const CI_SMOKE_JOB='mnemo-nonroot-smoke';
 export const CI_SMOKE_JOB_NAME='Mnemo nonroot smoke';
-export const CI_SMOKE_JOB_CONDITION="needs.build-and-push-image.result == 'success' && needs.build-and-push-image.outputs.mnemo_digest != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
+export const CI_SMOKE_JOB_CONDITION="!cancelled() && needs.application-region.result == 'success' && needs.build-and-push-image.result == 'success' && needs.build-and-push-image.outputs.mnemo_digest != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)";
 
 /** Keep both actual recipe hashes. Disabled legacy scripts remain in the
  * historical closure; no other preparation or DATA source delta is allowed. */

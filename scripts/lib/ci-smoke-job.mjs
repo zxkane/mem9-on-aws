@@ -7,7 +7,7 @@ export function ciSmokeJobDefinition(){
   'runs-on':"${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
   environment:"${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}",
   needs:['application-region','build-and-push-image'],
-  if:"needs.build-and-push-image.result == 'success' && needs.build-and-push-image.outputs.mnemo_digest != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)",
+  if:"!cancelled() && needs.application-region.result == 'success' && needs.build-and-push-image.result == 'success' && needs.build-and-push-image.outputs.mnemo_digest != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)",
   'timeout-minutes':15,
   permissions:{'id-token':'write',contents:'read',actions:'read'},
   env:{
