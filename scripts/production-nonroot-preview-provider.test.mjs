@@ -7,8 +7,8 @@ import {assertPreviewPhaseOperation} from './lib/production-nonroot-preview-oper
 import {verifySmokePhaseBundle} from './verify-ci-smoke-isolation.mjs';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 
-function fixture(){
- const source=previewProviderSourceFixture(),f=nonrootPreviewFixture({sourceTree:source.tree}),calls=[];
+function fixture(purposes){
+ const source=previewProviderSourceFixture(),f=nonrootPreviewFixture({sourceTree:source.tree,purposes}),calls=[];
  const clients={ssm:{send:async command=>{
   calls.push({api:command.constructor.name,input:command.input});
   return {Parameters:command.input.Names.flatMap(name=>f.parameters.has(name)?[f.parameters.get(name)]:[]),InvalidParameters:command.input.Names.filter(name=>!f.parameters.has(name))};
@@ -112,6 +112,23 @@ it('joins real backend observations and scoped source facts for exact hard-accep
  const bundle={kind:'nonroot-preview-phase-bundle',source:{sourceTree:f.scope.sourceTree},...result};
  expect(verifySmokePhaseBundle(bundle,{sourceReceiptHash:f.options.sourceReceiptHash,sourceTree:f.scope.sourceTree,phase:'prereadiness',now:f.options.clock(),route:'deploy-preview',step:'deploy-preview/20',effect:'credentialed-hard-acceptance'})).toEqual(result.phaseReceipt);
  expect(()=>assertPreviewPhaseOperation(result,{route:'deploy-preview',step:'deploy-preview/18',phase:'prereadiness'})).toThrow('NonrootPreviewOperationNotCovered');
+});
+it('keeps empty added capabilities in provider evidence while admitting the exact runtime-bootstrap guard',async()=>{
+ const f=fixture(['bootstrap-schema-seed','bootstrap-runtime-bootstrap']),backend=previewWorkloadFixture(f.scope),prefix=`arn:aws:ssm:${f.scope.region}:${f.scope.account}:parameter`;
+ backend.definition.containerDefinitions=backend.definition.containerDefinitions.map(c=>({...c,linuxParameters:{...c.linuxParameters,capabilities:{drop:['ALL'],add:[]}}}));
+ const raw=structuredClone(backend.definition);
+ for(const [name,p]of backend.parameters)f.parameters.set(name,{...p,Type:'String',ARN:prefix+name});
+ const original=f.clients.ecs.send;
+ f.clients.ecs.send=command=>f.definitions.has(command.input.taskDefinition)?original(command):backend.send('ecs',command);
+ const options={...f.options,sourceRevision:backend.sourceRevision,phase:'preupdate'},context=await collectNonrootPreviewTarget(f.clients,options),value=nonrootPreviewPhaseEvidence(context,{...options,now:options.clock()});
+ expect(value.phaseReceipt.coverage).toEqual(expect.arrayContaining(['backend-registration','backend-observation','bootstrap-purpose:bootstrap-schema-seed','bootstrap-purpose:bootstrap-runtime-bootstrap']));
+ expect(value.phaseEvidence.facts['backend-registration'].observation.taskDefinition).toEqual(raw);
+ expect(backend.definition).toEqual(raw);
+ expect(value.phaseEvidence.calls.find(c=>c.api==='DescribeTaskDefinitionCommand'&&c.requestHash===hash({taskDefinition:raw.taskDefinitionArn,include:['TAGS']})).responseHash).toBe(hash({taskDefinition:raw,tags:[]}));
+ const bundle={kind:'nonroot-preview-phase-bundle',source:{sourceTree:f.scope.sourceTree},...value},expected={sourceReceiptHash:options.sourceReceiptHash,sourceTree:f.scope.sourceTree,phase:'preupdate',now:options.clock(),route:'deploy-preview'};
+ expect(verifySmokePhaseBundle(bundle,{...expected,step:'deploy-preview/12',effect:'workload-mutation'})).toEqual(value.phaseReceipt);
+ expect(verifySmokePhaseBundle(bundle,{...expected,step:'deploy-preview/13',effect:'workload-launch'})).toEqual(value.phaseReceipt);
+ expect(assertPreviewPhaseOperation(value,{...expected,step:'deploy-preview/13'}).requirements).toContain('bootstrap-purpose:bootstrap-runtime-bootstrap');
 });
 it.each(['partial','duplicate','scope','version-drift','definition-drift','failed-read'])('rejects actual %s without source-only fallback',async defect=>{
  const f=fixture();

@@ -11,7 +11,7 @@ const requirements={
  'Remove conflicting Pulumi installation':[plan],
  'Deploy PR stage':[plan,inventory],
  'Drain preview service and previous bootstrap tasks':[plan,'backend-observation'],
- 'Run schema-bootstrap task (preview)':[plan,backend,bootstrap('bootstrap-schema-seed')],
+ 'Run schema-bootstrap task (preview)':[plan,backend,bootstrap('bootstrap-runtime-bootstrap')],
  'Deploy PR namespace enforcement':[plan,inventory],
  'Reconcile namespace-enforced preview ECS deployment':[plan,backend],
  'Verify preview runtime credentials (hard)':[plan,serving,bootstrap('bootstrap-runtime-verify')],

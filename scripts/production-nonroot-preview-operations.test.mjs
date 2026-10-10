@@ -14,6 +14,15 @@ it('bootstrap-only facts do not admit deployment, backend reconcile or arbitrary
   expect(operations.some(o=>['deploy-preview/11','deploy-preview/15','deploy-preview/18','deploy-preview/20'].includes(o.step))).toBe(false);
  }
 });
+it.each(['bootstrap-schema-seed','bootstrap-runtime-bootstrap'])('schema-bootstrap launch requires the runtime purpose, supplied %s',purpose=>{
+ const row=rows.find(r=>r.name==='Run schema-bootstrap task (preview)'),facts={
+  'planned-source-controls':{sourceTree:'a'.repeat(40)},'backend-registration':{synthetic:true},['bootstrap-purpose:'+purpose]:{synthetic:true},
+ };
+ const phaseEvidence={phase:row.rule.phase,facts,operations:previewOperationsForEvidence({phase:row.rule.phase,facts})},phaseReceipt={operationsHash:hash(phaseEvidence.operations)};
+ const check=()=>assertPreviewPhaseOperation({phaseEvidence,phaseReceipt},{route:row.route,step:row.callPath,phase:row.rule.phase});
+ if(purpose==='bootstrap-schema-seed')expect(check).toThrow('NonrootPreviewOperationNotCovered');
+ else expect(check().requirements).toEqual(['planned-source-controls','backend-registration','bootstrap-purpose:bootstrap-runtime-bootstrap']);
+});
 it('a real source plan plus observed absence admits only source-plan operations',()=>{
  const facts={'planned-source-controls':{sourceTree:'a'.repeat(40),files:[]},'stage-inventory':{state:'absent'}};
  const operations=previewOperationsForEvidence({phase:'preupdate',facts});

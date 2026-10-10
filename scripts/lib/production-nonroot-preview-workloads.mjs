@@ -8,7 +8,12 @@ const names=['llm-proxy','mnemo-server','qwen3-embed'];
 const same=(a,b)=>hash(a)===hash(b);
 const plain=value=>copyNonrootJson(JSON.parse(JSON.stringify(value)));
 const fields=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.slice().sort().join();
-const hardened=(name,c)=>same(c,dataLaunchPolicy(name,c))&&[...(c.environment??[]),...(c.secrets??[])].every(e=>!e.name.startsWith('LD_')&&!NONROOT_FORBIDDEN_ENVIRONMENT.includes(e.name));
+const hardened=(name,c)=>{
+ const comparison=structuredClone(c),capabilities=comparison.linuxParameters?.capabilities;
+ // Compare only absent/empty additions alike; retain the original observation.
+ if(Array.isArray(capabilities?.add)&&capabilities.add.length===0)delete capabilities.add;
+ return same(comparison,dataLaunchPolicy(name,c))&&[...(c.environment??[]),...(c.secrets??[])].every(e=>!e.name.startsWith('LD_')&&!NONROOT_FORBIDDEN_ENVIRONMENT.includes(e.name));
+};
 
 /** Only actual protected parameter values select resources. Definitions and
  * service/task observations remain separate facts: a prior or unhealthy task
