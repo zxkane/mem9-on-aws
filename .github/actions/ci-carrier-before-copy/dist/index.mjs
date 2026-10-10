@@ -149607,7 +149607,9 @@ var init_production_nonroot_launch = __esmMin((() => {
 		"preview-fixture-verify-repeated": "Mem9Bootstrap",
 		"post-runtime-fixture": "Mem9PostFixture",
 		"canary-fixture": "Mem9CanaryFixture",
-		"bootstrap-schema-seed": "Mem9Bootstrap"
+		"bootstrap-schema-seed": "Mem9Bootstrap",
+		"preview-namespace-benchmark": "Mem9Bootstrap",
+		"preview-namespace-connection-snapshot": "Mem9Bootstrap"
 	});
 	NONROOT_FORBIDDEN_ENVIRONMENT = Object.freeze([
 		"NODE_OPTIONS",

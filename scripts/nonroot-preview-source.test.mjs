@@ -46,6 +46,10 @@ describe('source-bound fixed preview purpose revisions',()=>{
   expect(rows).toHaveLength(1);
   const path='scripts/lib/nonroot-preview-source.mjs',bytes=readFileSync(new URL('./lib/nonroot-preview-source.mjs',import.meta.url));
   expect(rows[0].rule.entryFiles.filter(p=>p.path===path)).toEqual([{path,gitMode:'100644',sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length}]);
+  for(const pin of rows[0].rule.entryFiles){
+   const raw=readFileSync(new URL('../'+pin.path,import.meta.url));
+   expect(pin.sha256,pin.path).toBe(createHash('sha256').update(raw).digest('hex'));expect(pin.bytes,pin.path).toBe(raw.length);
+  }
   expect(rows[0].rule).toMatchObject({originalCondition:"always() && (failure() || cancelled()) && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
    normalGateIndependent:true,requiresOwnedIntent:true,mayStartRootTask:false,mayCreateFreshBusinessOperation:false,preserveOriginalDeadlines:true,failure:'hold-preserve-evidence'});
  });

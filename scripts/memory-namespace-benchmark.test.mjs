@@ -148,7 +148,11 @@ describe("preview benchmark packaging and runner", () => {
       "utf8",
     );
     expect(runner).toMatch(/\^pr-\[1-9\]\[0-9\]\*\$/u);
-    expect(runner).toContain("MEM9_BOOTSTRAP_OPERATION");
+    expect(runner).toContain("namespace-load");
+    expect(runner).toContain("namespace-recheck");
+    expect(runner).not.toContain('name:"MEM9_BOOTSTRAP_OPERATION"');
+    expect(runner).not.toContain('/task-def-arn');
+    expect(runner).toContain('--disable-execute-command');
     expect(runner).toContain("benchmark");
     expect(runner).toContain("MEM9_NAMESPACE_BENCHMARK_SAMPLES");
     expect(runner).toContain("MEM9_NAMESPACE_BENCHMARK_WARMUPS");

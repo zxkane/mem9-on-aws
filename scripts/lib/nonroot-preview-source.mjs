@@ -21,8 +21,13 @@ const operationByPurpose=Object.freeze({
  'preview-fixture-verify-planned':'consolidation-preview-verify-planned',
  'preview-fixture-verify-executed':'consolidation-preview-verify-executed',
  'preview-fixture-verify-repeated':'consolidation-preview-verify-repeated',
+ 'preview-namespace-benchmark':'benchmark',
+ 'preview-namespace-connection-snapshot':'connection-snapshot',
 });
 export const NONROOT_PREVIEW_BOOTSTRAP_PURPOSES=Object.freeze(Object.keys(operationByPurpose));
+const namespacePurpose=p=>p==='preview-namespace-benchmark'||p==='preview-namespace-connection-snapshot';
+const namespaceEnvironment=Object.freeze(['MEM9_STAGE','MEM9_DB_HOST','MEM9_DB_PORT','MEM9_DB_NAME','MEM9_COGNITO_ISSUER','AWS_REGION']);
+const namespaceOptionalEnvironment=Object.freeze(['MEM9_COGNITO_USER_POOL_ID']);
 const purpose=v=>need(typeof v==='string'&&Object.hasOwn(operationByPurpose,v),'NonrootPreviewPurpose');
 const scopeKeys=['stage','account','region','sourceTree'];
 function checkedScope(value){
@@ -53,12 +58,18 @@ function fixedContainer(container,selected,scope){
  const operation=operationByPurpose[selected];
  if(operation===null){need(!Object.hasOwn(env,'MEM9_BOOTSTRAP_OPERATION')&&!Object.hasOwn(env,'MEM9_RUNTIME_BOOTSTRAP_VERSION'));}
  else {need(env.MEM9_BOOTSTRAP_OPERATION===operation);if(selected.startsWith('bootstrap-'))need(env.MEM9_RUNTIME_BOOTSTRAP_VERSION==='1');}
+ if(namespacePurpose(selected)){
+  need(namespaceEnvironment.every(key=>typeof env[key]==='string'&&env[key].length>0),'NonrootPreviewNamespaceInputs');
+  need(Object.keys(env).every(key=>[...namespaceEnvironment,...namespaceOptionalEnvironment,'MEM9_BOOTSTRAP_OPERATION'].includes(key)),'NonrootPreviewNamespaceInputs');
+  need(container.secrets?.length===1&&container.secrets[0].name==='MEM9_DB_SECRET'&&container.secrets[0].valueFrom.length>0,'NonrootPreviewNamespaceSecret');
+ }
  const expected=controlLaunchPolicy(selected,container);same(comparableContainer(container),comparableContainer(expected));
  return container;
 }
 
-/** Exact finite metadata delta; all roles, secret references and unrelated
- * registration fields are copied. The returned body is not deployment authority. */
+/** Exact finite metadata delta. Namespace probes retain only their existing DB
+ * secret; other purposes preserve the original secret set. Roles and unrelated
+ * registration fields are copied. This is not deployment authority. */
 export function previewBootstrapRegistration(original,selected,scopeValue){
  const scope=checkedScope(scopeValue);purpose(selected);
  const body=structuredClone(copy(original));need(object(body));familyScope(body.family,scope);
@@ -86,8 +97,12 @@ export function previewBootstrapContainer(original,selected,stage){
  if(operation!==null)c.environment.push({name:'MEM9_BOOTSTRAP_OPERATION',value:operation});
  // Runtime/admin paths require this existing version marker; fixture paths
  // preserve it when present, while schema seed explicitly excludes it.
- if(selected.startsWith('bootstrap-')&&operation!==null||operation!==null&&rows.some(e=>e.name==='MEM9_RUNTIME_BOOTSTRAP_VERSION'))
+ if(!namespacePurpose(selected)&&(selected.startsWith('bootstrap-')&&operation!==null||operation!==null&&rows.some(e=>e.name==='MEM9_RUNTIME_BOOTSTRAP_VERSION')))
   c.environment.push({name:'MEM9_RUNTIME_BOOTSTRAP_VERSION',value:'1'});
+ if(namespacePurpose(selected)){
+  c.environment=c.environment.filter(e=>[...namespaceEnvironment,...namespaceOptionalEnvironment,'MEM9_BOOTSTRAP_OPERATION'].includes(e.name));
+  c.secrets=(c.secrets??[]).filter(s=>s.name==='MEM9_DB_SECRET');
+ }
  const target=controlLaunchPolicy(selected,c);
  fixedContainer(target,selected,{stage});return target;
 }
@@ -169,6 +184,18 @@ export function verifyPreviewRegistrationReadback(registration,value){
  same(comparableRegistration(material),comparableRegistration(expected));return o;
 }
 
+/** Prospective size only: 64-byte hashes and the longest safe revision width.
+ * Called before additional registrations; no projected row is emitted as evidence. */
+export function assertPreviewPurposeMapFits(input){
+ const v=copy(input);exact(v,['scope','family','defaultPurpose','purposes']);
+ const scope=checkedScope(v.scope);familyScope(v.family,scope);purpose(v.defaultPurpose);
+ need(Array.isArray(v.purposes)&&v.purposes.length>0&&v.purposes.length<=NONROOT_PREVIEW_BOOTSTRAP_PURPOSES.length&&new Set(v.purposes).size===v.purposes.length&&v.purposes.includes(v.defaultPurpose));
+ v.purposes.forEach(purpose);
+ const bindings=v.purposes.map((selected,index)=>({purpose:selected,taskDefinitionArn:`arn:aws:ecs:${scope.region}:${scope.account}:task-definition/${v.family}:${Number.MAX_SAFE_INTEGER-index}`,definitionHash:'0'.repeat(64)}));
+ const bytes=Buffer.byteLength(JSON.stringify({version:1,kind:'nonroot-preview-purpose-map',...scope,family:v.family,containerName:'Mem9Bootstrap',defaultPurpose:v.defaultPurpose,bindings}));
+ need(bytes<=4096,'NonrootPreviewMapSize');return bytes;
+}
+
 export function inspectNonrootPreviewPurposeMap(value,scopeValue){
  const scope=checkedScope(scopeValue),v=typeof value==='string'?parseNonrootJson(value,{maxBytes:4096}):copy(value);
  exact(v,['version','kind',...scopeKeys,'family','containerName','defaultPurpose','bindings']);
@@ -209,6 +236,14 @@ export function validateNonrootPreviewOverrides(selected,value,{now=Date.now(),c
  purpose(selected);const v=copy(value);exact(v,['containerOverrides']);need(v.containerOverrides.length===1);
  need(containerName==='Mem9Bootstrap'||containerName==='Mem9PostFixture'&&selected.startsWith('preview-fixture-'));
  const c=v.containerOverrides[0];exact(c,['name','environment']);need(c.name===containerName);const env=environmentRows(c.environment);
+ if(namespacePurpose(selected)){
+  const allowed=selected==='preview-namespace-benchmark'?['MEM9_NAMESPACE_BENCHMARK_SAMPLES','MEM9_NAMESPACE_BENCHMARK_WARMUPS']:[];
+  for(const [key,val]of Object.entries(env)){
+   need(allowed.includes(key)&&/^(?:0|[1-9][0-9]*)$/.test(val),'NonrootPreviewOverride');
+   const n=Number(val);need(Number.isSafeInteger(n)&&(key==='MEM9_NAMESPACE_BENCHMARK_SAMPLES'?n>=20&&n<=500:n>=0&&n<=100),'NonrootPreviewOverride');
+  }
+  return v;
+ }
  const runtime=selected.startsWith('bootstrap-')&&selected!=='bootstrap-schema-seed';
  const allowed=runtime?['MEM9_RUNTIME_INVOCATION','MEM9_RUNTIME_BOOTSTRAP_DEADLINE']:selected==='bootstrap-schema-seed'?[]:
   ['MEM9_PREVIEW_EXPECTED_GENERATION','MEM9_PREVIEW_OPERATOR_NONCE','MEM9_PREVIEW_OPERATOR_DEADLINE','MEM9_PREVIEW_BATCH_BOUNDARY_CROSSINGS'];

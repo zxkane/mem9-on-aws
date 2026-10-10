@@ -24,7 +24,7 @@ import type { DbOutputs } from "./db";
 import { workloadImage, accountId, applicationRegion } from "./ecr";
 import {execFileSync} from 'node:child_process';
 import {ECSClient,DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
-import {previewBootstrapContainer,previewBootstrapRegistration,previewRegistrationFromProviderArgs,buildNonrootPreviewPurposeMap} from '../scripts/lib/nonroot-preview-source.mjs';
+import {previewBootstrapContainer,previewBootstrapRegistration,previewRegistrationFromProviderArgs,buildNonrootPreviewPurposeMap,assertPreviewPurposeMapFits} from '../scripts/lib/nonroot-preview-source.mjs';
 import {parseNonrootJson} from '../scripts/lib/production-nonroot-contracts.mjs';
 import {applyProductionNonrootTask,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 import type {PreviewBootstrapPurpose,NonrootPreviewScope,NonrootPreviewMapInput} from '../scripts/lib/nonroot-preview-source.mjs';
@@ -103,6 +103,7 @@ export function bootstrap(
     if(runtime.probeParameterArn)previewPurposes.push('bootstrap-admin-probe','bootstrap-admin-probe-cleanup');
   }
   if(consolidationPreview&&!production?.active)previewPurposes.push('preview-fixture-setup','preview-fixture-pause','preview-fixture-verify-planned','preview-fixture-verify-executed','preview-fixture-verify-repeated');
+  if(numericPreview)previewPurposes.push('preview-namespace-benchmark','preview-namespace-connection-snapshot');
   let previewGenerated:Output<string>|undefined;
 
   // The one-shot task. arm64, sized small (psql + jq are light — the DDL is
@@ -190,6 +191,7 @@ export function bootstrap(
       const scope=$jsonStringify({stage:$app.stage,account:accountId(),region:applicationRegion()}).apply(raw=>({...JSON.parse(raw),sourceTree:previewSourceTree()}) as NonrootPreviewScope);
       return previewGenerated.apply(raw=>scope.apply(context=>{
         const original=previewRegistrationFromProviderArgs(JSON.parse(raw));
+        assertPreviewPurposeMapFits({scope:context,family:original.family as string,defaultPurpose,purposes:previewPurposes});
         // ECS revisions in this family must register sequentially, including
         // the original definition owned by SST.
         let previousDefinition=definition;

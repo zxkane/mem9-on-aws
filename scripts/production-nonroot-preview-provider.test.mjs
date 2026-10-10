@@ -2,13 +2,13 @@ import {it,expect} from 'vitest';
 import {nonrootPreviewFixture} from './nonroot-preview.fixture.mjs';
 import {collectNonrootPreviewTarget,nonrootPreviewPhaseEvidence} from './lib/production-nonroot-preview-provider.mjs';
 import {verifyImageSecurityDeployment} from './verify-image-security-deployment.mjs';
-import {previewProviderSourceFixture,previewWorkloadFixture,previewRetainedWorkloadFixture} from './production-nonroot-preview-provider.fixture.mjs';
+import {previewProgramSourceFixture,previewWorkloadFixture,previewRetainedWorkloadFixture} from './production-nonroot-preview-provider.fixture.mjs';
 import {assertPreviewPhaseOperation} from './lib/production-nonroot-preview-operations.mjs';
 import {verifySmokePhaseBundle} from './verify-ci-smoke-isolation.mjs';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 
 function fixture(purposes){
- const source=previewProviderSourceFixture(),f=nonrootPreviewFixture({sourceTree:source.tree,purposes}),calls=[];
+ const source=previewProgramSourceFixture(),f=nonrootPreviewFixture({sourceTree:source.tree,purposes}),calls=[];
  const clients={ssm:{send:async command=>{
   calls.push({api:command.constructor.name,input:command.input});
   return {Parameters:command.input.Names.flatMap(name=>f.parameters.has(name)?[f.parameters.get(name)]:[]),InvalidParameters:command.input.Names.filter(name=>!f.parameters.has(name))};

@@ -95,6 +95,7 @@ const controlNames=Object.freeze({
   'preview-fixture-verify-executed':'Mem9Bootstrap','preview-fixture-verify-repeated':'Mem9Bootstrap',
   'post-runtime-fixture':'Mem9PostFixture','canary-fixture':'Mem9CanaryFixture',
   'bootstrap-schema-seed':'Mem9Bootstrap',
+  'preview-namespace-benchmark':'Mem9Bootstrap','preview-namespace-connection-snapshot':'Mem9Bootstrap',
 });
 /** CONTROL replacement is an explicit purpose mapping. This does not admit the
  * operation (including denied purposes). No PATH lookup selects the Node binary. */

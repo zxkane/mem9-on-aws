@@ -8,6 +8,7 @@ import {previewOperationsForEvidence} from './production-nonroot-preview-operati
 import {collectPreviewWorkloadFacts} from './production-nonroot-preview-workloads.mjs';
 import {collectPreviewPostRuntimeFacts} from './production-nonroot-preview-postruntime.mjs';
 import {nonrootControlMetadataReads} from './production-nonroot-control-reads.mjs';
+import {captureNonrootPreviewProgramFacts} from './production-nonroot-preview-programs.mjs';
 
 const contexts=new WeakMap(),phases=new Set(['preupdate','preconfigure','presst','prereadiness']);
 const need=(ok,code='NonrootPreviewTargetInvalid')=>{if(!ok)throw Error(code);};
@@ -33,6 +34,7 @@ export async function collectNonrootPreviewTarget(clients,{stage,account,region,
  need(Number.isSafeInteger(startedMs)&&startedMs>0);
  const calls=[],facts={};
  if(sourceContext)facts['planned-source-controls']=await captureNonrootPreviewSourcePlan(sourceContext,scope);
+ if(sourceContext&&phase==='prereadiness')Object.assign(facts,await captureNonrootPreviewProgramFacts(sourceContext,scope));
  const send=async(service,command)=>{
   need(clock()>=startedMs&&clock()<startedMs+300000,'NonrootPreviewPhaseExpired');
   const event={service,api:command.constructor.name,requestHash:hash(command.input),status:'attempted'};calls.push(event);

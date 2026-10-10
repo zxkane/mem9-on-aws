@@ -7,7 +7,7 @@ import {DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
 import {GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {GetRoleCommand,ListRolePoliciesCommand,ListAttachedRolePoliciesCommand,GetRolePolicyCommand} from '@aws-sdk/client-iam';
 import {inspectPostRuntimePurposeMap,selectGuardedPostRuntimeRoute,validatePostRuntimeDefinition,postRuntimeTaskTrust,postRuntimeExecutionPolicy} from './post-runtime-preview-route.mjs';
-import {inspectNonrootPreviewPurposeMap,selectNonrootPreviewPurpose,verifyNonrootPreviewPurposeReadback,validateNonrootPreviewOverrides} from './nonroot-preview-source.mjs';
+import {inspectNonrootPreviewPurposeMap,selectNonrootPreviewPurpose,verifyNonrootPreviewPurposeReadback,validateNonrootPreviewOverrides,previewBootstrapPurposeForOperation} from './nonroot-preview-source.mjs';
 import {parseNonrootJson,copyNonrootJson} from './production-nonroot-contracts.mjs';
 import {verifyCanaryFixtureImageIndex} from './production-canary-material.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
@@ -125,19 +125,26 @@ export async function revalidatePostRuntimeOperator(clients,binding,options,chec
 // The operation catalog is fixed; stdin never supplies arbitrary CLI arguments.
 async function bootstrapCli(){
   const region=process.env.AWS_REGION,stage=process.env.STAGE,mode=process.argv[2];
-  if(!['bootstrap-load','bootstrap-recheck'].includes(mode))fail('NonrootPreviewCommand');
+  if(process.argv.length!==3||!['bootstrap-load','bootstrap-recheck','namespace-load','namespace-recheck'].includes(mode))fail('NonrootPreviewCommand');
+  let namespacePurpose;
+  if(mode.startsWith('namespace-')){
+    const operation=process.env.MEM9_PREVIEW_OBSERVATION_OPERATION;
+    if(!['benchmark','connection-snapshot'].includes(operation))fail('NonrootPreviewCommand');
+    namespacePurpose=previewBootstrapPurposeForOperation(operation);
+  }
   const clients={
     sts:{send:()=>cli(['sts','get-caller-identity','--region',region])},
-    ssm:{send:c=>cli(['ssm','get-parameters','--names',...c.input.Names,'--region',region])},
+    ssm:{send:c=>cli(['ssm','get-parameters','--names',...c.input.Names,'--no-with-decryption','--region',region])},
     ecs:{send:c=>cli(['ecs','describe-task-definition','--task-definition',c.input.taskDefinition,'--include','TAGS','--region',region])},
   };
   const sourceTree=await nonrootPreviewSourceTree();
-  if(mode==='bootstrap-load'){
-    process.stdout.write(JSON.stringify(await loadNonrootPreviewBootstrap(clients,{stage,region,sourceTree})));return;
+  if(mode==='bootstrap-load'||mode==='namespace-load'){
+    process.stdout.write(JSON.stringify(await loadNonrootPreviewBootstrap(clients,{stage,region,sourceTree,...(namespacePurpose?{purpose:namespacePurpose}:{})})));return;
   }
   const input=parseNonrootJson(await readFile('/dev/stdin','utf8'));
   if(!input||Object.keys(input).sort().join()!=='binding,overrides'||input.binding.scope.stage!==stage||input.binding.scope.region!==region||input.binding.scope.sourceTree!==sourceTree)fail('NonrootPreviewScope');
-  await revalidateNonrootPreviewBootstrap(clients,input.binding);
+  if(namespacePurpose&&input.binding.purpose!==namespacePurpose)fail('NonrootPreviewPurpose');
   validateNonrootPreviewOverrides(input.binding.purpose,input.overrides);
+  await revalidateNonrootPreviewBootstrap(clients,input.binding);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)bootstrapCli().catch(()=>{process.stderr.write('NonrootPreviewRejected\n');process.exitCode=1;});

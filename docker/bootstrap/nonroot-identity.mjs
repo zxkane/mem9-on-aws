@@ -78,6 +78,20 @@ export function resolveGuardPurpose(purpose,env){
   return Object.freeze({kind:'module',module:base+'production-consolidation-operator.mjs',operation});
  }
  if(!isPreview)fail('NonrootPurpose');
+ if(purpose==='preview-namespace-benchmark'||purpose==='preview-namespace-connection-snapshot'){
+  const operation=purpose==='preview-namespace-benchmark'?'benchmark':'connection-snapshot';
+  const required=['MEM9_STAGE','MEM9_DB_HOST','MEM9_DB_PORT','MEM9_DB_NAME','MEM9_COGNITO_ISSUER','AWS_REGION'];
+  const counts=operation==='benchmark'?['MEM9_NAMESPACE_BENCHMARK_SAMPLES','MEM9_NAMESPACE_BENCHMARK_WARMUPS']:[];
+  const allowed=[...required,'MEM9_COGNITO_USER_POOL_ID','MEM9_BOOTSTRAP_OPERATION','MEM9_DB_SECRET',...counts];
+  if(env.MEM9_BOOTSTRAP_OPERATION!==operation||required.some(key=>typeof env[key]!=='string'||!env[key])||
+   Object.keys(env).some(key=>key.startsWith('MEM9_')&&!allowed.includes(key))||env.MNEMO_DSN!==undefined)fail('NonrootPurpose');
+  for(const key of counts)if(env[key]!==undefined){
+   const n=Number(env[key]);
+   if(!/^(?:0|[1-9][0-9]*)$/.test(env[key])||!Number.isSafeInteger(n)||
+    (key==='MEM9_NAMESPACE_BENCHMARK_SAMPLES'?(n<20||n>500):(n<0||n>100)))fail('NonrootPurpose');
+  }
+  return Object.freeze({kind:'module',module:'/bootstrap/operator/operator-entrypoint.mjs',operation});
+ }
  if(purpose==='canary-fixture'){
   const identity=parseGuardJson(env.MEM9_CANARY_FIXTURE_IDENTITY,2048);
   const keys=['stage','runId','runAttempt','commit','sourceTree','coordinatorDigest','schemaDigest','operatorDigest','nonce','deadlineMs'];

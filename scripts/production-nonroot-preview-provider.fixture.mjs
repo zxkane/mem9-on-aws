@@ -8,6 +8,44 @@ import {PREVIEW_SOURCE_PLAN_FILES} from './lib/production-nonroot-preview-provid
 import {nonrootPostRuntimeFixture} from './nonroot-preview.fixture.mjs';
 import {postRuntimeCredentialReferences,postRuntimeTaskTrust,postRuntimeExecutionPolicy} from './lib/post-runtime-preview-route.mjs';
 import {inspectDataRelease} from './lib/production-data-release.mjs';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+
+const committedBlobs=new Map();
+/** Full source membership for program-closure tests. Git builds the synthetic
+ * tree in a disposable repository; no source repository object/index is written.
+ * Dirty source bytes and the new program reader are included before hashing. */
+export function previewProgramSourceFixture({replace={},corrupt={}}={}){
+ const root=fileURLToPath(new URL('../',import.meta.url)),directory=mkdtempSync(join(tmpdir(),'preview-program-source-'));
+ const readGit=args=>execFileSync('git',['--no-optional-locks','-c','core.fsmonitor=false',...args],{
+  cwd:root,maxBuffer:16777216,stdio:['pipe','pipe','pipe'],env:{...process.env,GIT_NO_LAZY_FETCH:'1'},
+ });
+ try{
+  const entries=readGit(['ls-tree','-r','-z','--full-tree','HEAD']).toString().split('\0').filter(Boolean).map(row=>{
+   const [metadata,path]=row.split('\t'),[mode,type,oid]=metadata.split(' ');return {path,mode,type,oid};
+  });
+  const byPath=new Map(entries.map(e=>[e.path,e])),blobs=new Map();
+  const dirty=readGit(['diff','--name-only','-z','HEAD']).toString().split('\0').filter(Boolean);
+  const changed=new Map([...dirty,'scripts/lib/production-nonroot-preview-programs.mjs'].map(path=>[path,readFileSync(join(root,path))]));
+  for(const [path,value]of Object.entries(replace))changed.set(path,value===null?null:Buffer.from(value));
+  for(const [path,raw]of changed){
+   if(raw===null){byPath.delete(path);continue;}
+   const oid=createHash('sha1').update('blob '+raw.length+'\0').update(raw).digest('hex');
+   byPath.set(path,{path,mode:byPath.get(path)?.mode??'100644',type:'blob',oid});blobs.set(oid,raw);
+  }
+  const git=(args,input)=>execFileSync('git',args,{cwd:directory,input,encoding:'utf8',stdio:['pipe','pipe','pipe']}).trim();
+  git(['init','--quiet']);
+  git(['update-index','--index-info'],[...byPath.values()].map(e=>`${e.mode} ${e.oid}\t${e.path}\n`).join(''));
+  const tree=git(['write-tree','--missing-ok']);
+  const context=createControlSourceContext({tree,entries:[...byPath.values()]},async(oid,path)=>{
+   if(Object.hasOwn(corrupt,path))return Buffer.from(corrupt[path]);
+   if(blobs.has(oid))return blobs.get(oid);
+   if(!committedBlobs.has(oid))committedBlobs.set(oid,readGit(['cat-file','blob',oid]));
+   return committedBlobs.get(oid);
+  });
+  return {tree,context};
+ }finally{rmSync(directory,{recursive:true,force:true});}
+}
 
 /** Synthetic checkout built with real Git object hashing. No cloud observation
  * or execution authority is produced by this source fixture. */

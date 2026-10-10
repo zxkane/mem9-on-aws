@@ -15802,8 +15802,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-launch.mjs",
-      "sha256": "8fcfa0fd905492d7ad63b10e84c8f008717c78719dc2002d414ad26957c654ae",
-      "bytesLength": 20662
+      "sha256": "e66c8693781b84fd79e384b85ad7aaf07b19997b5c44ecf7a681384523c1fc86",
+      "bytesLength": 20767
     },
     {
       "path": "scripts/lib/production-nonroot-original-issuer-accounting.mjs",
@@ -15883,7 +15883,7 @@
   ],
   "output": {
     "path": ".github/actions/ci-carrier-before-copy/dist/index.mjs",
-    "sha256": "0db79c1f3dbcb8a97d875cf47c8cc4ba30130cada6035bada2a0cd656c7d8811",
-    "bytesLength": 6163997
+    "sha256": "ae6bec60f74699e82279f7fdf3ffd784ae729456792684877e42ad29a6b38a6a",
+    "bytesLength": 6164107
   }
 }

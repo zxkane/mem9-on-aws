@@ -2,7 +2,8 @@ import type {JsonRef,NonrootJson,DeepReadonly} from './production-nonroot-contra
 export type PreviewBootstrapPurpose =
  | 'bootstrap-schema-seed' | 'bootstrap-runtime-bootstrap' | 'bootstrap-runtime-verify'
  | 'bootstrap-admin-probe' | 'bootstrap-admin-probe-cleanup' | 'preview-fixture-setup'
- | 'preview-fixture-pause' | 'preview-fixture-verify-planned' | 'preview-fixture-verify-executed' | 'preview-fixture-verify-repeated';
+ | 'preview-fixture-pause' | 'preview-fixture-verify-planned' | 'preview-fixture-verify-executed' | 'preview-fixture-verify-repeated'
+ | 'preview-namespace-benchmark' | 'preview-namespace-connection-snapshot';
 export const NONROOT_PREVIEW_BOOTSTRAP_PURPOSES: readonly PreviewBootstrapPurpose[];
 export interface NonrootPreviewScope {stage:string;account:string;region:string;sourceTree:string}
 export interface PreviewPurposeBinding {purpose:PreviewBootstrapPurpose;taskDefinitionArn:string;definitionHash:string}
@@ -24,6 +25,7 @@ export function previewRegistrationFromProviderArgs(input:unknown):Readonly<Reco
 export function verifyPreviewRegistrationReadback(registration:unknown,observation:unknown):NonrootPreviewObservation;
 export function inspectNonrootPreviewPurposeMap(value:unknown,scope:NonrootPreviewScope):NonrootPreviewPurposeMapV1;
 export function buildNonrootPreviewPurposeMap(input:NonrootPreviewMapInput):NonrootPreviewPurposeMapV1;
+export function assertPreviewPurposeMapFits(input:{scope:NonrootPreviewScope;family:string;defaultPurpose:PreviewBootstrapPurpose;purposes:readonly PreviewBootstrapPurpose[]}):number;
 export function selectNonrootPreviewPurpose(value:unknown,purpose:PreviewBootstrapPurpose,scope:NonrootPreviewScope):Readonly<PreviewPurposeBinding>;
 export function verifyNonrootPreviewPurposeReadback(value:unknown,purpose:PreviewBootstrapPurpose,observation:unknown,scope:NonrootPreviewScope):NonrootPreviewObservation;
 export function validateNonrootPreviewOverrides(purpose:PreviewBootstrapPurpose,value:unknown,options?:{now?:number;containerName?:'Mem9Bootstrap'|'Mem9PostFixture'}):NonrootJson;

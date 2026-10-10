@@ -20,11 +20,17 @@ case "$OPERATION:$EVENT" in
     exit 2
     ;;
 esac
-[[ "$SAMPLES" =~ ^[0-9]+$ && "$WARMUPS" =~ ^[0-9]+$ ]] || {
-  echo "::error::benchmark sample counts must be integers"
+if [[ "$OPERATION" == "benchmark" ]]; then
+  [[ "$SAMPLES" =~ ^[1-9][0-9]*$ && ${#SAMPLES} -le 3 &&
+     "$WARMUPS" =~ ^(0|[1-9][0-9]*)$ && ${#WARMUPS} -le 3 ]] &&
+    (( SAMPLES >= 20 && SAMPLES <= 500 && WARMUPS <= 100 )) || {
+    echo "::error::benchmark counts are outside the fixed bounds"
+    exit 2
+  }
+elif [[ -v MEM9_NAMESPACE_BENCHMARK_SAMPLES || -v MEM9_NAMESPACE_BENCHMARK_WARMUPS ]]; then
+  echo "::error::connection snapshots do not accept benchmark counts"
   exit 2
-}
-PREFIX="/mem9-on-aws/${STAGE}/bootstrap"
+fi
 TASK_ARN=""
 CLUSTER=""
 TASK_STOPPED=false
@@ -73,54 +79,48 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-ssm() {
-  aws ssm get-parameter \
-    --name "$1" \
-    --region "$REGION" \
-    --query Parameter.Value \
-    --output text
-}
-
-CLUSTER=$(ssm "${PREFIX}/cluster-name")
-TASK_DEF=$(ssm "${PREFIX}/task-def-arn")
-TASK_SG=$(ssm "${PREFIX}/task-sg-id")
-SUBNETS_CSV=$(ssm "${PREFIX}/subnet-ids")
-TASK_DEF_JSON=$(aws ecs describe-task-definition \
-  --task-definition "$TASK_DEF" \
-  --region "$REGION" \
-  --output json)
+# Select the exact source-bound purpose revision, never the default bootstrap
+# revision plus an operation override. Both load and recheck verify the caller,
+# all four protected metadata values and the full definition including tags.
+PREVIEW_BINDING_JSON=$(AWS_REGION="$REGION" MEM9_PREVIEW_OBSERVATION_OPERATION="$OPERATION" \
+  node "$ROOT/scripts/lib/post-runtime-preview-aws.mjs" namespace-load)
+CLUSTER=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.cluster')
+TASK_DEF=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.binding.taskDefinitionArn')
+TASK_SG=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.securityGroup')
+SUBNETS=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -c '.subnets')
+TASK_DEF_JSON=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -c '.observation')
 CONTAINER=$(printf '%s' "$TASK_DEF_JSON" | jq -er \
   '.taskDefinition.containerDefinitions[0].name')
 LOG_GROUP=$(printf '%s' "$TASK_DEF_JSON" | jq -er \
   '.taskDefinition.containerDefinitions[0].logConfiguration.options["awslogs-group"]')
 LOG_PREFIX=$(printf '%s' "$TASK_DEF_JSON" | jq -er \
   '.taskDefinition.containerDefinitions[0].logConfiguration.options["awslogs-stream-prefix"]')
-SUBNETS=$(printf '%s' "$SUBNETS_CSV" | jq -Rc 'split(",")')
 NETWORK=$(jq -cn --argjson subnets "$SUBNETS" --arg sg "$TASK_SG" '
   {awsvpcConfiguration:{
     subnets:$subnets,
     securityGroups:[$sg],
     assignPublicIp:"DISABLED"
   }}')
-OVERRIDES=$(jq -cn \
-  --arg container "$CONTAINER" \
-  --arg operation "$OPERATION" \
-  --arg samples "$SAMPLES" \
-  --arg warmups "$WARMUPS" '
-  {containerOverrides:[{
-    name:$container,
-    environment:[
-      {name:"MEM9_BOOTSTRAP_OPERATION",value:$operation},
+if [[ "$OPERATION" == "benchmark" ]]; then
+  OVERRIDES=$(jq -cn --arg container "$CONTAINER" --arg samples "$SAMPLES" --arg warmups "$WARMUPS" '
+    {containerOverrides:[{name:$container,environment:[
       {name:"MEM9_NAMESPACE_BENCHMARK_SAMPLES",value:$samples},
       {name:"MEM9_NAMESPACE_BENCHMARK_WARMUPS",value:$warmups}
-    ]
-  }]}')
+    ]}]}')
+else
+  OVERRIDES=$(jq -cn --arg container "$CONTAINER" '{containerOverrides:[{name:$container,environment:[]}]}')
+fi
+
+jq -cn --argjson binding "$PREVIEW_BINDING_JSON" --argjson overrides "$OVERRIDES" \
+  '{binding:$binding,overrides:$overrides}' | AWS_REGION="$REGION" MEM9_PREVIEW_OBSERVATION_OPERATION="$OPERATION" \
+  node "$ROOT/scripts/lib/post-runtime-preview-aws.mjs" namespace-recheck
 
 RUN=$(aws ecs run-task \
   --cluster "$CLUSTER" \
   --task-definition "$TASK_DEF" \
   --launch-type FARGATE \
   --count 1 \
+  --disable-execute-command \
   --network-configuration "$NETWORK" \
   --overrides "$OVERRIDES" \
   --region "$REGION" \

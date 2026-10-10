@@ -5,6 +5,7 @@ import {openCiSmokeAcquisition,acquisitionOwnerKey,createCiSmokeAcquisitionConfi
 import {hash,sha,zero,prepaidSlotBudget,validCheckpoint,parseAcquisitionJson} from './lib/ci-smoke-acquisition-format.mjs';
 import {createNonrootBudgetedReads} from './lib/production-nonroot-budget-transport.mjs';
 import {GetParametersCommand} from '@aws-sdk/client-ssm';
+import {DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
 import {PRODUCTION_DATA_RELEASE_PARAMETER as parameterName} from './lib/production-data-issuance.mjs';
 import {PREVIEW_ACQUISITION_LIMITS} from './lib/ci-smoke-preview-acquisition.mjs';
 const cleanup=[];afterEach(async()=>{vi.restoreAllMocks();for(const path of cleanup.splice(0))await rm(path,{recursive:true,force:true});});
@@ -102,14 +103,36 @@ it.each(['caller','unknown'])('a fresh checkpoint holds on %s failure without re
  await expect(openCiSmokeAcquisition(f.input)).rejects.toMatchObject({code:'EEXIST'});
  expect(f.send).not.toHaveBeenCalled();
 });
-it('every fresh checkpoint retains its original call cap and cannot reset an exhausted claim',async()=>{
- const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/26',phase:'prereadiness'}),slot=await openCiSmokeAcquisition(f.input),who={Account:f.seed.expected.scope.account,Arn:'arn:aws:sts::'+f.seed.expected.scope.account+':assumed-role/github-actions-mem9-on-aws-preview/fixture'};
+it.each(['preupdate','preconfigure','presst','prereadiness'])('the derived 40-call ceiling cannot reset in preview phase %s',async phase=>{
+ expect(PREVIEW_ACQUISITION_LIMITS).toEqual({maxCalls:40,durationMs:300000,responseBytes:4194304,requestBytes:16384,journalBytes:4194304,localSourceBytes:33554432});
+ const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/26',phase}),slot=await openCiSmokeAcquisition(f.input),who={Account:f.seed.expected.scope.account,Arn:'arn:aws:sts::'+f.seed.expected.scope.account+':assumed-role/github-actions-mem9-on-aws-preview/fixture'};
  for(let i=0;i<PREVIEW_ACQUISITION_LIMITS.maxCalls;i++){
   const first=i===0,read=await slot.beforeRead(first?'GetCallerIdentity':'GetParameters',first?{}:f.calls[1].request),response=first?who:f.response;
   read.finalGuard();read.charge(100);await read.complete(response,sha(JSON.stringify(response)));
  }
  await expect(slot.beforeRead('GetParameters',f.calls[1].request)).rejects.toThrow('PreviewAcquisitionCallLimit');
  await expect(openCiSmokeAcquisition(f.input)).rejects.toMatchObject({code:'EEXIST'});expect(f.send).not.toHaveBeenCalled();
+});
+it('prices both additional raw definition readbacks through the real transport and journal',async()=>{
+ const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/21',phase:'prereadiness'}),slot=await openCiSmokeAcquisition(f.input);
+ const who={Account:f.seed.expected.scope.account,Arn:'arn:aws:sts::'+f.seed.expected.scope.account+':assumed-role/github-actions-mem9-on-aws-preview/fixture'};
+ for(let i=0;i<38;i++){
+  const read=await slot.beforeRead(i?'GetParameters':'GetCallerIdentity',i?f.calls[1].request:{}),response=i?f.response:who;
+  read.finalGuard();read.charge(100);await read.complete(response,sha(JSON.stringify(response)));
+ }
+ let httpCalls=0,actualWire=3800;
+ const raw=Buffer.from(JSON.stringify({taskDefinition:{family:'mem9-on-aws-pr-17-Cluster-Mem9Bootstrap',revision:1,status:'ACTIVE'},tags:[]}));
+ const requestHandler={async handle(request){httpCalls++;actualWire+=Buffer.byteLength(request.body)+raw.length;
+  return {response:{statusCode:200,headers:{'content-type':'application/x-amz-json-1.1','content-length':String(raw.length)},body:Readable.from([raw])}};
+ },destroy(){}};
+ const transport=createNonrootBudgetedReads({region:f.seed.expected.scope.region,env:f.input.env,metadataReads:slot,requestHandler});
+ try{
+  for(const revision of [11,12])await transport.clients.ecs.send(new DescribeTaskDefinitionCommand({taskDefinition:`arn:aws:ecs:${f.seed.expected.scope.region}:${f.seed.expected.scope.account}:task-definition/mem9-on-aws-pr-17-Cluster-Mem9Bootstrap:${revision}`,include:['TAGS']}));
+  const done=await slot.finish({bundleRef:await f.bundle()}),record=JSON.parse(await readFile(done.receiptRef.path));
+  expect(record.reads).toBe(40);expect(record.observedWireBytes).toBe(actualWire);expect(record.productionLedger).toBeNull();expect(httpCalls).toBe(2);
+  const header=Buffer.byteLength(JSON.stringify({version:1,claimRef:record.claimRef,index:40,action:'x'.repeat(32),request:null}))-4;
+  expect(40*(header+16384-1024)).toBeLessThanOrEqual(PREVIEW_ACQUISITION_LIMITS.journalBytes);
+ }finally{transport.close();}
 });
 it('streamed GetObject composes with the real transport and leaves Body readable for the caller',async()=>{const q={Bucket:'example-owned-artifacts',Key:'decisions/prod/control-build/77/1/example.json',ExpectedBucketOwner:'123456789012'},f=await fixture({extraCalls:[{action:'GetObject',request:q,requestBytes:4096,responseBytes:4096,ecr:false}]}),slot=await openCiSmokeAcquisition(f.input);let n=0;const payload=Buffer.from('{"synthetic":"control-capture"}'),handler={async handle(){const raw=++n===1?Buffer.from(JSON.stringify(f.response)):payload;return {response:{statusCode:200,headers:{'content-length':String(raw.length),'content-type':'application/json'},body:Readable.from([raw])}};},destroy(){}};
  const transport=createNonrootBudgetedReads({region:f.seed.expected.scope.region,env:f.input.env,metadataReads:slot,requestHandler:handler});try{await transport.clients.ssm.send(new GetParametersCommand(f.calls[1].request));const object=await transport.clients.s3.send(new GetObjectCommand(q));expect(object.Body).toBeInstanceOf(Readable);expect(await object.Body.transformToString()).toBe(payload.toString());const done=await slot.finish({bundleRef:await f.bundle()});expect(done.authority).toBe(false);expect(n).toBe(2);}finally{transport.close();}});
