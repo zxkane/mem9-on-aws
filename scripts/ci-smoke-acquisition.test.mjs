@@ -6,6 +6,7 @@ import {hash,sha,zero,prepaidSlotBudget,validCheckpoint,parseAcquisitionJson} fr
 import {createNonrootBudgetedReads} from './lib/production-nonroot-budget-transport.mjs';
 import {GetParametersCommand} from '@aws-sdk/client-ssm';
 import {PRODUCTION_DATA_RELEASE_PARAMETER as parameterName} from './lib/production-data-issuance.mjs';
+import {PREVIEW_ACQUISITION_LIMITS} from './lib/ci-smoke-preview-acquisition.mjs';
 const cleanup=[];afterEach(async()=>{vi.restoreAllMocks();for(const path of cleanup.splice(0))await rm(path,{recursive:true,force:true});});
 async function fixture({checkpoint='deploy-prod/21',jobKey='deploy-prod',preview=jobKey.endsWith('preview'),extraCalls=[],phase='preupdate',localBudget:localAllowance=zero()}={}){
  const root=await mkdtemp(join(tmpdir(),'acquisition-fixture-'));cleanup.push(root);const put=async(name,value)=>{const raw=Buffer.isBuffer(value)?value:Buffer.from(JSON.stringify(value)),path=join(root,name);await writeFile(path,raw,{mode:0o600});return {path,sha256:sha(raw)};},now=Date.now(),proof={synthetic:'proof'},descriptor={version:3,stage:'prod',account:'123456789012',region:'us-east-1',runtimeNonce:'a'.repeat(32),authorizationId:'b'.repeat(32),expiresMs:now+600000,transition:{proofHash:hash(proof)}};
@@ -48,6 +49,68 @@ it('uses the bounded 32MiB transport parser without truncation or duplicate-key 
 it('creates static owner config from independent ledger/catalog records with no future run or allocation fields',async()=>{const f=await fixture(),c=JSON.parse(f.input.env.MEM9_CI_ACQUISITION_CONFIG),raw=Buffer.from(f.allocation.debit.startRaw,'base64'),catalog=Buffer.from(JSON.stringify({kind:'cumulative-acquisition-catalog',ledgerBinding:c.ledgerBinding})),made=createCiSmokeAcquisitionConfig({account:c.account,region:c.region,ownerRoot:c.ownerRoot,ledgerStartBytes:raw,catalogBytes:catalog,expiresMs:c.expiresMs,target:c.target,storage:c.storage});expect(made.ledgerStartHash).toBe(sha(raw));expect(made.catalogHash).toBe(sha(catalog));expect(made.runId).toBeUndefined();expect(made.sourceReceiptHash).toBeUndefined();expect(made.allocationHash).toBeUndefined();});
 it('composes with the real budget transport complete(response,responseHash) contract',async()=>{const f=await fixture(),acquisition=await openCiSmokeAcquisition(f.input),raw=Buffer.from(JSON.stringify(f.response));let httpCalls=0;const requestHandler={async handle(){httpCalls++;return {response:{statusCode:200,headers:{'content-type':'application/x-amz-json-1.1','content-length':String(raw.length)},body:Readable.from([raw])}};},destroy(){}};const transport=createNonrootBudgetedReads({region:f.seed.expected.scope.region,env:f.input.env,metadataReads:acquisition,requestHandler});try{await transport.clients.ssm.send(new GetParametersCommand(f.calls[1].request));expect(httpCalls).toBe(1);const done=await acquisition.finish({bundleRef:await f.bundle()});expect(done.authority).toBe(false);const files=await readFile(done.receiptRef.path,'utf8');expect(files).toContain('"ownerRefund":0');}finally{transport.close();}});
 it('source CI preview runs before any production ledger/config exists and performs zero owner-allocation reads',async()=>{const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/21'});delete f.input.env.MEM9_CI_ACQUISITION_CONFIG;const slot=await openCiSmokeAcquisition(f.input),m=await slot.beforeRead('GetCallerIdentity',{});m.finalGuard();const who={Account:f.seed.expected.scope.account,Arn:'arn:aws:sts::'+f.seed.expected.scope.account+':assumed-role/github-actions-mem9-on-aws-preview/fixture'};await m.complete(who,sha(JSON.stringify(who)));const read=await slot.beforeRead('GetParameters',f.calls[1].request);read.finalGuard();await read.complete(f.response,sha(JSON.stringify(f.response)));const done=await slot.finish({bundleRef:await f.bundle()}),record=JSON.parse(await readFile(done.receiptRef.path));expect(record.productionLedger).toBeNull();expect(record.reads).toBe(2);expect(f.send).not.toHaveBeenCalled();});
+it('runs the entire preview readiness sequence with distinct budgets but one unchanged source/job deadline',async()=>{
+ const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/16',phase:'prereadiness'}),started=Date.now();
+ let clock=started;vi.spyOn(Date,'now').mockImplementation(()=>clock);
+ // Establish the original synthetic job window once, before any checkpoint.
+ f.input.sourceReceipt.expiresMs=started+3600000;
+ const sourceRef=await f.put('source.json',f.input.sourceReceipt);
+ f.input.env.MEM9_CI_SMOKE_SOURCE_RECEIPT_HASH=sourceRef.sha256;
+ delete f.input.env.MEM9_CI_ACQUISITION_CONFIG;
+ const sourceBytes=await readFile(sourceRef.path),records=[];
+ const checkpoints=[16,17,18,19,20,21,22,23,24,26];
+ // Long Scheduler, Canary, performance and human steps are synthetic timings.
+ const minutesBefore=[0,1,1,18,12,1,1,8,1,8];
+ for(let i=0;i<checkpoints.length;i++){
+  clock+=minutesBefore[i]*60000;
+  const checkpoint='deploy-preview/'+checkpoints[i],input={...f.input,scope:{...f.input.scope,checkpoint}};
+  const slot=await openCiSmokeAcquisition(input),who={Account:f.seed.expected.scope.account,Arn:'arn:aws:sts::'+f.seed.expected.scope.account+':assumed-role/github-actions-mem9-on-aws-preview/fixture'};
+  for(const [action,request,response]of [['GetCallerIdentity',{},who],['GetParameters',f.calls[1].request,f.response]]){
+   const read=await slot.beforeRead(action,request);read.finalGuard();read.charge(100);await read.complete(response,sha(JSON.stringify(response)));
+  }
+  const value={kind:'nonroot-preview-phase-bundle',source:{sourceTree:f.input.sourceReceipt.checkout.tree},phaseReceipt:{phase:'prereadiness',sourceReceiptHash:sourceRef.sha256,observedMs:clock,expiresMs:Math.min(clock+300000,f.input.sourceReceipt.expiresMs),stage:'pr-17',account:f.seed.expected.scope.account,region:f.seed.expected.scope.region,sourceTree:f.input.sourceReceipt.checkout.tree}};
+  const done=await slot.finish({bundleRef:{value,canonicalHash:hash(value)}}),complete=JSON.parse(await readFile(done.receiptRef.path)),claim=JSON.parse(await readFile(complete.claimRef.path));
+  expect(claim.scope.checkpoint).toBe(checkpoint);expect(claim.startedMs).toBe(clock);
+  expect(claim.deadlineMs).toBe(Math.min(f.input.sourceReceipt.expiresMs,clock+PREVIEW_ACQUISITION_LIMITS.durationMs));
+  expect(claim.sourceReceiptRef).toEqual(sourceRef);expect(claim.productionLedger).toBeNull();
+  expect(complete.reads).toBe(2);expect(complete.observedWireBytes).toBe(200);expect(done.authority).toBe(false);
+  records.push({ref:complete.claimRef,raw:await readFile(complete.claimRef.path)});
+ }
+ expect(new Set(records.map(x=>x.ref.path)).size).toBe(checkpoints.length);
+ for(const record of records)expect(await readFile(record.ref.path)).toEqual(record.raw);
+ expect(await readFile(sourceRef.path)).toEqual(sourceBytes);expect(f.send).not.toHaveBeenCalled();
+ clock=f.input.sourceReceipt.expiresMs;
+ await expect(openCiSmokeAcquisition(f.input)).rejects.toThrow('PreviewAcquisitionExpired');
+ expect(await readFile(sourceRef.path)).toEqual(sourceBytes);
+});
+it.each(['source-bytes','attempt','job','revision','role','expired-source'])('cannot obtain a fresh preview checkpoint after %s drift',async defect=>{
+ const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/19',phase:'prereadiness'});
+ if(defect==='source-bytes')await writeFile(f.input.env.MEM9_CI_SMOKE_SOURCE_RECEIPT,'{}',{mode:0o600});
+ if(defect==='attempt')f.input.env.GITHUB_RUN_ATTEMPT='2';
+ if(defect==='job')f.input.env.GITHUB_JOB='deploy-prod';
+ if(defect==='revision')f.input.env.GITHUB_SHA='f'.repeat(40);
+ if(defect==='role')f.input.env.MEM9_DEPLOY_ROLE_ARN=f.input.env.MEM9_DEPLOY_ROLE_ARN.replace('-preview','-prod');
+ if(defect==='expired-source')vi.spyOn(Date,'now').mockReturnValue(f.input.sourceReceipt.expiresMs);
+ await expect(openCiSmokeAcquisition(f.input)).rejects.toThrow();expect(f.send).not.toHaveBeenCalled();
+});
+it.each(['caller','unknown'])('a fresh checkpoint holds on %s failure without retry or claim reset',async defect=>{
+ const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/19',phase:'prereadiness'}),slot=await openCiSmokeAcquisition(f.input),read=await slot.beforeRead('GetCallerIdentity',{});
+ read.finalGuard();read.charge(100);
+ if(defect==='caller')await expect(read.complete({Account:'9'.repeat(12),Arn:'arn:aws:sts::'+'9'.repeat(12)+':assumed-role/foreign/fixture'},sha('{}'))).rejects.toThrow('PreviewAcquisitionCaller');
+ else await read.unknown();
+ await expect(slot.beforeRead('GetCallerIdentity',{})).rejects.toThrow();
+ await expect(openCiSmokeAcquisition(f.input)).rejects.toMatchObject({code:'EEXIST'});
+ expect(f.send).not.toHaveBeenCalled();
+});
+it('every fresh checkpoint retains its original call cap and cannot reset an exhausted claim',async()=>{
+ const f=await fixture({jobKey:'deploy-preview',checkpoint:'deploy-preview/26',phase:'prereadiness'}),slot=await openCiSmokeAcquisition(f.input),who={Account:f.seed.expected.scope.account,Arn:'arn:aws:sts::'+f.seed.expected.scope.account+':assumed-role/github-actions-mem9-on-aws-preview/fixture'};
+ for(let i=0;i<PREVIEW_ACQUISITION_LIMITS.maxCalls;i++){
+  const first=i===0,read=await slot.beforeRead(first?'GetCallerIdentity':'GetParameters',first?{}:f.calls[1].request),response=first?who:f.response;
+  read.finalGuard();read.charge(100);await read.complete(response,sha(JSON.stringify(response)));
+ }
+ await expect(slot.beforeRead('GetParameters',f.calls[1].request)).rejects.toThrow('PreviewAcquisitionCallLimit');
+ await expect(openCiSmokeAcquisition(f.input)).rejects.toMatchObject({code:'EEXIST'});expect(f.send).not.toHaveBeenCalled();
+});
 it('streamed GetObject composes with the real transport and leaves Body readable for the caller',async()=>{const q={Bucket:'example-owned-artifacts',Key:'decisions/prod/control-build/77/1/example.json',ExpectedBucketOwner:'123456789012'},f=await fixture({extraCalls:[{action:'GetObject',request:q,requestBytes:4096,responseBytes:4096,ecr:false}]}),slot=await openCiSmokeAcquisition(f.input);let n=0;const payload=Buffer.from('{"synthetic":"control-capture"}'),handler={async handle(){const raw=++n===1?Buffer.from(JSON.stringify(f.response)):payload;return {response:{statusCode:200,headers:{'content-length':String(raw.length),'content-type':'application/json'},body:Readable.from([raw])}};},destroy(){}};
  const transport=createNonrootBudgetedReads({region:f.seed.expected.scope.region,env:f.input.env,metadataReads:slot,requestHandler:handler});try{await transport.clients.ssm.send(new GetParametersCommand(f.calls[1].request));const object=await transport.clients.s3.send(new GetObjectCommand(q));expect(object.Body).toBeInstanceOf(Readable);expect(await object.Body.transformToString()).toBe(payload.toString());const done=await slot.finish({bundleRef:await f.bundle()});expect(done.authority).toBe(false);expect(n).toBe(2);}finally{transport.close();}});
 it('complete never serializes a supplied S3 stream or its internals',async()=>{const q={Bucket:'example-owned-artifacts',Key:'decisions/prod/control-build/77/1/example.json',ExpectedBucketOwner:'123456789012'},f=await fixture({extraCalls:[{action:'GetObject',request:q,requestBytes:4096,responseBytes:4096,ecr:false}]}),slot=await openCiSmokeAcquisition(f.input),first=await slot.beforeRead('GetParameters',f.calls[1].request);first.finalGuard();await first.complete(f.response,sha(JSON.stringify(f.response)));const read=await slot.beforeRead('GetObject',q);read.finalGuard();const body=Readable.from(['payload']);body.toJSON=()=>{throw Error('StreamMustNotBeSerialized');};await read.complete({Body:body,ContentLength:7},sha('payload'));expect(await body.toArray()).toEqual(['payload']);await slot.finish({bundleRef:await f.bundle()});});

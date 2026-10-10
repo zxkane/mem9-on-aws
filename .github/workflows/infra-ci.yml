@@ -830,6 +830,19 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs verify
         continue-on-error: false
+      - id: ci_smoke_target_prereadiness_17
+        name: "Acquire smoke target receipt: Aurora administrator authority (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/17
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
       - id: ci_smoke_guard_27385f4910fd
         name: "Verify smoke phase receipt: Aurora administrator authority (preview, hard)"
         shell: bash
@@ -849,6 +862,19 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs admin-probe
         continue-on-error: false
+      - id: ci_smoke_target_prereadiness_18
+        name: "Acquire smoke target receipt: Continuous consolidation Scheduler E2E (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/18
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
       - id: ci_smoke_guard_957871004264
         name: "Verify smoke phase receipt: Continuous consolidation Scheduler E2E (preview, hard)"
         shell: bash
@@ -866,6 +892,19 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
           MEM9_DEPLOY_COMMIT: ${{ github.sha }}
         run: node scripts/consolidation-scheduler-e2e.mjs
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_19
+        name: "Acquire smoke target receipt: Canary continuation fixture (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && needs.build-and-push-image.result == 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/19
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
         continue-on-error: false
       - id: ci_smoke_guard_763be94f5c5b
         name: "Verify smoke phase receipt: Canary continuation fixture (preview, hard)"
@@ -888,6 +927,19 @@ jobs:
           EXPECTED_FIXTURE_RUNNER_DIGEST: ${{ needs.build-and-push-image.outputs.fixture_runner_digest }}
           EXPECTED_FIXTURE_DATABASE_DIGEST: ${{ needs.build-and-push-image.outputs.fixture_database_digest }}
         run: node scripts/canary-fixture-e2e.mjs
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_20
+        name: "Acquire smoke target receipt: MCP write-search E2E (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/20
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
         continue-on-error: false
       - id: ci_smoke_guard_fe17d75e647d
         name: "Verify smoke phase receipt: MCP write-search E2E (preview, hard)"
@@ -912,6 +964,19 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-mcp-e2e.sh
+        continue-on-error: false
+      - id: ci_smoke_target_prereadiness_21
+        name: "Acquire smoke target receipt: Namespace connection attribution E2E (preview, hard)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/21
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
         continue-on-error: false
       - id: ci_smoke_guard_a56fa2ae6e3f
         name: "Verify smoke phase receipt: Namespace connection attribution E2E (preview, hard)"
@@ -967,6 +1032,19 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-memory-namespace-benchmark.sh
         continue-on-error: false
+      - id: ci_smoke_target_prereadiness_23
+        name: "Acquire smoke target receipt: OAuth façade smoke (preview)"
+        if: success() && (steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/23
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
       - id: ci_smoke_guard_4b6c4ed07f45
         name: "Verify smoke phase receipt: OAuth façade smoke (preview)"
         shell: bash
@@ -1021,6 +1099,19 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs cancel
+      - id: ci_smoke_target_prereadiness_26
+        name: "Acquire smoke target receipt: Comment deploy status"
+        if: success() && (always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          STAGE: "${{ format('pr-{0}', github.event.pull_request.number) }}"
+          MEM9_CI_SMOKE_CHECKPOINT: deploy-preview/26
+        uses: ./.github/actions/ci-smoke-gate
+        with:
+          mode: target
+          phase: prereadiness
+        continue-on-error: false
       - id: ci_smoke_guard_dcc375938714
         name: "Verify smoke phase receipt: Comment deploy status"
         shell: bash

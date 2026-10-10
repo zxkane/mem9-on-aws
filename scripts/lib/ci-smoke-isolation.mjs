@@ -152,7 +152,14 @@ export function buildCiSmokePromotionRoutes({workflow,actions}){
     delete step.run;delete step.shell;
     step.uses=gateUses;step.with={mode:'target',phase:existingPhases[step.name]};
    }
-   const previewTargets=['Remove conflicting Pulumi installation','Drain preview service and previous bootstrap tasks','Verify preview runtime credentials (hard)','Namespace performance E2E (preview, hard)','Human namespace OAuth E2E (preview, hard)'];
+   // A preceding hard E2E step can outlast the target receipt. Each protected
+   // readiness operation gets its own bounded observation and checkpoint.
+   const previewTargets=['Remove conflicting Pulumi installation','Drain preview service and previous bootstrap tasks',
+    'Verify preview runtime credentials (hard)','Aurora administrator authority (preview, hard)',
+    'Continuous consolidation Scheduler E2E (preview, hard)','Canary continuation fixture (preview, hard)',
+    'MCP write-search E2E (preview, hard)','Namespace connection attribution E2E (preview, hard)',
+    'Namespace performance E2E (preview, hard)','OAuth façade smoke (preview)',
+    'Human namespace OAuth E2E (preview, hard)','Comment deploy status'];
    const prodTargets=['Seed OAuth HMAC key (workflow_dispatch only)','Reconcile prod ECS deployment','MCP write-search E2E (prod, hard)'];
    if(row&&(name==='deploy-preview'&&previewTargets.includes(step.name)||name==='deploy-prod'&&prodTargets.includes(step.name))){
     const role=name==='deploy-prod'?'${{ secrets.AWS_PROD_ROLE_ARN }}':'${{ secrets.AWS_PREVIEW_ROLE_ARN }}';

@@ -155,6 +155,37 @@ it('keeps expiry and phase fixed when read again from the opaque context',async(
  expect(()=>nonrootPreviewPhaseEvidence(context,{...f.options,phase:'presst',now})).toThrow('NonrootPreviewPhaseMismatch');
  expect(()=>nonrootPreviewPhaseEvidence(context,{...f.options,now:a.phaseReceipt.expiresMs})).toThrow('NonrootPreviewPhaseExpired');
 });
+it('requires a new bounded observation after a preceding step outlasts the receipt',async()=>{
+ const f=fixture(),backend=previewWorkloadFixture(f.scope),prefix=`arn:aws:ssm:${f.scope.region}:${f.scope.account}:parameter`;
+ for(const [name,p]of backend.parameters)f.parameters.set(name,{...p,Type:'String',ARN:prefix+name});
+ const original=f.clients.ecs.send;
+ f.clients.ecs.send=command=>f.definitions.has(command.input.taskDefinition)?original(command):backend.send('ecs',command);
+ let clock=f.options.clock();
+ const options={...f.options,sourceRevision:backend.sourceRevision,phase:'prereadiness',clock:()=>clock};
+ const observe=async()=>{
+  const context=await collectNonrootPreviewTarget(f.clients,options);
+  return {context,...nonrootPreviewPhaseEvidence(context,{...options,now:clock})};
+ };
+ const first=await observe(),originalEvidence=structuredClone(first.phaseEvidence),originalReceipt=structuredClone(first.phaseReceipt),firstReads=f.calls.length;
+ const bundle=value=>({kind:'nonroot-preview-phase-bundle',source:{sourceTree:f.scope.sourceTree},phaseEvidence:value.phaseEvidence,phaseReceipt:value.phaseReceipt});
+ const expected=()=>({sourceReceiptHash:options.sourceReceiptHash,sourceTree:f.scope.sourceTree,phase:'prereadiness',now:clock,route:'deploy-preview',step:'deploy-preview/20',effect:'credentialed-hard-acceptance'});
+ expect(first.phaseReceipt.expiresMs-first.phaseEvidence.startedMs).toBe(300000);
+ expect(verifySmokePhaseBundle(bundle(first),expected())).toEqual(first.phaseReceipt);
+ clock+=360000; // Synthetic long preceding step; no receipt deadline is renewed.
+ expect(()=>verifySmokePhaseBundle(bundle(first),expected())).toThrow('CiSmokePhaseReceiptRequired');
+ expect(()=>nonrootPreviewPhaseEvidence(first.context,{...options,now:clock})).toThrow('NonrootPreviewPhaseExpired');
+ const fresh=await observe();
+ expect(f.calls.length).toBeGreaterThan(firstReads);
+ expect(fresh.phaseEvidence.startedMs).toBe(clock);
+ expect(fresh.phaseReceipt.expiresMs-clock).toBe(300000);
+ expect(verifySmokePhaseBundle(bundle(fresh),expected())).toEqual(fresh.phaseReceipt);
+ expect(()=>verifySmokePhaseBundle(bundle(fresh),{...expected(),sourceReceiptHash:'d'.repeat(64)})).toThrow('CiSmokePhaseReceiptRequired');
+ expect(()=>verifySmokePhaseBundle(bundle(fresh),{...expected(),phase:'preupdate'})).toThrow('CiSmokePhaseReceiptRequired');
+ expect(first.phaseEvidence).toEqual(originalEvidence);expect(first.phaseReceipt).toEqual(originalReceipt);
+ expect(()=>verifySmokePhaseBundle(bundle(first),expected())).toThrow('CiSmokePhaseReceiptRequired');
+ f.clients.ssm.send=async()=>{throw Error('Synthetic fresh read failed');};
+ await expect(observe()).rejects.toThrow('Synthetic fresh read failed');
+});
 it('uses the actual default preview reader instead of the production descriptor route',async()=>{
  const f=fixture(),revision='b'.repeat(40),env={STAGE:f.scope.stage,GITHUB_ACTIONS:'true',GITHUB_SHA:revision,MEM9_DEPLOY_ROLE_ARN:`arn:aws:iam::${f.scope.account}:role/preview`};
  f.clients.sts={send:async()=>({Account:f.scope.account,Arn:`arn:aws:sts::${f.scope.account}:assumed-role/preview/test`})};

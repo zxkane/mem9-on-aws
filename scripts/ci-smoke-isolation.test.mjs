@@ -40,6 +40,31 @@ describe('closed DATA smoke recipe amendment',()=>{
 });
 
 describe('all four promotion routes and shared composite',()=>{
+ it('acquires a fresh checkpoint before every ordinary-preview prereadiness guard',()=>{
+  const b=baseline(),candidate=buildCiSmokePromotionRoutes(b),job=candidate.jobs['deploy-preview'];
+  const rows=CI_SMOKE_POLICY.rows.filter(r=>r.route==='deploy-preview'&&r.rule.kind==='protected'&&r.rule.phase==='prereadiness');
+  expect(rows.map(r=>r.callPath)).toEqual([16,17,18,19,20,21,22,23,24,26].map(i=>'deploy-preview/'+i));
+  const checkpoints=job.steps.filter(s=>s.with?.mode==='target'&&s.with.phase==='prereadiness');
+  expect(checkpoints.map(s=>s.env.MEM9_CI_SMOKE_CHECKPOINT)).toEqual(rows.map(r=>r.callPath));
+  for(const row of rows){
+   const guard=job.steps.findIndex(s=>s.id===row.rule.gateId),target=job.steps[guard-1],protectedStep=job.steps[guard+1];
+   const original=b.workflow.jobs['deploy-preview'].steps[Number(row.callPath.split('/')[1])];
+   expect(target).toMatchObject({name:'Acquire smoke target receipt: '+row.name,uses:'./.github/actions/ci-smoke-gate',with:{mode:'target',phase:'prereadiness'},'continue-on-error':false});
+   expect(target.env).toEqual({GH_TOKEN:'${{ github.token }}',MEM9_DEPLOY_ROLE_ARN:'${{ secrets.AWS_PREVIEW_ROLE_ARN }}',STAGE:"${{ format('pr-{0}', github.event.pull_request.number) }}",MEM9_CI_SMOKE_CHECKPOINT:row.callPath});
+   expect(target.if).toBe('success() && ('+(original.if??'true')+')');
+   expect(protectedStep).toEqual({...original,if:row.rule.requiredCondition,'continue-on-error':false});
+  }
+ });
+ it.each([16,17,18,19,20,21,22,23,24,26])('rejects deleting the fresh prereadiness checkpoint at deploy-preview/%s',index=>{
+  const b=baseline(),candidate=buildCiSmokePromotionRoutes(b);
+  candidate.jobs['deploy-preview'].steps=candidate.jobs['deploy-preview'].steps.filter(s=>s.env?.MEM9_CI_SMOKE_CHECKPOINT!=='deploy-preview/'+index);
+  expect(()=>verifyCiSmokePromotionRoutes(b,candidate)).toThrow('CiSmokePromotionSourceChanged');
+ });
+ it('keeps production, retained-runtime, and shared-composite routes unchanged by preview refreshes',()=>{
+  const b=baseline(),candidate=buildCiSmokePromotionRoutes(b),workflow=parse(readFileSync(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8'));
+  for(const route of ['deploy-prod','runtime-cutover-prod','runtime-cutover-preview'])expect(candidate.jobs[route]).toEqual(workflow.jobs[route]);
+  for(const [path,action]of Object.entries(candidate.actions))expect(action).toEqual(parse(readFileSync(new URL('../'+path,import.meta.url),'utf8')));
+ });
  it('provides the owner acquisition configuration to every production source reader',()=>{
   const workflow=parse(readFileSync(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8'));
   for(const name of ['verify-production-image-transition','build-image-transition-control','deploy-prod','runtime-cutover-prod']){
