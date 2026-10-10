@@ -233,6 +233,22 @@ describe("workflow integration", () => {
     );
   });
 
+  it("installs root and infra dependencies in every SST preview cleanup job", () => {
+    const infra = parse(readFileSync(workflowPath, "utf8"));
+    const reconcile = parse(readFileSync(resolve(workflowsDirectory, "reconcile-previews.yml"), "utf8"));
+    const rootManifest = JSON.parse(readFileSync(resolve(root, "package-lock.json"), "utf8"));
+    expect(rootManifest.packages[""].name).toBe(JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).name);
+    for (const job of [infra.jobs["cleanup-failed-preview"], infra.jobs["cleanup-preview"], reconcile.jobs.apply, reconcile.jobs.auto]) {
+      const steps = job.steps;
+      const root = steps.findIndex(step => step.run === "npm ci");
+      const dependencies = steps.findIndex(step => step.run === "pnpm -C infra install --frozen-lockfile");
+      expect(root).toBeGreaterThanOrEqual(0);
+      expect(dependencies).toBeGreaterThanOrEqual(0);
+      expect(steps[root].if).toBe(steps[dependencies].if);
+      expect(root).toBeLessThan(steps.findIndex(step => /sst remove|preview-reconciler\.mts (?:apply|auto)/.test(step.run ?? "")));
+    }
+  });
+
   it("runs IAM regression tests when the GitHub Actions role template changes", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
 

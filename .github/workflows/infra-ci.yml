@@ -1155,6 +1155,10 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         run: pnpm -C infra install --frozen-lockfile
 
+      - name: Install root dependencies
+        if: steps.gate.outputs.skip != 'true'
+        run: npm ci
+
       - name: Remove conflicting Pulumi installation
         if: steps.gate.outputs.skip != 'true'
         run: |
@@ -1326,6 +1330,10 @@ jobs:
       - name: Install infra dependencies
         if: steps.check-state.outputs.deployed == 'true'
         run: pnpm -C infra install --frozen-lockfile
+
+      - name: Install root dependencies
+        if: steps.check-state.outputs.deployed == 'true'
+        run: npm ci
 
       - name: Remove conflicting Pulumi installation
         if: steps.check-state.outputs.deployed == 'true'
