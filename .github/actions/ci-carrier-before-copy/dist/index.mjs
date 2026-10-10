@@ -49041,6 +49041,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 			"api",
 			"--hostname",
 			"github.com",
+			"--allow-escape-sequences",
 			"repos/" + env.GITHUB_REPOSITORY + "/actions/jobs/" + id + "/logs"
 		], { maxBytes: 8388608 });
 	};

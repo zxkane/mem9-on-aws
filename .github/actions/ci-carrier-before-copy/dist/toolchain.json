@@ -15642,8 +15642,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-host.mjs",
-      "sha256": "c91df7c241cc391256da74c6e3f2eea8f380e97f1676344baf6465bfee1a6e6d",
-      "bytesLength": 8395
+      "sha256": "337788e52b454f568cb2fcf38b7f0f362637d0985696b2932ac8cddd3124bf69",
+      "bytesLength": 8495
     },
     {
       "path": "scripts/lib/ci-smoke-private-archive.mjs",
@@ -15883,7 +15883,7 @@
   ],
   "output": {
     "path": ".github/actions/ci-carrier-before-copy/dist/index.mjs",
-    "sha256": "39bed81fb402a4c0a1b56b569b1089cbdeee80ed403061915ac2dd80af17760e",
-    "bytesLength": 6163966
+    "sha256": "0db79c1f3dbcb8a97d875cf47c8cc4ba30130cada6035bada2a0cd656c7d8811",
+    "bytesLength": 6163997
   }
 }

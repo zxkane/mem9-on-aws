@@ -26,7 +26,8 @@ export function ciSmokeHost(env,cwd=process.cwd()){
   need(typeof path==='string'&&/^[A-Za-z0-9_./?=&%+-]+$/.test(path)&&!path.includes('..')&&!path.startsWith('/'),'CiSmokeGithubPath');
   return parseCiSmokeJson(await run('gh',['api','--hostname','github.com','repos/'+env.GITHUB_REPOSITORY+'/'+path]));
  };
- const readLog=async id=>{need(Number.isSafeInteger(id)&&id>0);return run('gh',['api','--hostname','github.com','repos/'+env.GITHUB_REPOSITORY+'/actions/jobs/'+id+'/logs'],{maxBytes:8388608});};
+ // Logs are bounded parser input; preserve their original escape bytes.
+ const readLog=async id=>{need(Number.isSafeInteger(id)&&id>0);return run('gh',['api','--hostname','github.com','--allow-escape-sequences','repos/'+env.GITHUB_REPOSITORY+'/actions/jobs/'+id+'/logs'],{maxBytes:8388608});};
  const checkout=async()=>{
   await run('git',['diff','--quiet']);await run('git',['diff','--cached','--quiet']);
   const revision=(await run('git',['rev-parse','HEAD'])).trim(),tree=(await run('git',['rev-parse','HEAD^{tree}'])).trim();
