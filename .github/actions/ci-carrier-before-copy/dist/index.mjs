@@ -149589,6 +149589,7 @@ var init_production_nonroot_launch = __esmMin((() => {
 		}
 	});
 	Object.freeze({
+		"continuation-inspection": "ControlMem9Bootstrap",
 		"bootstrap-runtime-verify": "Mem9Bootstrap",
 		"consolidation-control": "ControlMem9Bootstrap",
 		"consolidation-promote": "PromoteMem9Bootstrap",

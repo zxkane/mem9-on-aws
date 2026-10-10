@@ -85,6 +85,7 @@ export function dataLaunchPolicy(component,original){
   return copyNonrootJson(value);
 }
 const controlNames=Object.freeze({
+  'continuation-inspection':'ControlMem9Bootstrap',
   'bootstrap-runtime-verify':'Mem9Bootstrap','consolidation-control':'ControlMem9Bootstrap',
   'consolidation-promote':'PromoteMem9Bootstrap','denied-provision':'ProdMem9Bootstrap',
   'denied-transition':'TransitionMem9Bootstrap','audit-original-root':'ControlMem9Bootstrap',

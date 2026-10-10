@@ -30,6 +30,15 @@ function fixture(){
 }
 
 describe('exact nonroot launch transforms',()=>{
+ it('registers continuation inspection only through the fixed CONTROL dispatcher',()=>{
+  const original={name:'ControlMem9Bootstrap',image:'example.com/bootstrap@'+d('a'),linuxParameters:{initProcessEnabled:true},secrets:[{name:'MEM9_DB_SECRET',valueFrom:'arn:aws:ssm:'+region+':'+account+':parameter/example'}]};
+  const before=structuredClone(original),launch=controlLaunchPolicy('continuation-inspection',original);
+  expect(original).toEqual(before);expect(launch.entryPoint).toEqual(['/bin/setpriv','--no-new-privs','--','/usr/local/bin/node','/bootstrap/nonroot-dispatch.mjs','continuation-inspection']);
+  expect(launch.command).toEqual([]);expect(launch.user).toBe('1000:1000');expect(launch.linuxParameters).toEqual({initProcessEnabled:true,capabilities:{drop:['ALL']}});expect(launch.secrets).toEqual(original.secrets);
+  expect(controlLaunchPolicy('continuation-inspection',launch)).toEqual(launch);
+  expect(()=>controlLaunchPolicy('continuation-inspection',{...original,name:'PromoteMem9Bootstrap'})).toThrow();
+  expect(()=>controlLaunchPolicy('continuation-inspection-other',original)).toThrow();
+ });
  it.each(['mnemo-server','qwen3-embed','llm-proxy','planner','executor'])('hardens %s preserving unrelated fields and caller input',component=>{
   const worker=['planner','executor'].includes(component);const name=worker?'Mem9Consolidation'+(component==='planner'?'Planner':'Executor'):component;
   const original={name,image:'example.com/image@'+d('a'),linuxParameters:{initProcessEnabled:true},environment:[{name:'UNCHANGED',value:'yes'}],...(worker?{entryPoint:['node'],command:['/app/scripts/consolidation-worker.mjs']}:{})};const saved=structuredClone(original);

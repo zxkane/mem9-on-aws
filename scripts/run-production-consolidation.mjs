@@ -1,5 +1,6 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
+import {isDeepStrictEqual} from 'node:util';
 import {setTimeout as delay} from 'node:timers/promises';
 import {SSMClient,GetParametersCommand,GetParametersByPathCommand,PutParameterCommand,DeleteParameterCommand} from '@aws-sdk/client-ssm';
 import {ECSClient,DescribeTaskDefinitionCommand,RunTaskCommand,DescribeTasksCommand,StopTaskCommand,ListTasksCommand} from '@aws-sdk/client-ecs';
@@ -13,6 +14,8 @@ import {execFileSync} from 'node:child_process';
 import {canaryReportDigest,canaryReportFragments} from './lib/production-canary-report.mjs';
 import {loadWorkerDataRelease} from './lib/production-data-release-loader.mjs';
 import {assertMaintenanceDispatch,sendMaintenanceCommand} from './lib/production-maintenance-admission.mjs';
+import {controlLaunchPolicy,NONROOT_FORBIDDEN_ENVIRONMENT} from './lib/production-nonroot-launch.mjs';
+import {getImageAuthorization} from './lib/production-image-admission.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
@@ -132,6 +135,33 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   return meta;
 }
 
+/** Match the deployment builder without replacing its guarded entrypoint or
+ * introducing a command override. Partially stripped guards cannot select the
+ * historical fixed-module launch. */
+function validAdministrationLaunch(definition,container,kind,authorization){
+  if(!container)return false;
+  const entry=container.entryPoint,command=container.command,drop=container.linuxParameters?.capabilities?.drop;
+  const guarded=authorization?.kind?.startsWith('nonroot-')||container.user==='1000:1000'||Array.isArray(drop)&&drop.includes('ALL')||
+    Array.isArray(entry)&&entry.some(v=>v==='/bin/setpriv'||v==='/bootstrap/nonroot-dispatch.mjs');
+  if(!guarded)return isDeepStrictEqual(entry,['node'])&&isDeepStrictEqual(command,['/bootstrap/operator/scripts/production-consolidation-operator.mjs']);
+  const purpose={control:'consolidation-control',promotion:'consolidation-promote'}[kind];
+  // The nonroot provision/transition dispatcher purposes are explicitly denied.
+  if(!purpose||definition.runtimePlatform?.operatingSystemFamily!=='LINUX')return false;
+  try{
+    if(!isDeepStrictEqual(container,controlLaunchPolicy(purpose,container)))return false;
+    const names=new Set();
+    for(const [rows,field]of [[container.environment??[],'value'],[container.secrets??[],'valueFrom']]){
+      if(!Array.isArray(rows))return false;
+      for(const row of rows){
+        if(!row||Object.keys(row).sort().join()!==['name',field].sort().join()||typeof row.name!=='string'||
+          typeof row[field]!=='string'||names.has(row.name)||row.name.startsWith('LD_')||NONROOT_FORBIDDEN_ENVIRONMENT.includes(row.name))return false;
+        names.add(row.name);
+      }
+    }
+    return true;
+  }catch{return false;}
+}
+
 export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility},{now=Date.now,sleep=delay}={}){
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix='/mem9-on-aws/prod/',manifestName=prefix+'consolidation-runtime/operator-manifest';
@@ -151,7 +181,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   const actual=Object.fromEntries((container?.secrets??[]).map(s=>[s.name,s.valueFrom]));
   if(definition?.taskDefinitionArn!==target.taskDefinition||definition.containerDefinitions?.length!==1||container.name!==name||
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||
-    container.entryPoint?.join()!=='node'||container.command?.join()!=='/bootstrap/operator/scripts/production-consolidation-operator.mjs'||container.environmentFiles?.length||
+    !validAdministrationLaunch(definition,container,kind,getImageAuthorization(clients))||container.environmentFiles?.length||
     container.image!==target.image||env.MEM9_WORKER_IMAGE!==meta.workerImage||env.MEM9_WORKER_SOURCE_TAG!==meta.sourceTag||
     (meta.controlSourceTag!==undefined&&env.MEM9_CONTROL_SOURCE_TAG!==meta.controlSourceTag)||
     (meta.version>=2&&env.MEM9_RETAINED_DATA_RELEASE_HASH!==meta.dataReleaseHash)||
