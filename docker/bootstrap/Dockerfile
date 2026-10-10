@@ -84,6 +84,8 @@ RUN chmod +x /bootstrap/entrypoint.sh
 # The guarded launch is selected by the authenticated task plan. Keep these
 # files outside the preserved application entrypoints and DATA build recipe.
 COPY docker/bootstrap/nonroot-dispatch.mjs docker/bootstrap/nonroot-files.mjs docker/bootstrap/nonroot-identity.mjs /bootstrap/
+COPY scripts/production-continuation-inspection.mjs /bootstrap/operator/scripts/
+COPY scripts/lib/production-continuation-inspection.mjs scripts/lib/production-continuation-root.mjs scripts/lib/production-continuation-publication.mjs /bootstrap/operator/scripts/lib/
 COPY scripts/build-nonroot-manifest.mjs /usr/local/lib/mem9/build-nonroot-manifest.mjs
 RUN chmod -R a+rX,go-w /bootstrap \
     && node /usr/local/lib/mem9/build-nonroot-manifest.mjs

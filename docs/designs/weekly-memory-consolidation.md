@@ -1858,6 +1858,32 @@ frozen attempt, receipt membership, protected rows, spent counter, retired login
 runtime ACLs, ownership, disabled controls and zero benchmark residue. It does
 not install continuation tables or return memory images.
 
+Non-root CONTROL diagnostics use the fixed `continuation-inspection` dispatcher
+purpose. Its closed operation set is `parse-begin`, `root-audit`,
+`capacity-census`, `publication-audit` and `publication-probe`. Every path keeps
+the fixed `setpriv` prefix, absolute Node executable, UID/GID 1000, dropped
+capabilities and image-manifest verification before credential access. Requests
+cannot supply code, a module path, SQL or a URL. The begin parser definition has
+no task role, database secret or database endpoint; successful parsing is not
+continuation admission. Actual begin still uses `consolidation-control` and its
+existing witness, parent, receipt and lifetime-allowance checks.
+
+Root and capacity inspections bind the original parent and current control
+source. They execute fixed queries under the existing advisory lease and one
+`REPEATABLE READ READ ONLY` transaction. Capacity queries bind one namespace
+parameter at a time and aggregate every original target within that snapshot;
+they return counts, never memory bodies. The finite data envelope retains a
+32 KiB decoded limit and bounded compression for ECS overrides. Publication
+keeps its existing held read-only audit, heartbeat and independent release
+probe. Owned tasks and definitions remain journaled; uncertain execution,
+rollback, release or cleanup cannot produce successful continuation evidence.
+Publication checks its exact invocation, raw request hash and absolute deadline
+before reading a database credential. The first request fixes its issue time
+and the existing four-minute startup plus six-minute watchdog window; the
+container watchdog remains at most six minutes and the database lease remains
+five minutes. A replay never refreshes these times. Late startup, insufficient
+remaining time or altered metadata rejects before credential access.
+
 The compact continuation witness also requires a fixture hash, CI run ID and
 attempt. The publisher reads one completed `synthetic-canary-continuation`
 record from the authenticated preview job whose required fixture step passed.

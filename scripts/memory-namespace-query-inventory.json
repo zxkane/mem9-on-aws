@@ -3072,6 +3072,54 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
+      "id": "778e072deb66bf2bcf5c",
+      "owner": "scripts/production-continuation-inspection.mjs",
+      "line": 46,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "b3e1ae34a96d919416b6d84116ea4c91936461e89c4080ca6d71c787205da7fb",
+      "statement": "SELECT memory_type,state,count(*)::int AS count FROM public.memories WHERE namespace_id=$1 GROUP BY memory_type,state ORDER BY memory_type,state",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-inspection.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "aea90c447ab4ecc6045d",
+      "owner": "scripts/production-continuation-inspection.mjs",
+      "line": 48,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8668ca54aec0cee306c4cbf5ea9147eb27473cd1e7a20bd9e34063eaeb26b6b0",
+      "statement": "SELECT count(*)::int AS groups,coalesce(sum(n),0)::int AS rows,coalesce(sum(n-1),0)::int AS surplus,coalesce(max(n),0)::int AS largest_group FROM (SELECT count(*) AS n FROM public.memories m WHERE m.namespace_id=$1 AND m.state='active' AND m.memory_type='insight' GROUP BY m.namespace_id,m.content,mem9_maintenance.material_context(jsonb_build_object('memory_type',m.memory_type,'app_id',m.app_id,'source',m.source,'agent_id',m.agent_id,'tags',m.tags,'metadata',m.metadata)) HAVING count(*)>1) groups",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-inspection.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "7f09b8652c04cf9bad13",
+      "owner": "scripts/production-continuation-inspection.mjs",
+      "line": 51,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7c7754a8546424f0ed8301e5f9d0a49251b0bc0445db3b792478152fec87683d",
+      "statement": "SELECT count(*)::int AS count FROM public.memories WHERE namespace_id=$1 AND agent_id=$2",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-inspection.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
       "id": "e60cf7616a68527fc761",
       "owner": "scripts/run-maintenance-namespace-e2e.mjs",
       "line": 170,

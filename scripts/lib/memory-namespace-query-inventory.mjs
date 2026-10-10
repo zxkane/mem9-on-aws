@@ -362,6 +362,7 @@ export function statementHash(text) {
 }
 
 const SCOPED_COVERAGE = new Map([
+  ['scripts/production-continuation-inspection.mjs', ['scripts/production-continuation-inspection.test.mjs']],
   ...['scripts/production-consolidation-operator.mjs','scripts/lib/production-canary-paused-audit.mjs',
     'scripts/lib/production-canary-snapshot.mjs','scripts/lib/production-canary-continuation.mjs'].map(owner=>[owner,[
     'scripts/production-consolidation-operator.postgres.test.mjs',
