@@ -552,7 +552,10 @@ export function ecs(
         args.tags = { ...(args.tags ?? {}), ...tags };
         if (runtime) args.desiredCount = runtime.ready ? 1 : 0;
         if(runtime?.executionRoleArn)args.deploymentCircuitBreaker={enable:true,rollback:process.env.MEM9_PRODUCTION_RUNTIME_MODE==="active"};
-        if(/^pr-[1-9][0-9]*$/.test($app.stage))args.deploymentCircuitBreaker={enable:true,rollback:false};
+        if(/^pr-[1-9][0-9]*$/.test($app.stage)){
+          args.deploymentCircuitBreaker={enable:true,rollback:false};
+          args.enableExecuteCommand=false;
+        }
         // Fargate compute is billed to tasks, not just to this tagged Service.
         // Propagate Project/Stage to every new task so Cost Explorer can
         // attribute vCPU and memory charges. Managed tags add the ECS

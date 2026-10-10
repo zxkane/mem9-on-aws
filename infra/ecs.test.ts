@@ -325,6 +325,7 @@ function createdOf(kind: string): Record<string, unknown> {
 }
 
 afterEach(() => {
+  vi.doUnmock("./ecr");
   for (const g of ["$app", "aws", "sst", "command", "$interpolate", "$jsonStringify"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
@@ -474,6 +475,60 @@ describe("ecs stack", () => {
       "mnemo.mem9-prod.local",
     );
     expect(outs.taskSecurityGroupId).toBeDefined();
+  });
+
+  it.each([
+    { stage: "pr-7", retained: false, expectedExec: false },
+    { stage: "pr-42", retained: true, expectedExec: false },
+    { stage: "prod", retained: false, expectedExec: true },
+    { stage: "dev", retained: false, expectedExec: true },
+    { stage: "pr-0", retained: false, expectedExec: true },
+    { stage: "pr-07", retained: false, expectedExec: true },
+    { stage: "pr-feature", retained: false, expectedExec: true },
+  ])("scopes inherited ECS Exec to numeric previews ($stage, retained=$retained)", async ({ stage, retained, expectedExec }) => {
+    installGlobals(stage);
+    if (retained) {
+      // Fixture only the authenticated image selection, not the service transform.
+      const images = Object.fromEntries(["mnemo-server", "qwen3-embed", "llm-proxy"].map(name =>
+        [name, `123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/preview/${name}@sha256:${"a".repeat(64)}`]));
+      const selection = { hash: "b".repeat(64), images, data: { version: 1, dataSourceTag: "pr-abcdef0",
+        images: Object.fromEntries(Object.keys(images).map(name => [name, { arm64Digest: "sha256:" + "c".repeat(64) }])) } };
+      vi.doMock("./ecr", async () => ({
+        ...await vi.importActual<typeof import("./ecr")>("./ecr"),
+        selectedDataRelease: () => out(selection),
+        selectedDataSourceTag: () => out(selection.data.dataSourceTag),
+        workloadImage: (name: string) => out(images[name]),
+      }));
+    }
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const containersBefore = materialize(services[0].args.containers);
+    const transform = (services[0].args.transform as Record<string, any>).service;
+    // These are the underlying service args, including SST's inherited Exec default.
+    const serviceArgs: Record<string, any> = {
+      enableExecuteCommand: true, desiredCount: 1, taskDefinition: "synthetic-task:2",
+      deploymentCircuitBreaker: { enable: true, rollback: true },
+      deploymentMinimumHealthyPercent: 100, deploymentMaximumPercent: 200,
+      networkConfiguration: { assignPublicIp: false, subnets: ["subnet-test"], securityGroups: ["sg-test"] },
+      tags: { Existing: "kept" }, triggers: { existingTrigger: "kept" },
+    };
+    const before = structuredClone(serviceArgs), dependency = { syntheticDependency: true };
+    const options: Record<string, any> = { dependsOn: [dependency], protect: true };
+    transform(serviceArgs, options);
+    expect(materialize(serviceArgs)).toEqual({
+      ...before, enableExecuteCommand: expectedExec,
+      deploymentCircuitBreaker: { enable: true, rollback: expectedExec },
+      tags: { Existing: "kept", Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" },
+      propagateTags: "SERVICE", enableEcsManagedTags: true, forceNewDeployment: true,
+      triggers: { existingTrigger: "kept", taskTagPropagation: "v1", transportSigningRevision: "transport-revision" },
+      serviceRegistries: { registryArn: "arn:aws:servicediscovery:svc/mnemo" },
+    });
+    expect(options.protect).toBe(true);
+    expect(options.dependsOn).toHaveLength(2);
+    expect(options.dependsOn[0]).toBe(dependency);
+    expect(materialize(services[0].args.containers)).toEqual(containersBefore);
+    const selection = params.find(p => p.name.endsWith("/ecs/image-selection"));
+    expect(JSON.parse(String(materialize(selection?.value))).mode).toBe(retained ? "retained" : "tag");
   });
 
   it("grants the task role Bedrock MANTLE inference perms (not the wrong bedrock:* namespace)", async () => {
