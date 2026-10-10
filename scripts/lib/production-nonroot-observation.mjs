@@ -13,7 +13,14 @@ import {inspectImageFilesystemEntries} from './production-image-filesystem.mjs';
 import {verifyNonrootControlArtifactFiles} from './production-nonroot-artifact.mjs';
 
 const observations=new WeakMap(),sha=bytes=>createHash('sha256').update(bytes).digest('hex');
-const probe=readFileSync(new URL('./production-nonroot-path-probe.mjs',import.meta.url)),probeCodeHash=sha(probe);
+let probeSource;
+function runtimeProbe(){
+ if(!probeSource){
+  const probe=readFileSync(new URL('./production-nonroot-path-probe.mjs',import.meta.url));
+  probeSource={probe,probeCodeHash:sha(probe)};
+ }
+ return probeSource;
+}
 const need=(ok,code='NonrootRuntimeObservationInvalid')=>{if(!ok)throw Object.assign(Error(code),{code,hold:true});};
 const same=(a,b,code)=>need(hash(a)===hash(b),code);
 const exact=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.slice().sort().join());
@@ -117,6 +124,9 @@ export async function inspectNonrootControlRuntimeProbe(raw,value,options){
 export async function collectNonrootControlRuntime(value,options){
  value=copyNonrootJson(value);
  const p=await preflight(value,options),startedMs=Date.now(),deadline=startedMs+120000,name='mem9-artifact-probe-'+randomBytes(16).toString('hex'),label=name.slice('mem9-artifact-probe-'.length);
+ // Infrastructure bundles import proof validators but do not run this host
+ // collector. Resolve its fixed sidecar only for an actual Docker observation.
+ const {probe,probeCodeHash}=runtimeProbe();
  need((await lstat('/var/run/docker.sock')).isSocket(),'NonrootRuntimeLocalDockerRequired');
  const directory=await mkdtemp(join(tmpdir(),'mem9-artifact-docker-'));let id,createAttempted=false,created=false,cleanupConfirmed=false,sticky=false,primary,record,removal;
  const run=async(stage,args,{cleanup=false}={})=>{
@@ -155,7 +165,7 @@ export function verifyNonrootControlRuntimeObservation(handle,value,options){
  const state=observations.get(handle);need(state,'NonrootRuntimeObservationRequired');
  need(state.graph===options?.controlVerification?.graph&&state.filesystem===options?.controlVerification?.filesystem,'NonrootRuntimeObservationContext');
  controlImageGraphBinding(state.graph);const r=state.record,now=options.now??Date.now();
- need(r.buildHash===hash(value)&&r.probeCodeHash===probeCodeHash&&r.cleanupConfirmed===true,'NonrootRuntimeObservationBinding');
+ need(r.buildHash===hash(value)&&r.probeCodeHash===probeSource?.probeCodeHash&&r.cleanupConfirmed===true,'NonrootRuntimeObservationBinding');
  need(r.startedMs<=r.completedMs&&r.completedMs<=now&&now-r.completedMs<=300000,'NonrootRuntimeObservationExpired');
  return copyNonrootJson(r);
 }
