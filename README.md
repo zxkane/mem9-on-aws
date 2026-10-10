@@ -362,6 +362,11 @@ session restricted to the single evidence object. Full evidence verification
 and reader cleanup precede normal deployment credentials. Each protected
 operation also requires its applicable, unexpired target receipt.
 
+The reader uses the OIDC service URL injected by the GitHub Node action handler.
+It preserves the platform's internal route and query while requiring the existing
+GitHub Actions service origin, canonical HTTPS and the fixed STS audience.
+Redirects and ambient AWS credentials remain rejected.
+
 The CONTROL build checks its actual Git/Docker context before building and
 records the successful build action afterward. Its private capture is stored
 under `decisions/prod/control-build/` and handed to the deployment job using a

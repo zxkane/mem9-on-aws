@@ -18,7 +18,7 @@ const safeCodes = new Set([
 const readerPhases = new Set(['precheck', 'oidc', 'assume', 'identity', 'use']);
 const readerReasons = new Set([
   'CiSmokeAwsExpiration', 'CiSmokeReadSessionInput', 'CiSmokeReadSessionEnvironment',
-  'CiSmokeOidcEndpoint', 'CiSmokeReadSessionDeadline', 'CiSmokeReadSessionAborted',
+  'CiSmokeOidcEndpoint', 'CiSmokeOidcOrigin', 'CiSmokeOidcQuery', 'CiSmokeReadSessionDeadline', 'CiSmokeReadSessionAborted',
   'CiSmokeReadSessionEndpoint', 'CiSmokeReadSessionBody', 'CiSmokeReadSessionBodyLimit',
   'CiSmokeReadSessionHttp', 'CiSmokeReadSessionToken', 'CiSmokeReadSessionNoAmbientCredentials',
   'CiSmokeReadSessionCredentials', 'CiSmokeReadSessionExpiration', 'CiSmokeReadSessionIdentity',

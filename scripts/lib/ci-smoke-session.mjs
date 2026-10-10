@@ -12,7 +12,7 @@ const STS_REGION='us-west-2',STS_HOST='sts.us-west-2.amazonaws.com',AUDIENCE='st
 const MAX_BODY=131072,MAX_TOKEN=65536,CLEANUP_MS=1000;
 const need=(ok,code='CiSmokeReadSessionInput')=>{if(!ok)throw Error(code);};
 const cleanupError=()=>Object.assign(Error('CiSmokeReadSessionCleanupHeld'),{code:'ECLEANUP'});
-const reasons=new Set(['CiSmokeAwsExpiration','CiSmokeReadSessionInput','CiSmokeReadSessionEnvironment','CiSmokeOidcEndpoint','CiSmokeReadSessionDeadline','CiSmokeReadSessionAborted','CiSmokeReadSessionEndpoint','CiSmokeReadSessionBody','CiSmokeReadSessionBodyLimit','CiSmokeReadSessionHttp','CiSmokeReadSessionToken','CiSmokeReadSessionNoAmbientCredentials','CiSmokeReadSessionCredentials','CiSmokeReadSessionExpiration','CiSmokeReadSessionIdentity']);
+const reasons=new Set(['CiSmokeAwsExpiration','CiSmokeReadSessionInput','CiSmokeReadSessionEnvironment','CiSmokeOidcEndpoint','CiSmokeOidcOrigin','CiSmokeOidcQuery','CiSmokeReadSessionDeadline','CiSmokeReadSessionAborted','CiSmokeReadSessionEndpoint','CiSmokeReadSessionBody','CiSmokeReadSessionBodyLimit','CiSmokeReadSessionHttp','CiSmokeReadSessionToken','CiSmokeReadSessionNoAmbientCredentials','CiSmokeReadSessionCredentials','CiSmokeReadSessionExpiration','CiSmokeReadSessionIdentity']);
 const integer=(n,min=1)=>need(Number.isSafeInteger(n)&&n>=min);
 function fields(value,required,optional=[]){
  need(value&&typeof value==='object'&&!Array.isArray(value)&&!types.isProxy(value)&&[Object.prototype,null].includes(Object.getPrototypeOf(value)));
@@ -41,15 +41,14 @@ function environment(env){
 }
 function oidcUrl(raw){
  need(typeof raw==='string'&&raw.length<=4096&&!/[\s\\]/.test(raw),'CiSmokeOidcEndpoint');let url;try{url=new URL(raw);}catch{throw Error('CiSmokeOidcEndpoint');}
- // GitHub assigns runner service hosts dynamically. Accept only a single
- // service label in GitHub Actions' domain and the exact runner token route;
- // never the issuer's discovery URL, an arbitrary URL or a redirect.
+ // The Node action handler injects GenerateIdTokenUrl from the job's service
+ // connection. Its internal path/version is not a public API contract. Keep
+ // the existing service-origin policy and pin this exact URL for the request;
+ // callers cannot supply an endpoint input and HTTP redirects remain denied.
  const host=/^[a-z0-9]+(?:-[a-z0-9]+)*\.actions\.githubusercontent\.com$/;
- const uuid='[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}';
- const route=new RegExp('^/[A-Za-z0-9_-]{1,256}/_apis/distributedtask/hubs/build/plans/'+uuid+'/jobs/'+uuid+'/idtoken$');
- need(url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&!url.hash&&url.href===raw&&host.test(url.hostname)&&route.test(url.pathname),'CiSmokeOidcEndpoint');
- const keys=[...url.searchParams.keys()];need(new Set(keys).size===keys.length&&keys.every(k=>['api-version','audience'].includes(k))&&url.searchParams.get('api-version')==='2.0','CiSmokeOidcEndpoint');
- need(!url.searchParams.has('audience')||url.searchParams.get('audience')===AUDIENCE,'CiSmokeOidcEndpoint');url.searchParams.set('audience',AUDIENCE);return url;
+ need(url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&!url.hash&&url.href===raw&&host.test(url.hostname),'CiSmokeOidcOrigin');
+ const keys=[...url.searchParams.keys()];need(new Set(keys).size===keys.length,'CiSmokeOidcQuery');
+ need(!url.searchParams.has('audience')||url.searchParams.get('audience')===AUDIENCE,'CiSmokeOidcQuery');url.searchParams.set('audience',AUDIENCE);return url;
 }
 
 /** use({credentials,config,signal}) must pass signal and the same deadline to

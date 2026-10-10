@@ -45,7 +45,21 @@ it('performs one OIDC + exact 900s web identity STS + signed identity check, the
  expect(identity.authorization).toContain(m.issued.accessKeyId);expect(identity.authorization).toContain('/us-west-2/sts/aws4_request');expect(identity.token).toBe(m.issued.sessionToken);
  expect(f.env).toEqual(before);expect(held.accessKeyId).toBe('');expect(held.secretAccessKey).toBe('');expect(held.sessionToken).toBe('');expect(held.expiration.getTime()).toBe(0);expect(signal.aborted).toBe(true);expect(m.bodies.every(b=>b.closed)).toBe(true);
 });
-for(const value of [requestUrl.replace('https:','http:'),requestUrl.replace('pipelines.actions.githubusercontent.com','example.com'),requestUrl.replace('pipelines.actions.githubusercontent.com','pipelines.actions.githubusercontent.com.example.com'),requestUrl.replace('https://','https:'+'//user:password@'),requestUrl+'#fragment',requestUrl+'&audience=example.com',requestUrl+'&audience=sts.amazonaws.com&audience=sts.amazonaws.com',requestUrl.replace('/idtoken','/other'),requestUrl.replace('/idtoken','/%69dtoken'),requestUrl.replace('api-version=2.0','api-version=2.0&redirect=https://example.com')])it('rejects an unapproved OIDC URL before network: '+value,async()=>{
+// Synthetic service routes exercise the platform-URL contract, not a claim
+// about GitHub's current internal endpoint path or API version.
+for(const value of [
+ 'https://pipelines.actions.githubusercontent.com/synthetic/token?api-version=3.0&scope=fixture',
+ 'https://pipelines.actions.githubusercontent.com/opaque/provider/route?context=fixture',
+ requestUrl.replace('api-version=2.0','api-version=2.1'),
+])it('preserves a platform-provided opaque route/query on the existing service origin: '+value,async()=>{
+ const f=fixture(),m=mockHttp();f.env.ACTIONS_ID_TOKEN_REQUEST_URL=value;
+ await expect(withCiSmokeReadSession(f,()=>true,m.seams)).resolves.toBe(true);
+ const supplied=new URL(value),request=m.calls[0].request;
+ expect(request.hostname).toBe(supplied.hostname);expect(request.path).toBe(supplied.pathname);
+ expect(request.query).toEqual({...Object.fromEntries(supplied.searchParams),audience:'sts.amazonaws.com'});
+ expect(m.calls).toHaveLength(3);expect(f.env.ACTIONS_ID_TOKEN_REQUEST_URL).toBe(value);
+});
+for(const value of [requestUrl.replace('https:','http:'),requestUrl.replace('pipelines.actions.githubusercontent.com','example.com'),requestUrl.replace('pipelines.actions.githubusercontent.com','pipelines.actions.githubusercontent.com.example.com'),requestUrl.replace('https://','https:'+'//user:password@'),requestUrl.replace('.com/','.com:8443/'),requestUrl+'#fragment',requestUrl+'&audience=example.com',requestUrl+'&audience=sts.amazonaws.com&audience=sts.amazonaws.com',requestUrl+'&api-version=3.0'])it('rejects an unapproved OIDC URL before network: '+value,async()=>{
  const f=fixture(),m=mockHttp();f.env.ACTIONS_ID_TOKEN_REQUEST_URL=value;
  await expect(withCiSmokeReadSession(f,()=>{throw Error('unexpected use');},m.seams)).rejects.toThrow();expect(m.calls).toHaveLength(0);
 });
@@ -57,7 +71,7 @@ it('rejects missing GitHub credentials/identity and extra endpoint/provider opti
 });
 it('reports only owned static reasons and never copies an external callback error',async()=>{
  const f=fixture(),m=mockHttp();f.env.ACTIONS_ID_TOKEN_REQUEST_URL='https://example.com/';
- await expect(withCiSmokeReadSession(f,()=>{},m.seams)).rejects.toMatchObject({phase:'precheck',reason:'CiSmokeOidcEndpoint'});
+ await expect(withCiSmokeReadSession(f,()=>{},m.seams)).rejects.toMatchObject({phase:'precheck',reason:'CiSmokeOidcOrigin'});
  const good=fixture(),http=mockHttp();await expect(withCiSmokeReadSession(good,()=>{throw Error('synthetic-sensitive-callback');},http.seams)).rejects.toMatchObject({phase:'use',reason:'CiSmokeReadSessionFailure'});
 });
 for(const stage of ['oidc','assume','identity'])it('holds on '+stage+' HTTP failure without retry, use or raw error text',async()=>{
@@ -65,7 +79,9 @@ for(const stage of ['oidc','assume','identity'])it('holds on '+stage+' HTTP fail
  await expect(withCiSmokeReadSession(f,()=>{used=true;},m.seams)).rejects.toThrow(/^CiSmokeReadSessionHeld$/);expect(used).toBe(false);expect(m.calls.length).toBe(['oidc','assume','identity'].indexOf(stage)+1);expect(m.handler.destroyed).toBe(true);
 });
 it('does not follow redirects or forward the OIDC bearer to another host',async()=>{
- const f=fixture(),m=mockHttp(({response})=>{response.statusCode=302;response.headers.location='https://example.com/steal';});await expect(withCiSmokeReadSession(f,()=>{},m.seams)).rejects.toThrow();expect(m.calls).toHaveLength(1);expect(m.handler.destroyed).toBe(true);
+ const f=fixture(),m=mockHttp(({response})=>{response.statusCode=302;response.headers.location='https://example.com/steal';});
+ f.env.ACTIONS_ID_TOKEN_REQUEST_URL=requestUrl+'&redirect=https://example.com';
+ await expect(withCiSmokeReadSession(f,()=>{},m.seams)).rejects.toThrow();expect(m.calls).toHaveLength(1);expect(m.calls[0].request.hostname).toBe('pipelines.actions.githubusercontent.com');expect(m.handler.destroyed).toBe(true);
 });
 for(const fault of ['account','role','session','user-id','expired','oversized-session'])it('rejects actual STS '+fault+' mismatch before use',async()=>{
  const f=fixture(),m=mockHttp(async({stage,response})=>{
