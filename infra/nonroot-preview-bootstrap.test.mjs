@@ -1,6 +1,6 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import {previewRegistrationFromProviderArgs,verifyNonrootPreviewPurposeReadback} from '../scripts/lib/nonroot-preview-source.mjs';
-const state=vi.hoisted(()=>({definitions:new Map(),resources:[],calls:[],revision:0,drift:false,registrations:[],pending:[],active:0,maximumActive:0,rejectConcurrent:false,failName:null}));
+const state=vi.hoisted(()=>({definitions:new Map(),resources:[],calls:[],revision:0,drift:false,registrations:[],pending:[],active:0,maximumActive:0,rejectConcurrent:false,failName:null,mutateTags:null}));
 const account='123456789012',region='ap-northeast-1',stage='pr-7',sourceTree='a'.repeat(40);
 const cluster='mem9-on-aws-pr-7-Cluster-example',family=cluster+'-Mem9Bootstrap';
 const out=value=>({value,apply(fn){const invoke=v=>{const next=fn(v);return next&&typeof next==='object'&&'apply'in next?next.value:next;};return out(value instanceof Promise?value.then(invoke):invoke(value));}});
@@ -18,7 +18,7 @@ vi.mock('./vpc',()=>({resolveVpc:()=>({privateSubnetIds:out(['subnet-0123456789a
 vi.mock('@aws-sdk/client-ecs',()=>({
  DescribeTaskDefinitionCommand:class{constructor(input){this.input=input;}},
  ECSClient:class{async send(command){state.calls.push(command.input);const result=structuredClone(state.definitions.get(command.input.taskDefinition));
-  if(!result)throw Error('UnknownSyntheticDefinition');if(state.drift)result.taskDefinition.cpu='4096';return result;}destroy(){}},
+  if(!result)throw Error('UnknownSyntheticDefinition');if(state.drift)result.taskDefinition.cpu='4096';state.mutateTags?.(result.tags);return result;}destroy(){}},
 }));
 function register(name,args,options={}){
  const revision=++state.revision,arn=`arn:aws:ecs:${region}:${account}:task-definition/${family}:${revision}`;
@@ -30,8 +30,11 @@ function register(name,args,options={}){
   if(state.rejectConcurrent&&state.active>1)throw Error('ConcurrentFamilyRegistration');
   await new Promise(resolve=>setTimeout(resolve,0));
   if(state.failName===name)throw Error('SyntheticRegistrationFailed');
-  const registration=previewRegistrationFromProviderArgs(resolved),{tags,...body}=registration;
-  state.resources.push({kind:'definition',name,registration});
+  const registration=previewRegistrationFromProviderArgs(resolved);
+  // Framework tags are applied after the component transform captured its inputs.
+  const request=previewRegistrationFromProviderArgs({...resolved,tags:{...resolved.tags,'sst:app':globalThis.$app.name,'sst:stage':globalThis.$app.stage}});
+  const {tags,...body}=request;
+  state.resources.push({kind:'definition',name,registration,request});
   // Model provider defaults and unordered keyed rows independently of inputs.
   const containerDefinitions=body.containerDefinitions.map(c=>({...structuredClone(c),cpu:c.cpu??0,essential:c.essential??true,
    mountPoints:c.mountPoints??[],volumesFrom:c.volumesFrom??[],systemControls:c.systemControls??[],
@@ -73,7 +76,7 @@ const cognito=()=>({issuer:out('https://example.com/issuer'),userPoolId:out('poo
 const runtime=()=>({parameterArn:out(`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/pr-7/runtime/database-credential`),probeParameterArn:out(`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/pr-7/runtime/admin-probe-credential`)});
 const fixtures=()=>({generation:'c'.repeat(64),arns:Object.fromEntries(['config','planner','executor','backend','seed'].map(k=>[k,out(`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/pr-7/consolidation-preview/${k}`)]))});
 describe('numeric-preview bootstrap purpose map producer',()=>{
- beforeEach(()=>{vi.resetModules();state.definitions.clear();state.resources=[];state.calls=[];state.revision=0;state.drift=false;state.registrations=[];state.pending=[];state.active=0;state.maximumActive=0;state.rejectConcurrent=false;state.failName=null;setup();});
+ beforeEach(()=>{vi.resetModules();state.definitions.clear();state.resources=[];state.calls=[];state.revision=0;state.drift=false;state.registrations=[];state.pending=[];state.active=0;state.maximumActive=0;state.rejectConcurrent=false;state.failName=null;state.mutateTags=null;setup();});
  afterEach(async()=>{await Promise.allSettled(state.pending);vi.unstubAllGlobals();vi.unstubAllEnvs();});
  it('serializes same-family revisions behind the original and each previous purpose',async()=>{
   state.rejectConcurrent=true;const {bootstrap}=await import('./bootstrap.ts');
@@ -97,6 +100,11 @@ describe('numeric-preview bootstrap purpose map producer',()=>{
   const map=JSON.parse(await resolve(result.previewPurposeBindings));expect(map.bindings).toHaveLength(9);
   expect(new Set(map.bindings.map(b=>b.taskDefinitionArn)).size).toBe(9);expect(map.defaultPurpose).toBe('bootstrap-runtime-bootstrap');
   const defs=state.resources.filter(r=>r.kind==='definition').map(r=>r.registration);
+  const expectedTags={Project:'mem9-on-aws',Stage:stage,ManagedBy:'sst','sst:app':'mem9-on-aws','sst:stage':stage};
+  for(const row of state.resources.filter(r=>r.kind==='definition')){
+   expect(Object.fromEntries(row.registration.tags.map(t=>[t.key,t.value]))).toEqual(expectedTags);
+   expect(Object.fromEntries(row.request.tags.map(t=>[t.key,t.value]))).toEqual(expectedTags);
+  }
   for(const def of defs){expect(def.family).toBe(family);expect(def.taskRoleArn).toBe(defs[0].taskRoleArn);expect(def.executionRoleArn).toBe(defs[0].executionRoleArn);
    expect(def.containerDefinitions[0].secrets).toEqual(defs[0].containerDefinitions[0].secrets);expect(def.containerDefinitions[0].command).toEqual([]);
    expect(def.containerDefinitions[0].user).toBe('1000:1000');}
@@ -108,6 +116,24 @@ describe('numeric-preview bootstrap purpose map producer',()=>{
   expect(state.calls).toHaveLength(9);expect(state.calls.every(c=>c.include.join()==='TAGS')).toBe(true);
   const parameter=state.resources.find(r=>r.name==='BootstrapPurposeBindings');expect(parameter.args.name).toBe('/mem9-on-aws/pr-7/bootstrap/purpose-bindings');
   expect(await resolve(parameter.args.value)).toBe(JSON.stringify(map));
+ });
+ it.each(['sst:app','sst:stage'])('rejects a missing framework tag %s',async key=>{
+  state.mutateTags=tags=>tags.splice(tags.findIndex(tag=>tag.key===key),1);
+  const {bootstrap}=await import('./bootstrap.ts');
+  const result=bootstrap({nodes:{cluster:{name:out(cluster)}}},db(),identity(),cognito(),undefined,fixtures(),runtime());
+  await expect(resolve(result.previewPurposeBindings)).rejects.toThrow('NonrootPreviewMismatch');
+ });
+ it.each(['sst:app','sst:stage'])('rejects a wrong framework tag %s',async key=>{
+  state.mutateTags=tags=>{tags.find(tag=>tag.key===key).value='different';};
+  const {bootstrap}=await import('./bootstrap.ts');
+  const result=bootstrap({nodes:{cluster:{name:out(cluster)}}},db(),identity(),cognito(),undefined,fixtures(),runtime());
+  await expect(resolve(result.previewPurposeBindings)).rejects.toThrow('NonrootPreviewMismatch');
+ });
+ it('rejects an extra tag rather than dropping it from comparison',async()=>{
+  state.mutateTags=tags=>tags.push({key:'unexpected',value:'value'});
+  const {bootstrap}=await import('./bootstrap.ts');
+  const result=bootstrap({nodes:{cluster:{name:out(cluster)}}},db(),identity(),cognito(),undefined,fixtures(),runtime());
+  await expect(resolve(result.previewPurposeBindings)).rejects.toThrow('NonrootPreviewMismatch');
  });
  it('does not publish a usable map when a registered definition differs',async()=>{
   state.drift=true;const {bootstrap}=await import('./bootstrap.ts');

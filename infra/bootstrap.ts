@@ -155,6 +155,8 @@ export function bootstrap(
         args.tags = { ...(args.tags ?? {}), ...tags };
         if(production?.active)args.executionRoleArn=production.bootstrapExecutionRoleArn;
         if(numericPreview){
+          // SST adds these after the transform; capture the exact expected tags.
+          args.tags={...(args.tags ?? {}),'sst:app':$app.name,'sst:stage':$app.stage};
           args.trackLatest=false;
           // Each revision has a fixed purpose. Only its declared operation env
           // changes; roles, secrets and the original application remain shared.
