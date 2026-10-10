@@ -17,9 +17,26 @@ export function gatewaySecretEndpointDns(service: EndpointService, region: strin
   return matches[0].dnsName;
 }
 
-export function gatewaySecretEndpointPolicy(service: EndpointService, roleArn: string, resources: string[]) {
-  return { Version: "2012-10-17", Statement: [{ Effect: "Allow", Principal: { AWS: roleArn },
-    Action: service === "ssm" ? "ssm:GetParameters" : "secretsmanager:GetSecretValue", Resource: resources }] };
+/** The endpoint filters the exact role; service-side permissions still apply. */
+export function gatewaySecretEndpointPolicy(service: EndpointService, roleArn: string, resources: string[], region: string) {
+  function fail(): never { throw new Error("GatewaySecretEndpointPolicy"); }
+  const literal = (value: unknown): value is string => typeof value === 'string' && !/[\s*?]|\$\{/.test(value);
+  if (!['ssm', 'secretsmanager'].includes(service) || !literal(region) || !/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(region) ||
+    !literal(roleArn) || !Array.isArray(resources) || resources.length === 0) fail();
+  const role = /^arn:aws:iam::(\d{12}):role\/([\x21-\x7e]+)$/.exec(roleArn);
+  if (!role) fail();
+  const lastSlash = role[2].lastIndexOf('/');
+  if (lastSlash + 1 > 511 || !/^[A-Za-z0-9_+=,.@-]{1,64}$/.test(role[2].slice(lastSlash + 1))) fail();
+  for (const resource of resources) {
+    if (!literal(resource)) fail();
+    const arn = /^arn:aws:(ssm|secretsmanager):([^:]+):(\d{12}):(.+)$/.exec(resource);
+    if (!arn || arn[1] !== service || arn[2] !== region || arn[3] !== role[1]) fail();
+    const validName = service === 'ssm' ? /^parameter\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/ : /^secret:[A-Za-z0-9/_+=.@-]+$/;
+    if (!validName.test(arn[4])) fail();
+  }
+  return { Version: "2012-10-17", Statement: [{ Effect: "Allow", Principal: "*",
+    Action: service === "ssm" ? "ssm:GetParameters" : "secretsmanager:GetSecretValue", Resource: [...resources],
+    Condition: { ArnEquals: { 'aws:PrincipalArn': roleArn } } }] };
 }
 
 export function createGatewayProxyNetwork({ vpcId, backendSecurityGroupId, tags }: {
@@ -60,8 +77,8 @@ export function provisionGatewaySecretEndpoints({ vpcId, subnetIds, endpointSecu
   const EndpointResource = (aws.ec2 as unknown as { VpcEndpoint: new (name: string, args: EndpointArgs) => Endpoint }).VpcEndpoint;
   const resources = { secretsmanager: [tenantSecretArn, identitySecretArn], ssm: [transportParameterArn] };
   const endpoints = (['secretsmanager', 'ssm'] as const).map(service => {
-    const policy = $jsonStringify({ roleArn, resources: resources[service] })
-      .apply(raw => { const value = JSON.parse(raw); return JSON.stringify(gatewaySecretEndpointPolicy(service, value.roleArn, value.resources)); });
+    const policy = $jsonStringify({ roleArn, resources: resources[service], region })
+      .apply(raw => { const value = JSON.parse(raw); return JSON.stringify(gatewaySecretEndpointPolicy(service, value.roleArn, value.resources, value.region)); });
     const endpoint = new EndpointResource(service === 'ssm' ? 'Mem9GatewaySsmEndpoint' : 'Mem9GatewaySecretsManagerEndpoint', {
       vpcId, subnetIds, securityGroupIds: [endpointSecurityGroupId],
       serviceName: $interpolate`com.amazonaws.${region}.${service}`, vpcEndpointType: 'Interface',
