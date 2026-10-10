@@ -1,4 +1,7 @@
 import {describe,it,expect} from 'vitest';
+import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {CI_SMOKE_POLICY} from './lib/ci-smoke-policy.mjs';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {previewBootstrapRegistration,previewRegistrationFromProviderArgs,buildNonrootPreviewPurposeMap,
  selectNonrootPreviewPurpose,verifyNonrootPreviewPurposeReadback,verifyPreviewRegistrationReadback,
@@ -38,6 +41,14 @@ function providerReadback(record){
  return o;
 }
 describe('source-bound fixed preview purpose revisions',()=>{
+ it('keeps the reviewed cancellation source pin coupled to the actual normalizer bytes',()=>{
+  const rows=CI_SMOKE_POLICY.rows.filter(r=>r.rule.kind==='safe-recovery'&&r.rule.contractId==='owned-preview-invocation-cancel');
+  expect(rows).toHaveLength(1);
+  const path='scripts/lib/nonroot-preview-source.mjs',bytes=readFileSync(new URL('./lib/nonroot-preview-source.mjs',import.meta.url));
+  expect(rows[0].rule.entryFiles.filter(p=>p.path===path)).toEqual([{path,gitMode:'100644',sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length}]);
+  expect(rows[0].rule).toMatchObject({originalCondition:"always() && (failure() || cancelled()) && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+   normalGateIndependent:true,requiresOwnedIntent:true,mayStartRootTask:false,mayCreateFreshBusinessOperation:false,preserveOriginalDeadlines:true,failure:'hold-preserve-evidence'});
+ });
  it('compares finite provider defaults and keyed order while retaining the full original readback hash',()=>{
   const f=structuredClone(fixture());for(const r of f.records){delete r.registration.volumes;delete r.registration.placementConstraints;r.observation=providerReadback(r);}
   const before=structuredClone(f),map=buildNonrootPreviewPurposeMap(f);

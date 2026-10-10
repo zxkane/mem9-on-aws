@@ -127,8 +127,8 @@ describe('Git-backed CI smoke source record producer',()=>{
     const context=variant(files=>files.set(path,Buffer.concat([files.get(path),Buffer.from('\n# changed fixture bytes\n')])));
     await expect(createCiSmokeIsolationRecord(input(context))).rejects.toThrow('CiSmokeRecipeChanged');
   },30000);
-  it('rejects recovery-source drift instead of refreshing its reviewed pin',async()=>{
-    const context=variant(files=>{const p='scripts/lib/production-image-deployment-bundle.mjs';files.set(p,Buffer.concat([files.get(p),Buffer.from('\n// changed recovery source\n')]));});
+  it.each(['scripts/lib/production-image-deployment-bundle.mjs','scripts/lib/nonroot-preview-source.mjs'])('rejects recovery-source drift in %s instead of refreshing its reviewed pin',async p=>{
+    const context=variant(files=>{files.set(p,Buffer.concat([files.get(p),Buffer.from('\n// changed recovery source\n')]));});
     await expect(createCiSmokeIsolationRecord(input(context))).rejects.toThrow('CiSmokeFileChanged');
   },30000);
   it('rejects a missing route guard and a substituted smoke job',async()=>{
