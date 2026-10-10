@@ -183,18 +183,25 @@ export function bootstrap(
   if(numericPreview){
     // The underlying task output resolves after SST has invoked its transform.
     // Reuse that exact family/roles/secret set for every additional revision.
-    previewPurposeBindings=task.nodes.taskDefinition.apply(()=>{
+    previewPurposeBindings=task.nodes.taskDefinition.apply(definition=>{
       if(!previewGenerated)throw Error('NonrootPreviewGeneratedDefinitionMissing');
       const scope=$jsonStringify({stage:$app.stage,account:accountId(),region:applicationRegion()}).apply(raw=>({...JSON.parse(raw),sourceTree:previewSourceTree()}) as NonrootPreviewScope);
       return previewGenerated.apply(raw=>scope.apply(context=>{
         const original=previewRegistrationFromProviderArgs(JSON.parse(raw));
+        // ECS revisions in this family must register sequentially, including
+        // the original definition owned by SST.
+        let previousDefinition=definition;
         const records=previewPurposes.map(purpose=>{
           const registration=purpose===defaultPurpose?original:previewBootstrapRegistration(original,purpose,context);
           const {containerDefinitions,tags:registrationTags,...fields}=registration;
-          const arn=purpose===defaultPurpose?task.taskDefinition:new aws.ecs.TaskDefinition('Mem9BootstrapPurpose'+purpose.split('-').map(p=>p[0].toUpperCase()+p.slice(1)).join(''),{
-            ...fields,containerDefinitions:JSON.stringify(containerDefinitions),
-            tags:Object.fromEntries((registrationTags as Array<{key:string;value:string}>).map(t=>[t.key,t.value])),trackLatest:false,skipDestroy:true,
-          } as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1]).arn;
+          let arn=task.taskDefinition;
+          if(purpose!==defaultPurpose){
+            const additional=new aws.ecs.TaskDefinition('Mem9BootstrapPurpose'+purpose.split('-').map(p=>p[0].toUpperCase()+p.slice(1)).join(''),{
+              ...fields,containerDefinitions:JSON.stringify(containerDefinitions),
+              tags:Object.fromEntries((registrationTags as Array<{key:string;value:string}>).map(t=>[t.key,t.value])),trackLatest:false,skipDestroy:true,
+            } as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1],{dependsOn:[previousDefinition]});
+            previousDefinition=additional;arn=additional.arn;
+          }
           return arn.apply(async taskDefinition=>{
             const client=new ECSClient({region:context.region});
             try{
