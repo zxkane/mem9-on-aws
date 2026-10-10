@@ -83,6 +83,9 @@ function mockArn(type: string, name: string): string {
     const revision=recordedResources.filter(r=>r.type===type&&r.inputs.family===family).findIndex(r=>r.name===name)+1;
     return `arn:aws:ecs:${region}:${accountId}:task-definition/${family}:${revision}`;
   }
+  if(type==='aws:iam/role:Role')return `arn:aws:iam::${accountId}:role/${name}`;
+  if(type==='aws:secretsmanager/secret:Secret'||type==='aws:secretsmanager/secretVersion:SecretVersion')return `arn:aws:secretsmanager:${region}:${accountId}:secret:${name}`;
+  if(type==='aws:ssm/parameter:Parameter')return `arn:aws:ssm:${region}:${accountId}:parameter/${name}`;
   const service = type.split(":")[1] || "mock";
   return `arn:aws:${service}:${region}:${accountId}:${name}`;
 }
