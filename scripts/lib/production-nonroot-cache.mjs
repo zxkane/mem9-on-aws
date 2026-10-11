@@ -1,3 +1,4 @@
+import {inspectOriginalLocalWorkData} from './production-nonroot-local-work.mjs';
 import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-image-response.mjs';
 import {createCopyScanPoolReplay,applyCopyScanPoolEvent,describeScanSequenceTemplate} from './production-nonroot-scan-pool.mjs';
 import {verifyRootOwnerReservations} from './production-nonroot-root-owner-accounting.mjs';
@@ -260,7 +261,7 @@ export function verifyNonrootCombinedCopyAccounting(value,{copyCheckpoint,copyRe
  const check=()=>{const exposure=[...active.values()].reduce((n,r)=>n+r.bound,0)+scan.active.size*8388608;for(const k of Object.keys(CAPS))need(spent[k]+remaining[k]+(k==='httpBodyBytes'?exposure:0)<=CAPS[k],'NonrootCacheCumulativeLimit');};
  need(Array.isArray(record.events)&&record.events.length>0&&record.events.length<=20000,'NonrootCacheAccountingEvents');check();
  const rootReservations=verifyRootOwnerReservations(record.events),rootPool=createRootOwnerPoolReplay();
- const beforeCopy=Object.hasOwn(record,'payments')?verifyNonrootBeforeCopyAccounting(record.payments,{startRaw:record.startRaw,events:record.events,copyReceipt:c,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFenceAcquisition}):{prepayments:new Map(),legacyReservations:new Set(),legacyFilesystemSequences:new Set()};
+ const beforeCopy=Object.hasOwn(record,'payments')?verifyNonrootBeforeCopyAccounting(record.payments,{startRaw:record.startRaw,events:record.events,copyReceipt:c,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFenceAcquisition}):{prepayments:new Map(),legacyReservations:new Set(),legacyFilesystemSequences:new Set(),localWorkSequences:new Set()};
  need(!expectedFenceAcquisition||Object.hasOwn(record,'payments'),'NonrootFencePaymentRequired');
  for(const [i,e]of record.events.entries()){
   exact(e,['version','sequence','owner','executionId','planHash','publicationHash','previousHash','type','data','spent','remaining',...Object.keys(revision)]);need(!sealed&&e.version===policy.version&&e.sequence===i+1&&e.previousHash===previous,'NonrootCacheEventChain');if(policy.version===2)same(e.budgetRevision,policy.budgetRevision,'NonrootBudgetRevisionMismatch');for(const k of Object.keys(binding))need(e[k]===binding[k],'NonrootCacheEventOwner');const d=e.data;
@@ -276,6 +277,8 @@ export function verifyNonrootCombinedCopyAccounting(value,{copyCheckpoint,copyRe
    need(!opened&&active.size===0&&!['scan-pool-unknown','scan-pool-rejected'].includes(e.type),'NonrootCacheUncertainAccounting');
    if(e.type==='scan-pool-prepayment')need(d.plan.startedMs>=c.summary.startedMs&&d.plan.startedMs<=p.startedMs&&charged.size===objects.size&&[...source.values()].every(q=>q.complete),'NonrootScanPoolEarly');
    const delta=applyCopyScanPoolEvent(scan,e.type,d,{binding,ledgerStartHash:p.ledgerStartHash,settledReadbackHash:p.settledReadbackHash,template:scanTemplate,deadlineMs:start.deadlineMs});for(const [k,n]of Object.entries(delta))add(k,n);
+  }else if(e.type==='local-work'){
+   need(!opened&&beforeCopy.localWorkSequences.has(e.sequence),'NonrootBeforeCopyUnboundLocalWork');const charge=inspectOriginalLocalWorkData(d);add('logicalBytes',charge.logicalBytes);
   }else if(e.type==='logical'){
    exact(d,['purpose','bytes','reserveDebit',...(d.destinationObject?['destinationObject']:[])]);need(['upload','manifest','metadata','archive','destination'].includes(d.purpose),'NonrootCombinedLogical');add('logicalBytes',d.bytes);
    if(d.destinationObject){exact(d.destinationObject,['key','descriptor']);const {key,descriptor}=d.destinationObject,n=objects.get(key);need(!opened&&d.purpose==='destination'&&n&&!charged.has(key)&&d.bytes===n.size,'NonrootCombinedDebit');same(descriptor,{digest:n.digest,size:n.size,mediaType:n.mediaType});same(d.reserveDebit,{...zero(),logicalBytes:n.size});charged.set(key,e.sequence);}

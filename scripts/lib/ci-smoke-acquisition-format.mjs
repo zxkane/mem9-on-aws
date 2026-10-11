@@ -1,3 +1,4 @@
+import {inspectOriginalLocalWorkData} from './production-nonroot-local-work.mjs';
 import {createHash} from 'node:crypto';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {parseCiSmokeJson} from './ci-smoke-evidence.mjs';
@@ -45,6 +46,7 @@ export function replayAccounting(events,{binding,startingCounters,reserve,budget
   else if(e.type==='cache-begin'){exact(d,['key','descriptor','origin','reserveDebit']);need(!cache.has(d.key)&&integer(d.descriptor.size)&&['source-cache','completed-destination-cache'].includes(d.origin),'CustodySecondGraphPass');cache.set(d.key,{...d,completed:false});spent=addCounters(spent,{...zero(),logicalBytes:d.descriptor.size});}
   else if(e.type==='cache-complete'){exact(d,['key','digest','physicalBytes']);const row=cache.get(d.key);need(row&&!row.completed&&row.descriptor.digest===d.digest&&row.descriptor.size===d.physicalBytes,'CustodyCacheCompletion');row.completed=true;}
   else if(e.type==='filesystem'){exact(d,['component','phase','uncompressedBytes','processedEntries','reserveDebit']);spent=addCounters(spent,{...zero(),uncompressedBytes:d.uncompressedBytes,processedEntries:d.processedEntries});}
+  else if(e.type==='local-work'){spent=addCounters(spent,inspectOriginalLocalWorkData(d));}
   else if(e.type==='logical'){exact(d,['purpose','bytes','reserveDebit']);need(['upload','manifest','metadata','archive','destination'].includes(d.purpose),'CustodyLogicalPurpose');spent=addCounters(spent,{...zero(),logicalBytes:d.bytes});}
   else if(e.type==='prepayment'){exact(d,['allocationId','planHash','scopeHash','charge','reserveDebit']);need([d.allocationId,d.planHash,d.scopeHash].every(v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)),'CustodyPrepayment');counter(d.charge);same(d.charge,d.reserveDebit,'CustodyPrepaymentDebit');spent=addCounters(spent,d.charge);}
   else if(e.type==='availability'){exact(d,['reservationId','request','response']);}

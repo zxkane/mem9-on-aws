@@ -1,3 +1,4 @@
+import {verifyOriginalLocalWorkEvents} from './production-nonroot-local-work.mjs';
 /** Closed COPY-prefix accounting only. These records cannot restore a reader,
  * issue credentials, spend a slot, or authenticate a build/security result. */
 import {copyNonrootJson,parseNonrootJson} from './production-nonroot-contracts.mjs';
@@ -56,6 +57,7 @@ function legacyAccounting(value,{start,events,carrier,sourceTags,issuerSource}){
  const r=document(value.readPlan),original=document(value.operatorBinding),d=document(value.download),m=document(value.material),inventory=document(value.inventory);
  exact(r,['authority','plan','operatorBindingRef','deadlineMs']);need(r.authority===false&&r.deadlineMs===start.deadlineMs,'NonrootBeforeCopyLegacyClock');same(r.operatorBindingRef,value.operatorBinding.ref);
  const p=legacyPlan(r.plan,original,carrier.template.scope,issuerSource),b=p.binding;
+ const localWork=verifyOriginalLocalWorkEvents(events,{scope:'legacy',subjectHash:hash(p),binding:start.binding,deadlineMs:start.deadlineMs,beforeSequence:carrier.debitSequence}),feeSequences=new Set(localWork.sequences);
  if(carrier.template.ownerSource)same(carrier.template.ownerSource,issuerSource,'NonrootBeforeCopyLegacyIssuerSource');
  if(issuerSource.provider==='instance-metadata')need(carrier.template.ownerSource,'NonrootBeforeCopyLegacyIssuerSource');
  need(carrier.template.anchors.oldImageEvidenceHash===hash(original),'NonrootBeforeCopyLegacyOrigin');
@@ -116,7 +118,8 @@ function legacyAccounting(value,{start,events,carrier,sourceTags,issuerSource}){
     // The native source adapter charges its bounded file/raw/journal envelope
     // once before touching source files. This is its existing conservative
     // LOCAL charge, not an additional debit or a measurement of HTTP bodies.
-    const local=events[e.sequence-2];need(local?.type==='logical','NonrootBeforeCopyLegacySourceLocal');
+    let previous=e.sequence-2;while(previous>=0&&feeSequences.has(events[previous].sequence))previous--;
+    const local=events[previous];need(local?.type==='logical','NonrootBeforeCopyLegacySourceLocal');
     same(local.data,{purpose:'metadata',bytes:ORIGINAL_ISSUER_LIMITS.localBytes,reserveDebit:{...zero(),logicalBytes:ORIGINAL_ISSUER_LIMITS.localBytes}},'NonrootBeforeCopyLegacySourceLocal');
     logical+=ORIGINAL_ISSUER_LIMITS.localBytes;sourceLocalSequence=local.sequence;
    }
@@ -138,8 +141,9 @@ function legacyAccounting(value,{start,events,carrier,sourceTags,issuerSource}){
   if(first!==null&&e.sequence<carrier.debitSequence&&e.type==='logical'&&x.purpose==='metadata'){same(x.reserveDebit,{...zero(),logicalBytes:x.bytes},'NonrootBeforeCopyLegacyDebit');need(integer(x.bytes),'NonrootBeforeCopyLegacyLocal');logical+=x.bytes;}
  }
  need(!active&&done.size===expectedRequests.size&&seenFs.has('legacy-bootstrap')&&[...layers.keys()].every(i=>seenFs.has('legacy-package-layer-'+i)),'NonrootBeforeCopyLegacyIncomplete');
+ logical+=localWork.logicalBytes;
  need(logical>=d.localUsed.logicalBytes&&logical<=p.bounds.localBytes&&wire<=p.charge.httpBodyBytes&&ecr<=p.charge.ecrRequests&&uncompressed<=p.bounds.uncompressedBytes&&entries<=p.bounds.processedEntries,'NonrootBeforeCopyLegacyBounds');
- return {reservations,filesystemSequences,firstSequence:sourceLocalSequence??first,lastSequence:last};
+ return {reservations,filesystemSequences,localWorkSequences:feeSequences,firstSequence:Math.min(sourceLocalSequence??first,localWork.firstSequence??Infinity),lastSequence:Math.max(last,localWork.lastSequence??0)};
 }
 
 /** payments.originalIssuers.journals is exactly the two original {plan,records}
@@ -185,8 +189,16 @@ export function verifyNonrootBeforeCopyAccounting(value,{startRaw,events,copyRec
   add(checked.planHash,checked.scopeHash,checked.charge);
  }
  need(all.length===prepayments.size&&prepayments.size===(expectedFenceAcquisition?4:3),'NonrootBeforeCopyUnknownPayment');
- let legacy={reservations:new Set(),filesystemSequences:new Set()};
+ let legacy={reservations:new Set(),filesystemSequences:new Set(),localWorkSequences:new Set()};
  if(payments.legacyBootstrap){legacy=legacyAccounting(payments.legacyBootstrap,{start,events,carrier:{...p,debitSequence:n},sourceTags,issuerSource:compiled.source});need(legacy.firstSequence>issuerEvents.get('ci-reader').sequence&&legacy.lastSequence<n,'NonrootBeforeCopyLegacyOrder');}
  else need(!events.some(e=>e.type==='reservation'&&e.data.action.startsWith('LegacyBootstrap')||e.type==='filesystem'&&(e.data.phase==='control-before-copy'||e.data.component.startsWith('legacy-'))),'NonrootBeforeCopyLegacyRequired');
- return {prepayments,legacyReservations:legacy.reservations,legacyFilesystemSequences:legacy.filesystemSequences};
+ const preparationWork=verifyOriginalLocalWorkEvents(events,{scope:'carrier-preparation',subjectHash:hash(p.template),binding:start.binding,deadlineMs:start.deadlineMs,beforeSequence:n});
+ const localWorkSequences=new Set([...legacy.localWorkSequences,...preparationWork.sequences]);
+ need(events.filter(e=>e.type==='local-work').every(e=>localWorkSequences.has(e.sequence)),'NonrootBeforeCopyUnboundLocalWork');
+ if(preparationWork.sequences.length){
+  need(preparationWork.firstSequence>(legacy.lastSequence??issuerEvents.get('ci-reader').sequence),'NonrootBeforeCopyPreparationOrder');
+  const charged=events.filter(e=>e.sequence>=preparationWork.firstSequence&&e.sequence<n&&e.type==='logical'&&e.data.purpose==='archive').reduce((n,e)=>n+e.data.bytes,preparationWork.logicalBytes);
+  need(Number.isSafeInteger(charged)&&charged<=p.template.preFundingPreparation.logicalBytes,'NonrootBeforeCopyPreparationCap');
+ }
+ return {prepayments,legacyReservations:legacy.reservations,legacyFilesystemSequences:legacy.filesystemSequences,localWorkSequences};
 }

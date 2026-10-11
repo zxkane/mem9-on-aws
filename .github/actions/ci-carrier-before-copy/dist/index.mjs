@@ -85,25 +85,25 @@ var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
 */
 /** Copy only inert JSON data. Never invoke getters, toJSON, or proxy traps. */
 function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
-	need$34(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
+	need$35(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
 	let bytes = 0, nodes = 0;
 	const active = /* @__PURE__ */ new Set();
 	const add = (n) => {
 		bytes += n;
-		need$34(bytes <= maxBytes);
+		need$35(bytes <= maxBytes);
 	};
 	const string = (v) => {
-		need$34(v.isWellFormed());
+		need$35(v.isWellFormed());
 		add(Buffer.byteLength(JSON.stringify(v)));
 	};
 	function copy(v, depth) {
-		need$34(depth <= NONROOT_LIMITS.maxJsonDepth && ++nodes <= 1e5);
+		need$35(depth <= NONROOT_LIMITS.maxJsonDepth && ++nodes <= 1e5);
 		if (v === null || typeof v === "boolean") {
 			add(v === null ? 4 : v ? 4 : 5);
 			return v;
 		}
 		if (typeof v === "number") {
-			need$34(Number.isSafeInteger(v) && !Object.is(v, -0));
+			need$35(Number.isSafeInteger(v) && !Object.is(v, -0));
 			add(String(v).length);
 			return v;
 		}
@@ -111,21 +111,21 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 			string(v);
 			return v;
 		}
-		need$34(v && typeof v === "object" && !types.isProxy(v) && !active.has(v));
+		need$35(v && typeof v === "object" && !types.isProxy(v) && !active.has(v));
 		const array = Array.isArray(v), proto = Object.getPrototypeOf(v);
-		need$34(array ? proto === Array.prototype : proto === Object.prototype || proto === null);
+		need$35(array ? proto === Array.prototype : proto === Object.prototype || proto === null);
 		const descriptors = Object.getOwnPropertyDescriptors(v), keys = Reflect.ownKeys(descriptors);
-		need$34(keys.every((k) => typeof k === "string"));
+		need$35(keys.every((k) => typeof k === "string"));
 		active.add(v);
 		add(2);
 		let result;
 		if (array) {
 			const length = descriptors.length?.value;
-			need$34(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1);
+			need$35(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1);
 			result = [];
 			for (let i = 0; i < length; i++) {
 				const d = descriptors[String(i)];
-				need$34(d?.enumerable && Object.hasOwn(d, "value"));
+				need$35(d?.enumerable && Object.hasOwn(d, "value"));
 				if (i) add(1);
 				result.push(copy(d.value, depth + 1));
 			}
@@ -133,7 +133,7 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 			result = {};
 			for (const [i, k] of keys.entries()) {
 				const d = descriptors[k];
-				need$34(d.enumerable && Object.hasOwn(d, "value"));
+				need$35(d.enumerable && Object.hasOwn(d, "value"));
 				if (i) add(1);
 				string(k);
 				add(1);
@@ -153,17 +153,17 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 /** Duplicate decoded keys must be rejected before JSON.parse loses them. */
 function parseNonrootJson(text, options = {}) {
 	const o = copyJson(options);
-	need$34(Object.keys(o).every((k) => k === "maxBytes"));
+	need$35(Object.keys(o).every((k) => k === "maxBytes"));
 	const maxBytes = o.maxBytes ?? NONROOT_LIMITS.maxProofBytes;
-	need$34(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
-	need$34(typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes);
+	need$35(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
+	need$35(typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes);
 	let i = 0;
 	const ws = () => {
 		while (/[\x20\t\r\n]/.test(text[i] ?? "!")) i++;
 	};
 	const str = () => {
 		const start = i;
-		need$34(text[i++] === "\"");
+		need$35(text[i++] === "\"");
 		let escape = false;
 		while (i < text.length) {
 			const c = text[i++];
@@ -174,7 +174,7 @@ function parseNonrootJson(text, options = {}) {
 		fail$9();
 	};
 	function scan(depth) {
-		need$34(depth <= NONROOT_LIMITS.maxJsonDepth);
+		need$35(depth <= NONROOT_LIMITS.maxJsonDepth);
 		ws();
 		const c = text[i];
 		if (c === "{") {
@@ -188,17 +188,17 @@ function parseNonrootJson(text, options = {}) {
 			while (true) {
 				ws();
 				const key = str();
-				need$34(!keys.has(key));
+				need$35(!keys.has(key));
 				keys.add(key);
 				ws();
-				need$34(text[i++] === ":");
+				need$35(text[i++] === ":");
 				scan(depth + 1);
 				ws();
 				if (text[i] === "}") {
 					i++;
 					return;
 				}
-				need$34(text[i++] === ",");
+				need$35(text[i++] === ",");
 			}
 		}
 		if (c === "[") {
@@ -215,7 +215,7 @@ function parseNonrootJson(text, options = {}) {
 					i++;
 					return;
 				}
-				need$34(text[i++] === ",");
+				need$35(text[i++] === ",");
 			}
 		}
 		if (c === "\"") {
@@ -223,13 +223,13 @@ function parseNonrootJson(text, options = {}) {
 			return;
 		}
 		const m = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(i));
-		need$34(m);
+		need$35(m);
 		i += m[0].length;
 	}
 	try {
 		scan(0);
 		ws();
-		need$34(i === text.length);
+		need$35(i === text.length);
 		return freeze$3(copyJson(JSON.parse(text), maxBytes));
 	} catch {
 		fail$9();
@@ -237,13 +237,13 @@ function parseNonrootJson(text, options = {}) {
 }
 /** Structural and intrinsic equality validation only. "pass" fields are claims. */
 function inspectNonrootRecord(type, value) {
-	need$34(typeof type === "string" && Object.hasOwn(schemas$2, type));
+	need$35(typeof type === "string" && Object.hasOwn(schemas$2, type));
 	const maxBytes = type === "DataDescriptorV3" ? NONROOT_LIMITS.maxDescriptorBytes : type === "CompatibilityCertificateV5" ? NONROOT_LIMITS.maxCertificateBytes : ["RuntimeIdentityV2", "TargetIdentityRecheckV1"].includes(type) ? NONROOT_LIMITS.maxRuntimeRecordBytes : NONROOT_LIMITS.maxProofBytes;
 	const data = typeof value === "string" ? parseNonrootJson(value, { maxBytes }) : copyJson(value, maxBytes);
 	schemas$2[type](data);
 	return freeze$3(data);
 }
-var NONROOT_TRANSITION_KIND, NONROOT_DATA_COMPONENTS, NONROOT_TASK_KEYS, CONTROL_NODE, NONROOT_LIMITS, NONROOT_HARDENING_POLICY, NONROOT_GUARD_BUILTINS, fail$9, need$34, rawHash, freeze$3, canonical$4, nonrootHash, NONROOT_LIMITS_HASH, copyNonrootJson, text$4, pattern$1, integer$3, literal$1, oneOf$1, array$2, object$3, union, schemas$2, ref, define$1, H$1, G$1, N, D$1, A, R, P$2, Z, B, S$2, MS, ARN, ROLE, TASK, TD, CLUSTER, COMPONENT, KEY, SAFE_PATH, ABS, unique, equal$1, named, time$2, image$1, ARGV, JSON_REF, BYTE_REF, IMG, CIMG, hashes$1, refs, clocks, builtinPolicy, auditNames, carrierEntry, network, tags$1, runFixed, updateTaskKeys, processFields, ignoredEntrypoint, trustedProcessFields, presence, deployedControlImageSlot, controlImageTargets, release$1, inspectNonrootTransition;
+var NONROOT_TRANSITION_KIND, NONROOT_DATA_COMPONENTS, NONROOT_TASK_KEYS, CONTROL_NODE, NONROOT_LIMITS, NONROOT_HARDENING_POLICY, NONROOT_GUARD_BUILTINS, fail$9, need$35, rawHash, freeze$3, canonical$4, nonrootHash, NONROOT_LIMITS_HASH, copyNonrootJson, text$4, pattern$1, integer$3, literal$1, oneOf$1, array$2, object$3, union, schemas$2, ref, define$1, H$1, G$1, N, D$1, A, R, P$2, Z, B, S$2, MS, ARN, ROLE, TASK, TD, CLUSTER, COMPONENT, KEY, SAFE_PATH, ABS, unique, equal$1, named, time$2, image$1, ARGV, JSON_REF, BYTE_REF, IMG, CIMG, hashes$1, refs, clocks, builtinPolicy, auditNames, carrierEntry, network, tags$1, runFixed, updateTaskKeys, processFields, ignoredEntrypoint, trustedProcessFields, presence, deployedControlImageSlot, controlImageTargets, release$1, inspectNonrootTransition;
 var init_production_nonroot_contracts = __esmMin((() => {
 	NONROOT_TRANSITION_KIND = "image-security-nonroot-upgrade";
 	NONROOT_DATA_COMPONENTS = Object.freeze([
@@ -313,7 +313,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	fail$9 = () => {
 		throw Error("NonrootContractInvalid");
 	};
-	need$34 = (condition) => {
+	need$35 = (condition) => {
 		if (!condition) fail$9();
 	};
 	rawHash = (value) => createHash("sha256").update(value).digest("hex");
@@ -328,21 +328,21 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	nonrootHash = (value) => rawHash(JSON.stringify(canonical$4(copyJson(value))));
 	NONROOT_LIMITS_HASH = nonrootHash(NONROOT_LIMITS);
 	copyNonrootJson = (value) => freeze$3(copyJson(value));
-	text$4 = (max = 4096, min = 1) => (v) => need$34(typeof v === "string" && v.length >= min && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max);
+	text$4 = (max = 4096, min = 1) => (v) => need$35(typeof v === "string" && v.length >= min && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max);
 	pattern$1 = (re) => (v) => {
 		text$4()(v);
-		need$34(re.test(v));
+		need$35(re.test(v));
 	};
-	integer$3 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$34(Number.isSafeInteger(v) && v >= min && v <= max);
-	literal$1 = (expected) => (v) => need$34(v === expected);
-	oneOf$1 = (...values) => (v) => need$34(values.includes(v));
+	integer$3 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$35(Number.isSafeInteger(v) && v >= min && v <= max);
+	literal$1 = (expected) => (v) => need$35(v === expected);
+	oneOf$1 = (...values) => (v) => need$35(values.includes(v));
 	array$2 = (item, min = 0, max = 1e3) => (v) => {
-		need$34(Array.isArray(v) && v.length >= min && v.length <= max);
+		need$35(Array.isArray(v) && v.length >= min && v.length <= max);
 		v.forEach(item);
 	};
 	object$3 = (fields, check = () => {}) => (v) => {
-		need$34(v && typeof v === "object" && !Array.isArray(v));
-		need$34(Object.keys(v).length === Object.keys(fields).length && Object.keys(fields).every((k) => Object.hasOwn(v, k)));
+		need$35(v && typeof v === "object" && !Array.isArray(v));
+		need$35(Object.keys(v).length === Object.keys(fields).length && Object.keys(fields).every((k) => Object.hasOwn(v, k)));
 		for (const [k, validator] of Object.entries(fields)) validator(v[k]);
 		check(v);
 	};
@@ -355,7 +355,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	};
 	schemas$2 = Object.create(null);
 	ref = (name) => (v) => {
-		need$34(Object.hasOwn(schemas$2, name));
+		need$35(Object.hasOwn(schemas$2, name));
 		schemas$2[name](v);
 	};
 	define$1 = (name, fields, check) => {
@@ -381,25 +381,25 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	KEY = oneOf$1(...NONROOT_TASK_KEYS);
 	SAFE_PATH = (v) => {
 		text$4(4096)(v);
-		need$34(!v.startsWith("/") && !v.split("/").some((p) => p === ".." || p === "") && !/[\r\n\\]/.test(v));
+		need$35(!v.startsWith("/") && !v.split("/").some((p) => p === ".." || p === "") && !/[\r\n\\]/.test(v));
 	};
 	ABS = (v) => {
 		text$4(4096)(v);
-		need$34(v.startsWith("/") && !v.split("/").includes("..") && !/[\r\n\\]/.test(v));
+		need$35(v.startsWith("/") && !v.split("/").includes("..") && !/[\r\n\\]/.test(v));
 	};
-	unique = (items, key = (x) => x) => need$34(new Set(items.map(key)).size === items.length);
-	equal$1 = (a, b) => need$34(nonrootHash(a) === nonrootHash(b));
+	unique = (items, key = (x) => x) => need$35(new Set(items.map(key)).size === items.length);
+	equal$1 = (a, b) => need$35(nonrootHash(a) === nonrootHash(b));
 	named = (items, names) => {
 		unique(items, (x) => x.name ?? x.containerName ?? x.taskKey);
 		equal$1(items.map((x) => x.name ?? x.containerName ?? x.taskKey).sort(), [...names].sort());
 	};
-	time$2 = (v) => need$34(v.completedMs >= v.startedMs);
+	time$2 = (v) => need$35(v.completedMs >= v.startedMs);
 	image$1 = (v) => {
-		need$34(v.rootDigest !== v.arm64Digest && v.configDigest !== v.rootDigest && v.configDigest !== v.arm64Digest);
+		need$35(v.rootDigest !== v.arm64Digest && v.configDigest !== v.rootDigest && v.configDigest !== v.arm64Digest);
 	};
 	ARGV = (v) => {
 		array$2(text$4(8192, 0), 0, 64)(v);
-		need$34(Buffer.byteLength(JSON.stringify(v)) <= 8192);
+		need$35(Buffer.byteLength(JSON.stringify(v)) <= 8192);
 	};
 	JSON_REF = ref("JsonRef");
 	BYTE_REF = ref("ByteRef");
@@ -458,7 +458,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		bytes: Z,
 		blob: BYTE_REF
 	}, (v) => {
-		need$34(v.bytes === v.blob.bytesLength && v.sha256 === v.blob.sha256);
+		need$35(v.bytes === v.blob.bytesLength && v.sha256 === v.blob.sha256);
 	});
 	define$1("SourceClosureV1", {
 		version: literal$1(1),
@@ -468,7 +468,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		closureHash: H$1
 	}, (v) => {
 		unique(v.files, (x) => x.path);
-		need$34(v.closureHash === nonrootHash(v.files));
+		need$35(v.closureHash === nonrootHash(v.files));
 	});
 	define$1("DataOriginV1", {
 		revision: G$1,
@@ -492,7 +492,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		receipts: integer$3(1, 20),
 		spent: integer$3(1, 19),
 		cap: literal$1(20)
-	}, (v) => need$34(v.receipts <= v.spent));
+	}, (v) => need$35(v.receipts <= v.spent));
 	define$1("PrimitiveEvidenceV1", {
 		version: literal$1(1),
 		kind: literal$1("verified-nnp-primitive"),
@@ -556,7 +556,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		gid: literal$1(0),
 		parentPathEvidence: JSON_REF
 	}, (v) => {
-		need$34(v.value === v.resolvedPath && (v.mode & 18) === 0 && (v.mode & 3072) === 0);
+		need$35(v.value === v.resolvedPath && (v.mode & 18) === 0 && (v.mode & 3072) === 0);
 	});
 	define$1("EnvironmentGateV1", {
 		version: literal$1(1),
@@ -620,16 +620,16 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			combinedIdentities: literal$1(256)
 		})
 	}, (v) => {
-		need$34(v.startedMs <= v.latestArmMs && v.latestArmMs < v.observationEndMs && v.observationEndMs < v.deadlineMs);
-		need$34(Number.isSafeInteger(v.observationEndMs + v.cleanupReserveMs) && v.observationEndMs + v.cleanupReserveMs <= v.deadlineMs);
+		need$35(v.startedMs <= v.latestArmMs && v.latestArmMs < v.observationEndMs && v.observationEndMs < v.deadlineMs);
+		need$35(Number.isSafeInteger(v.observationEndMs + v.cleanupReserveMs) && v.observationEndMs + v.cleanupReserveMs <= v.deadlineMs);
 		let previous = v.startedMs, total = 0;
 		for (const [index, e] of v.episodes.entries()) {
 			const start = v.startedMs + e.offsetMs, end = start + e.durationMs;
-			need$34(e.index === index && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= previous && end <= v.observationEndMs && e.sampleEveryMs <= e.durationMs);
-			if (index === 0) need$34(Number.isSafeInteger(v.latestArmMs + v.armingLimitMs) && v.latestArmMs + v.armingLimitMs <= start);
+			need$35(e.index === index && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= previous && end <= v.observationEndMs && e.sampleEveryMs <= e.durationMs);
+			if (index === 0) need$35(Number.isSafeInteger(v.latestArmMs + v.armingLimitMs) && v.latestArmMs + v.armingLimitMs <= start);
 			previous = end;
 			total += Math.ceil(e.durationMs / e.sampleEveryMs) + 1;
-			need$34(Number.isSafeInteger(total));
+			need$35(Number.isSafeInteger(total));
 		}
 	});
 	define$1("ControlLaunchTemplateV1", {
@@ -697,7 +697,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		codeHash: H$1,
 		sourceHash: H$1
 	}, (v) => {
-		need$34(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256);
+		need$35(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256);
 	});
 	define$1("ReviewedHostOriginV2", {
 		version: literal$1(2),
@@ -709,7 +709,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		codeHash: H$1,
 		sourceHash: H$1
 	}, (v) => {
-		need$34(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256 && v.codeHash !== v.ancestor.codeHash);
+		need$35(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256 && v.codeHash !== v.ancestor.codeHash);
 	});
 	schemas$2.CarrierHostOrigin = union(ref("LegacyHostOriginV1"), ref("ReviewedHostOriginV2"));
 	define$1("LegacyImageOriginV1", {
@@ -761,7 +761,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		verifiedMs: MS
 	}, (v) => {
 		unique(v.files, (x) => x.destinationPath);
-		need$34(v.sourceClosureHash === v.destinationClosureHash);
+		need$35(v.sourceClosureHash === v.destinationClosureHash);
 	});
 	carrierEntry = [
 		"/bin/setpriv",
@@ -800,7 +800,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		completedMs: MS
 	}, (v) => {
 		equal$1(v.entryPoint, carrierEntry);
-		need$34(v.image.repositoryName === "mem9-on-aws/preview/bootstrap" && v.source.tree === v.build.tree);
+		need$35(v.image.repositoryName === "mem9-on-aws/preview/bootstrap" && v.source.tree === v.build.tree);
 		equal$1(v.image, v.legacyClosureProof.destinationImage);
 	});
 	network = object$3({ awsvpcConfiguration: object$3({
@@ -827,7 +827,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		pattern$1(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)(e[0].value);
 		H$1(e[1].value);
 		H$1(e[2].value);
-		need$34(Buffer.byteLength(JSON.stringify(v)) <= 8192);
+		need$35(Buffer.byteLength(JSON.stringify(v)) <= 8192);
 	});
 	runFixed = {
 		cluster: CLUSTER,
@@ -856,8 +856,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		startedBy: S$2,
 		overrides: ref("CarrierRunOverridesV1")
 	}, (v) => {
-		need$34(v.startedBy === "root-" + v.clientToken.slice(0, 29));
-		need$34(v.cluster.split(":").slice(0, 5).join(":") === v.taskDefinition.split(":").slice(0, 5).join(":"));
+		need$35(v.startedBy === "root-" + v.clientToken.slice(0, 29));
+		need$35(v.cluster.split(":").slice(0, 5).join(":") === v.taskDefinition.split(":").slice(0, 5).join(":"));
 	});
 	define$1("CarrierRunTaskBindingV1", {
 		version: literal$1(1),
@@ -875,7 +875,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			decision: literal$1("allowed")
 		})
 	}, (v) => {
-		need$34(v.requestHash === nonrootHash(v.request) && v.authorization.requestHash === v.requestHash && v.authorization.taskDefinitionArn === v.request.taskDefinition && v.authorization.clusterArn === v.request.cluster);
+		need$35(v.requestHash === nonrootHash(v.request) && v.authorization.requestHash === v.requestHash && v.authorization.taskDefinitionArn === v.request.taskDefinition && v.authorization.clusterArn === v.request.cluster);
 	});
 	define$1("PreauditLaunchPlanV1", {
 		version: literal$1(1),
@@ -901,7 +901,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		carrierPlatform: ref("RuntimePlatformObservationV1")
 	}, (v) => {
 		equal$1(v.entryPoint, carrierEntry);
-		need$34(v.account === v.carrierImage.account && v.region === v.carrierImage.region && v.carrierImage.repositoryName === "mem9-on-aws/preview/bootstrap" && v.runTaskContract.tags[0].value === v.owner && v.carrierPlatform.platformVersion === v.runTaskContract.platformVersion);
+		need$35(v.account === v.carrierImage.account && v.region === v.carrierImage.region && v.carrierImage.repositoryName === "mem9-on-aws/preview/bootstrap" && v.runTaskContract.tags[0].value === v.owner && v.carrierPlatform.platformVersion === v.runTaskContract.platformVersion);
 	});
 	define$1("CarrierRegistrationReadbackV1", {
 		version: literal$1(1),
@@ -925,12 +925,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		observedMs: MS,
 		expiresMs: MS
 	}, (v) => {
-		need$34(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5);
+		need$35(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5);
 		for (const [key, digest] of [
 			["rootManifest", "rootDigest"],
 			["arm64Manifest", "arm64Digest"],
 			["config", "configDigest"]
-		]) need$34("sha256:" + v[key].sha256 === v.image[digest]);
+		]) need$35("sha256:" + v[key].sha256 === v.image[digest]);
 	});
 	define$1("CarrierPrerequisiteReviewV1", {
 		version: literal$1(1),
@@ -939,7 +939,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...hashes$1("designReviewHash carrierBuildHash sourceEvidenceHash launchPlanHash permissionsHash legacyBindingsHash"),
 		reviewedMs: MS,
 		expiresMs: MS
-	}, (v) => need$34(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
+	}, (v) => need$35(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
 	define$1("PreauditPermitV1", {
 		version: literal$1(1),
 		kind: literal$1("premerge-readonly-audit-permit"),
@@ -954,9 +954,9 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		issuedMs: MS,
 		deadlineMs: MS
 	}, (v) => {
-		need$34(v.deadlineMs > v.issuedMs);
+		need$35(v.deadlineMs > v.issuedMs);
 		equal$1(v.runOverrides, v.runTask.request.overrides);
-		need$34(v.runTask.request.clientToken === v.invocation && v.runTask.request.tags[0].value === v.owner && v.runTask.launchPlanHash === v.launchPlanHash && v.runTask.authorization.permissionsDossierHash === v.permissionsHash && v.runTask.registrationReadbackHash === nonrootHash(v.registrationReadback) && v.runTask.environmentGateHash === nonrootHash(v.environmentGate) && v.runTask.carrierPresenceHash === nonrootHash(v.carrierPresence));
+		need$35(v.runTask.request.clientToken === v.invocation && v.runTask.request.tags[0].value === v.owner && v.runTask.launchPlanHash === v.launchPlanHash && v.runTask.authorization.permissionsDossierHash === v.permissionsHash && v.runTask.registrationReadbackHash === nonrootHash(v.registrationReadback) && v.runTask.environmentGateHash === nonrootHash(v.environmentGate) && v.runTask.carrierPresenceHash === nonrootHash(v.carrierPresence));
 	});
 	define$1("PermissionsDossierV1", {
 		version: literal$1(1),
@@ -1084,7 +1084,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		tagRule: literal$1("mem9-actual-main-sha7"),
 		provenanceRule: literal$1("authenticated-workflow-run-attempt")
 	}, (v) => {
-		need$34(v.actionSource.path === v.actionPath && v.bundle.path === v.entryPath && v.toolchain.path === ".github/actions/control-composition/dist/toolchain.json");
+		need$35(v.actionSource.path === v.actionPath && v.bundle.path === v.entryPath && v.toolchain.path === ".github/actions/control-composition/dist/toolchain.json");
 	});
 	define$1("ControlRecipeV2", {
 		version: literal$1(2),
@@ -1173,7 +1173,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		registrationBody: JSON_REF,
 		registrationBodyHash: H$1
 	}, (v) => {
-		need$34(v.entryPoint[3] === CONTROL_NODE);
+		need$35(v.entryPoint[3] === CONTROL_NODE);
 	});
 	define$1("ControlScanEvidenceV1", {
 		version: literal$1(1),
@@ -1201,7 +1201,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		workflowSha: G$1,
 		authenticatedSource: JSON_REF
 	}, (v) => {
-		need$34(v.mainTree === v.candidateTree && v.workflowSha === v.mainRevision && v.parents[0] === v.baseRevision && (v.parents.length === 1 || v.parents[1] === v.candidateRevision));
+		need$35(v.mainTree === v.candidateTree && v.workflowSha === v.mainRevision && v.parents[0] === v.baseRevision && (v.parents.length === 1 || v.parents[1] === v.candidateRevision));
 		unique(v.parents);
 	});
 	define$1("DeployedControlBuildV1", {
@@ -1241,12 +1241,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$34(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
+		need$35(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
 		equal$1(v.scan.image, v.image);
 		unique(v.resolvedLaunches, (x) => x.taskKey);
 		for (const l of v.resolvedLaunches) {
 			equal$1(l.image, v.image);
-			need$34(l.contractHash === v.contractHash);
+			need$35(l.contractHash === v.contractHash);
 		}
 	});
 	define$1("DeployedControlBuildV2", {
@@ -1286,12 +1286,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$34(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
+		need$35(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
 		equal$1(v.scan.image, v.image);
 		unique(v.resolvedLaunches, (x) => x.taskKey);
 		for (const l of v.resolvedLaunches) {
 			equal$1(l.image, v.image);
-			need$34(l.contractHash === v.contractHash);
+			need$35(l.contractHash === v.contractHash);
 		}
 	});
 	updateTaskKeys = NONROOT_TASK_KEYS.filter((k) => k !== "fallback" && k !== "preaudit");
@@ -1419,10 +1419,10 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			...v.trustedLaunch,
 			...v.managed
 		];
-		need$34(all.length <= 256);
+		need$35(all.length <= 256);
 		unique(all, (p) => p.pid + ":" + p.startTimeTicks);
-		need$34(v.phase === "preview" === (v.artifactBinding.kind === "artifact-test"));
-		need$34(v.taskArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":") && v.taskDefinitionArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":"));
+		need$35(v.phase === "preview" === (v.artifactBinding.kind === "artifact-test"));
+		need$35(v.taskArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":") && v.taskDefinitionArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":"));
 	});
 	define$1("TargetContainerBindingV1", {
 		name: COMPONENT,
@@ -1464,7 +1464,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	}, (v) => {
 		time$2(v);
 		named(v.identity, NONROOT_DATA_COMPONENTS);
-		need$34(v.routing.targetBindingHash === nonrootHash(v.target));
+		need$35(v.routing.targetBindingHash === nonrootHash(v.target));
 	});
 	define$1("TargetIdentityRecheckV1", {
 		version: literal$1(1),
@@ -1499,7 +1499,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			"startTimeTicks",
 			"executableDigest",
 			"entrypointIdentityHash"
-		]) need$34(m.preMain[k] === m.postMain[k]);
+		]) need$35(m.preMain[k] === m.postMain[k]);
 	});
 	define$1("TargetPostAuditV1", {
 		version: literal$1(1),
@@ -1512,7 +1512,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$34(v.preTargetHash === v.identityRecheck.preTargetHash && v.identityRecheck.targetBindingHash === nonrootHash(v.target) && v.routingRecheck.targetBindingHash === nonrootHash(v.target));
+		need$35(v.preTargetHash === v.identityRecheck.preTargetHash && v.identityRecheck.targetBindingHash === nonrootHash(v.target) && v.routingRecheck.targetBindingHash === nonrootHash(v.target));
 	});
 	schemas$2.AuditTargetJoinV1 = union(object$3({ kind: literal$1("not-applicable") }), object$3({
 		kind: literal$1("same-target-window"),
@@ -1535,8 +1535,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		cleanupComplete: literal$1(true)
 	}, (v) => {
 		time$2(v);
-		need$34(v.databaseObservedMs >= v.startedMs && v.databaseObservedMs <= v.completedMs);
-		need$34(v.phase === "predeployment" === (v.targetJoin.kind === "not-applicable"));
+		need$35(v.databaseObservedMs >= v.startedMs && v.databaseObservedMs <= v.completedMs);
+		need$35(v.phase === "predeployment" === (v.targetJoin.kind === "not-applicable"));
 	});
 	define$1("RuntimeReadinessV2", {
 		version: literal$1(2),
@@ -1549,7 +1549,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		result: literal$1("pass")
 	}, (v) => {
 		time$2(v);
-		need$34(v.postdeployRootAudit.phase === "postdeployment-preservation");
+		need$35(v.postdeployRootAudit.phase === "postdeployment-preservation");
 	});
 	define$1("FreshAdmissionV1", {
 		version: literal$1(1),
@@ -1563,7 +1563,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		permissionBindingsHash: H$1,
 		observedMs: MS,
 		expiresMs: MS
-	}, (v) => need$34(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5));
+	}, (v) => need$35(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5));
 	presence = union(object$3({ present: literal$1(false) }), object$3({
 		present: literal$1(true),
 		value: () => {}
@@ -1590,11 +1590,11 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		cause: oneOf$1("fixed-user", "drop-all", "fixed-data-nnp", "fixed-health-nnp", "guarded-control", "carrier-image", "retained-data-image", "ecs-derived", "disable-root-rollback"),
 		observationHash: H$1
 	}, (v) => {
-		need$34(v.after.present);
+		need$35(v.after.present);
 		const x = v.after.value;
-		if (v.field === "user") need$34(x === "1000:1000");
+		if (v.field === "user") need$35(x === "1000:1000");
 		else if (v.field === "linuxParameters.capabilities") equal$1(x, { drop: ["ALL"] });
-		else if (v.field === "deploymentCircuitBreaker.rollback") need$34(x === false);
+		else if (v.field === "deploymentCircuitBreaker.rollback") need$35(x === false);
 		else if ([
 			"entryPoint",
 			"command",
@@ -1603,7 +1603,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		else if (v.field === "image") {
 			if (typeof x === "string") text$4()(x);
 			else {
-				need$34(v.surface === "container" && v.cause === "guarded-control" && Object.hasOwn(controlImageTargets, v.taskKey) && v.selector === controlImageTargets[v.taskKey] && v.before.present);
+				need$35(v.surface === "container" && v.cause === "guarded-control" && Object.hasOwn(controlImageTargets, v.taskKey) && v.selector === controlImageTargets[v.taskKey] && v.before.present);
 				text$4()(v.before.value);
 				deployedControlImageSlot(x);
 			}
@@ -1675,7 +1675,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...refs("artifactSecurity policySources designReview"),
 		observedMs: MS
 	}, (v) => {
-		need$34(v.predeploymentAudit.phase === "predeployment");
+		need$35(v.predeploymentAudit.phase === "predeployment");
 		equal$1(v.root, v.predeploymentAudit.root);
 	});
 	define$1("NonrootTransitionV2", {
@@ -1697,14 +1697,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		images: object$3(Object.fromEntries(NONROOT_DATA_COMPONENTS.map((n) => [n, object$3({
 			rootDigest: D$1,
 			arm64Digest: D$1
-		}, (v) => need$34(v.rootDigest !== v.arm64Digest))]))),
+		}, (v) => need$35(v.rootDigest !== v.arm64Digest))]))),
 		...hashes$1("parentProofHash backendBindingHash generation targetsHash schemaDigest operatorDigest buildInputsHash securityEvidenceHash policyHash"),
 		runtimeNonce: N,
 		authorizationId: N,
 		issuedMs: MS,
 		expiresMs: MS,
 		transition: ref("NonrootTransitionV2")
-	}, (v) => need$34(v.dataSourceTag === "mem9-" + v.dataRevision.slice(0, 7) && v.expiresMs > v.issuedMs && v.expiresMs - v.issuedMs <= 864e5));
+	}, (v) => need$35(v.dataSourceTag === "mem9-" + v.dataRevision.slice(0, 7) && v.expiresMs > v.issuedMs && v.expiresMs - v.issuedMs <= 864e5));
 	define$1("FinalReviewV2", {
 		version: literal$1(2),
 		kind: literal$1("nonroot-deployment-policy-review"),
@@ -1713,14 +1713,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		controlSourceTree: G$1,
 		reviewedMs: MS,
 		expiresMs: MS
-	}, (v) => need$34(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
+	}, (v) => need$35(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
 	define$1("ParameterCaptureV1", {
 		Name: literal$1("/mem9-on-aws/prod/consolidation-runtime/data-release"),
 		Type: literal$1("SecureString"),
 		ARN,
 		Version: P$2,
 		Value: text$4(4096)
-	}, (v) => need$34(v.ARN.endsWith(":parameter" + v.Name)));
+	}, (v) => need$35(v.ARN.endsWith(":parameter" + v.Name)));
 	define$1("NonrootExpectedV2", {
 		account: A,
 		region: R,
@@ -1754,7 +1754,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		lineage: JSON_REF,
 		evidenceManifest: JSON_REF
 	}, (v) => {
-		need$34(v.authorization.hash === nonrootHash(v.authorization.data) && v.operation.owner === v.authorization.data.authorizationId && v.authorization.data.policyHash === nonrootHash(v.authorization.review) && v.operation.prior.value === v.predecessor.Value);
+		need$35(v.authorization.hash === nonrootHash(v.authorization.data) && v.operation.owner === v.authorization.data.authorizationId && v.authorization.data.policyHash === nonrootHash(v.authorization.review) && v.operation.prior.value === v.predecessor.Value);
 	});
 	release$1 = object$3({
 		sourceTree: G$1,
@@ -1816,8 +1816,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			"schemaDigest",
 			"operatorDigest",
 			"runtimeNonce"
-		]) need$34(v.previous.release[k] === v.current.release[k]);
-		for (const k of ["network", "credentials"]) need$34(v.material[k].previous === v.material[k].current);
+		]) need$35(v.previous.release[k] === v.current.release[k]);
+		for (const k of ["network", "credentials"]) need$35(v.material[k].previous === v.material[k].current);
 		equal$1(v.images.worker, v.images["llm-proxy"]);
 	});
 	define$1("ContinuationWitnessV2", {
@@ -1839,8 +1839,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		ref: union(JSON_REF, BYTE_REF),
 		encoding: oneOf$1("json", "bytes")
 	}, (v) => {
-		need$34(!v.name.includes("/") && !v.name.includes("\\") && ![".", ".."].includes(v.name));
-		need$34(v.encoding === "json" ? Object.hasOwn(v.ref, "canonicalHash") : Object.hasOwn(v.ref, "sha256"));
+		need$35(!v.name.includes("/") && !v.name.includes("\\") && ![".", ".."].includes(v.name));
+		need$35(v.encoding === "json" ? Object.hasOwn(v.ref, "canonicalHash") : Object.hasOwn(v.ref, "sha256"));
 	});
 	define$1("ArchiveManifestV2", {
 		version: literal$1(2),
@@ -1858,14 +1858,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 * hash beside a subset of COPY files is not membership or closure evidence. */
 function createControlSourceContext(value, readBlob) {
 	const input = copyNonrootJson(value);
-	need$33(input && Object.keys(input).sort().join() === "entries,tree");
+	need$34(input && Object.keys(input).sort().join() === "entries,tree");
 	const { tree, entries } = input;
-	need$33(/^[a-f0-9]{40}$/.test(tree ?? "") && typeof readBlob === "function");
+	need$34(/^[a-f0-9]{40}$/.test(tree ?? "") && typeof readBlob === "function");
 	const rows = copyNonrootJson(entries);
-	need$33(Array.isArray(rows) && rows.length > 0 && rows.length <= 2e4);
+	need$34(Array.isArray(rows) && rows.length > 0 && rows.length <= 2e4);
 	const root = /* @__PURE__ */ new Map(), files = /* @__PURE__ */ new Map();
 	for (const row of rows) {
-		need$33(row && Object.keys(row).sort().join() === [
+		need$34(row && Object.keys(row).sort().join() === [
 			"path",
 			"mode",
 			"type",
@@ -1880,10 +1880,10 @@ function createControlSourceContext(value, readBlob) {
 		let node = root;
 		for (const part of parts.slice(0, -1)) {
 			if (!node.has(part)) node.set(part, /* @__PURE__ */ new Map());
-			need$33(node.get(part) instanceof Map);
+			need$34(node.get(part) instanceof Map);
 			node = node.get(part);
 		}
-		need$33(!node.has(parts.at(-1)));
+		need$34(!node.has(parts.at(-1)));
 		node.set(parts.at(-1), row);
 	}
 	const treeHash = (node) => {
@@ -1891,7 +1891,7 @@ function createControlSourceContext(value, readBlob) {
 		const bytes = Buffer.concat(entries.flatMap(([name, value]) => [Buffer.from((value instanceof Map ? "40000" : value.mode) + " " + name + "\0"), Buffer.from(value instanceof Map ? treeHash(value) : value.oid, "hex")]));
 		return gitObject("tree", bytes);
 	};
-	need$33(treeHash(root) === tree);
+	need$34(treeHash(root) === tree);
 	const handle = Object.freeze({
 		kind: "verified-control-source-tree",
 		tree
@@ -1905,13 +1905,13 @@ function createControlSourceContext(value, readBlob) {
 }
 async function readControlSourceFile(context, path) {
 	const state = contexts$3.get(context);
-	need$33(state && safePath(path));
+	need$34(state && safePath(path));
 	const entry = state.files.get(path);
-	need$33(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
+	need$34(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
 	const bytes = await state.readBlob(entry.oid, path);
-	need$33(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
+	need$34(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
 	const raw = Buffer.from(bytes);
-	need$33(gitObject("blob", raw) === entry.oid);
+	need$34(gitObject("blob", raw) === entry.oid);
 	return {
 		file: inspectNonrootRecord("SourceFileV1", {
 			path,
@@ -1931,28 +1931,28 @@ function copySources(text) {
 	for (const raw of text.split(/\r?\n/)) {
 		const line = raw.trim();
 		if (!/^(?:COPY|ADD)\b/i.test(line)) continue;
-		need$33(line.startsWith("COPY ") && !/[\\\[\]"'$`]/.test(line));
+		need$34(line.startsWith("COPY ") && !/[\\\[\]"'$`]/.test(line));
 		const words = line.split(/\s+/).slice(1);
-		need$33(words.length >= 2 && !words.some((word) => word.startsWith("--")));
+		need$34(words.length >= 2 && !words.some((word) => word.startsWith("--")));
 		words.pop();
 		for (const source of words) {
-			need$33(/^[A-Za-z0-9_.*\/-]+$/.test(source) && !source.startsWith("/") && !source.split("/").some((part) => part === "." || part === ".."));
+			need$34(/^[A-Za-z0-9_.*\/-]+$/.test(source) && !source.startsWith("/") && !source.split("/").some((part) => part === "." || part === ".."));
 			values.push(source);
 		}
 	}
-	need$33(values.length > 0);
+	need$34(values.length > 0);
 	return [...new Set(values)].sort();
 }
 /** Exact COPY expansion against the authenticated complete tree. This is the
 * declared recipe; the build launcher separately rejects untracked matches. */
 async function describeControlCopyClosure(context) {
 	const state = contexts$3.get(context);
-	need$33(state);
+	need$34(state);
 	const dockerfile = await readControlSourceFile(context, "docker/bootstrap/Dockerfile"), paths = /* @__PURE__ */ new Set();
 	for (const source of copySources(new TextDecoder("utf-8", { fatal: true }).decode(dockerfile.bytes))) {
 		const pattern = new RegExp("^" + source.split("*").map(RegExp.escape).join("[^/]*") + "$");
 		const matches = [...state.files.keys()].filter((path) => source.endsWith("/") ? path.startsWith(source) : pattern.test(path));
-		need$33(matches.length > 0);
+		need$34(matches.length > 0);
 		for (const path of matches) paths.add(path);
 	}
 	const files = [];
@@ -1967,26 +1967,26 @@ async function describeControlCopyClosure(context) {
 }
 async function verifyControlSourceClosure(context, closure, { copyContext = false } = {}) {
 	const state = contexts$3.get(context);
-	need$33(state);
+	need$34(state);
 	const checked = inspectNonrootRecord("SourceClosureV1", closure);
-	need$33(checked.tree === state.tree);
-	for (const file of checked.files) need$33(nonrootHash((await readControlSourceFile(context, file.path)).file) === nonrootHash(file));
-	if (copyContext) need$33(nonrootHash(await describeControlCopyClosure(context)) === nonrootHash(checked));
+	need$34(checked.tree === state.tree);
+	for (const file of checked.files) need$34(nonrootHash((await readControlSourceFile(context, file.path)).file) === nonrootHash(file));
+	if (copyContext) need$34(nonrootHash(await describeControlCopyClosure(context)) === nonrootHash(checked));
 	return checked;
 }
 function controlSourcePaths(context) {
 	const state = contexts$3.get(context);
-	need$33(state);
+	need$34(state);
 	return Object.freeze([...state.files.keys()].sort());
 }
-var contexts$3, fail$8, need$33, sha$9, gitObject, safePath;
+var contexts$3, fail$8, need$34, sha$9, gitObject, safePath;
 var init_production_control_source = __esmMin((() => {
 	init_production_nonroot_contracts();
 	contexts$3 = /* @__PURE__ */ new WeakMap();
 	fail$8 = () => {
 		throw Error("ControlSourceUnverified");
 	};
-	need$33 = (value) => {
+	need$34 = (value) => {
 		if (!value) fail$8();
 	};
 	sha$9 = (value) => createHash("sha256").update(value).digest("hex");
@@ -1996,21 +1996,21 @@ var init_production_control_source = __esmMin((() => {
 //#endregion
 //#region scripts/lib/production-image-transition.mjs
 function transition(t, certificate = false) {
-	if (!exact$12(t, [
+	if (!exact$13(t, [
 		"version",
 		"kind",
 		"proofHash",
 		"predecessorHash",
 		"limitsHash",
 		...certificate ? ["projectionHash"] : []
-	]) || t.version !== 1 || t.kind !== "image-security-upgrade" || !hex$12(t.proofHash) || !hex$12(t.predecessorHash) || t.limitsHash !== "59a5bf6d08f4e1a787d1f016a320c625fd43bb973bb924d6999427dfcfe71ced" || certificate && !hex$12(t.projectionHash)) fail$7();
+	]) || t.version !== 1 || t.kind !== "image-security-upgrade" || !hex$13(t.proofHash) || !hex$13(t.predecessorHash) || t.limitsHash !== "59a5bf6d08f4e1a787d1f016a320c625fd43bb973bb924d6999427dfcfe71ced" || certificate && !hex$13(t.projectionHash)) fail$7();
 }
 function inspectImageTransitionDescriptorCommitment(t) {
 	transition(t);
 	return Object.freeze(commitments(t));
 }
 function inspectImageTransitionCertificate(c) {
-	if (!exact$12(c, [
+	if (!exact$13(c, [
 		"version",
 		"dataReleaseHash",
 		"parentProofHash",
@@ -2026,7 +2026,7 @@ function inspectImageTransitionCertificate(c) {
 		"parentProofHash",
 		"generation",
 		"targetsHash"
-	].every((k) => hex$12(c[k])) || !exact$12(c.previous, ["release", "backendBindingHash"]) || !hex$12(c.previous.backendBindingHash) || !exact$12(c.current, ["release", "backendBinding"])) fail$7();
+	].every((k) => hex$13(c[k])) || !exact$13(c.previous, ["release", "backendBindingHash"]) || !hex$13(c.previous.backendBindingHash) || !exact$13(c.current, ["release", "backendBinding"])) fail$7();
 	transition(c.transition, true);
 	const releaseKeys = [
 		"sourceTree",
@@ -2039,11 +2039,11 @@ function inspectImageTransitionCertificate(c) {
 	];
 	let accountRegion;
 	for (const r of [c.previous.release, c.current.release]) {
-		if (!exact$12(r, releaseKeys) || !hex$12(r.sourceTree, 40) || ![
+		if (!exact$13(r, releaseKeys) || !hex$13(r.sourceTree, 40) || ![
 			"coordinatorDigest",
 			"schemaDigest",
 			"operatorDigest"
-		].every((k) => hex$12(r[k])) || !hex$12(r.runtimeNonce, 32) || !/^mem9-[a-f0-9]{7}$/.test(r.sourceTag ?? "") || typeof r.workerImage !== "string") fail$7();
+		].every((k) => hex$13(r[k])) || !hex$13(r.runtimeNonce, 32) || !/^mem9-[a-f0-9]{7}$/.test(r.sourceTag ?? "") || typeof r.workerImage !== "string") fail$7();
 		const m = /^(\d{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com\/mem9-on-aws\/llm-proxy@sha256:[a-f0-9]{64}$/.exec(r.workerImage);
 		if (!m) fail$7();
 		const key = m[1] + "/" + m[2];
@@ -2056,8 +2056,8 @@ function inspectImageTransitionCertificate(c) {
 		"runtimeNonce"
 	]) if (c.previous.release[k] !== c.current.release[k]) fail$7();
 	const components = ["worker", ...IMAGE_TRANSITION_COMPONENTS];
-	if (!exact$12(c.images, components) || !exact$12(c.material, IMAGE_TRANSITION_MATERIALS)) fail$7();
-	for (const image of Object.values(c.images)) if (!exact$12(image, [
+	if (!exact$13(c.images, components) || !exact$13(c.material, IMAGE_TRANSITION_MATERIALS)) fail$7();
+	for (const image of Object.values(c.images)) if (!exact$13(image, [
 		"previousRoot",
 		"currentRoot",
 		"previousChild",
@@ -2071,16 +2071,16 @@ function inspectImageTransitionCertificate(c) {
 	]) if (c.images.worker[k] !== c.images["llm-proxy"][k]) fail$7();
 	if (!c.previous.release.workerImage.endsWith("@" + c.images.worker.previousRoot) || !c.current.release.workerImage.endsWith("@" + c.images.worker.currentRoot)) fail$7();
 	for (const [name, pair] of Object.entries(c.material)) {
-		if (!exact$12(pair, ["previous", "current"]) || !hex$12(pair.previous) || !hex$12(pair.current)) fail$7();
+		if (!exact$13(pair, ["previous", "current"]) || !hex$13(pair.previous) || !hex$13(pair.current)) fail$7();
 		if (["network", "credentials"].includes(name) ? pair.previous !== pair.current : pair.previous === pair.current) fail$7();
 	}
 	const b = c.current.backendBinding, [account, region] = accountRegion.split("/"), prefix = "arn:aws:ecs:" + region + ":" + account + ":";
-	if (!exact$12(b, [
+	if (!exact$13(b, [
 		"taskArn",
 		"taskDefinitionArn",
 		"containers"
 	]) || typeof b.taskArn !== "string" || !b.taskArn.startsWith(prefix + "task/") || !/^arn:aws:ecs:[a-z0-9-]+:\d{12}:task\/[A-Za-z0-9_-]+\/[a-f0-9]{32}$/.test(b.taskArn) || typeof b.taskDefinitionArn !== "string" || !b.taskDefinitionArn.startsWith(prefix + "task-definition/") || !/^arn:aws:ecs:[a-z0-9-]+:\d{12}:task-definition\/[A-Za-z0-9_-]+:[1-9][0-9]*$/.test(b.taskDefinitionArn) || !array$1(b.containers, 3)) fail$7();
-	for (const v of b.containers) if (!exact$12(v, ["name", "imageDigest"]) || !IMAGE_TRANSITION_COMPONENTS.includes(v.name) || ![c.images[v.name].currentRoot, c.images[v.name].currentChild].includes(v.imageDigest)) fail$7();
+	for (const v of b.containers) if (!exact$13(v, ["name", "imageDigest"]) || !IMAGE_TRANSITION_COMPONENTS.includes(v.name) || ![c.images[v.name].currentRoot, c.images[v.name].currentChild].includes(v.imageDigest)) fail$7();
 	if (new Set(b.containers.map((v) => v.name)).size !== 3) fail$7();
 	if (new TextEncoder().encode(JSON.stringify(c)).length > 6e3) fail$7();
 	return Object.freeze({
@@ -2088,7 +2088,7 @@ function inspectImageTransitionCertificate(c) {
 		projectionHash: c.transition.projectionHash
 	});
 }
-var IMAGE_TRANSITION_LIMITS, IMAGE_TRANSITION_LIMITS_HASH, IMAGE_TRANSITION_COMPONENTS, IMAGE_TRANSITION_MATERIALS, fail$7, record$3, exact$12, array$1, hex$12, digest$7, commitments;
+var IMAGE_TRANSITION_LIMITS, IMAGE_TRANSITION_LIMITS_HASH, IMAGE_TRANSITION_COMPONENTS, IMAGE_TRANSITION_MATERIALS, fail$7, record$3, exact$13, array$1, hex$13, digest$7, commitments;
 var init_production_image_transition = __esmMin((() => {
 	IMAGE_TRANSITION_LIMITS = Object.freeze({
 		version: 1,
@@ -2141,15 +2141,55 @@ var init_production_image_transition = __esmMin((() => {
 		throw Error("ImageTransitionSchemaInvalid");
 	};
 	record$3 = (v) => v !== null && typeof v === "object" && !Array.isArray(v) && [Object.prototype, null].includes(Object.getPrototypeOf(v)) && Reflect.ownKeys(v).every((k) => typeof k === "string" && Object.getOwnPropertyDescriptor(v, k).enumerable && Object.hasOwn(Object.getOwnPropertyDescriptor(v, k), "value"));
-	exact$12 = (v, keys) => record$3(v) && Reflect.ownKeys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
+	exact$13 = (v, keys) => record$3(v) && Reflect.ownKeys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
 	array$1 = (v, length) => Array.isArray(v) && Object.getPrototypeOf(v) === Array.prototype && v.length === length && Reflect.ownKeys(v).length === length + 1 && Array.from({ length }, (_, i) => Object.getOwnPropertyDescriptor(v, String(i))).every((d) => d?.enumerable && Object.hasOwn(d, "value"));
-	hex$12 = (v, n = 64) => typeof v === "string" && new RegExp("^[a-f0-9]{" + n + "}$").test(v);
+	hex$13 = (v, n = 64) => typeof v === "string" && new RegExp("^[a-f0-9]{" + n + "}$").test(v);
 	digest$7 = (v) => typeof v === "string" && /^sha256:[a-f0-9]{64}$/.test(v);
 	commitments = (t) => ({
 		proofHash: t.proofHash,
 		predecessorHash: t.predecessorHash,
 		limitsHash: t.limitsHash
 	});
+}));
+//#endregion
+//#region scripts/lib/production-nonroot-local-work.mjs
+function inspectOriginalLocalWorkData(d) {
+	exact$12(d, [
+		"scope",
+		"scopeHash",
+		"ordinal",
+		"kind",
+		"workBytes",
+		"journalBytes",
+		"reserveDebit",
+		...d?.kind === "journal" ? ["targetLogicalBytes"] : []
+	]);
+	need$33(["legacy", "carrier-preparation"].includes(d.scope) && hex$12(d.scopeHash) && natural(d.ordinal) && d.ordinal > 0, "LocalWorkScope");
+	need$33(["source", "journal"].includes(d.kind) && natural(d.workBytes) && d.workBytes > 0 && d.journalBytes === 40960, "LocalWorkPrice");
+	if (d.kind === "source") need$33(d.scope === "legacy" && d.workBytes % 65536 === 0, "LocalWorkQuantum");
+	else need$33(d.workBytes === 40960 && natural(d.targetLogicalBytes), "LocalWorkJournalTarget");
+	const n = d.workBytes + d.journalBytes;
+	need$33(natural(n), "LocalWorkPrice");
+	exact$12(d.reserveDebit, keys$4);
+	for (const k of keys$4) need$33(d.reserveDebit[k] === (k === "logicalBytes" ? n : 0), "LocalWorkDebit");
+	return { ...d.reserveDebit };
+}
+var need$33, keys$4, natural, exact$12, hex$12;
+var init_production_nonroot_local_work = __esmMin((() => {
+	init_production_nonroot_contracts();
+	need$33 = (v, c) => {
+		if (!v) throw Error(c);
+	};
+	keys$4 = [
+		"ecrRequests",
+		"logicalBytes",
+		"httpBodyBytes",
+		"uncompressedBytes",
+		"processedEntries"
+	];
+	natural = (n) => Number.isSafeInteger(n) && n >= 0;
+	exact$12 = (v, k) => need$33(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.toSorted().join(), "LocalWorkFields");
+	hex$12 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 }));
 //#endregion
 //#region scripts/lib/production-canary-verification.mjs
@@ -3156,7 +3196,8 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				uncompressedBytes: d.uncompressedBytes,
 				processedEntries: d.processedEntries
 			});
-		} else if (e.type === "logical") {
+		} else if (e.type === "local-work") spent = addCounters(spent, inspectOriginalLocalWorkData(d));
+		else if (e.type === "logical") {
 			exact$9(d, [
 				"purpose",
 				"bytes",
@@ -3222,6 +3263,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 }
 var sha$8, need$30, exact$9, same$8, integer$1, hex$10, COUNTERS, CAPS, zero$6, counter, freeze$2;
 var init_ci_smoke_acquisition_format = __esmMin((() => {
+	init_production_nonroot_local_work();
 	init_production_canary_verification();
 	init_ci_smoke_evidence();
 	init_production_image_transition();

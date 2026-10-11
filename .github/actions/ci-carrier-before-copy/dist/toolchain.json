@@ -15677,8 +15677,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-acquisition-format.mjs",
-      "sha256": "c511263d11179c3d62674ec8bc014298515f648a91ef2e1113bb525baff92b0c",
-      "bytesLength": 14992
+      "sha256": "908c3d613d9fda4396cb2e6ccea5e79fbf4b5521b7e4e4ea83b1fdc7efef705d",
+      "bytesLength": 15166
     },
     {
       "path": "scripts/lib/ci-smoke-control-resources.mjs",
@@ -15861,6 +15861,11 @@
       "bytesLength": 24315
     },
     {
+      "path": "scripts/lib/production-nonroot-local-work.mjs",
+      "sha256": "4c2939a00439e8aea2153380d46257af77b1954fd6a3d556f1c4564957d1a9ff",
+      "bytesLength": 3399
+    },
+    {
       "path": "scripts/lib/production-nonroot-original-issuer-accounting.mjs",
       "sha256": "1195b543d79b980c52bb1668cda7a95b365b133f228db22849dc49bfb2a27bc7",
       "bytesLength": 14101
@@ -15938,7 +15943,7 @@
   ],
   "output": {
     "path": ".github/actions/ci-carrier-before-copy/dist/index.mjs",
-    "sha256": "43ecea1e80354f42cd7e6d4d85adbd411a1d283f3ea00698cfe33b7e054723c9",
-    "bytesLength": 6254181
+    "sha256": "915bca3467674c73ae42b19c487d1f6b5d0927c642d5332855265356133683fd",
+    "bytesLength": 6255939
   }
 }

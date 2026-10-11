@@ -15467,8 +15467,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-acquisition-format.mjs",
-      "sha256": "c511263d11179c3d62674ec8bc014298515f648a91ef2e1113bb525baff92b0c",
-      "bytesLength": 14992
+      "sha256": "908c3d613d9fda4396cb2e6ccea5e79fbf4b5521b7e4e4ea83b1fdc7efef705d",
+      "bytesLength": 15166
     },
     {
       "path": "scripts/lib/ci-smoke-acquisition.mjs",
@@ -16057,8 +16057,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-before-copy-accounting.mjs",
-      "sha256": "c985b92ae2a70a348e9d3750c59b9c5548f47271973956416ee63ef57333c71e",
-      "bytesLength": 26725
+      "sha256": "6102b41ec01f0ae84e24febfed914940b2b3e6389d8a5491226098e0f4533dd6",
+      "bytesLength": 28244
     },
     {
       "path": "scripts/lib/production-nonroot-budget-revision.mjs",
@@ -16072,8 +16072,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-cache.mjs",
-      "sha256": "4af27d7b1cb5f9ce8cda511e7f7cd0bd4c38d781b0c0d797eb0e0f9ba3f93d21",
-      "bytesLength": 48216
+      "sha256": "d0ad22769a65ff453914a5147cb4e3126b73c65e117364e8d5872e9782af0d06",
+      "bytesLength": 48548
     },
     {
       "path": "scripts/lib/production-nonroot-carrier-probe-supervisor.mjs",
@@ -16179,6 +16179,11 @@
       "path": "scripts/lib/production-nonroot-launch.mjs",
       "sha256": "5a3ffd9a15eacc4c2cef5419f1d0677449ef451f8873daaffa4dfabc8bc6674e",
       "bytesLength": 24315
+    },
+    {
+      "path": "scripts/lib/production-nonroot-local-work.mjs",
+      "sha256": "4c2939a00439e8aea2153380d46257af77b1954fd6a3d556f1c4564957d1a9ff",
+      "bytesLength": 3399
     },
     {
       "path": "scripts/lib/production-nonroot-observation.mjs",
@@ -16628,7 +16633,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "00b5b467e34daee2fff7a5676fbc5c4f3a7280d05cbbe7da9e3f8e9689ca1604",
-    "bytesLength": 6490577
+    "sha256": "3c083ad114b4edb7532a082a1b06c1a83551f4a9e3702f215b3f5d33314470f3",
+    "bytesLength": 6495226
   }
 }
