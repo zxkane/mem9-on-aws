@@ -362,6 +362,8 @@ export function statementHash(text) {
 }
 
 const SCOPED_COVERAGE = new Map([
+  ['scripts/lib/production-continuation-absence.mjs', ['scripts/production-continuation-absence.test.mjs']],
+  ['scripts/production-continuation-inspection.mjs', ['scripts/production-continuation-inspection.test.mjs']],
   ...['scripts/production-consolidation-operator.mjs','scripts/lib/production-canary-paused-audit.mjs',
     'scripts/lib/production-canary-snapshot.mjs','scripts/lib/production-canary-continuation.mjs'].map(owner=>[owner,[
     'scripts/production-consolidation-operator.postgres.test.mjs',
@@ -402,6 +404,13 @@ export function classifyStatement(statement, trustedExceptions = []) {
   const evidence = namespaceEvidence(text);
   if (statement.unsupported_expression) {
     return classification("unclassified", "An unsupported string expression cannot prove the resulting SQL.", []);
+  }
+
+  if (owner === 'scripts/lib/production-continuation-absence.mjs' &&
+      statementHash(text) === '7cc790ee5cd96d282b3ad7398c3a1cd1c3351211a529786c2a69c9adbf280a9b') {
+    return classification('namespace_bound',
+      'The fixed read-only fingerprint query binds the complete original parent namespace list through ANY($1); it returns aggregate counts and a digest.',
+      ['scripts/production-continuation-absence.test.mjs'], 'namespace_id=ANY($1)');
   }
 
   // These definitions execute at runtime through SECURITY DEFINER. Their

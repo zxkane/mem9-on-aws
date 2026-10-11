@@ -1,4 +1,5 @@
 import { applicationRegion } from "./ecr";
+import { runtimeSsmSecretPermissions } from "./runtime-secret-permissions";
 
 // Observability: CloudWatch metrics, dashboard, alarms, and Slack alerting for
 // the mnemo-server container (issues #26, #47, and #55). Only created for `prod`
@@ -197,14 +198,20 @@ export function observability(
     },
   );
 
+  const webhookParameter = new aws.ssm.Parameter("Mem9AlertWebhookParameter", {
+    name: `/mem9-on-aws/${stage}/observability/slack-webhook-url`,
+    type: "SecureString", value: slackWebhookUrl,
+    tags: { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" },
+  });
   const alertRouter = new sst.aws.Function("Mem9AlertRouter", {
     handler: "infra/src/alert-router/handler.handler",
     runtime: "nodejs24.x",
     architecture: "arm64",
     timeout: "30 seconds",
     memory: "256 MB",
-    environment: { SLACK_WEBHOOK_URL: slackWebhookUrl },
+    environment: { SLACK_WEBHOOK_URL_PARAMETER_ARN: webhookParameter.arn, STAGE: stage, MEM9_SECRET_ACCOUNT_ID: accountId },
     permissions: [
+      ...runtimeSsmSecretPermissions([webhookParameter.arn], region),
       {
         actions: ["sqs:SendMessage"],
         resources: [executionFailureQueue.arn],

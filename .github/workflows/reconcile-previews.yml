@@ -147,6 +147,9 @@ jobs:
       - name: Install SST dependencies
         run: pnpm -C infra install --frozen-lockfile
 
+      - name: Install root dependencies
+        run: npm ci
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
@@ -215,6 +218,9 @@ jobs:
 
       - name: Install SST dependencies
         run: pnpm -C infra install --frozen-lockfile
+
+      - name: Install root dependencies
+        run: npm ci
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6

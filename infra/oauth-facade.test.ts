@@ -81,6 +81,7 @@ function installGlobals(stage: string) {
   installInterpolate();
   (globalThis as Record<string, unknown>).aws = {
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    kms: {getKeyOutput: () => ({arn: out("arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")})},
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     cognito: {
       // Reader UserPoolClient: captured, exposes .id + .clientSecret.
@@ -95,6 +96,7 @@ function installGlobals(stage: string) {
     ssm: {
       Parameter: class {
         value: unknown;
+        arn: unknown;
         constructor(
           _n: string,
           args: { name: unknown; type: string; value: unknown },
@@ -104,6 +106,7 @@ function installGlobals(stage: string) {
             typeof args.name === "object" && args.name && "value" in args.name
               ? (args.name as { value: string }).value
               : (args.name as string);
+          this.arn = out(`arn:aws:ssm:ap-northeast-1:123456789012:parameter${name}`);
           params.push({ name, type: args.type, value: unwrap(args.value) });
         }
       },
@@ -434,7 +437,7 @@ describe("oauthFacade factory", () => {
         values: unknown[];
       }>;
     }[];
-    const ssmPerm = perms.find((p) => p.actions.includes("ssm:GetParameters"));
+    const ssmPerm = perms.find((p) => p.actions.includes("ssm:GetParameters") && p.resources.length > 1);
     expect(ssmPerm).toBeDefined();
     expect(ssmPerm?.actions).toEqual(["ssm:GetParameters"]);
     const resources = (unwrap(ssmPerm!.resources) as string[]).map(String);
@@ -444,7 +447,7 @@ describe("oauthFacade factory", () => {
     ].map(path=>'arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/'+path));
     expect(resources.some(r=>r.endsWith('/prod/*')||r.includes('/runtime/')||r.includes('/db/'))).toBe(false);
 
-    const decrypt = perms.find((p) => p.actions.includes("kms:Decrypt"));
+    const decrypt = perms.find((p) => p.actions.includes("kms:Decrypt") && p.resources.includes("*"));
     expect(decrypt?.resources).toEqual(["*"]);
     expect(unwrap(decrypt?.conditions)).toEqual([
       {
@@ -468,14 +471,19 @@ describe("oauthFacade factory", () => {
       .filter(({ kind }) => kind === "Secret")
       .map(({ args }) => args);
     expect(secrets).toEqual([
-      { name: "OauthStateHmacKey", fallback: "" },
+      { name: "OauthStateHmacKey", fallback: undefined },
       { name: "OauthAllowedCallbackUrls", fallback: "[]" },
     ]);
     const fn = only("SstFunction");
     const environment = unwrap(fn.environment) as Record<string, string>;
     expect(environment).toMatchObject({
-      OAUTH_STATE_HMAC_KEY: "OauthStateHmacKey-value",
+      OAUTH_STATE_HMAC_KEY_PARAMETER_ARN: "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/oauth/state-hmac-key",
       RESOURCE_SCOPES: "mem9-mcp/read,mem9-mcp/write",
+    });
+    expect(environment).not.toHaveProperty("OAUTH_STATE_HMAC_KEY");
+    expect(JSON.stringify(environment)).not.toContain("OauthStateHmacKey-value");
+    expect(params.find(parameter => parameter.name.endsWith("/oauth/state-hmac-key"))).toMatchObject({
+      type: "SecureString", value: "OauthStateHmacKey-value",
     });
     expect(environment.OAUTH_ALLOWED_CALLBACK_URLS_VERSION).toMatch(
       /^[0-9a-f]{64}$/u,
@@ -508,10 +516,9 @@ describe("oauthFacade factory", () => {
       string,
       unknown
     >;
-    expect(environment.OAUTH_STATE_HMAC_KEY).toMatchObject({
-      value: "preview-hmac-key",
-      isSecret: true,
-    });
+    expect(unwrap(environment.OAUTH_STATE_HMAC_KEY_PARAMETER_ARN)).toBe("arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/pr-42/oauth/state-hmac-key");
+    expect(environment).not.toHaveProperty("OAUTH_STATE_HMAC_KEY");
+    expect(params.find(p=>p.name.endsWith("/oauth/state-hmac-key"))).toMatchObject({type:"SecureString",value:"preview-hmac-key"});
   });
 
   it("returns the reader client id + facade url", async () => {

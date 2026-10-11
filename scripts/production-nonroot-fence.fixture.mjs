@@ -1,0 +1,9 @@
+import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
+import {NONROOT_REMAINING_WORK_LIMITS_HASH_V2} from './lib/production-nonroot-budget-revision.mjs';
+import {describeNonrootFenceAcquisitionBudget} from './lib/production-nonroot-fence-accounting.mjs';
+export function fenceAccountingFixture(provider='static-temporary'){
+ const spec={version:1,kind:'before-copy-fence-acquisition',account:'123456789012',region:'us-east-1',owner:'a'.repeat(32),executionId:'b'.repeat(32),predecessorExecutionId:'c'.repeat(32),runtimeNonce:'d'.repeat(32),rootBindingHash:hash('root'),predecessorParameter:{bytesHash:hash('raw'),canonicalHash:hash('value'),bytesLength:32},source:{repository:'example/project',revision:'e'.repeat(40),tree:'f'.repeat(40)},storage:{bucket:'example-owner',kmsKeyArn:'arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'}};
+ const issuers={source:{profile:'default',provider,configFile:'/synthetic/source/config',credentialsFile:'/synthetic/source/credentials',configHash:hash('config'),credentialsHash:provider==='static-temporary'?hash('credentials'):null},scope:{account:spec.account,personalAccount:spec.account.split('').reverse().join(''),region:spec.region,owner:spec.owner,runtimeNonce:spec.runtimeNonce,...spec.storage}};
+ const budget=describeNonrootFenceAcquisitionBudget(spec,issuers),expected={budget,ledgerBinding:{owner:spec.owner,executionId:spec.executionId,planHash:hash('config'),publicationHash:hash('publication')},ledgerStartHash:hash('start'),ownerAuthorizationHash:hash('approval'),parentStartHash:hash('parent'),budgetRevision:{version:2,limitsHash:NONROOT_REMAINING_WORK_LIMITS_HASH_V2,envelopeHash:hash('synthetic envelope'),historyHeadHash:hash('synthetic history')},deadlineMs:2000000};
+ return {spec,issuers,budget,expected};
+}

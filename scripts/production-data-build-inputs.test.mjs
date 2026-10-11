@@ -29,6 +29,14 @@ it('binds all matching lockfiles, directory members, Dockerfile bytes and ignore
 it('does not mistake control source edits for data recipe changes',async()=>{
   const f=fixture(),before=await f.describe();f.files.set('scripts/operator.mjs','new control');expect(compareDataBuildInputs(before,await f.describe())).toBe(before.hash);
 });
+it('keeps a separate prerequisite source-verifier job outside the data build recipe',async()=>{
+ const f=fixture(),before=await f.describe(),workflow=parse(f.files.get('.github/workflows/infra-ci.yml'));
+ workflow.jobs['verify-production-image-transition']={steps:[{run:'node scripts/verify-image-security-deployment.mjs'}]};
+ workflow.jobs['build-and-push-image'].needs=['verify-production-image-transition'];
+ workflow.jobs['build-and-push-image'].if="needs.verify-production-image-transition.result == 'success'";
+ f.files.set('.github/workflows/infra-ci.yml',stringify(workflow));f.files.set('scripts/verify-image-security-deployment.mjs','throw Error("synthetic source hold");');
+ expect(compareDataBuildInputs(before,await f.describe())).toBe(before.hash);
+});
 it('fingerprints context preparation and its transitive local scripts',async()=>{
   const f=fixture(),before=await f.describe(),workflow=parse(f.files.get('.github/workflows/infra-ci.yml'));
   workflow.jobs['build-and-push-image'].steps.unshift({run:'bash scripts/prepare.sh'});

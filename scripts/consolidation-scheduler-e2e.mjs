@@ -1,7 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
-import {execFileSync} from 'node:child_process';
 import {SSMClient,GetParametersCommand,GetParametersByPathCommand,PutParameterCommand,DeleteParameterCommand} from '@aws-sdk/client-ssm';
 import {ECSClient,DescribeTaskDefinitionCommand,RunTaskCommand,ListTasksCommand,DescribeTasksCommand,StopTaskCommand,TagResourceCommand} from '@aws-sdk/client-ecs';
 import {SchedulerClient,GetScheduleCommand,CreateScheduleCommand,DeleteScheduleCommand} from '@aws-sdk/client-scheduler';
@@ -10,8 +9,10 @@ import {RDSClient,DescribeDBClustersCommand,DescribeDBInstancesCommand,ListTagsF
 import {IAMClient} from '@aws-sdk/client-iam';
 import {STSClient} from '@aws-sdk/client-sts';
 import {previewGeneration,isConsolidationPreview,previewAcceptanceContext} from './lib/consolidation-preview-config.mjs';
-import {loadPostRuntimeOperator,revalidatePostRuntimeOperator} from './lib/post-runtime-preview-aws.mjs';
-import {inspectPostRuntimeRoute,validatePostRuntimeDefinition} from './lib/post-runtime-preview-route.mjs';
+import {loadPostRuntimeOperator,revalidatePostRuntimeOperator,loadNonrootPreviewBootstrap,revalidateNonrootPreviewBootstrap,nonrootPreviewSourceTree,nonrootPreviewObservation} from './lib/post-runtime-preview-aws.mjs';
+import {previewBootstrapPurposeForOperation,validateNonrootPreviewOverrides} from './lib/nonroot-preview-source.mjs';
+import {dataLaunchPolicy} from './lib/production-nonroot-launch.mjs';
+import {POST_RUNTIME_PURPOSES,inspectPostRuntimeRoute,validatePostRuntimeDefinition} from './lib/post-runtime-preview-route.mjs';
 import {canaryEvidenceHash as evidenceHash} from './lib/production-canary-verification.mjs';
 import {assertStructuralDatabaseLog} from './lib/consolidation-preview-secrets.mjs';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
@@ -149,31 +150,38 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,po
   const manifestName=prefix+'/consolidation-preview/manifest';
   const manifest=validateManifest(JSON.parse((await parameters([manifestName])).get(manifestName)),stage,generation,region);
   const postOptions={stage,generation,region,context:postRuntime,controlSourceTree};
-  const binding=postRuntime?await loadPostRuntimeOperator(clients,postOptions,postRuntimeChecks):undefined;
-  let bootArn,bootDef,bootName,operatorSubnets,operatorSecurityGroup;
+  let binding=postRuntime?await loadPostRuntimeOperator(clients,postOptions,postRuntimeChecks):undefined;
+  const postParameters=binding?.parameters;
+  let bootArn,bootDef,bootName,operatorSubnets,operatorSecurityGroup,bootstrapBinding;
   if(binding){
+    if(binding.route.version!==2)fail('NonrootPreviewVersionRequired');
+    if(!Array.isArray(binding.purposeBindings)||evidenceHash(binding.purposeBindings.map(b=>b.purpose).sort())!==evidenceHash([...POST_RUNTIME_PURPOSES].sort()))fail('NonrootPreviewPurposeUnavailable');
     const r=binding.route;bootArn=r.taskDefinitionArn;bootDef=binding.definition;bootName=r.containerName;operatorSubnets=r.subnets;operatorSecurityGroup=r.securityGroup;
   }else{
-    const bootstrapKeys=['task-def-arn','subnet-ids','task-sg-id'].map(key=>prefix+'/bootstrap/'+key);
-    const bootstrap=await parameters(bootstrapKeys);bootArn=bootstrap.get(bootstrapKeys[0]);bootName='Mem9Bootstrap';
-    if(!taskDefinitionMatches(bootArn,manifest,bootName))fail('InvalidBootstrapMetadata');
-    bootDef=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:bootArn}))).taskDefinition;
-    operatorSubnets=bootstrap.get(bootstrapKeys[1]).split(',');operatorSecurityGroup=bootstrap.get(bootstrapKeys[2]);
-  }
-  const boot=bootDef?.containerDefinitions?.find(c=>c.name===bootName);
-  const bootEnv=Object.fromEntries((boot?.environment??[]).map(e=>[e.name,e.value]));
-  if(bootEnv.MEM9_PREVIEW_GENERATION!==generation)fail('GenerationDeployMismatch');
-  if(!binding){
     const names=['production-plan','production-manifest','production-state'].map(name=>prefix+'/runtime/'+name);
     const lifecycle=await send(ssm,new GetParametersCommand({Names:names,WithDecryption:false}));
     if(lifecycle.Parameters?.length)fail('PostRuntimeContextRequired');
     if(!Array.isArray(lifecycle.InvalidParameters)||lifecycle.InvalidParameters.length!==names.length||
       new Set(lifecycle.InvalidParameters).size!==names.length||lifecycle.InvalidParameters.some(name=>!names.includes(name)))fail('AcceptanceMetadataMissing');
+    bootstrapBinding=await loadNonrootPreviewBootstrap(clients,{stage,region,sourceTree:controlSourceTree,purpose:'preview-fixture-pause'});
+    if(bootstrapBinding.clusterArn!==manifest.clusterArn)fail('InvalidBootstrapMetadata');
+    bootArn=bootstrapBinding.binding.taskDefinitionArn;bootDef=bootstrapBinding.observation.taskDefinition;bootName='Mem9Bootstrap';
+    operatorSubnets=bootstrapBinding.subnets;operatorSecurityGroup=bootstrapBinding.securityGroup;
   }
+  const boot=bootDef?.containerDefinitions?.find(c=>c.name===bootName);
+  const bootEnv=Object.fromEntries((boot?.environment??[]).map(e=>[e.name,e.value]));
+  if(bootEnv.MEM9_PREVIEW_GENERATION!==generation)fail('GenerationDeployMismatch');
   const defs=new Map([[bootArn,bootDef]]);
+  const workerReadbacks=new Map();
   for(const worker of manifest.workers){
-    const def=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:worker.taskDefinitionArn}))).taskDefinition;
-    if(def?.containerDefinitions?.find(c=>c.name===worker.containerName)?.environment?.find(e=>e.name==='MEM9_WORKER_GENERATION')?.value!==generation)fail('GenerationDeployMismatch');
+    const observed=nonrootPreviewObservation(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:worker.taskDefinitionArn,include:['TAGS']}))),def=observed.taskDefinition;
+    if(def.taskDefinitionArn!==worker.taskDefinitionArn||!Array.isArray(observed.tags))fail('NonrootPreviewWorkerReadback');
+    const container=def?.containerDefinitions?.find(c=>c.name===worker.containerName);
+    if(container?.environment?.find(e=>e.name==='MEM9_WORKER_GENERATION')?.value!==generation)fail('GenerationDeployMismatch');
+    const launch=dataLaunchPolicy(worker.kind,container);
+    for(const field of ['user','entryPoint','command'])if(evidenceHash(container[field]??null)!==evidenceHash(launch[field]))fail('NonrootPreviewWorkerLaunch');
+    if(evidenceHash(container.linuxParameters?.capabilities?.drop??null)!==evidenceHash(['ALL']))fail('NonrootPreviewWorkerLaunch');
+    workerReadbacks.set(worker.taskDefinitionArn,observed);
     defs.set(worker.taskDefinitionArn,def);
   }
   const records=async(task,containerName,event)=>{
@@ -206,6 +214,19 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,po
   let operatorTask,operatorJournal;
   const operator=async(operation,crossings=0)=>{
     progress('operator-'+operation);
+    const purpose=previewBootstrapPurposeForOperation('consolidation-preview-'+operation);
+    let selected;
+    if(bootstrapBinding){
+      selected=await loadNonrootPreviewBootstrap(clients,{...bootstrapBinding.scope,purpose});
+      if(evidenceHash(selected.parameters)!==evidenceHash(bootstrapBinding.parameters))fail('NonrootPreviewBindingsChanged');
+      bootArn=selected.binding.taskDefinitionArn;defs.set(bootArn,selected.observation.taskDefinition);
+      if(selected.observation.taskDefinition.containerDefinitions[0].environment.find(e=>e.name==='MEM9_PREVIEW_GENERATION')?.value!==generation)fail('GenerationDeployMismatch');
+    }else{
+      binding=await loadPostRuntimeOperator(clients,{...postOptions,purpose},postRuntimeChecks);
+      if(evidenceHash(binding.parameters)!==evidenceHash(postParameters))fail('PostRuntimeRouteChanged');
+      bootArn=binding.route.taskDefinitionArn;defs.set(bootArn,binding.definition);
+      if(binding.definition.containerDefinitions[0].environment.find(e=>e.name==='MEM9_BOOTSTRAP_OPERATION')?.value!=='consolidation-preview-'+operation)fail('NonrootPreviewPurposeUnavailable');
+    }
     if(binding)await revalidatePostRuntimeOperator(clients,binding,postOptions,postRuntimeChecks);
     const nonce=randomUUID().replaceAll('-',''),deadline=now()+600000;
     const journal={operator:true,stage,generation,nonce,deadline,taskDefinitionArn:bootArn,
@@ -217,18 +238,22 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,po
       if(JSON.stringify(saved)!==JSON.stringify(journal))fail('OperatorJournalMismatch');
     }
     if(binding)await revalidatePostRuntimeOperator(clients,binding,postOptions,postRuntimeChecks);
+    if(selected)await revalidateNonrootPreviewBootstrap(clients,selected);
+    const overrides={containerOverrides:[{name:bootName,environment:[
+      {name:'MEM9_BOOTSTRAP_OPERATION',value:'consolidation-preview-'+operation},
+      {name:'MEM9_PREVIEW_EXPECTED_GENERATION',value:generation},
+      {name:'MEM9_PREVIEW_OPERATOR_NONCE',value:nonce},
+      {name:'MEM9_PREVIEW_OPERATOR_DEADLINE',value:String(deadline)},
+      {name:'MEM9_PREVIEW_BATCH_BOUNDARY_CROSSINGS',value:String(crossings)}]}]};
+    validateNonrootPreviewOverrides(purpose,overrides,{now:now(),containerName:bootName});
     const r=await send(ecs,new RunTaskCommand({cluster:manifest.clusterArn,taskDefinition:bootArn,launchType:'FARGATE',count:1,clientToken:nonce,
+      enableExecuteCommand:false,
       propagateTags:'TASK_DEFINITION',enableECSManagedTags:true,
       networkConfiguration:{awsvpcConfiguration:{subnets:operatorSubnets,securityGroups:[operatorSecurityGroup],assignPublicIp:'DISABLED'}},
-      overrides:{containerOverrides:[{name:bootName,environment:[
-        {name:'MEM9_BOOTSTRAP_OPERATION',value:'consolidation-preview-'+operation},
-        {name:'MEM9_PREVIEW_EXPECTED_GENERATION',value:generation},
-        {name:'MEM9_PREVIEW_OPERATOR_NONCE',value:nonce},
-        {name:'MEM9_PREVIEW_OPERATOR_DEADLINE',value:String(deadline)},
-        {name:'MEM9_PREVIEW_BATCH_BOUNDARY_CROSSINGS',value:String(crossings)}]}]}}));
+      overrides}));
     if(r.failures?.length||r.tasks?.length!==1)fail('OperatorLaunchFailed');
-    if(binding&&(!r.tasks[0].taskArn?.startsWith(manifest.clusterArn.replace(':cluster/',':task/')+'/')||
-      r.tasks[0].clusterArn!==manifest.clusterArn||r.tasks[0].taskDefinitionArn!==bootArn))fail('OperatorLaunchIdentityMismatch');
+    if(!r.tasks[0].taskArn?.startsWith(manifest.clusterArn.replace(':cluster/',':task/')+'/')||
+      r.tasks[0].clusterArn!==manifest.clusterArn||r.tasks[0].taskDefinitionArn!==bootArn)fail('OperatorLaunchIdentityMismatch');
     operatorTask=r.tasks[0].taskArn;
     operatorJournal=journal;
     if(binding){
@@ -275,7 +300,8 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,po
           if(evidenceHash(route)!==j.routeHash||route.generation!==j.generation||route.taskDefinitionArn!==j.taskDefinitionArn||
             !['setup','pause','verify-planned','verify-executed','verify-repeated'].includes(j.operation)||!Number.isSafeInteger(j.createdAt)||j.createdAt<1||
             j.createdAt>j.deadline||j.deadline-j.createdAt>600000||!Number.isSafeInteger(j.batchBoundaryCrossings)||j.batchBoundaryCrossings<0||j.batchBoundaryCrossings>10000)fail('InvalidOperatorJournal');
-          const def=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:j.taskDefinitionArn}))).taskDefinition;validatePostRuntimeDefinition(def,route);
+          const observed=nonrootPreviewObservation(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:j.taskDefinitionArn,include:['TAGS']})));
+          validatePostRuntimeDefinition(observed.taskDefinition,route,observed);
         }else if(j.version!==undefined||!taskDefinitionMatches(j.taskDefinitionArn,manifest,'Mem9Bootstrap'))fail('InvalidOperatorJournal');
         saved.push({path:p.Name,journal:j});
       }
@@ -340,6 +366,8 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,po
     const path=prefix+'/consolidation-preview/schedules/'+generation+'/'+wave+'-'+kind;
     await send(ssm,new PutParameterCommand({Name:path,Type:'String',Value:JSON.stringify(journal),Overwrite:false}));
     validateJournal(JSON.parse((await parameters([path])).get(path)),manifest,path,now());
+    const readback=nonrootPreviewObservation(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:worker.taskDefinitionArn,include:['TAGS']})));
+    if(evidenceHash(readback)!==evidenceHash(workerReadbacks.get(worker.taskDefinitionArn)))fail('NonrootPreviewWorkerReadbackChanged');
     await send(scheduler,new CreateScheduleCommand(oneShotInput(template,manifest,worker,journal)));
     progress('scheduled-'+wave);
     return journal;
@@ -486,11 +514,11 @@ export async function scanDatabaseLogs({coverage,progress=emit,...options}){
 
 async function main(){
   const stage=process.env.STAGE;const generation=previewGeneration(stage);
-  const postRuntime=previewAcceptanceContext(stage),controlSourceTree=postRuntime?execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim():undefined;
+  const postRuntime=previewAcceptanceContext(stage),controlSourceTree=await nonrootPreviewSourceTree();
   const region=process.env.AWS_REGION||await resolveApplicationRegion();
   const cfg={region,maxAttempts:3};
   const clients={ssm:new SSMClient(cfg),ecs:new ECSClient(cfg),scheduler:new SchedulerClient(cfg),logs:new CloudWatchLogsClient(cfg),rds:new RDSClient(cfg),
-    ...(postRuntime?{iam:new IAMClient({...cfg,region:'us-east-1'}),sts:new STSClient(cfg)}:{})};
+    sts:new STSClient(cfg),...(postRuntime?{iam:new IAMClient({...cfg,region:'us-east-1'})}:{})};
   try{await runSchedulerAcceptance({clients,stage,generation,region,postRuntime,controlSourceTree});}finally{for(const client of Object.values(clients))client.destroy();}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(error=>{

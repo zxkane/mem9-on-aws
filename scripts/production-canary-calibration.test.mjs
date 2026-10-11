@@ -2,6 +2,8 @@ import {it,expect} from 'vitest';
 import {calibrateProductionContinuation} from './lib/production-canary-calibration.mjs';
 import {normalizeCanaryTask} from './lib/production-canary-material.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
+import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
+import {asNonrootCertificate} from './production-nonroot-runtime.fixture.mjs';
 const h=c=>c.repeat(64),account='123456789012',region='ap-northeast-1',now=1800000000000;
 function fixture(){
   const image=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/llm-proxy@sha256:${h('a')}`,child='sha256:'+h('b'),attemptId='b'.repeat(32),oldTime=now-10800000;
@@ -44,4 +46,83 @@ it('rejects changed execution configuration, incomplete capacity, stale census a
     f=>{f.census.exactCandidateUpperBound={groups:5000,rows:10000,surplus:5000,largest_group:2};},f=>{f.state.benchmarkRemaining=1;}]){
     const f=fixture();change(f);expect(()=>run(f)).toThrow();
   }
+});
+function transitionFixture(){
+ const f=fixture(),c=f.options.compatibility;c.version=3;c.dataReleaseHash=h('c');c.transition={version:1,kind:'bootstrap-boundary-tightening',proofHash:h('d'),backendProjectionHash:h('e')};
+ c.material.authority.current=h('f');c.material.backend.current=h('e');c.current.backendBinding={taskArn:`arn:aws:ecs:${region}:${account}:task/mem9-on-aws-prod-Test/`+'a'.repeat(32),taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-prod-Test-Backend:2`,containers:['llm-proxy','mnemo-server','qwen3-embed'].map(name=>({name,imageDigest:'sha256:'+h('a')}))};
+ f.state.verified.verification.backendBindingHash=hash(c.current.backendBinding);f.state.report.verificationHash=hash(f.state.verified.verification);return f;
+}
+it('V3 calibration preserves original receipts and capacity while retaining unequal authority hashes',()=>{
+ const f=transitionFixture(),before=structuredClone(f.original),value=run(f);expect(value.estimatedDailyCapacity).toBe(3456);expect(value.capacityReceipts).toBe(5);expect(f.original).toEqual(before);expect(f.options.compatibility.material.authority.previous).not.toBe(f.options.compatibility.material.authority.current);
+});
+it('V3 calibration rejects a malformed commitment or unrelated execution-material change',()=>{
+ for(const key of ['commitment','executor']){const f=transitionFixture();if(key==='commitment')f.options.compatibility.transition.proofHash='bad';else f.options.compatibility.material.executor.current=h('9');expect(()=>run(f)).toThrow();}
+});
+
+function currentImageFixture({pairs=2}={}){
+ const f=fixture(),c=f.options.compatibility,attemptId=f.options.attemptId,dataRevision='7'.repeat(40),image=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/llm-proxy@sha256:${h('7')}`;
+ c.version=4;c.dataReleaseHash=h('8');c.transition={version:1,kind:'image-security-upgrade',proofHash:h('9'),predecessorHash:h('0'),limitsHash:IMAGE_TRANSITION_LIMITS_HASH,projectionHash:h('1')};
+ c.current.release={...c.current.release,sourceTag:'mem9-'+dataRevision.slice(0,7),workerImage:image};
+ c.images=Object.fromEntries(['worker','llm-proxy','mnemo-server','qwen3-embed'].map(name=>[name,{previousRoot:'sha256:'+h('a'),previousChild:'sha256:'+h('b'),currentRoot:'sha256:'+h('7'),currentChild:'sha256:'+h('8')}]));
+ c.material.planner.current=h('2');c.material.backend.current=h('3');c.material.authority.current=h('4');
+ const cluster=`arn:aws:ecs:${region}:${account}:cluster/mem9-on-aws-prod-Test`;
+ c.current.backendBinding={taskArn:cluster.replace(':cluster/',':task/')+'/'+'a'.repeat(32),taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-prod-Test-Backend:2`,containers:['llm-proxy','mnemo-server','qwen3-embed'].map(name=>({name,imageDigest:'sha256:'+h('7')}))};
+ const current=structuredClone(f.original),times=Array.from({length:pairs},(_,i)=>now-175000+i*5000);
+ for(let i=0;i<pairs;i++)current.replayActions.push({namespace:'namespace',id:(i+6).toString(16).padStart(64,'0'),result:{action_id:(i+6).toString(16).padStart(64,'0'),status:'applied',changed_rows:2}});
+ current.receiptWindow={...current.receiptWindow,lastCommittedMs:times.at(-1),committedMs:[...current.receiptWindow.committedMs,...times]};
+ Object.assign(current.verification,{attemptId,parentProofHash:c.parentProofHash,workerImage:image,sourceTag:c.current.release.sourceTag,receipts:5+pairs,changedRows:10+pairs*2,sourceRows:5+pairs,
+  releaseHash:hash(c.current.release),backendBindingHash:hash(c.current.backendBinding),replayResultHash:hash(current.replayActions.map(a=>[a.namespace,a.id,a.result]))});
+ f.state.verified=current;f.state.report.verificationHash=hash(current.verification);f.state.report.receipts=current.receiptWindow;
+ for(const a of f.state.report.activity){a.image=image;a.imageDigest='sha256:'+h('8');if(a.kind==='executor')a.stoppedMs=now-140000;}
+ for(const replay of f.state.report.replays){replay.image=image;replay.imageDigest='sha256:'+h('8');replay.matched=5+pairs;replay.resultHash=current.verification.replayResultHash;}
+ const definition=structuredClone(f.capacity.definition);definition.revision=2;definition.taskDefinitionArn=definition.taskDefinitionArn.replace(/:1$/,':2');definition.containerDefinitions[0].image=image;
+ c.material.executor.current=hash(normalizeCanaryTask(definition,{account,region,images:new Map([[image,{registryId:account,repositoryName:'mem9-on-aws/llm-proxy',rootDigest:'sha256:'+h('7'),arm64Digest:'sha256:'+h('8')}]])}));
+ const delivery={...f.capacity.delivery,taskArn:cluster.replace(':cluster/',':task/')+'/'+'b'.repeat(32),taskDefinitionArn:definition.taskDefinitionArn,startedMs:now-180000,stoppedMs:now-140000,image,imageDigest:'sha256:'+h('8')};
+ delivery.record={...delivery.record,outcome:'complete',changedRows:pairs*2,startedMs:delivery.startedMs,finishedMs:delivery.stoppedMs};
+ const task={...f.capacity.task,clusterArn:cluster,taskArn:delivery.taskArn,taskDefinitionArn:definition.taskDefinitionArn,startedAt:new Date(now-181000).toISOString(),stoppedAt:new Date(now-139000).toISOString(),containers:[{name:definition.containerDefinitions[0].name,image,imageDigest:delivery.imageDigest,exitCode:0}]};
+ const launch={version:1,stage:'prod',region,account,cluster:'mem9-on-aws-prod-Test',clusterArn:cluster,generation:c.generation,nonce:delivery.invocation,wave:'apply',when:delivery.startedMs-1000,deadline:delivery.stoppedMs+1000,
+  taskDefinitionArn:definition.taskDefinitionArn,containerName:'Mem9ConsolidationExecutor',taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn,targetHash:h('f'),overridesHash:hash({containerOverrides:task.overrides.containerOverrides})};
+ f.capacity={version:1,kind:'current-apply-capacity',attemptId,dataRevision,dataReleaseHash:c.dataReleaseHash,observedMs:now-1000,definition,delivery,launch,task};
+ f.state.deliveries=[structuredClone(delivery)];f.state.launches=[{kind:'executor',wave:'apply',journal:structuredClone(launch)}];f.state.executorRequested=true;f.options.dataRevision=dataRevision;f.census.controls.execution_receipts=5+pairs;
+ return f;
+}
+it('V4 measures the complete current apply delta while preserving the original receipt set and allowance',()=>{
+ const f=currentImageFixture(),before=structuredClone(f.original),value=run(f);
+ expect(value.capacitySource).toBe('current-apply');expect(value.capacityReceipts).toBe(2);expect(value.steadyChangedRows).toBe(2);expect(value.spanSeconds).toBe(5);
+ expect(value.existingSpent).toBe(10);expect(value.newChangedRows).toBe(4);expect(f.state.verified.verification.changedRows).toBe(14);expect(f.original).toEqual(before);
+});
+it('V4 accepts the full remaining allowance without creating another budget',()=>{
+ const f=currentImageFixture({pairs:5}),value=run(f);expect(value.capacityReceipts).toBe(5);expect(value.newChangedRows).toBe(10);expect(f.state.verified.verification.changedRows).toBe(20);
+});
+function nonrootCapacityFixture(){
+ const f=currentImageFixture();f.options.compatibility=asNonrootCertificate(f.options.compatibility);
+ const container=f.capacity.definition.containerDefinitions[0];Object.assign(container,{user:'1000:1000',privileged:false,linuxParameters:{capabilities:{drop:['ALL']}},entryPoint:['/usr/bin/setpriv','--no-new-privs','--','node'],command:['/app/scripts/consolidation-worker.mjs']});
+ const c=f.options.compatibility,image=c.current.release.workerImage;
+ c.material.executor.current=hash(normalizeCanaryTask(f.capacity.definition,{account,region,images:new Map([[image,{registryId:account,repositoryName:'mem9-on-aws/llm-proxy',rootDigest:c.images.worker.currentRoot,arm64Digest:c.images.worker.currentChild}]])}));
+ return f;
+}
+it('V5 calibrates only the current prefixed apply task and retains original spent/cap',()=>{
+ const f=nonrootCapacityFixture(),original=structuredClone(f.original),value=run(f);
+ expect(value.capacitySource).toBe('current-apply');expect(value.newChangedRows).toBe(4);expect(value.existingSpent).toBe(10);expect(f.original).toEqual(original);
+});
+for(const defect of ['unprefixed','root','added-capability','dropped-capability','old-capacity','replay'])it('V5 current capacity rejects '+defect,()=>{
+ const f=nonrootCapacityFixture(),container=f.capacity.definition.containerDefinitions[0],c=f.options.compatibility;
+ if(defect==='unprefixed')container.entryPoint=['node'];if(defect==='root')container.user='0:0';if(defect==='added-capability')container.linuxParameters.capabilities.add=['SYS_ADMIN'];if(defect==='dropped-capability')container.linuxParameters.capabilities.drop=[];
+ if(defect==='old-capacity')f.capacity=fixture().capacity;if(defect==='replay')f.capacity.delivery.wave='repeat-a';
+ if(!['old-capacity','replay'].includes(defect)){const image=c.current.release.workerImage;c.material.executor.current=hash(normalizeCanaryTask(f.capacity.definition,{account,region,images:new Map([[image,{registryId:account,repositoryName:'mem9-on-aws/llm-proxy',rootDigest:c.images.worker.currentRoot,arm64Digest:c.images.worker.currentChild}]])}));}
+ expect(()=>run(f)).toThrow();
+});
+for(const defect of ['one-pair','over-budget','historical-capacity','replay-capacity','cross-batch','subset','full-revision','task-window','read-window','write-window','old-image','wrong-definition','stale-census'])it('V4 calibration holds '+defect,()=>{
+ const f=currentImageFixture({pairs:defect==='one-pair'?1:defect==='over-budget'?6:2});
+ if(defect==='historical-capacity')f.capacity=fixture().capacity;
+ if(defect==='replay-capacity')f.capacity.delivery.wave='repeat-a';
+ if(defect==='cross-batch')f.state.deliveries.push({...f.state.deliveries[0],invocation:'1'.repeat(32)});
+ if(defect==='subset'){f.capacity.delivery.record.changedRows=2;f.state.deliveries[0].record.changedRows=2;}
+ if(defect==='full-revision')f.capacity.dataRevision=f.options.dataRevision.slice(0,7)+'8'.repeat(33);
+ if(defect==='task-window')f.capacity.task.startedAt=new Date(now-170000).toISOString();
+ if(defect==='read-window'||defect==='write-window'){const kind=defect==='read-window'?'read':'write_ack';for(const s of f.state.report.loaded.samples.filter(s=>s.kind===kind)){s.startedMs+=50000;s.finishedMs+=50000;}}
+ if(defect==='old-image')f.capacity.task.containers[0].imageDigest='sha256:'+h('b');
+ if(defect==='wrong-definition')f.capacity.definition.cpu='1024';
+ if(defect==='stale-census')f.census.at=new Date(now-300001).toISOString();
+ expect(()=>run(f)).toThrow();
 });

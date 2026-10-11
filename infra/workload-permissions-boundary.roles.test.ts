@@ -2,11 +2,37 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { WORKLOAD_BOUNDARY_POLICY_NAME } from "./workload-permissions-boundary";
 import {
   EXPECTED_WORKLOAD_ROLE_NAMES,
 } from "./workload-permissions-boundary.test-fixtures";
+
+// This suite synthesizes a mocked resource graph, not CI/source provenance.
+// Real source authentication and Docker/AWS readbacks have dedicated tests.
+vi.mock('node:child_process',async original=>{
+  const actual=await original<typeof import('node:child_process')>();
+  return {...actual,execFileSync:(command:string,args:string[],options:unknown)=>{
+    if(command==='git'&&['ls-files','diff'].includes(args[0]))return Buffer.alloc(0);
+    if(command==='git'&&args.join(' ')==='rev-parse HEAD^{tree}')return 'a'.repeat(40)+'\n';
+    return actual.execFileSync(command,args,options as never);
+  }};
+});
+vi.mock('@aws-sdk/client-ecs',async original=>{
+  const actual=await original<typeof import('@aws-sdk/client-ecs')>();
+  return {...actual,ECSClient:class{
+    async send(command:{input:{taskDefinition:string;include:string[]}}){
+      const row=recordedResources.find(r=>r.type==='aws:ecs/taskDefinition:TaskDefinition'&&mockArn(r.type,r.name)===command.input.taskDefinition);
+      if(!row||command.input.include.join()!=='TAGS')throw Error('UnexpectedMockEcsReadback');
+      const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));
+      const {previewRegistrationFromProviderArgs}=await import('../scripts/lib/nonroot-preview-source.mjs');
+      const {tags,...body}=previewRegistrationFromProviderArgs({...row.inputs,containerDefinitions:unwrapRpcSecret(row.inputs.containerDefinitions)});
+      return {taskDefinition:{...body,taskDefinitionArn:command.input.taskDefinition,revision:Number(command.input.taskDefinition.split(':').at(-1)),status:'ACTIVE',
+        registeredAt:'2026-10-08T00:00:00.000Z',registeredBy:`arn:aws:sts::${accountId}:assumed-role/preview/session`,requiresAttributes:[],compatibilities:['FARGATE']},tags};
+    }
+    destroy(){}
+  }};
+});
 
 interface MockCallArgs {
   inputs: Record<string, unknown>;
@@ -29,6 +55,7 @@ const accountId = "123456789012";
 const region = "ap-northeast-1";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const recordedResources: RecordedResource[] = [];
+let sharedRpcServer:Awaited<ReturnType<typeof startSstRpcServer>>|undefined;
 const maintenanceNamespaceIds = [
   "60000000-0000-4000-8000-000000000101",
   "60000000-0000-4000-8000-000000000102",
@@ -50,6 +77,15 @@ function moduleUrl(path: string): string {
 }
 
 function mockArn(type: string, name: string): string {
+  if(type==='aws:ecs/taskDefinition:TaskDefinition'){
+    const row=recordedResources.find(r=>r.type===type&&r.name===name);
+    const family=row?.inputs.family;
+    const revision=recordedResources.filter(r=>r.type===type&&r.inputs.family===family).findIndex(r=>r.name===name)+1;
+    return `arn:aws:ecs:${region}:${accountId}:task-definition/${family}:${revision}`;
+  }
+  if(type==='aws:iam/role:Role')return `arn:aws:iam::${accountId}:role/${name}`;
+  if(type==='aws:secretsmanager/secret:Secret'||type==='aws:secretsmanager/secretVersion:SecretVersion')return `arn:aws:secretsmanager:${region}:${accountId}:secret:${name}`;
+  if(type==='aws:ssm/parameter:Parameter')return `arn:aws:ssm:${region}:${accountId}:parameter/${name}`;
   const service = type.split(":")[1] || "mock";
   return `arn:aws:${service}:${region}:${accountId}:${name}`;
 }
@@ -73,6 +109,8 @@ function mockCall(args: MockCallArgs): Record<string, unknown> {
     case "aws:ecr/getImage:getImage":
       return {...args.inputs,id:'synthetic-image',imageDigest:'sha256:'+'a'.repeat(64),imageTags:[args.inputs.imageTag],
         imageUri:`${accountId}.dkr.ecr.${region}.amazonaws.com/${args.inputs.repositoryName}@sha256:${'a'.repeat(64)}`};
+    case "aws:kms/getKey:getKey":
+      return {...args.inputs, arn:`arn:aws:kms:${region}:${accountId}:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`};
     case "aws:ec2/getVpc:getVpc":
       return {
         ...args.inputs,
@@ -113,6 +151,12 @@ function mockNewResource(args: MockResourceArgs): {
     name: args.inputs.name ?? args.name,
   };
   switch (args.type) {
+    case "aws:ec2/vpcEndpoint:VpcEndpoint": {
+      const service = String(args.inputs.serviceName).split('.').at(-1);
+      const endpointId = service === 'ssm' ? 'vpce-abcd' : 'vpce-abce';
+      return { id: endpointId, state: { ...state, id: endpointId,
+        dnsEntries: [{dnsName: `${endpointId}-synthetic.${service}.${region}.vpce.amazonaws.com`, hostedZoneId: 'synthetic-zone'}] } };
+    }
     case "aws:rds/cluster:Cluster":
       Object.assign(state, {
         clusterIdentifier: args.name,
@@ -381,6 +425,7 @@ async function waitForRecordedRoles(expectedCount: number): Promise<void> {
 const globalNames = [
   "$app",
   "$cli",
+  "$util",
   "$config",
   "$dev",
   "$interpolate",
@@ -399,6 +444,14 @@ afterEach(() => {
   recordedResources.length = 0;
   vi.unstubAllEnvs();
   vi.resetModules();
+});
+afterAll(async()=>{
+  // SST caches RPC clients across the real component modules. Keep their local
+  // endpoint alive for the whole file rather than resetting an in-flight socket
+  // between otherwise independent mocked stack cases.
+  const pulumi=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/index.js'));
+  await pulumi.runtime.waitForRPCs();
+  await sharedRpcServer?.close();
 });
 
 describe("workload role coverage from the real SST graph", () => {
@@ -427,7 +480,7 @@ describe("workload role coverage from the real SST graph", () => {
       const preview = runtimeReady !== undefined;
       const stage = preview ? 'pr-7' : 'prod';
       vi.resetModules();
-      const rpcServer = await startSstRpcServer();
+      const rpcServer = sharedRpcServer??=await startSstRpcServer();
       const environment: Record<string, string | undefined> = {
         SST_SERVER: rpcServer.url,
         WORKLOAD_BOUNDARY_PROD_ENABLED: "true",
@@ -441,6 +494,7 @@ describe("workload role coverage from the real SST graph", () => {
         MEM9_CONSOLIDATION_SCHEDULE_ENABLED: scheduleEnabled ? "1" : "0",
         SST_SECRET_MaintenanceNamespaceIds: JSON.stringify(scheduleEnabled ? maintenanceNamespaceIds : []),
         SST_SECRET_SlackWebhookUrl: "https://hooks.example.com/services/mock",
+        SST_SECRET_OauthStateHmacKey: "synthetic-hmac-key-for-offline-sst-graph",
         MEM9_SLACK_APPROVAL_ENABLED: "0",
         MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: "0",
         MEM9_CLEANUP_SCAN_ENABLED: "0",
@@ -449,7 +503,7 @@ describe("workload role coverage from the real SST graph", () => {
         SST_SECRET_SlackSigningSecret: undefined,
         MEM9_DECISION_ARTIFACT_BUCKET: `mem9-audit-${accountId}`,
         MEM9_DEPLOY_COMMIT: "a".repeat(40),
-        MEM9_IMAGE_TAG:'mem9-aaaaaaa',
+        MEM9_IMAGE_TAG:preview?'pr-aaaaaaa':'mem9-aaaaaaa',
         GITHUB_RUN_ID: "7",
         GITHUB_RUN_ATTEMPT: "1",
       };
@@ -521,6 +575,7 @@ describe("workload role coverage from the real SST graph", () => {
         );
         Object.assign(globalThis, {
           $config: (value: unknown) => value,
+          $util: pulumi,
           $interpolate: pulumi.interpolate,
           $jsonStringify: pulumi.jsonStringify,
           $transform,
@@ -624,9 +679,13 @@ describe("workload role coverage from the real SST graph", () => {
         const expectedBoundary = `arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
         expect(
           createdRoles.every(
-            ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
+            ({ inputs, name }) => inputs.permissionsBoundary === (['Mem9ProxyFnRole','Mem9IdentityInterceptorFnRole'].includes(name)
+              ? `arn:aws:iam::${accountId}:policy/mem9-on-aws-gateway-boundary` : expectedBoundary),
           ),
         ).toBe(true);
+        for (const role of createdRoles.filter(({name})=>["Mem9ProxyFnRole","Mem9IdentityInterceptorFnRole"].includes(name))) {
+          expect(role.inputs.tags).toMatchObject({Project:"mem9-on-aws",Stage:stage});
+        }
         await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired, productionMode);
         if(productionMode){
           const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));
@@ -773,7 +832,6 @@ describe("workload role coverage from the real SST graph", () => {
         }
       } finally {
         vi.unstubAllEnvs();
-        await rpcServer.close();
       }
     },
     120_000,

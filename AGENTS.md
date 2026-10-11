@@ -16,6 +16,10 @@ them, update the file rather than silently diverging.
 
 ## Hard rules
 
+- **Test registration**: root CI runs Vitest. Tests selected by its configuration
+  must register through `vitest`; importing `node:test` directly can leave
+  failures invisible to the configured runner. Native Node suites must run in
+  a separate process whose exit status is checked by the enclosing test.
 - **AWS compliance**: known constraints to honor here — **no Lambda Function URL**
   (use API Gateway / AgentCore Gateway), **Lambda runtime `nodejs24.x`**,
   least-privilege IAM, and **no hardcoded account IDs / ARNs in committed files**

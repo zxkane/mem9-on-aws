@@ -2208,6 +2208,70 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
+      "id": "59b46b229807a1f0e833",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 125,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "f7e2424a9805c369dbd82a30ea224b7765556b854d0ebb84c59ed826dea6cbc2",
+      "statement": "INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,tags,metadata,memory_type) VALUES($1,$2,$3,$3,'Synthetic carrier fact','carrier-fixture','[]','{}','insight')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
+      "id": "adef5e37bafed476968e",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 126,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "b77b88a9f336c2540191e7604c95b14d3cdfdf267874d8a1dbb86a6ba62de205",
+      "statement": "SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2) ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "bb275f6aaa5c7a29c36d",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 130,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "708db43ff92452c6865181dd25bef0e819fbd7ba7eb477527035c802da874918",
+      "statement": "UPDATE public.memories SET metadata=$1,version=version+1 WHERE namespace_id=$2 AND id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
+      "id": "b117aab16f528b528ccf",
+      "owner": "scripts/lib/ci-carrier-sql-state.mjs",
+      "line": 131,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "1007de305366fb6290c06988936f44ae73b44f4a128be1a95d129258eb90a615",
+      "statement": "UPDATE public.memories SET state='deleted',superseded_by=$1,version=version+1 WHERE namespace_id=$2 AND id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
       "id": "7317e3a65a2fcb77ed87",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
       "line": 724,
@@ -2409,6 +2473,38 @@
         "scripts/canary-fixture-e2e.mjs"
       ],
       "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "3d165a693ae407b6d4d6",
+      "owner": "scripts/lib/production-continuation-absence.mjs",
+      "line": 45,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7c7754a8546424f0ed8301e5f9d0a49251b0bc0445db3b792478152fec87683d",
+      "statement": "SELECT count(*)::int AS count FROM public.memories WHERE namespace_id=$1 AND agent_id=$2",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-absence.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "cc82952125617747f64a",
+      "owner": "scripts/lib/production-continuation-absence.mjs",
+      "line": 51,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7cc790ee5cd96d282b3ad7398c3a1cd1c3351211a529786c2a69c9adbf280a9b",
+      "statement": "SELECT count(*)::int AS total,count(*) FILTER(WHERE state='active')::int AS active,encode(sha256(convert_to(coalesce(string_agg(encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex'),'' ORDER BY namespace_id,id),''),'UTF8')),'hex') AS fingerprint FROM public.memories m WHERE namespace_id=ANY($1)",
+      "classification": "namespace_bound",
+      "rationale": "The fixed read-only fingerprint query binds the complete original parent namespace list through ANY($1); it returns aggregate counts and a digest.",
+      "coverage": [
+        "scripts/production-continuation-absence.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=ANY($1)"
     },
     {
       "id": "a7ed6ed6cf6e5f2790df",
@@ -3004,6 +3100,54 @@
         "scripts/production-consolidation-operator.postgres.test.mjs",
         "scripts/run-runtime-credentials-integration.sh",
         "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "d4be0c7564b7c36ad78a",
+      "owner": "scripts/production-continuation-inspection.mjs",
+      "line": 48,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "b3e1ae34a96d919416b6d84116ea4c91936461e89c4080ca6d71c787205da7fb",
+      "statement": "SELECT memory_type,state,count(*)::int AS count FROM public.memories WHERE namespace_id=$1 GROUP BY memory_type,state ORDER BY memory_type,state",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-inspection.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "a080afc7f2fa74f8bf2b",
+      "owner": "scripts/production-continuation-inspection.mjs",
+      "line": 50,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8668ca54aec0cee306c4cbf5ea9147eb27473cd1e7a20bd9e34063eaeb26b6b0",
+      "statement": "SELECT count(*)::int AS groups,coalesce(sum(n),0)::int AS rows,coalesce(sum(n-1),0)::int AS surplus,coalesce(max(n),0)::int AS largest_group FROM (SELECT count(*) AS n FROM public.memories m WHERE m.namespace_id=$1 AND m.state='active' AND m.memory_type='insight' GROUP BY m.namespace_id,m.content,mem9_maintenance.material_context(jsonb_build_object('memory_type',m.memory_type,'app_id',m.app_id,'source',m.source,'agent_id',m.agent_id,'tags',m.tags,'metadata',m.metadata)) HAVING count(*)>1) groups",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-inspection.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "f1e2fcd69b1dbe7d673b",
+      "owner": "scripts/production-continuation-inspection.mjs",
+      "line": 53,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7c7754a8546424f0ed8301e5f9d0a49251b0bc0445db3b792478152fec87683d",
+      "statement": "SELECT count(*)::int AS count FROM public.memories WHERE namespace_id=$1 AND agent_id=$2",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-continuation-inspection.test.mjs"
       ],
       "namespace_evidence": "namespace_id=$1"
     },

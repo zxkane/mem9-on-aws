@@ -1,5 +1,6 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
+import {isDeepStrictEqual} from 'node:util';
 import {setTimeout as delay} from 'node:timers/promises';
 import {SSMClient,GetParametersCommand,GetParametersByPathCommand,PutParameterCommand,DeleteParameterCommand} from '@aws-sdk/client-ssm';
 import {ECSClient,DescribeTaskDefinitionCommand,RunTaskCommand,DescribeTasksCommand,StopTaskCommand,ListTasksCommand} from '@aws-sdk/client-ecs';
@@ -12,6 +13,9 @@ import {productionCoordinatorDigest,productionSourceTree} from './run-production
 import {execFileSync} from 'node:child_process';
 import {canaryReportDigest,canaryReportFragments} from './lib/production-canary-report.mjs';
 import {loadWorkerDataRelease} from './lib/production-data-release-loader.mjs';
+import {assertMaintenanceDispatch,sendMaintenanceCommand} from './lib/production-maintenance-admission.mjs';
+import {controlLaunchPolicy,NONROOT_FORBIDDEN_ENVIRONMENT} from './lib/production-nonroot-launch.mjs';
+import {getImageAuthorization} from './lib/production-image-admission.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
@@ -112,7 +116,7 @@ export async function verifyProductionTaskRoles(clients,meta,definition,name,sec
 }
 
 export function validateProductionWorkerTarget(meta,{region,account}){
-  if(![1,2].includes(meta?.version)||meta.stage!=='prod'||meta.region!==region||meta.account!==account||
+  if(![1,2,3].includes(meta?.version)||meta.stage!=='prod'||meta.region!==region||meta.account!==account||
     !meta.cluster?.startsWith('mem9-on-aws-prod-')||!/^[A-Za-z0-9-]+$/.test(meta.cluster)||meta.clusterArn!==`arn:aws:ecs:${region}:${account}:cluster/${meta.cluster}`||
     !meta.host?.startsWith('mem9-on-aws-prod-')||!meta.host.endsWith(`.${region}.rds.amazonaws.com`)||
     !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(meta.database??'')||!/^[a-f0-9]{64}$/.test(meta.generation??'')||
@@ -123,11 +127,39 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   const arn=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/prod/`;
   for(const [key,path] of Object.entries({administratorCredential:'runtime/schema-administrator-credential',plannerCredential:'consolidation-runtime/planner-credential',
     executorCredential:'consolidation-runtime/executor-credential',targetsParameter:'maintenance/targets'}))if(meta[key]!==arn+path)fail('ProductionWorkerCredentialReferenceMismatch');
-  if(meta.version===2){
+  if(meta.version>=2){
     if(!/^mem9-[a-f0-9]{7}$/.test(meta.controlSourceTag??'')||!/^[a-f0-9]{64}$/.test(meta.dataReleaseHash??'')||
       meta.dataReleaseParameter!=='/mem9-on-aws/prod/consolidation-runtime/data-release')fail('InvalidProductionDataReleaseManifest');
-  }else if(meta.dataReleaseHash!==undefined||meta.dataReleaseParameter!==undefined||meta.controlSourceTag!==undefined&&meta.controlSourceTag!==meta.sourceTag)fail('InvalidProductionDataReleaseManifest');
+    if(meta.version===3&&(!Number.isSafeInteger(meta.dataReleaseParameterVersion)||meta.dataReleaseParameterVersion<1)||meta.version===2&&meta.dataReleaseParameterVersion!==undefined)fail('InvalidProductionDataReleaseManifest');
+  }else if(meta.dataReleaseHash!==undefined||meta.dataReleaseParameter!==undefined||meta.dataReleaseParameterVersion!==undefined||meta.controlSourceTag!==undefined&&meta.controlSourceTag!==meta.sourceTag)fail('InvalidProductionDataReleaseManifest');
   return meta;
+}
+
+/** Match the deployment builder without replacing its guarded entrypoint or
+ * introducing a command override. Partially stripped guards cannot select the
+ * historical fixed-module launch. */
+function validAdministrationLaunch(definition,container,kind,authorization){
+  if(!container)return false;
+  const entry=container.entryPoint,command=container.command,drop=container.linuxParameters?.capabilities?.drop;
+  const guarded=authorization?.kind?.startsWith('nonroot-')||container.user==='1000:1000'||Array.isArray(drop)&&drop.includes('ALL')||
+    Array.isArray(entry)&&entry.some(v=>v==='/bin/setpriv'||v==='/bootstrap/nonroot-dispatch.mjs');
+  if(!guarded)return isDeepStrictEqual(entry,['node'])&&isDeepStrictEqual(command,['/bootstrap/operator/scripts/production-consolidation-operator.mjs']);
+  const purpose={control:'consolidation-control',promotion:'consolidation-promote'}[kind];
+  // The nonroot provision/transition dispatcher purposes are explicitly denied.
+  if(!purpose||definition.runtimePlatform?.operatingSystemFamily!=='LINUX')return false;
+  try{
+    if(!isDeepStrictEqual(container,controlLaunchPolicy(purpose,container)))return false;
+    const names=new Set();
+    for(const [rows,field]of [[container.environment??[],'value'],[container.secrets??[],'valueFrom']]){
+      if(!Array.isArray(rows))return false;
+      for(const row of rows){
+        if(!row||Object.keys(row).sort().join()!==['name',field].sort().join()||typeof row.name!=='string'||
+          typeof row[field]!=='string'||names.has(row.name)||row.name.startsWith('LD_')||NONROOT_FORBIDDEN_ENVIRONMENT.includes(row.name))return false;
+        names.add(row.name);
+      }
+    }
+    return true;
+  }catch{return false;}
 }
 
 export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility},{now=Date.now,sleep=delay}={}){
@@ -149,15 +181,15 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   const actual=Object.fromEntries((container?.secrets??[]).map(s=>[s.name,s.valueFrom]));
   if(definition?.taskDefinitionArn!==target.taskDefinition||definition.containerDefinitions?.length!==1||container.name!==name||
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||
-    container.entryPoint?.join()!=='node'||container.command?.join()!=='/bootstrap/operator/scripts/production-consolidation-operator.mjs'||container.environmentFiles?.length||
+    !validAdministrationLaunch(definition,container,kind,getImageAuthorization(clients))||container.environmentFiles?.length||
     container.image!==target.image||env.MEM9_WORKER_IMAGE!==meta.workerImage||env.MEM9_WORKER_SOURCE_TAG!==meta.sourceTag||
     (meta.controlSourceTag!==undefined&&env.MEM9_CONTROL_SOURCE_TAG!==meta.controlSourceTag)||
-    (meta.version===2&&env.MEM9_RETAINED_DATA_RELEASE_HASH!==meta.dataReleaseHash)||
+    (meta.version>=2&&env.MEM9_RETAINED_DATA_RELEASE_HASH!==meta.dataReleaseHash)||
+    (meta.version===3&&env.MEM9_RETAINED_DATA_RELEASE_VERSION!==String(meta.dataReleaseParameterVersion))||
     env.MEM9_STAGE!=='prod'||env.MEM9_DB_HOST!==meta.host||env.MEM9_DB_NAME!==meta.database||env.MEM9_WORKER_GENERATION!==meta.generation||
     env.MEM9_DB_PORT!==String(meta.port)||env.MEM9_PRODUCTION_WORKER_OPERATOR!==kind||Object.keys(actual).length!==Object.keys(secrets).length||
     Object.entries(secrets).some(([key,value])=>actual[key]!==value))fail('ProductionWorkerOperatorDefinitionMismatch');
   await verifyProductionTaskRoles(clients,meta,definition,name,secrets);
-  if(operation!=='status')await stopPreviousProductionAdministration(clients,meta,{now,sleep});
   let acceptance;
   if(!['pause','status'].includes(operation)){
     const proof=await send(clients.ssm,new GetParametersCommand({Names:[prefix+'runtime/rehearsal-acceptance'],WithDecryption:true}));
@@ -171,23 +203,27 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
   }
+  const admission={kind:['status','inspect-canary'].includes(operation)?'target-verify':operation==='pause'?'owned-cleanup':'admin',operation,transitionRequired:compatibility?.version===3,target:{account,region,image:target.image,taskDefinitionArn:target.taskDefinition,taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn,
+    sourceTree:acceptance?.sourceTree??null,dataReleaseHash:meta.dataReleaseHash??null,dataReleaseParameterVersion:meta.dataReleaseParameterVersion??null}};
+  await assertMaintenanceDispatch(clients,{...admission,service:'ecs',api:'InspectTarget',input:{taskDefinition:target.taskDefinition}});
+  if(operation!=='status')await stopPreviousProductionAdministration(clients,meta,{now,sleep});
   const invocation=randomUUID().replaceAll('-','');
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
     ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
     ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
-    await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));
+    await sendMaintenanceCommand(clients,'ssm',new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}),admission);
   }
   const journalName=prefix+'consolidation-runtime/invocations/'+invocation;
   const journal={version:1,stage:'prod',cluster:meta.clusterArn,taskDefinition:target.taskDefinition,container:name,invocation,
     request:{operation,invocation,deadline:request.deadline},requestHash:requestHash(encoded),
     taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn};
   if(Buffer.byteLength(JSON.stringify(journal))>3500)fail('ProductionWorkerJournalTooLarge');
-  await send(clients.ssm,new PutParameterCommand({Name:journalName,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}));
-  const run=await send(clients.ecs,new RunTaskCommand({cluster:meta.clusterArn,taskDefinition:target.taskDefinition,launchType:'FARGATE',count:1,clientToken:invocation,
+  await sendMaintenanceCommand(clients,'ssm',new PutParameterCommand({Name:journalName,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}),admission);
+  const run=await sendMaintenanceCommand(clients,'ecs',new RunTaskCommand({cluster:meta.clusterArn,taskDefinition:target.taskDefinition,launchType:'FARGATE',count:1,clientToken:invocation,
     networkConfiguration:{awsvpcConfiguration:{subnets:meta.subnets,securityGroups:[meta.securityGroup],assignPublicIp:'DISABLED'}},
-    overrides}));
+    overrides}),admission);
   if(run.failures?.length||run.tasks?.length!==1)fail('ProductionWorkerOperatorLaunchFailed');
   const taskArn=run.tasks[0].taskArn;
   await send(clients.ssm,new PutParameterCommand({Name:journalName,Type:'SecureString',Value:JSON.stringify({...journal,taskArn}),Overwrite:true}));

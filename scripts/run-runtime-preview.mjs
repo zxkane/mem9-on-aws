@@ -5,6 +5,9 @@ import {SSMClient,GetParametersCommand,GetParametersByPathCommand,PutParameterCo
 import {ECSClient,DescribeTaskDefinitionCommand,DescribeServicesCommand,ListTasksCommand,DescribeTasksCommand,StopTaskCommand,RunTaskCommand} from '@aws-sdk/client-ecs';
 import {CloudWatchLogsClient,FilterLogEventsCommand} from '@aws-sdk/client-cloudwatch-logs';
 import {IAMClient} from '@aws-sdk/client-iam';
+import {STSClient} from '@aws-sdk/client-sts';
+import {loadNonrootPreviewBootstrap,revalidateNonrootPreviewBootstrap} from './lib/post-runtime-preview-aws.mjs';
+import {previewBootstrapPurposeForOperation,validateNonrootPreviewOverrides} from './lib/nonroot-preview-source.mjs';
 import {runtimeServerContract,verifyRuntimeRoles} from './lib/runtime-live-verification.mjs';
 import {runtimePreviewStage as runtimeStage} from './lib/runtime-credentials.mjs';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
@@ -40,7 +43,7 @@ export function ownsRuntimeTask(task,meta,journal){
     env.MEM9_BOOTSTRAP_OPERATION===`runtime-${journal.operation}`;
 }
 
-export async function runRuntimePreview({clients,stage,region,operation,now=Date.now,sleep=delay,progress=emit}){
+export async function runRuntimePreview({clients,stage,region,operation,sourceTree,now=Date.now,sleep=delay,progress=emit}){
   if(!runtimeStage(stage)||!['drain','bootstrap','verify','admin-probe','admin-probe-cleanup','cancel'].includes(operation))fail('InvalidRuntimeOperation');
   const {ssm,ecs,logs}=clients;
   const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
@@ -107,7 +110,7 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
     // Keep every original journal until a separate, journaled cleanup task
     // confirms role removal. Cleanup failures retain both generations for retry.
     if(pending.some(({journal})=>journal.operation.startsWith('admin-probe')))
-      await runRuntimePreview({clients,stage,region,operation:'admin-probe-cleanup',now,sleep,progress});
+      await runRuntimePreview({clients,stage,region,operation:'admin-probe-cleanup',sourceTree,now,sleep,progress});
     for(const {path} of pending)await send(ssm,new DeleteParameterCommand({Name:path}));
   };
   if(operation==='cancel'){await cancel();progress('cancelled');return;}
@@ -130,7 +133,10 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
     }
     fail('RuntimeDrainDeadline');
   }
-  const def=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:meta.taskDefinition}))).taskDefinition;
+  const selected=await loadNonrootPreviewBootstrap(clients,{stage,region,sourceTree,purpose:previewBootstrapPurposeForOperation('runtime-'+operation)});
+  if(selected.clusterArn!==meta.clusterArn||selected.securityGroup!==meta.securityGroup||JSON.stringify(selected.subnets)!==JSON.stringify(meta.subnets))fail('NonrootPreviewNetwork');
+  meta.taskDefinition=selected.binding.taskDefinitionArn;
+  const def=selected.observation.taskDefinition;
   const container=def?.containerDefinitions?.find(c=>c.name==='Mem9Bootstrap'),env=environment(container);
   if(def?.family!==meta.family||env.MEM9_RUNTIME_BOOTSTRAP_VERSION!=='1'||env.MEM9_STAGE!==stage||
     container?.secrets?.find(s=>s.name==='MEM9_RUNTIME_DB_SECRET')?.valueFrom!==`arn:aws:ssm:${region}:${meta.account}:parameter${prefix}/runtime/database-credential`)fail('RuntimeBootstrapRevisionMismatch');
@@ -162,11 +168,15 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
   // Persist before invoking ECS. No credential value is retrieved by the runner.
   await send(ssm,new PutParameterCommand({Name:path,Type:'String',Value:JSON.stringify(journal),Overwrite:false}));
   try{
-    const r=await send(ecs,new RunTaskCommand({cluster:meta.clusterArn,taskDefinition:meta.taskDefinition,launchType:'FARGATE',count:1,clientToken:nonce,
+    const overrides={containerOverrides:[{name:'Mem9Bootstrap',environment:[{name:'MEM9_BOOTSTRAP_OPERATION',value:'runtime-'+operation},
+      {name:'MEM9_RUNTIME_INVOCATION',value:nonce},{name:'MEM9_RUNTIME_BOOTSTRAP_DEADLINE',value:String(journal.deadline)}]}]};
+    await revalidateNonrootPreviewBootstrap(clients,selected);
+    validateNonrootPreviewOverrides(selected.purpose,overrides,{now:now()});
+    const r=await send(ecs,new RunTaskCommand({cluster:meta.clusterArn,taskDefinition:selected.binding.taskDefinitionArn,launchType:'FARGATE',count:1,clientToken:nonce,
+      enableExecuteCommand:false,
       propagateTags:'TASK_DEFINITION',enableECSManagedTags:true,
       networkConfiguration:{awsvpcConfiguration:{subnets:meta.subnets,securityGroups:[meta.securityGroup],assignPublicIp:'DISABLED'}},
-      overrides:{containerOverrides:[{name:'Mem9Bootstrap',environment:[{name:'MEM9_BOOTSTRAP_OPERATION',value:'runtime-'+operation},
-        {name:'MEM9_RUNTIME_INVOCATION',value:nonce},{name:'MEM9_RUNTIME_BOOTSTRAP_DEADLINE',value:String(journal.deadline)}]}]}}));
+      overrides}));
     if(r.failures?.length||r.tasks?.length!==1)fail('RuntimeLaunchFailed');
     let stopped;
     while(now()<journal.deadline+60000){
@@ -215,7 +225,7 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
 
 async function main(){
   const region=process.env.AWS_REGION||await resolveApplicationRegion(),stage=process.env.STAGE;
-  const clients={ssm:new SSMClient({region,maxAttempts:3}),ecs:new ECSClient({region,maxAttempts:3}),logs:new CloudWatchLogsClient({region,maxAttempts:3}),iam:new IAMClient({region,maxAttempts:3})};
+  const clients={ssm:new SSMClient({region,maxAttempts:3}),ecs:new ECSClient({region,maxAttempts:3}),logs:new CloudWatchLogsClient({region,maxAttempts:3}),iam:new IAMClient({region,maxAttempts:3}),sts:new STSClient({region,maxAttempts:3})};
   try{await runRuntimePreview({clients,region,stage,operation:process.argv[2]});}
   finally{for(const client of Object.values(clients))client.destroy();}
 }

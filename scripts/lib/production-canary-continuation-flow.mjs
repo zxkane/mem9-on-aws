@@ -3,6 +3,8 @@ import {inspectContinuationReceiptSet,verifyContinuationReceiptSet,verifyContinu
 import {encodeBenchmarkRefs,encodeCanaryReport,verifyCanaryReport} from './production-canary-report.mjs';
 import {verifyCanaryPerformance,verifyCanaryCohort} from './production-canary-performance.mjs';
 import {verifyProductionRecurringProof} from './production-recurring-verification.mjs';
+import {inspectImageTransitionCertificate} from './production-image-transition.mjs';
+import {inspectNonrootCompatibilityCertificate} from './production-nonroot-runtime.mjs';
 
 const fail=code=>{throw Error(code);};
 const errorCode=e=>/^[A-Za-z0-9_-]{1,128}$/.test(e?.message??'')?e.message:'ProductionContinuationFailed';
@@ -12,9 +14,12 @@ async function bounded(promise,ms){let timer;try{return await Promise.race([prom
 /** The adapter owns the operator fence and authenticates all AWS/source evidence. */
 export async function runProductionContinuationFlow(deps,{original,attemptId,compatibility},{maxDiscoveryWaves=8,samplesPerKind=150,joinTimeoutMs=60000}={}){
   const root=inspectContinuationReceiptSet(original).proof;
+  const imageTransition=compatibility?.version===5?inspectNonrootCompatibilityCertificate(compatibility):compatibility?.version===4?inspectImageTransitionCertificate(compatibility):null;
   if(!/^[a-f0-9]{32}$/.test(attemptId??'')||compatibility?.parentProofHash!==hash(root)||root.changedRows>=20||
     !Number.isInteger(maxDiscoveryWaves)||maxDiscoveryWaves<1||maxDiscoveryWaves>8||samplesPerKind!==150||
     !Number.isSafeInteger(joinTimeoutMs)||joinTimeoutMs<1||joinTimeoutMs>60000)fail('ContinuationConfigurationInvalid');
+  if(imageTransition&&20-root.changedRows<4)fail('InsufficientCurrentCapacityAllowance');
+  const minimumCandidates=imageTransition?2:1;
   const context={attemptId,compatibility},state={version:1,phase:'preflight',attemptId,validationId:root.validationId,
     parentProofHash:hash(root),certificateHash:hash(compatibility),samplesPerKind,writes:[],launches:[],deliveries:[],replays:[],executorRequested:false};
   const writes=new Map(),entries=[];let closing=false,recovery,firstFailure,entered=false,began=false,runningVerified=false;
@@ -96,17 +101,18 @@ export async function runProductionContinuationFlow(deps,{original,attemptId,com
     status=await checkStatus(true);
     if(status.attempt.frozen||!['created','planning'].includes(status.attempt.phase))fail('ContinuationAttemptAlreadyMeasured');
     state.initial=await inspect(false);await save();
-    if(status.queuedActions<1){
+    if(status.queuedActions<minimumCandidates){
       await phase('discovering');state.planningAdmission=(await admin('resume-plan')).admission;
       if(!/^[a-f0-9]{32}$/.test(state.planningAdmission??''))fail('ProductionWorkerAdmissionMissing');
       await save();
-      for(let wave=0;wave<maxDiscoveryWaves&&status.queuedActions<1;wave++){
+      for(let wave=0;wave<maxDiscoveryWaves&&status.queuedActions<minimumCandidates;wave++){
         successful(await launch('planner',{wave:'plan',admission:state.planningAdmission}));status=await checkStatus(false);
       }
-      await pauseQuiet();await checkStatus(true);state.afterDiscovery=await inspect(false);await save();
-      if(status.queuedActions<1)fail('NoExecutableCandidate');
+      await pauseQuiet();const pausedStatus=await checkStatus(true);if(imageTransition)status=pausedStatus;state.afterDiscovery=await inspect(false);await save();
+      if(status.queuedActions<minimumCandidates)fail(imageTransition?'InsufficientCurrentCapacityCandidates':'NoExecutableCandidate');
     }
     await phase('baseline');state.baseline=await deps.sample(root.validationId,'baseline',{samplesPerKind,onWrite:collect,isClosing:()=>closing});cohort(state.baseline);await save();
+    if(imageTransition&&(await checkStatus(true)).queuedActions<minimumCandidates)fail('InsufficientCurrentCapacityCandidates');
     await phase('admitting-load');state.loadedAdmission=(await admin('canary')).admission;
     if(!/^[a-f0-9]{32}$/.test(state.loadedAdmission??''))fail('ProductionWorkerAdmissionMissing');await phase('loaded');
     let executor,plannerStarted=false;
@@ -123,7 +129,14 @@ export async function runProductionContinuationFlow(deps,{original,attemptId,com
     if(!executor||!state.loaded)fail('ExecutorCausalLaunchMissing');const applied=successful(await executor);assertOpen();
     if(planned.record?.kind!=='planner'||!(planned.record.classified>0)||!(planned.record.slices>0)||planned.record.failedSlices!==0)fail('GenuinePlannerWorkMissing');
     await pauseQuiet();await checkStatus(true,true);
-    const measured=await inspect();verifyContinuationCommitWindow(original,measured,state.loaded,context);
+    const measured=await inspect(),extension=verifyContinuationCommitWindow(original,measured,state.loaded,context);
+    if(imageTransition){
+      const rows=extension.newActions.reduce((sum,a)=>sum+a.result.changed_rows,0),image=compatibility.images.worker;
+      if(extension.newActions.length<2||extension.newActions.some(a=>a.result.changed_rows!==2)||rows>20-root.changedRows||
+        measured.verification.changedRows!==root.changedRows+rows||applied.record?.changedRows!==rows||
+        applied.image!==compatibility.current.release.workerImage||![image.currentRoot,image.currentChild].includes(applied.imageDigest)||
+        extension.newTimes.some(t=>t<applied.startedMs||t>applied.stoppedMs))fail('CurrentCapacityBatchIncomplete');
+    }
     const activity=[planned,applied].map(d=>({kind:d.kind,startedMs:d.startedMs,stoppedMs:d.stoppedMs,exitCode:d.exitCode,image:d.image,imageDigest:d.imageDigest}));
     verifyCanaryPerformance({baseline:state.baseline,loaded:state.loaded,activity,receipts:measured.receiptWindow});
     state.verified=await admin('verify-canary');
@@ -141,6 +154,10 @@ export async function runProductionContinuationFlow(deps,{original,attemptId,com
     if(hash((await inspect()).verification)!==hash(state.verified.verification))fail('PostCleanupEvidenceChanged');
     await phase('calibrating');state.calibration=await deps.calibrate(state);
     const calibration=state.calibration;
+    if(imageTransition&&(calibration?.version!==2||calibration.capacitySource!=='current-apply'||calibration.attemptId!==attemptId||
+      calibration.dataReleaseHash!==compatibility.dataReleaseHash||calibration.existingSpent!==root.changedRows||
+      calibration.newChangedRows!==state.verified.verification.changedRows-root.changedRows||calibration.capacityReceipts<2||
+      calibration.capacityReceipts*2!==calibration.newChangedRows))fail('CurrentCapacityCalibrationRequired');
     if(calibration?.verificationHash!==hash(state.verified.verification)||!Number.isInteger(calibration.dailyRows)||calibration.dailyRows<=20||calibration.dailyRows>50000||
       !Number.isInteger(calibration.basisPoints)||calibration.basisPoints<1||calibration.basisPoints>5000||
       !Number.isFinite(calibration.estimatedDrainHours)||calibration.estimatedDrainHours<0||calibration.estimatedDrainHours>72)fail('ProductionCalibrationMissing');
@@ -159,7 +176,7 @@ export async function runProductionContinuationFlow(deps,{original,attemptId,com
   }catch(error){
     state.errorCode=errorCode(firstFailure??error);
     if(runningVerified){state.phase='running_cleanup_pending';try{await save();}catch(error){state.persistenceErrorCode=errorCode(error);}try{await deps.hold(state);}catch(error){state.holdErrorCode=errorCode(error);}return state;}
-    if(!entered){try{await phase('failed');await deps.release();return state;}catch{return hold();}}
+    if(!entered){if(imageTransition)return hold();try{await phase('failed');await deps.release();return state;}catch{return hold();}}
     const recovered=await beginRecovery(error);
     try{
       if(!recovered.ok)throw recovered.error;
@@ -170,6 +187,7 @@ export async function runProductionContinuationFlow(deps,{original,attemptId,com
         if(hash(first.verification)!==hash(second.verification))fail('FailureReceiptsUnstable');state.failureVerification=second;
       }
       const status=await deps.admin('status');if(status.enabled!==false||status.dispatcherEnabled!==false)fail('FailurePauseNotVerified');
+      if(imageTransition)return hold();
       await phase('failed');await deps.release();return state;
     }catch(cleanupError){state.cleanupErrorCode=errorCode(cleanupError);return hold();}
   }

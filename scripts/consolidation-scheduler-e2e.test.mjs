@@ -1,5 +1,7 @@
 import {describe,it,expect} from 'vitest';
 import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance,taskDefinitionMatches,discoverSchedulerTasks,verifyPostRuntimeTask} from './consolidation-scheduler-e2e.mjs';
+import {nonrootPreviewFixture} from './nonroot-preview.fixture.mjs';
+import {dataLaunchPolicy} from './lib/production-nonroot-launch.mjs';
 
 const stage='pr-7',generation='a'.repeat(64),region='ap-northeast-1',account='123456789012';
 const clusterName=`mem9-on-aws-${stage}-Cluster-example`;
@@ -113,21 +115,48 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
     await expect(runSchedulerAcceptance({clients:{ssm:client,ecs:client},stage,generation,region,progress:()=>{}})).rejects.toThrow('PostRuntimeContextRequired');
     expect(calls.every(name=>/^(Get|Describe)/.test(name))).toBe(true);
   });
+  it('does not launch operators or schedule a preview worker with a root identity',async()=>{
+    const guarded=nonrootPreviewFixture({stage,region,account,cluster:clusterName,purposes:['preview-fixture-pause'],environment:[{name:'MEM9_PREVIEW_GENERATION',value:generation}]}),calls=[];
+    const client={send:async command=>{
+      const kind=command.constructor.name,input=command.input;calls.push(kind);
+      if(kind==='GetCallerIdentityCommand')return {Account:account};
+      if(kind==='GetParametersCommand'){
+        if(input.Names[0].endsWith('/consolidation-preview/manifest'))return {Parameters:[{Name:input.Names[0],Value:JSON.stringify(raw)}]};
+        if(input.Names[0].endsWith('/production-plan'))return {Parameters:[],InvalidParameters:input.Names};
+        return {Parameters:input.Names.map(n=>guarded.parameters.get(n))};
+      }
+      if(kind==='DescribeTaskDefinitionCommand'){
+        if(guarded.definitions.has(input.taskDefinition))return guarded.definitions.get(input.taskDefinition);
+        const worker=manifest.workers.find(w=>w.taskDefinitionArn===input.taskDefinition);
+        const c=dataLaunchPolicy(worker.kind,{name:worker.containerName,entryPoint:['node'],command:['/app/scripts/consolidation-worker.mjs'],environment:[{name:'MEM9_WORKER_GENERATION',value:generation}]});
+        return {taskDefinition:{taskDefinitionArn:input.taskDefinition,containerDefinitions:[{...c,user:'root'}]},tags:[]};
+      }
+      throw Error('UnexpectedMutation');
+    }};
+    await expect(runSchedulerAcceptance({clients:{ssm:client,ecs:client,sts:client},stage,generation,region,controlSourceTree:guarded.scope.sourceTree,progress:()=>{}})).rejects.toThrow('NonrootPreviewWorkerLaunch');
+    expect(calls.every(k=>/^(Get|Describe)/.test(k))).toBe(true);
+  });
   it.each(['schedule-response-loss','setup-response-loss','stop-failure'])('journals and continues cleanup after %s',async scenario=>{
     let now=Date.now(),taskSequence=0;const calls=[],store=new Map(),tasks=new Map();
     const bootArn=`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9Bootstrap:7`;
+    const guarded=nonrootPreviewFixture({stage,region,account,cluster:clusterName,purposes:['preview-fixture-pause','preview-fixture-setup','preview-fixture-verify-planned','preview-fixture-verify-executed','preview-fixture-verify-repeated'],
+      environment:[{name:'MEM9_PREVIEW_GENERATION',value:generation},{name:'MEM9_DB_HOST',value:'writer.example.com'}]});
     store.set(`/mem9-on-aws/${stage}/consolidation-preview/manifest`,JSON.stringify(raw));
     for(const [k,v] of Object.entries({'task-def-arn':bootArn,'subnet-ids':'subnet-test','task-sg-id':'sg-test'}))store.set(`/mem9-on-aws/${stage}/bootstrap/${k}`,v);
+    for(const [name,p]of guarded.parameters)store.set(name,p.Value);
     const client={send:async command=>{
       const kind=command.constructor.name,input=command.input;calls.push({kind,input});
-      if(kind==='GetParametersCommand')return {Parameters:input.Names.filter(Name=>store.has(Name)).map(Name=>({Name,Value:store.get(Name)})),InvalidParameters:input.Names.filter(Name=>!store.has(Name))};
+      if(kind==='GetCallerIdentityCommand')return {Account:account};
+      if(kind==='GetParametersCommand')return {Parameters:input.Names.filter(Name=>store.has(Name)).map(Name=>({...guarded.parameters.get(Name),Name,Value:store.get(Name)})),InvalidParameters:input.Names.filter(Name=>!store.has(Name))};
       if(kind==='PutParameterCommand'){store.set(input.Name,input.Value);return {};}
       if(kind==='DeleteParameterCommand'){store.delete(input.Name);return {};}
       if(kind==='GetParametersByPathCommand')return {Parameters:[...store].filter(([key])=>key.startsWith(input.Path)).map(([Name,Value])=>({Name,Value}))};
       if(kind==='DescribeTaskDefinitionCommand'){
+        if(guarded.definitions.has(input.taskDefinition))return structuredClone(guarded.definitions.get(input.taskDefinition));
         const w=manifest.workers.find(w=>w.taskDefinitionArn===input.taskDefinition),name=w?.containerName??'Mem9Bootstrap';
-        return {taskDefinition:{containerDefinitions:[{name,environment:[{name:w?'MEM9_WORKER_GENERATION':'MEM9_PREVIEW_GENERATION',value:generation},{name:'MEM9_DB_HOST',value:'writer.example.com'}],
-          logConfiguration:{options:{'awslogs-group':'/sst/synthetic','awslogs-stream-prefix':'ecs'}}}]}};
+        return {taskDefinition:{taskDefinitionArn:input.taskDefinition,containerDefinitions:[dataLaunchPolicy(w.kind,{name,entryPoint:['node'],command:['/app/scripts/consolidation-worker.mjs'],
+          environment:[{name:'MEM9_WORKER_GENERATION',value:generation},{name:'MEM9_DB_HOST',value:'writer.example.com'}],
+          logConfiguration:{options:{'awslogs-group':'/sst/synthetic','awslogs-stream-prefix':'ecs'}}})]},tags:[]};
       }
       if(kind==='DescribeDBClustersCommand')return {DBClusters:[{Endpoint:'writer.example.com',DBClusterIdentifier:'mem9-on-aws-pr-7-db',DBClusterArn:'synthetic-db-arn',DBClusterMembers:[{DBInstanceIdentifier:'mem9-on-aws-pr-7-instance'}]}]};
       if(kind==='ListTagsForResourceCommand')return {TagList:[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:stage}]};
@@ -136,10 +165,10 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
       if(kind==='RunTaskCommand'){
         const taskArn=`arn:aws:ecs:${region}:${account}:task/${clusterName}/task-${++taskSequence}`;
         const setup=input.overrides.containerOverrides[0].environment[0].value==='consolidation-preview-setup';
-        tasks.set(taskArn,{taskArn,clusterArn:manifest.clusterArn,taskDefinitionArn:bootArn,overrides:input.overrides,
+        tasks.set(taskArn,{taskArn,clusterArn:manifest.clusterArn,taskDefinitionArn:input.taskDefinition,overrides:input.overrides,
           lastStatus:setup&&scenario!=='schedule-response-loss'?'RUNNING':'STOPPED',containers:[{name:'Mem9Bootstrap',exitCode:0}]});
         if(setup&&scenario==='setup-response-loss')throw Error('SyntheticSetupResponseLost');
-        return {tasks:[{taskArn}]};
+        return {tasks:[tasks.get(taskArn)]};
       }
       if(kind==='DescribeTasksCommand'){
         if(scenario==='stop-failure'&&input.tasks.some(arn=>tasks.get(arn)?.lastStatus==='RUNNING'))throw Error('SyntheticObservationFailure');
@@ -156,11 +185,16 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
       if(kind==='ListTasksCommand')return {taskArns:[...tasks].filter(([,task])=>task.lastStatus===input.desiredStatus).map(([arn])=>arn)};
       throw Error('UnexpectedCommand');
     }};
-    await expect(runSchedulerAcceptance({clients:{ssm:client,ecs:client,scheduler:client,logs:client,rds:client},stage,generation,region,
+    await expect(runSchedulerAcceptance({clients:{ssm:client,ecs:client,scheduler:client,logs:client,rds:client,sts:client},stage,generation,region,controlSourceTree:guarded.scope.sourceTree,
       now:()=>now,sleep:async ms=>{now+=ms;},progress:()=>{}})).rejects.toThrow(scenario==='schedule-response-loss'?'SyntheticResponseLost':scenario==='setup-response-loss'?'SyntheticSetupResponseLost':'AcceptanceCleanupIncomplete');
     const setup=calls.findIndex(c=>c.kind==='RunTaskCommand'&&c.input.overrides.containerOverrides[0].environment[0].value==='consolidation-preview-setup');
-    expect(calls[setup-1].kind).toBe('GetParametersCommand');
-    expect(calls[setup-2].kind).toBe('PutParameterCommand');
+    expect(calls[setup-1].kind).toBe('DescribeTaskDefinitionCommand');
+    const journalWrite=calls.slice(0,setup).findLastIndex(c=>c.kind==='PutParameterCommand'&&c.input.Name.includes('/operators/'));
+    expect(journalWrite).toBeGreaterThanOrEqual(0);
+    expect(calls.slice(journalWrite+1,setup).map(c=>c.kind)).toEqual(expect.arrayContaining(['GetParametersCommand','DescribeTaskDefinitionCommand']));
+    const launches=calls.filter(c=>c.kind==='RunTaskCommand');
+    expect(new Set(launches.map(c=>c.input.taskDefinition)).size).toBeGreaterThan(1);
+    expect(launches.every(c=>c.input.enableExecuteCommand===false&&!Object.hasOwn(c.input.overrides.containerOverrides[0],'command'))).toBe(true);
     const finalPause=calls.findLastIndex(c=>c.kind==='RunTaskCommand'&&c.input.overrides.containerOverrides[0].environment[0].value==='consolidation-preview-pause');
     expect(finalPause).toBeGreaterThan(setup);
     if(scenario==='setup-response-loss')expect(calls.findIndex(c=>c.kind==='StopTaskCommand')).toBeLessThan(finalPause);
@@ -173,7 +207,7 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
     if(scenario==='setup-response-loss')return;
     const create=calls.findIndex(c=>c.kind==='CreateScheduleCommand');
     expect(calls.slice(0,create).some(c=>c.kind==='PutParameterCommand')).toBe(true);
-    expect(calls[create-1].kind).toBe('GetParametersCommand');
+    expect(calls[create-1].kind).toBe('DescribeTaskDefinitionCommand');
     const later=calls.slice(create+1);
     expect(later.find(c=>c.kind==='RunTaskCommand').input.overrides.containerOverrides[0].environment[0].value).toBe('consolidation-preview-pause');
     expect(later.some(c=>c.kind==='DeleteScheduleCommand')).toBe(true);

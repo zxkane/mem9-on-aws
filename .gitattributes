@@ -1,1 +1,4 @@
 docker/mnemo-server/patches/*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+# The generated bundle contains verbatim template-string data. Preserve its
+# meaningful trailing spaces; handwritten sources retain normal whitespace checks.
+/.github/actions/control-composition/dist/index.mjs whitespace=-blank-at-eol

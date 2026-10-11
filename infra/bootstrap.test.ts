@@ -82,6 +82,7 @@ function fakeCognito(preview = false): CognitoOutputs {
 }
 
 function installGlobals(stage: string) {
+  if(/^pr-[1-9][0-9]*$/.test(stage))process.env.MEM9_IMAGE_TAG='pr-abcdef0';
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
   (globalThis as Record<string, unknown>).$interpolate = (
     strings: TemplateStringsArray,
@@ -103,6 +104,7 @@ function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).aws = {
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    ecr: {getImageOutput:()=>({imageDigest:out('sha256:'+'a'.repeat(64))})},
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
@@ -123,7 +125,9 @@ function installGlobals(stage: string) {
     aws: {
       Task: class {
         taskDefinition = out("arn:aws:ecs:x:y:task-definition/mem9-on-aws-prod-Mem9Bootstrap:1");
-        nodes = { task: { arn: out("arn:task") } };
+        // This suite inspects resource arguments only. The separate nonroot
+        // producer suite resolves and tests the complete registration graph.
+        nodes = { task: { arn: out("arn:task") },taskDefinition:{apply:()=>out('deferred-preview-map')} };
         constructor(_n: string, args: Record<string, unknown>) {
           tasks.push({ args });
         }

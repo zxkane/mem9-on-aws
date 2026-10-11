@@ -18,6 +18,7 @@
 // ── Pulumi Output/Input ────────────────────────────────────────────────────
 declare namespace $util {
   interface Output<T> {
+    apply<U>(fn: (value: T) => Promise<U>): Output<U>;
     apply<U>(fn: (value: T) => U | Output<U>): Output<U>;
   }
   type Input<T> = T | Promise<T> | Output<T>;
@@ -35,7 +36,7 @@ declare const $app: $App;
 
 declare function $transform<A>(
   resource: new (...args: never[]) => unknown,
-  cb: (args: A) => void,
+  cb: (args: A, opts: Record<string, unknown>, name: string) => void,
 ): void;
 
 declare function $config(input: unknown): unknown;

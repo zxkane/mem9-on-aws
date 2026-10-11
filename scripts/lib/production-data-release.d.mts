@@ -1,7 +1,6 @@
 export const DATA_COMPONENTS: readonly string[];
 export const DATA_RELEASE_MAX_AUTHORIZATION_MS: number;
-export interface DataRelease {
-  version: 1;
+interface DataReleaseFields {
   stage: string;
   account: string;
   region: string;
@@ -24,6 +23,11 @@ export interface DataRelease {
   issuedMs: number;
   expiresMs: number;
 }
+export type DataRelease = DataReleaseFields & (
+  {version:1;transition?:never} |
+  {version:2;transition:{version:1;kind:'image-security-upgrade';proofHash:string;predecessorHash:string;limitsHash:string}} |
+  {version:3;transition:{version:2;kind:'image-security-nonroot-upgrade';proofHash:string;predecessorHash:string;limitsHash:string}}
+);
 export interface DataReleaseContext {
   stage:string;account:string;region:string;controlSourceTree:string;
   bindings?: Partial<Pick<DataRelease,'parentProofHash'|'backendBindingHash'|'runtimeNonce'|'generation'|'targetsHash'|'schemaDigest'|'operatorDigest'|'buildInputsHash'|'securityEvidenceHash'|'policyHash'>>;

@@ -36,6 +36,16 @@ it('creates a bounded preview fixture with no application AWS role, secrets or e
     expect(()=>verifyCanaryFixtureTask(f.task,f.definition,f.expected,f.meta,f.images)).toThrow();
   }
 });
+it('preserves the image guard with fixed absolute Node and leaves PostgreSQL on its separate UID 999 contract',()=>{
+ const f=fixture(),runner=f.expected.containerDefinitions.find(c=>c.name==='Mem9CanaryFixture'),db=f.expected.containerDefinitions.find(c=>c.name==='CanaryPostgres');
+ expect(runner.entryPoint).toEqual(['/bin/setpriv','--no-new-privs','--','/usr/local/bin/node','/bootstrap/nonroot-dispatch.mjs','canary-fixture']);
+ expect(runner.command).toEqual([]);expect(runner.user).toBe('1000:1000');expect(runner.linuxParameters.capabilities).toEqual({drop:['ALL']});
+ expect(db.user).toBe('999:999');expect(db.entryPoint).toEqual(['docker-entrypoint.sh']);expect(db.command[0]).toBe('postgres');
+ expect(db.healthCheck.command).toEqual(['CMD','pg_isready','-h','127.0.0.1','-U','postgres','-d','runtime_credentials_test']);
+ for(const patch of [{entryPoint:['node']},{entryPoint:runner.entryPoint.map(v=>v==='/usr/local/bin/node'?'node':v)},{command:['/bootstrap/operator/scripts/canary-fixture-runner.mjs']},{user:'root'}]){
+  const actual=structuredClone(f.definition);Object.assign(actual.containerDefinitions[0],patch);expect(()=>verifyCanaryFixtureDefinition(actual,f.expected,f.meta)).toThrow();
+ }
+});
 it('rejects credential injection, different code, overrides and foreign or unfinished tasks',()=>{
  for(const mutate of [f=>{f.definition.taskRoleArn=f.meta.executionRoleArn;},f=>{f.definition.containerDefinitions[0].secrets=[{name:'DB',valueFrom:'foreign'}];},
   f=>{f.definition.containerDefinitions[0].environment.push({name:'UNEXPECTED',value:'x'});},f=>{f.definition.containerDefinitions[0].privileged=true;},

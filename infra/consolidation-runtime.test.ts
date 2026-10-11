@@ -67,5 +67,13 @@ describe("continuous consolidation preview resources",()=>{
     expect(JSON.stringify(policy)).not.toContain("executor-credential");
     expect(JSON.stringify(policy)).not.toContain("secretsmanager:GetSecretValue");
     expect(value(planner.args.environment).MEM9_WORKER_GENERATION).toBe(config.generation);
+    for(const worker of [planner,executor]){
+      const definition:any={containerDefinitions:out(JSON.stringify([{name:worker.name,entrypoint:['node'],command:['/app/scripts/consolidation-worker.mjs'],linuxParameters:{initProcessEnabled:true}}]))};
+      worker.args.transform.taskDefinition(definition);
+      const container=JSON.parse(value(definition.containerDefinitions))[0];
+      expect(container.user).toBe('1000:1000');expect(container.entryPoint).toEqual(['/usr/bin/setpriv','--no-new-privs','--','node']);
+      expect(container.command).toEqual(['/app/scripts/consolidation-worker.mjs']);expect(container).not.toHaveProperty('entrypoint');
+      expect(container.linuxParameters).toEqual({initProcessEnabled:true,capabilities:{drop:['ALL']}});
+    }
   });
 });

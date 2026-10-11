@@ -26,6 +26,7 @@ function verifySnapshot(actual,expected,authorization,{issued=false}={}){
 export async function issueProductionDataRelease(deps,{authorization,expected}){
   const now=deps.now??Date.now,data=authorization?.data;
   const active=()=>{
+    if(data?.version!==1)fail('DataReleaseIssuanceIdentity');
     const checked=requireActiveDataRelease(data,{stage:'prod',account:expected?.account,region:expected?.region,controlSourceTree:expected?.controlSourceTree},{now:now()});
     if(checked.hash!==authorization.hash||!/^([a-f0-9]{40})$/.test(expected.controlRevision??''))fail('DataReleaseIssuanceIdentity');
     if(hash(authorization.review)!==data.policyHash||authorization.review.freshBuildSecurityHash!==expected.freshBuildSecurityHash||

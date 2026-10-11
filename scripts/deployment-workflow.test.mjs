@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse, parseDocument } from "yaml";
+import { controlCompositionActionStep } from "./lib/production-control-composition-job.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -185,11 +186,27 @@ function actionSetForSid(source, sid) {
 }
 
 describe("workflow integration", () => {
-  it("masks the AWS account ID in every credential configuration", () => {
+  it("covers every credential path with account masking or the scoped native action", () => {
     const workflowFiles = readdirSync(workflowsDirectory).filter((name) =>
       /\.ya?ml$/u.test(name),
     );
     const credentialJobs = [];
+    const nativeCredentialJobs = [];
+    const previewCredentialSteps = [];
+    const expectedPreviewCredentialSteps = [
+      "Configure AWS credentials (OIDC)",
+      "ci_smoke_credentials_16",
+      "ci_smoke_credentials_17",
+      "ci_smoke_credentials_18",
+      "ci_smoke_credentials_19",
+      "ci_smoke_credentials_20",
+      "ci_smoke_credentials_21",
+      "ci_smoke_credentials_22",
+      "ci_smoke_credentials_23",
+      "ci_smoke_credentials_24",
+      "ci_smoke_credentials_25",
+      "ci_smoke_credentials_26",
+    ];
 
     for (const workflowFile of workflowFiles) {
       const workflow = parse(
@@ -197,6 +214,13 @@ describe("workflow integration", () => {
       );
       for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
         for (const step of job.steps ?? []) {
+          if (step.uses === "./.github/actions/control-composition") {
+            nativeCredentialJobs.push(`${workflowFile}:${jobName}`);
+            expect(step).toEqual(controlCompositionActionStep());
+            expect(job.permissions["id-token"]).toBe("write");
+            expect(job.env.MEM9_CI_ACQUISITION_CONFIG).toBe("${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}");
+            expect(job.steps.some(row => row.uses?.startsWith("aws-actions/configure-aws-credentials@"))).toBe(false);
+          }
           if (
             typeof step.uses !== "string" ||
             !step.uses.startsWith("aws-actions/configure-aws-credentials@")
@@ -204,6 +228,9 @@ describe("workflow integration", () => {
             continue;
           }
           credentialJobs.push(`${workflowFile}:${jobName}`);
+          if (workflowFile === "infra-ci.yml" && jobName === "deploy-preview") {
+            previewCredentialSteps.push(step.id ?? step.name);
+          }
           expect(
             step.with?.["mask-aws-account-id"],
             `${workflowFile}:${jobName}:${step.name ?? step.uses}`,
@@ -212,14 +239,19 @@ describe("workflow integration", () => {
       }
     }
 
-    expect(credentialJobs.sort()).toEqual(
+    expect(previewCredentialSteps).toEqual(expectedPreviewCredentialSteps);
+    expect(nativeCredentialJobs).toEqual(["infra-ci.yml:build-image-transition-control"]);
+    expect([...credentialJobs, ...nativeCredentialJobs].sort()).toEqual(
       [
         "infra-ci.yml:build-and-push-image",
+        "infra-ci.yml:verify-production-image-transition",
+        "infra-ci.yml:build-image-transition-control",
         "infra-ci.yml:build-human-acceptance-image",
         "infra-ci.yml:cleanup-failed-preview",
         "infra-ci.yml:cleanup-preview",
-        "infra-ci.yml:deploy-preview",
+        ...expectedPreviewCredentialSteps.map(() => "infra-ci.yml:deploy-preview"),
         "infra-ci.yml:deploy-prod",
+        "infra-ci.yml:mnemo-nonroot-smoke",
         "infra-ci.yml:runtime-cutover-preview",
         "reconcile-previews.yml:apply",
         "reconcile-previews.yml:auto",
@@ -228,6 +260,32 @@ describe("workflow integration", () => {
         "runtime-recovery.yml:production",
       ].sort(),
     );
+    const nativeTransport = readFileSync(resolve(here, "lib/production-control-composition-transport.mjs"), "utf8");
+    expect(nativeTransport).toContain("ControlCompositionNoAmbientCredentials");
+    expect(nativeTransport).toContain("AssumeRoleWithWebIdentityCommand(input)");
+    expect(nativeTransport).toContain("DurationSeconds:900");
+    expect(nativeTransport).toContain("credentials.accessKeyId='';credentials.secretAccessKey='';credentials.sessionToken=''");
+    expect(nativeTransport).not.toMatch(/console\.(?:log|error|warn|info|debug)\s*\(/);
+    const entry = readFileSync(resolve(root, ".github/actions/control-composition/index.mjs"), "utf8");
+    expect(entry.match(/console\.error\([^\n]+/g)).toEqual([
+      "console.error(JSON.stringify({kind:'native-control-composition-held',code:'ControlCompositionActionFailed'}));process.exitCode=1;",
+    ]);
+  });
+
+  it("installs root and infra dependencies in every SST preview cleanup job", () => {
+    const infra = parse(readFileSync(workflowPath, "utf8"));
+    const reconcile = parse(readFileSync(resolve(workflowsDirectory, "reconcile-previews.yml"), "utf8"));
+    const rootManifest = JSON.parse(readFileSync(resolve(root, "package-lock.json"), "utf8"));
+    expect(rootManifest.packages[""].name).toBe(JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")).name);
+    for (const job of [infra.jobs["cleanup-failed-preview"], infra.jobs["cleanup-preview"], reconcile.jobs.apply, reconcile.jobs.auto]) {
+      const steps = job.steps;
+      const root = steps.findIndex(step => step.run === "npm ci");
+      const dependencies = steps.findIndex(step => step.run === "pnpm -C infra install --frozen-lockfile");
+      expect(root).toBeGreaterThanOrEqual(0);
+      expect(dependencies).toBeGreaterThanOrEqual(0);
+      expect(steps[root].if).toBe(steps[dependencies].if);
+      expect(root).toBeLessThan(steps.findIndex(step => /sst remove|preview-reconciler\.mts (?:apply|auto)/.test(step.run ?? "")));
+    }
   });
 
   it("runs IAM regression tests when the GitHub Actions role template changes", () => {
@@ -363,7 +421,7 @@ describe("workflow integration", () => {
 
     expect(phaseGateIndex).toBeGreaterThanOrEqual(0);
     expect(phaseGateIndex).toBeLessThan(deployIndex);
-    expect(phaseGate.if).toBe("vars.MEM9_NAMESPACE_REQUIRED == '1'");
+    expect(phaseGate.if).toMatch(/^success\(\) && steps\.ci_smoke_guard_[a-f0-9]{12}\.outcome == 'success' && \(vars\.MEM9_NAMESPACE_REQUIRED == '1'\)$/);
     expect(phaseGate.env.STAGE).toBe("prod");
     expect(phaseGate.run).toContain(
       "run-memory-namespace-task.sh assert-phase --expected-phase constraints_complete",
@@ -738,14 +796,16 @@ describe("workflow integration", () => {
     ).toBe(true);
   });
 
-  it("reports preview reconciliation failures using the overall job status", () => {
-    const workflow = readFileSync(workflowPath, "utf8");
-    const statusComment = workflow.indexOf("name: Comment deploy status");
-    const commentBlock = workflow.slice(statusComment, statusComment + 500);
-
-    expect(statusComment).toBeGreaterThanOrEqual(0);
-    expect(commentBlock).toContain("DEPLOY_STATUS: ${{ job.status }}");
-    expect(commentBlock).not.toContain("steps.deploy.outcome");
+  it("publishes preview status only after guarded acceptance using the overall job status", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const steps = workflow.jobs["deploy-preview"].steps;
+    const index = steps.findIndex(step => step.name === "Comment deploy status");
+    expect(index).toBeGreaterThanOrEqual(1);
+    const comment = steps[index];
+    expect(comment.env.DEPLOY_STATUS).toBe("${{ job.status }}");
+    expect(comment.if).toContain("success() && steps." + steps[index - 1].id + ".outcome == 'success'");
+    expect(comment.if).toContain("steps.deploy.outputs.stage != ''");
+    expect(comment["continue-on-error"]).toBe(false);
   });
 });
 

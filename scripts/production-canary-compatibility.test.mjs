@@ -1,8 +1,19 @@
 import {describe,it,expect} from 'vitest';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 import {validateCanaryCompatibility,inspectCanaryCompatibility} from './lib/production-canary-compatibility.mjs';
+import {readFile} from 'node:fs/promises';
+import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
+import {NONROOT_LIMITS_HASH} from './lib/production-nonroot-contracts.mjs';
 
 const hex=n=>n.toString(16).padStart(64,'0');
+it('the control image and coordinator closure include the V3/V4 consumer and host modules',async()=>{
+ const docker=await readFile(new URL('../docker/bootstrap/Dockerfile',import.meta.url),'utf8');
+ expect(docker).toContain('COPY scripts/lib/production-canary-transition.mjs /bootstrap/operator/scripts/lib/production-canary-transition.mjs');
+ expect(docker).toContain('COPY scripts/lib/production-image-transition.mjs /bootstrap/operator/scripts/lib/production-image-transition.mjs');
+ const host=await readFile(new URL('./run-production-runtime.mjs',import.meta.url),'utf8');
+ const digest=host.slice(host.indexOf('export async function productionCoordinatorDigest()'),host.indexOf('export async function retainedDeploymentEnvironment'));
+ for(const name of ['production-canary-transition','production-canary-material-transition','production-canary-material-integrity','production-maintenance-admission'])expect(digest).toContain("'scripts/lib/"+name+".mjs'");
+});
 function fixture(){
   const runtime={schemaDigest:hex(1),operatorDigest:hex(2),runtimeNonce:'a'.repeat(32)};
   const oldRelease={...runtime,sourceTree:'a'.repeat(40),coordinatorDigest:hex(3),sourceTag:'mem9-aaaaaaa',workerImage:'example/worker@sha256:'+hex(4)};
@@ -56,4 +67,79 @@ describe('canary continuation compatibility certificate',()=>{
       expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
     }
   });
+});
+
+function transitionFixture(){
+ const f=fixture(),c=f.certificate,worker='123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy@sha256:'+hex(4);
+ c.version=3;c.dataReleaseHash=hex(44);c.previous.release.workerImage=worker;c.current.release.workerImage=worker;c.images.worker.currentRoot=c.images.worker.previousRoot;
+ f.parent.workerImage=worker;f.parent.releaseHash=hash(c.previous.release);c.parentProofHash=hash(f.parent);f.config.workerImage=worker;
+ c.material.authority.current=hex(45);c.material.backend.current=hex(46);c.transition={version:1,kind:'bootstrap-boundary-tightening',proofHash:hex(47),backendProjectionHash:hex(48)};
+ f.config.dataRelease={hash:c.dataReleaseHash};f.config.acceptance.dataReleaseHash=c.dataReleaseHash;f.config.acceptance.continuation.parentProofHash=c.parentProofHash;f.config.acceptance.continuation.certificateHash=hash(c);return f;
+}
+it('V3 binds real material differences and the entire certificate to the protected witness',()=>{
+ const f=transitionFixture(),before=structuredClone(f.certificate);expect(validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(before));expect(f.certificate).toEqual(before);
+ delete f.config.acceptance.continuation;expect(inspectCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(before));expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
+});
+for(const defect of ['proof','witness','root','authority-equal','planner','legacy-downgrade','unsupported'])it('V3 consumer rejects '+defect,()=>{
+ const f=transitionFixture();if(defect==='proof')f.certificate.transition.proofHash='bad';if(defect==='witness')f.config.acceptance.continuation.certificateHash=hex(99);if(defect==='root')f.config.generation=hex(99);
+ if(defect==='authority-equal')f.certificate.material.authority.current=f.certificate.material.authority.previous;if(defect==='planner')f.certificate.material.planner.current=hex(99);if(defect==='legacy-downgrade')f.certificate.version=2;if(defect==='unsupported')f.certificate.version=4;
+ expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
+});
+
+function imageTransitionFixture(){
+ const f=transitionFixture(),c=f.certificate;c.version=4;
+ c.transition={version:1,kind:'image-security-upgrade',proofHash:hex(50),predecessorHash:hex(51),limitsHash:IMAGE_TRANSITION_LIMITS_HASH,projectionHash:hex(52)};
+ for(const [i,name]of ['worker','llm-proxy','mnemo-server','qwen3-embed'].entries()){
+  const root=name==='worker'||name==='llm-proxy'?6:20+i;
+  c.images[name]={previousRoot:'sha256:'+hex(name==='worker'||name==='llm-proxy'?4:9),previousChild:'sha256:'+hex(11),currentRoot:'sha256:'+hex(root),currentChild:'sha256:'+hex(root+20)};
+ }
+ c.current.release.workerImage=c.current.release.workerImage.replace('@'+c.images.worker.previousRoot,'@'+c.images.worker.currentRoot);f.config.workerImage=c.current.release.workerImage;
+ for(const name of ['planner','executor'])c.material[name].current=hex(70);
+ for(const container of c.current.backendBinding.containers)container.imageDigest=c.images[container.name].currentRoot;
+ const {projectionHash:ignored,...transition}=c.transition;f.config.dataRelease={data:{version:2,transition},hash:hex(44)};
+ f.config.acceptance.continuation.certificateHash=hash(c);return f;
+}
+
+function nonrootFixture(){
+ const f=imageTransitionFixture(),c=f.certificate;c.version=5;
+ c.transition={...c.transition,version:2,kind:'image-security-nonroot-upgrade',limitsHash:NONROOT_LIMITS_HASH,runtimeEvidenceHash:hex(81),operatorEvidenceHash:hex(82),deploymentSourceHash:hex(83)};
+ f.config.dataRelease.data={version:3,transition:{version:2,kind:c.transition.kind,proofHash:c.transition.proofHash,predecessorHash:c.transition.predecessorHash,limitsHash:NONROOT_LIMITS_HASH}};
+ Object.assign(f.config.acceptance.continuation,{version:2,certificateHash:hash(c),readinessHash:c.transition.runtimeEvidenceHash,descriptorHash:c.dataReleaseHash});return f;
+}
+it('V5 binds descriptor V3 and witness V2 to actual-runtime and deployed-source commitments',()=>{
+ const f=nonrootFixture();expect(validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(f.certificate));
+});
+for(const defect of ['legacy-witness','wrong-readiness','wrong-descriptor','legacy-certificate','legacy-descriptor','different-proof','network-change','same-image','wrong-worker-image','wrong-backend-image'])it('V5 rejects '+defect,()=>{
+ const f=nonrootFixture(),c=f.certificate,w=f.config.acceptance.continuation;
+ if(defect==='legacy-witness'){w.version=1;delete w.readinessHash;delete w.descriptorHash;}
+ if(defect==='wrong-readiness')w.readinessHash=hex(999);if(defect==='wrong-descriptor')w.descriptorHash=hex(999);
+ if(defect==='legacy-certificate')c.version=4;if(defect==='legacy-descriptor')f.config.dataRelease.data.version=2;
+ if(defect==='different-proof')f.config.dataRelease.data.transition.proofHash=hex(999);if(defect==='network-change')c.material.network.current=hex(999);
+ if(defect==='same-image')c.images['qwen3-embed'].currentChild=c.images['qwen3-embed'].previousChild;
+ if(defect==='wrong-worker-image')c.current.release.workerImage=c.current.release.workerImage.replace('@'+c.images.worker.currentRoot,'@sha256:'+hex(999));
+ if(defect==='wrong-backend-image')c.current.backendBinding.containers[0].imageDigest='sha256:'+hex(999);
+ w.certificateHash=hash(c);expect(()=>validateCanaryCompatibility(c,f.parent,f.config,f.state)).toThrow();
+});
+it('legacy certificates cannot consume a V2 witness even if its hashes are self-consistent',()=>{
+ const f=imageTransitionFixture(),c=f.certificate;Object.assign(f.config.acceptance.continuation,{version:2,readinessHash:hex(81),descriptorHash:c.dataReleaseHash});
+ expect(()=>validateCanaryCompatibility(c,f.parent,f.config,f.state)).toThrow();
+});
+it('V4 binds typed descriptor commitments and the new images to the original parent and protected witness',()=>{
+ const f=imageTransitionFixture(),before=structuredClone(f.certificate);
+ expect(validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(before));expect(f.certificate).toEqual(before);
+ delete f.config.acceptance.continuation;expect(inspectCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(before));
+ expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
+});
+for(const version of [1,2,3])it('a typed descriptor V2 cannot fall through certificate V'+version+' even with unchanged images',()=>{
+ const f=version===3?transitionFixture():fixture();f.certificate.version=version;
+ if(version===2){f.certificate.dataReleaseHash=hex(44);f.config.acceptance.dataReleaseHash=hex(44);}
+ f.config.dataRelease={hash:hex(44),data:{version:2,transition:{version:1,kind:'image-security-upgrade',proofHash:hex(50),predecessorHash:hex(51),limitsHash:IMAGE_TRANSITION_LIMITS_HASH}}};
+ f.config.acceptance.continuation.certificateHash=hash(f.certificate);
+ expect(()=>inspectCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
+});
+for(const defect of ['legacy-descriptor','missing-data','proofHash','predecessorHash','limitsHash','witness','unknown-kind'])it('V4 rejects '+defect,()=>{
+ const f=imageTransitionFixture();
+ if(defect==='legacy-descriptor')f.config.dataRelease.data.version=1;else if(defect==='missing-data')delete f.config.dataRelease.data;
+ else if(defect==='witness')delete f.config.acceptance.dataReleaseHash;else if(defect==='unknown-kind')f.certificate.transition.kind='other';else f.config.dataRelease.data.transition[defect]=hex(99);
+ expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
 });

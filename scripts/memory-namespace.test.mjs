@@ -495,10 +495,15 @@ describe("memory namespace operator config", () => {
   it("requires an owner-only desired-state file", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mem9-namespace-"));
     const path = join(directory, "config.json");
-    await writeFile(path, JSON.stringify(desired()), { mode: 0o644 });
-    await expect(readDesiredState(path)).rejects.toThrow(/owner-only/u);
-    await chmod(path, 0o600);
-    await expect(readDesiredState(path)).resolves.toEqual(desired());
+    try {
+      await writeFile(path, JSON.stringify(desired()), { mode: 0o600 });
+      await chmod(path, 0o644);
+      await expect(readDesiredState(path)).rejects.toThrow(/owner-only/u);
+      await chmod(path, 0o600);
+      await expect(readDesiredState(path)).resolves.toEqual(desired());
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("ships a valid public desired-state example", async () => {

@@ -35,6 +35,7 @@ interface ServiceRecord {
 interface ParamRecord {
   name: string;
   value: unknown;
+  type?: string;
 }
 interface GenericRecord {
   kind: string;
@@ -129,6 +130,12 @@ function installGlobals(stage: string) {
     // hardcoded 12-digit account number in committed code.
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    kms: {
+      getKeyOutput: ({ keyId }: { keyId: string }) => {
+        expect(keyId).toBe("alias/aws/ssm");
+        return { arn: out("arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") };
+      },
+    },
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
@@ -208,12 +215,14 @@ function installGlobals(stage: string) {
     },
     ssm: {
       Parameter: class {
-        constructor(_logicalName: string, args: { name: unknown }) {
+        arn: ReturnType<typeof out<string>>;
+        constructor(_logicalName: string, args: { name: unknown; type?: string }) {
           const name =
             typeof args.name === "object" && args.name && "value" in args.name
               ? (args.name as { value: string }).value
               : (args.name as string);
-          params.push({ name, value: (args as { value?: unknown }).value });
+          this.arn = out(`arn:aws:ssm:ap-northeast-1:123456789012:parameter${name}`);
+          params.push({ name, value: (args as { value?: unknown }).value, type: args.type });
         }
       },
     },
@@ -316,6 +325,7 @@ function createdOf(kind: string): Record<string, unknown> {
 }
 
 afterEach(() => {
+  vi.doUnmock("./ecr");
   for (const g of ["$app", "aws", "sst", "command", "$interpolate", "$jsonStringify"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
@@ -465,6 +475,60 @@ describe("ecs stack", () => {
       "mnemo.mem9-prod.local",
     );
     expect(outs.taskSecurityGroupId).toBeDefined();
+  });
+
+  it.each([
+    { stage: "pr-7", retained: false, expectedExec: false },
+    { stage: "pr-42", retained: true, expectedExec: false },
+    { stage: "prod", retained: false, expectedExec: true },
+    { stage: "dev", retained: false, expectedExec: true },
+    { stage: "pr-0", retained: false, expectedExec: true },
+    { stage: "pr-07", retained: false, expectedExec: true },
+    { stage: "pr-feature", retained: false, expectedExec: true },
+  ])("scopes inherited ECS Exec to numeric previews ($stage, retained=$retained)", async ({ stage, retained, expectedExec }) => {
+    installGlobals(stage);
+    if (retained) {
+      // Fixture only the authenticated image selection, not the service transform.
+      const images = Object.fromEntries(["mnemo-server", "qwen3-embed", "llm-proxy"].map(name =>
+        [name, `123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/preview/${name}@sha256:${"a".repeat(64)}`]));
+      const selection = { hash: "b".repeat(64), images, data: { version: 1, dataSourceTag: "pr-abcdef0",
+        images: Object.fromEntries(Object.keys(images).map(name => [name, { arm64Digest: "sha256:" + "c".repeat(64) }])) } };
+      vi.doMock("./ecr", async () => ({
+        ...await vi.importActual<typeof import("./ecr")>("./ecr"),
+        selectedDataRelease: () => out(selection),
+        selectedDataSourceTag: () => out(selection.data.dataSourceTag),
+        workloadImage: (name: string) => out(images[name]),
+      }));
+    }
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const containersBefore = materialize(services[0].args.containers);
+    const transform = (services[0].args.transform as Record<string, any>).service;
+    // These are the underlying service args, including SST's inherited Exec default.
+    const serviceArgs: Record<string, any> = {
+      enableExecuteCommand: true, desiredCount: 1, taskDefinition: "synthetic-task:2",
+      deploymentCircuitBreaker: { enable: true, rollback: true },
+      deploymentMinimumHealthyPercent: 100, deploymentMaximumPercent: 200,
+      networkConfiguration: { assignPublicIp: false, subnets: ["subnet-test"], securityGroups: ["sg-test"] },
+      tags: { Existing: "kept" }, triggers: { existingTrigger: "kept" },
+    };
+    const before = structuredClone(serviceArgs), dependency = { syntheticDependency: true };
+    const options: Record<string, any> = { dependsOn: [dependency], protect: true };
+    transform(serviceArgs, options);
+    expect(materialize(serviceArgs)).toEqual({
+      ...before, enableExecuteCommand: expectedExec,
+      deploymentCircuitBreaker: { enable: true, rollback: expectedExec },
+      tags: { Existing: "kept", Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" },
+      propagateTags: "SERVICE", enableEcsManagedTags: true, forceNewDeployment: true,
+      triggers: { existingTrigger: "kept", taskTagPropagation: "v1", transportSigningRevision: "transport-revision" },
+      serviceRegistries: { registryArn: "arn:aws:servicediscovery:svc/mnemo" },
+    });
+    expect(options.protect).toBe(true);
+    expect(options.dependsOn).toHaveLength(2);
+    expect(options.dependsOn[0]).toBe(dependency);
+    expect(materialize(services[0].args.containers)).toEqual(containersBefore);
+    const selection = params.find(p => p.name.endsWith("/ecs/image-selection"));
+    expect(JSON.parse(String(materialize(selection?.value))).mode).toBe(retained ? "retained" : "tag");
   });
 
   it("grants the task role Bedrock MANTLE inference perms (not the wrong bedrock:* namespace)", async () => {
@@ -825,6 +889,7 @@ describe("ecs stack", () => {
       "/mem9-on-aws/prod/ecs/service-dns-name",
       "/mem9-on-aws/prod/ecs/service-name",
       "/mem9-on-aws/prod/ecs/task-definition",
+      "/mem9-on-aws/prod/observability/slack-webhook-url",
     ]);
     const taskDefinition = params.find((p) => p.name.endsWith("/task-definition"));
     const imageTag = params.find((p) => p.name.endsWith("/image-tag"));
@@ -864,15 +929,30 @@ describe("ecs stack", () => {
     expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(false);
   });
 
-  it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
+  it("preserves the SST webhook in SecureString and gives Lambda only its exact ARN and read permissions", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
 
     expect(created.filter((resource) => resource.kind === "Secret")).toHaveLength(1);
     const fn = createdOf("Function");
-    const environment = fn.environment as Record<string, unknown>;
-    expect(environment.SLACK_WEBHOOK_URL).toMatchObject({ isSecret: true });
+    const environment = materialize(fn.environment);
+    const parameterArn = "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/observability/slack-webhook-url";
+    const parameter = params.find(row => row.name === "/mem9-on-aws/prod/observability/slack-webhook-url");
+    expect(parameter?.type).toBe("SecureString");
+    expect(parameter?.value).toMatchObject({ isSecret: true });
+    expect(materialize(parameter?.value)).toBe(process.env.SST_SECRET_SlackWebhookUrl);
+    expect(environment).toEqual({ SLACK_WEBHOOK_URL_PARAMETER_ARN: parameterArn, STAGE: "prod", MEM9_SECRET_ACCOUNT_ID: "123456789012" });
+    expect(JSON.stringify(environment)).not.toContain(process.env.SST_SECRET_SlackWebhookUrl);
+    const permissions = materialize(fn.permissions) as Array<{ actions: string[]; resources: string[]; conditions?: unknown[] }>;
+    expect(permissions.flatMap(row => row.actions).sort()).toEqual(["kms:Decrypt", "sqs:SendMessage", "ssm:GetParameters"]);
+    expect(permissions.filter(row => row.actions.some(action => action.startsWith("ssm:") || action.startsWith("kms:")))).toEqual([
+      { actions: ["ssm:GetParameters"], resources: [parameterArn] },
+      { actions: ["kms:Decrypt"], resources: ["arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"], conditions: [
+        { test: "StringEquals", variable: "kms:ViaService", values: ["ssm.ap-northeast-1.amazonaws.com"] },
+        { test: "ArnEquals", variable: "kms:EncryptionContext:PARAMETER_ARN", values: [parameterArn] },
+      ] },
+    ]);
   });
 
   it("does NOT create metric filters, dashboards, or alarms on pr-* stages", async () => {

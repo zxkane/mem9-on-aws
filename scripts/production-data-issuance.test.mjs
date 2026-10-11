@@ -24,6 +24,11 @@ it('creates only the exact protected record once and releases only after verifie
   const f=fixture();expect((await issueProductionDataRelease(f.deps,f)).phase).toBe('complete');
   expect(f.calls).toEqual(['archive','intent','put','verified','gate-release','mutex-release']);
 });
+it('never creates an image-security descriptor through legacy issuance',async()=>{
+ const f=fixture();f.authorization.data.version=2;
+ await expect(issueProductionDataRelease(f.deps,f)).rejects.toThrow('DataReleaseIssuanceIdentity');
+ expect(f.calls).toEqual([]);
+});
 it('reconciles a lost response by exact readback without repeating the write',async()=>{
   const f=fixture(),put=f.deps.putParameter;f.deps.putParameter=async input=>{await put(input);throw Error('TransportLost');};
   expect((await issueProductionDataRelease(f.deps,f)).phase).toBe('complete');expect(f.calls.filter(x=>x==='put')).toHaveLength(1);

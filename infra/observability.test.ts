@@ -52,11 +52,14 @@ function record(kind: string, logicalName: string, args: Record<string, unknown>
 }
 
 function installGlobals() {
+  (globalThis as Record<string,unknown>).$interpolate = (parts:TemplateStringsArray,...values:unknown[]) => out(parts.reduce((s,p,i)=>s+p+(i<values.length?String(materialize(values[i])):""),""));
   (globalThis as Record<string, unknown>).$jsonStringify = (value: unknown) =>
     out(JSON.stringify(materialize(value)));
   (globalThis as Record<string, unknown>).aws = {
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    kms: {getKeyOutput: () => ({arn: out("arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")})},
+    ssm: {Parameter: class {arn:TestOutput<string>; constructor(logicalName:string,args:Record<string,unknown>){record("Parameter",logicalName,args);this.arn=out(`arn:aws:ssm:ap-northeast-1:123456789012:parameter${args.name}`);}}},
     cloudwatch: {
       LogMetricFilter: class {
         constructor(logicalName: string, args: Record<string, unknown>) {
@@ -150,6 +153,23 @@ function one(kind: string): ResourceRecord {
   return matches[0];
 }
 
+it("stores the unchanged webhook only in SecureString and grants the exact parameter/key", () => {
+  observability(prodInputs);
+  const parameter=one("Parameter"),fn=materialize(one("Function").args) as {environment:Record<string,string>;permissions:Array<{actions:string[];resources:string[]}>};
+  expect(parameter.args).toMatchObject({name:"/mem9-on-aws/prod/observability/slack-webhook-url",type:"SecureString",value:prodInputs.slackWebhookUrl});
+  const parameterArn="arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/observability/slack-webhook-url";
+  expect(fn.environment).toEqual({SLACK_WEBHOOK_URL_PARAMETER_ARN:parameterArn,STAGE:"prod",MEM9_SECRET_ACCOUNT_ID:"123456789012"});
+  expect(JSON.stringify(fn.environment)).not.toContain(prodInputs.slackWebhookUrl);
+  expect(fn.permissions.flatMap(p=>p.actions).sort()).toEqual(["kms:Decrypt","sqs:SendMessage","ssm:GetParameters"]);
+  expect(fn.permissions.filter(p=>p.actions.some(a=>a.startsWith("ssm:")||a.startsWith("kms:")))).toEqual([
+    {actions:["ssm:GetParameters"],resources:[parameterArn]},
+    {actions:["kms:Decrypt"],resources:["arn:aws:kms:ap-northeast-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],conditions:[
+      {test:"StringEquals",variable:"kms:ViaService",values:["ssm.ap-northeast-1.amazonaws.com"]},
+      {test:"ArnEquals",variable:"kms:EncryptionContext:PARAMETER_ARN",values:[parameterArn]},
+    ]},
+  ]);
+});
+
 function queue(logicalName: string): ResourceRecord {
   const match = resources.find(
     (resource) => resource.kind === "Queue" && resource.logicalName === logicalName,
@@ -196,7 +216,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const name of ["$jsonStringify", "aws", "sst"]) {
+  for (const name of ["$interpolate", "$jsonStringify", "aws", "sst"]) {
     delete (globalThis as Record<string, unknown>)[name];
   }
   vi.restoreAllMocks();
@@ -334,7 +354,7 @@ describe("observability alert delivery", () => {
     ]);
 
     const fn = one("Function");
-    expect(materialize(fn.args.permissions)).toEqual([
+    expect((materialize(fn.args.permissions) as Array<{actions:string[]}>).filter(p=>p.actions.includes("sqs:SendMessage"))).toEqual([
       {
         actions: ["sqs:SendMessage"],
         resources: [

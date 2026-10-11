@@ -21,7 +21,8 @@ describe('independent cutover cancellation recovery',()=>{
     const at=steps.findIndex(s=>s.name==='Verify ordinary deployment bootstrap invocation');
     expect(at).toBeGreaterThan(steps.findIndex(s=>s.name==='Converge infrastructure and verify retirement'));
     expect(at).toBeLessThan(steps.findIndex(s=>s.name==='Verify preview extension upgrade and administrator backup recovery'));
-    expect(steps[at]).toMatchObject({if:"inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'",shell:'bash',run:'bash scripts/run-bootstrap-task.sh'});
+    expect(steps[at]).toMatchObject({if:"success() && steps.ci_smoke_child_guard_08.outcome == 'success' && (inputs.cleanup-preview == 'true' && inputs.phase != 'prepare')",shell:'bash',run:'bash scripts/run-bootstrap-task.sh'});
+    expect(steps[at-1].id).toBe('ci_smoke_child_guard_08');
     expect(steps[at]['continue-on-error']).not.toBe(true);
   });
   it('keeps preview rehearsal scheduling aligned with normal preview instead of the production opt-in',async()=>{

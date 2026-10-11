@@ -28,7 +28,7 @@ export function parseRuntimeConfig(env){
 }
 export async function runtimeSchemaDigest(root){
   const script=fileURLToPath(new URL('../../docker/bootstrap/schema-digest.sh',import.meta.url));
-  const result=await promisify(execFile)('sh',[script,root],{timeout:10000,maxBuffer:4096});
+  const result=await promisify(execFile)('/bin/sh',[script,root],{timeout:10000,maxBuffer:4096,env:{PATH:'/usr/bin:/bin',LANG:'C',LC_ALL:'C'}});
   const hash=result.stdout.trim();if(!/^[a-f0-9]{64}$/.test(hash))throw Error('InvalidSchemaDigest');return hash;
 }
 export async function applyBootstrapSchema(db,file){

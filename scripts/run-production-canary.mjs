@@ -20,6 +20,7 @@ import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
 import {bindProductionBackend} from './lib/production-artifacts.mjs';
 import {runProductionContinuationFlow} from './lib/production-canary-continuation-flow.mjs';
 import {observeProductionRecurringDeliveries} from './lib/production-recurring-observer.mjs';
+import {inheritMaintenanceAdmission,dispatchMaintenanceAction,requireMaintenanceAdmission} from './lib/production-maintenance-admission.mjs';
 
 const execute=promisify(execFile),repository='zxkane/mem9-on-aws';
 const gh=async args=>(await execute('gh',args,{timeout:30000,maxBuffer:2*1024*1024})).stdout.trim();
@@ -36,14 +37,15 @@ async function setSchedulingSecret(name,value){
 }
 
 export async function runProductionCanary({clients,region,dailyRows=6000,basisPoints=5000,planningWaves=8,persist,continuation,controls}){
+  if(continuation?.compatibility?.version===3)requireMaintenanceAdmission(clients);
   if(continuation&&(!controls||['guard','release','hold','calibrate','verifyQuiet'].some(key=>typeof controls[key]!=='function')))throw Error('ContinuationOperatorControlsRequired');
   const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
   const targets=[];
   for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
   let mcp,activationStartedMs;
   const cancellation=continuation?new AbortController():undefined;
-  const wakeClients=cancellation?Object.fromEntries(Object.entries(clients).map(([name,client])=>[name,{send:(command,options={})=>client.send(command,
-    {...options,abortSignal:AbortSignal.any([cancellation.signal,...(options.abortSignal?[options.abortSignal]:[])])})}])):clients;
+  const wakeClients=cancellation?inheritMaintenanceAdmission(clients,Object.fromEntries(Object.entries(clients).map(([name,client])=>[name,{send:(command,options={})=>client.send(command,
+    {...options,abortSignal:AbortSignal.any([cancellation.signal,...(options.abortSignal?[options.abortSignal]:[])])})}]))):clients;
   const admin=(operation,options={})=>runProductionConsolidationTask(clients,{region,operation,...options});
   const reload=async()=>{
     const current=[];for(const kind of ['planner','executor'])current.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
@@ -71,6 +73,7 @@ export async function runProductionCanary({clients,region,dailyRows=6000,basisPo
       if(backendBinding)bindProductionBackend(expected,backendBinding,targets[0].clusterArn);
       await verifyScheduling({enabled:false,backendBinding:expected});
       return activateProductionScheduling({
+      clients,
       currentMain:async()=>{if(continuation)await controls.guard('activation');return gh(['api',`repos/${repository}/commits/main`,'--jq','.sha']);},setSecret:setSchedulingSecret,
       enable:options=>enableProductionScheduling(clients,targets,options),
       verify:options=>verifyScheduling({...options,backendBinding:expected}),
@@ -87,7 +90,11 @@ export async function runProductionCanary({clients,region,dailyRows=6000,basisPo
       // Closure prevents the next request instead of creating new ambiguity by
       // aborting a potentially committed HTTP write.
       const client=Object.fromEntries(['read','write'].map(method=>[method,(...args)=>{
-        if(sampling.isClosing?.())throw Error('ContinuationClosing');return mcp[method](...args);
+        if(sampling.isClosing?.())throw Error('ContinuationClosing');
+        if(method==='read')return mcp.read(...args);
+        return dispatchMaintenanceAction(clients,{kind:'benchmark',operation:'sample-write',validationId,phase},args,values=>{
+          if(sampling.isClosing?.())throw Error('ContinuationClosing');return mcp.write(...values);
+        });
       }]));
       return sampleMcpCanaryCohort(client,{validationId,phase,samplesPerKind:sampling.samplesPerKind??100,onWrite:sampling.onWrite});
     },

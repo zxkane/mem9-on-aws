@@ -1,6 +1,9 @@
 import {it,expect} from 'vitest';
 import {loadWorkerDataRelease} from './lib/production-data-release-loader.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
+import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
+import {imageTransitionFixture,imageTransitionServingFixture} from './production-image-transition.fixture.mjs';
+import {buildImageTransitionProof} from './lib/production-image-transition-proof.mjs';
 const now=1800000000000,hex=n=>n.toString(16).padStart(64,'0');
 function fixture(){
  const data={version:1,stage:'prod',account:'123456789012',region:'ap-northeast-1',controlSourceTree:'a'.repeat(40),dataRevision:'b'.repeat(40),dataSourceTree:'c'.repeat(40),dataSourceTag:'mem9-bbbbbbb',
@@ -27,4 +30,36 @@ it('rejects swapped references, control identity, hash, generation and selected 
 });
 it('preserves the legacy single-release path without reading another parameter',async()=>{
  const f=fixture();expect(await loadWorkerDataRelease(f.clients,{version:1,sourceTag:'mem9-aaaaaaa'},f.options)).toBeUndefined();expect(f.calls).toEqual([]);
+});
+it('loads a manifest-pinned successor version exactly',async()=>{
+ const f=fixture();f.meta.version=3;f.meta.dataReleaseParameterVersion=2;f.parameter.Version=2;
+ const selected=await loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'});expect(selected.parameterVersion).toBe(2);
+});
+it.each([1,3,undefined])('rejects observed version %s despite identical descriptor bytes',async version=>{
+ const f=fixture();f.meta.version=3;f.meta.dataReleaseParameterVersion=2;f.parameter.Version=version;
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow();
+});
+it.each([undefined,0,'2',-1])('rejects invalid version binding %s in the new manifest',async version=>{
+ const f=fixture();f.meta.version=3;f.meta.dataReleaseParameterVersion=version;f.parameter.Version=2;
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow();
+});
+it('a legacy retained manifest cannot admit a later same-byte parameter version',async()=>{
+ const f=fixture();f.parameter.Version=2;
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow();
+ expect((await loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'inspection'})).parameterVersion).toBe(2);
+});
+it('image-transition schema validity alone never admits a worker',async()=>{
+ const f=fixture();f.data.version=2;f.data.transition={version:1,kind:'image-security-upgrade',proofHash:hex(50),predecessorHash:hex(51),limitsHash:IMAGE_TRANSITION_LIMITS_HASH};
+ f.meta.version=3;f.meta.dataReleaseParameterVersion=2;f.meta.dataReleaseHash=hash(f.data);f.parameter.Version=2;f.parameter.Value=JSON.stringify(f.data);
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow('ImageTransitionProofRequired');
+ expect((await loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'inspection'})).data.version).toBe(2);
+});
+it('admits the exact image target only through its fully verified review-bound context',async()=>{
+ const f=await imageTransitionFixture(),proof=await buildImageTransitionProof(f.input,f),served=imageTransitionServingFixture(f,proof),data=served.data;
+ const parameter={Name:'/mem9-on-aws/prod/consolidation-runtime/data-release',Type:'SecureString',Version:2,Value:JSON.stringify(data)};
+ const meta={version:3,stage:'prod',account:data.account,region:data.region,generation:data.generation,sourceTag:data.dataSourceTag,
+  controlSourceTag:served.current.controlSourceTag,workerImage:served.current.workerImage,dataReleaseHash:hash(data),dataReleaseParameter:parameter.Name,dataReleaseParameterVersion:2};
+ const clients={ssm:{send:async()=>({Parameters:[parameter]})}},options={controlRevision:served.current.revision,controlSourceTree:served.current.sourceTree,mode:'admission',now:f.now,imageTransition:served.authorizationContext};
+ expect((await loadWorkerDataRelease(clients,meta,options)).hash).toBe(hash(data));
+ await expect(loadWorkerDataRelease(clients,meta,{...options,imageTransition:{...served.authorizationContext}})).rejects.toThrow();
 });

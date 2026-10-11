@@ -26,6 +26,7 @@
 
 import { createHash } from "node:crypto";
 import type { AuthConfig } from "./auth-config";
+import { runtimeSsmSecretPermissions } from "./runtime-secret-permissions";
 
 import {
   MCP_BROWSER_SCOPES,
@@ -316,7 +317,7 @@ export function oauthFacade(
   // and disappears with the stage.
   const hmacKeyValue =
     stage === "prod"
-      ? new sst.Secret("OauthStateHmacKey", "").value
+      ? new sst.Secret("OauthStateHmacKey").value
       : new random.RandomPassword("OauthStateHmacKey", {
           length: 64,
           special: false,
@@ -324,6 +325,7 @@ export function oauthFacade(
   // Stage-scoped JSON array of exact HTTPS callbacks for hosted MCP clients.
   // Loopback callbacks remain built in; an empty array preserves that default.
   const allowedCallbackUrls = new sst.Secret("OauthAllowedCallbackUrls", "[]");
+  const hmacKeyParameter = param("SsmOauthStateHmacKey", "oauth/state-hmac-key", hmacKeyValue, true);
   const allowedCallbackUrlsParameter = param(
     "SsmAllowedCallbackUrls",
     "oauth/allowed-callback-urls",
@@ -338,7 +340,7 @@ export function oauthFacade(
   // --- Façade Function (public, NOT VPC-attached) ---
   // arm64 nodejs24.x. Env carries the SSM prefix (the handler reads the reader
   // client id/secret from SSM at runtime) + the Cognito endpoint URLs + the
-  // resource scope + the live HMAC key. An entire-stage reader would also gain
+  // resource scope + the HMAC parameter ARN. An entire-stage reader would also gain
   // access to future database credentials. Enumerate only the handler's inputs.
   const facadeParameters = [
     `${prefix}/gateway/url`, `${credentialPrefix}/client-id`, `${credentialPrefix}/client-secret`,
@@ -379,10 +381,12 @@ export function oauthFacade(
         external?.revocationEndpoint ?? cognitoOut!.revocationEndpoint,
       COGNITO_JWKS_URI: external?.jwksUri ?? cognitoOut!.jwksUri,
       RESOURCE_SCOPES: MCP_RESOURCE_SCOPES.join(","),
-      OAUTH_STATE_HMAC_KEY: hmacKeyValue,
+      OAUTH_STATE_HMAC_KEY_PARAMETER_ARN: hmacKeyParameter.arn,
+      MEM9_SECRET_ACCOUNT_ID: accountId,
       OAUTH_ALLOWED_CALLBACK_URLS_VERSION: allowedCallbackUrlsVersion,
     },
     permissions: [
+      ...runtimeSsmSecretPermissions([hmacKeyParameter.arn], region),
       {
         actions: ["ssm:GetParameters"],
         resources: facadeParameters,
