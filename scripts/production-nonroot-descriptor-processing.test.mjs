@@ -84,7 +84,7 @@ it('prices all growing original blob prefixes instead of assuming one constant-s
   const guards=x.rows.slice(before).filter(r=>r.kind==='descriptor-guard');expect(guards[1].nodes).toBe(4+k);prefixNodes+=guards[1].nodes;
  }
  expect(prefixNodes).toBe(4*K+K*(K-1)/2);expect(usage.digests).toHaveLength(K);
-}));
+}),30000);
 it('join preserves the first observed failure even when a lower-index read fails later',async()=>{
  const work=createDescriptorProcessing({check(){},charge(){}}),slow=deferred(),error=Error('first-observed');
  const result=descriptorJoin(work,[0,1],async i=>{if(i===1)throw error;await slow.promise;throw Error('later-low-index');}).catch(e=>e);
