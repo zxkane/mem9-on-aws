@@ -4,7 +4,7 @@ import {randomBytes} from 'node:crypto';
 import {inspectCarrierOfflineBuild} from './production-nonroot-carrier-build.mjs';
 import {assertCarrierConsumer} from './ci-carrier-consumer.mjs';
 import {controlImageGraphBinding,imageGraphState} from './production-image-graph.mjs';
-import {inspectImageFilesystemFile} from './production-image-filesystem.mjs';
+import {inspectImageFilesystemFile,assertImageFilesystemUncompressedLimit} from './production-image-filesystem.mjs';
 import {loadNonrootControlImage} from './production-nonroot-control-docker.mjs';
 import {carrierCheckpointSelection} from './ci-carrier-before-copy.mjs';
 import {prepareCarrierSqlAcceptanceFixture,executeCarrierSqlCase,closeCarrierSqlAcceptanceFixture,closeCarrierSqlFixture} from './ci-carrier-sql-fixture.mjs';
@@ -24,6 +24,7 @@ export async function runCarrierSqlAcceptance({built,context,derived,consumer,so
  assertCarrierConsumer(consumer);const admission=consumer.admission,plan=admission.config.plan,b=inspectCarrierOfflineBuild(built);
  need(!attempted.has(built)&&b.record.templateHash===plan.templateHash&&b.record.contextHash===plan.context.sha256&&sourceContext===admission.source.sourceContext,'CarrierSqlAcceptanceInputs');
  need(context&&derived&&fixture&&oldSource,'CarrierSqlAcceptanceDependencies');
+ assertImageFilesystemUncompressedLimit(b.filesystem,plan.template.bounds.uncompressedBytes);
  attempted.add(built);consumer.check();const startedMs=Date.now(),{graphHash,...image}=controlImageGraphBinding(b.graph);
  const upload=Object.fromEntries(['nonce','scopeHash','artifactId','artifactDigest'].map(k=>[k,admission.receipt[k]])),claim=carrierCheckpointSelection(plan,admission.binding,upload).claim;
  const objects=new Map(),put=bytes=>{bytes=Buffer.from(bytes);const ref={sha256:sha(bytes),bytesLength:bytes.length},key=hash(ref);if(!objects.has(key))objects.set(key,{ref,bytesBase64:bytes.toString('base64')});return ref;};

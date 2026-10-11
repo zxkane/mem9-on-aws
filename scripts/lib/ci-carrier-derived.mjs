@@ -6,7 +6,7 @@ import {join,resolve} from 'node:path';
 import {randomBytes,createHash,X509Certificate} from 'node:crypto';
 import {inspectMaterializedCarrierContext,verifyMaterializedCarrierContext} from './ci-carrier-context.mjs';
 import {controlImageGraphBinding,imageGraphState} from './production-image-graph.mjs';
-import {inspectImageFilesystemEvidence,imageFilesystemVerificationKind} from './production-image-filesystem.mjs';
+import {inspectImageFilesystemEvidence,imageFilesystemVerificationKind,assertImageFilesystemUncompressedLimit} from './production-image-filesystem.mjs';
 import {readControlSourceFile} from './production-control-source.mjs';
 import {collectCarrierBasePrerequisites,inspectNonrootControlPrerequisites} from './production-nonroot-control-prerequisites.mjs';
 import {formatCarrierDerivedMaterial,CARRIER_RUNTIME_MANIFEST_PATH} from './ci-carrier-derived-format.mjs';
@@ -25,6 +25,7 @@ export async function deriveCarrierRuntimeMaterial({context,baseGraph,baseFilesy
  need(sourceContext?.tree===t.source.candidateTree&&resolve(tempRoot)===tempRoot&&await realpath(tempRoot)===tempRoot,'CarrierDerivationSource');
  const bound=controlImageGraphBinding(baseGraph),{graphHash,...base}=bound,filesystem=inspectImageFilesystemEvidence(baseFilesystem);
  same(base,t.base,'CarrierDerivationBase');need(filesystem.graphHash===graphHash&&imageFilesystemVerificationKind(baseFilesystem)==='live-filesystem-evidence','CarrierDerivationFilesystem');
+ assertImageFilesystemUncompressedLimit(baseFilesystem,t.bounds.uncompressedBytes);
  attempted.add(context);await verifyMaterializedCarrierContext(context);
  const check=()=>{signal?.throwIfAborted();need(Date.now()<p.deadlineMs,'CarrierDerivationExpired');metadataReads.reserveLocal(zero());};
  const charge=bytes=>{check();metadataReads.reserveLocal({...zero(),logicalBytes:bytes});};

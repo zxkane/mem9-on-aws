@@ -1,3 +1,4 @@
+import {assertImageFilesystemUncompressedLimit} from './production-image-filesystem.mjs';
 import {beginCarrierLocalCleanup,drainCarrierLocalCounter,closeCarrierLocalCounter} from './ci-carrier-local-counter.mjs';
 import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-image-response.mjs';
 /** The CI journal spends an already-paid R9 allocation. It never creates a
@@ -100,7 +101,7 @@ export function openCarrierConsumer({startup,config:input,env}){
    const value=inspectCompletedCarrierSqlAcceptance(handle,{built,consumer:api});need(value.record.templateHash===p.templateHash&&value.record.contextHash===p.context.sha256,'CarrierConsumerSqlBinding');
    sqlAcceptance=value;sqlBuilt=built;append('sql-accepted',{acceptanceHash:hash(value),atMs:Date.now()});
   },
-  bindBuilt(handle){check();need(phase==='base'&&!current&&!output&&[...baseNodes.keys()].every(d=>baseDone.has(d)),'CarrierConsumerBaseIncomplete');const built=inspectCarrierOfflineBuild(handle);need(built.record.templateHash===config.templateHash&&built.record.contextHash===p.context.sha256&&(!sqlAcceptance||sqlBuilt===handle),'CarrierConsumerBuildBinding');output=built;outputNodes=built.graph.inventory.nodes;append('built',{record:built.record});phase='output';},
+  bindBuilt(handle){check();need(phase==='base'&&!current&&!output&&[...baseNodes.keys()].every(d=>baseDone.has(d)),'CarrierConsumerBaseIncomplete');const built=inspectCarrierOfflineBuild(handle);need(built.record.templateHash===config.templateHash&&built.record.contextHash===p.context.sha256&&(!sqlAcceptance||sqlBuilt===handle),'CarrierConsumerBuildBinding');assertImageFilesystemUncompressedLimit(built.filesystem,t.bounds.uncompressedBytes);output=built;outputNodes=built.graph.inventory.nodes;append('built',{record:built.record});phase='output';},
   missing(){check();return missing.map(d=>({...d}));},
   prepareResult(){check();need(phase==='result'&&!current&&!preparedResult,'CarrierConsumerResultOrder');const {record,graph}=output;
    const claim=carrierCheckpointSelection(p,admission.binding,Object.fromEntries(['nonce','scopeHash','artifactId','artifactDigest'].map(k=>[k,admission.receipt[k]]))).claim;

@@ -33,7 +33,7 @@ import "timers";
 import * as stream$2 from "stream";
 import { Readable as Readable$1 } from "stream";
 import fs$1, { realpath as realpath$1 } from "fs/promises";
-import { pipeline } from "node:stream/promises";
+import { finished, pipeline } from "node:stream/promises";
 import { setTimeout as setTimeout$2 } from "node:timers/promises";
 //#region \0rolldown/runtime.js
 var __create = Object.create;
@@ -58491,7 +58491,7 @@ var require_abort_signal = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 //#region node_modules/undici/lib/api/api-stream.js
 var require_api_stream = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	const assert$11 = __require("node:assert");
-	const { finished: finished$1, PassThrough: PassThrough$2 } = __require("node:stream");
+	const { finished: finished$2, PassThrough: PassThrough$2 } = __require("node:stream");
 	const { InvalidArgumentError, InvalidReturnValueError } = require_errors$2();
 	const util = require_util$11();
 	const { getResolveErrorBodyCallback } = require_util$9();
@@ -58570,7 +58570,7 @@ var require_api_stream = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 					context
 				});
 				if (!res || typeof res.write !== "function" || typeof res.end !== "function" || typeof res.on !== "function") throw new InvalidReturnValueError("expected Writable");
-				finished$1(res, { readable: false }, (err) => {
+				finished$2(res, { readable: false }, (err) => {
 					const { callback, res, opaque, trailers, abort } = this;
 					this.res = null;
 					if (err || !res.readable) util.destroy(res, err);
@@ -61262,7 +61262,7 @@ var require_fetch = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	const { safelyExtractBody, extractBody } = require_body();
 	const { redirectStatusSet, nullBodyStatus, safeMethodsSet, requestBodyHeader, subresourceSet } = require_constants$4();
 	const EE$3 = __require("node:events");
-	const { Readable: Readable$2, pipeline: pipeline$2, finished } = __require("node:stream");
+	const { Readable: Readable$2, pipeline: pipeline$2, finished: finished$1 } = __require("node:stream");
 	const { addAbortListener, isErrored, isReadable, bufferToLowerCasedHeaderName } = require_util$11();
 	const { dataURLProcessor, serializeAMimeType, minimizeSupportedMimeType } = require_data_url();
 	const { getGlobalDispatcher } = require_global();
@@ -61577,7 +61577,7 @@ var require_fetch = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		});
 		const internalResponse = response.type === "error" ? response : response.internalResponse ?? response;
 		if (internalResponse.body == null) processResponseEndOfBody();
-		else finished(internalResponse.body.stream, () => {
+		else finished$1(internalResponse.body.stream, () => {
 			processResponseEndOfBody();
 		});
 	}
@@ -148214,461 +148214,19 @@ var init_ci_carrier_startup = __esmMin((() => {
 	positive$1 = (n) => Number.isSafeInteger(n) && n > 0;
 }));
 //#endregion
-//#region scripts/lib/ci-carrier-context.mjs
-/** Decode only the owner's R9 framed context. No tar extraction, package
-* installation, credentials, user-selected recipe or executable callbacks. */
-function carrierDockerfile(base, { caPresent = false, derived = false } = {}) {
-	const image = base.account + ".dkr.ecr." + base.region + ".amazonaws.com/" + base.repositoryName + "@" + base.rootDigest;
-	need$12(!derived || caPresent, "CarrierDerivedCaRequired");
-	return `FROM ${image}\nUSER 0:0\nRUN rm -rf /bootstrap/operator /carrier\nCOPY --chown=0:0 rootfs/ /\n${derived ? "COPY --from=carrier_runtime --chown=0:0 rootfs/ /\n" : ""}RUN chmod 0555 /bootstrap && find /carrier /bootstrap/operator -type d -exec chmod 0555 {} +\nENV PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp NODE_EXTRA_CA_CERTS=${caPresent ? "/bootstrap/global-bundle.pem" : ""}\nUSER 1000:1000\nENTRYPOINT ["/bin/setpriv","--no-new-privs","--","/usr/local/bin/node","/carrier/guard-first.mjs","audit-original-root"]\nCMD []\n`;
-}
-function inspectManifest(m, plan, baseEvidence) {
-	const t = plan.template, sourceOnly = m.version === 2 && m.kind === "carrier-build-source-context";
-	exact$6(m, [
-		"version",
-		"kind",
-		"templateHash",
-		"sourceTree",
-		"provenance",
-		"files",
-		...sourceOnly ? ["runtimeSource"] : []
-	]);
-	need$12((sourceOnly || m.version === 1 && m.kind === "carrier-build-context") && m.templateHash === plan.templateHash && m.sourceTree === t.source.candidateTree && canaryEvidenceHash(m) === plan.context.manifestHash, "CarrierContextBinding");
-	if (sourceOnly) {
-		exact$6(m.runtimeSource, [
-			"legacyCodeHash",
-			"expandedSourceHash",
-			"minifiedSourceHash",
-			"dependencyHash",
-			"operatorInventoryHash"
-		]);
-		need$12(Object.values(m.runtimeSource).every(hex$7) && m.runtimeSource.legacyCodeHash === t.anchors.hostCodeHash && m.runtimeSource.expandedSourceHash === t.anchors.hostSourceHash, "CarrierRuntimeSource");
-		need$12(baseEvidence === void 0, "CarrierSourceContextNoNativeFacts");
-	}
-	same$6(m.provenance, {
-		oldImageHash: canaryEvidenceHash(t.anchors.oldImage),
-		oldImageEvidenceHash: t.anchors.oldImageEvidenceHash,
-		hostEvidenceHash: t.anchors.hostEvidenceHash,
-		sourceCiHash: t.anchors.sourceCiHash,
-		baseEvidenceHash: t.anchors.baseEvidenceHash
-	}, "CarrierContextProvenance");
-	if (baseEvidence !== void 0) {
-		exact$6(baseEvidence, [
-			"version",
-			"kind",
-			"image",
-			"native",
-			"ca"
-		]);
-		need$12(baseEvidence.version === 1 && baseEvidence.kind === "carrier-secure-base-evidence" && canaryEvidenceHash(baseEvidence) === t.anchors.baseEvidenceHash, "CarrierContextBaseEvidence");
-		same$6(baseEvidence.image, t.base, "CarrierContextBaseImage");
-		exact$6(baseEvidence.native, ["nodeSha256", "setprivSha256"]);
-		need$12(Object.values(baseEvidence.native).every(hex$7), "CarrierContextNativePin");
-		need$12(typeof baseEvidence.ca?.present === "boolean", "CarrierContextCa");
-		exact$6(baseEvidence.ca, baseEvidence.ca.present ? [
-			"present",
-			"ref",
-			"sourceEvidenceHash"
-		] : ["present"]);
-	}
-	need$12(Array.isArray(m.files) && m.files.length > 0 && m.files.length <= t.bounds.contextFiles, "CarrierContextFileCount");
-	const byPath = /* @__PURE__ */ new Map();
-	let total = 0;
-	for (const row of m.files) {
-		exact$6(row, [
-			"path",
-			"type",
-			"mode",
-			"sha256",
-			"bytesLength",
-			...row.type === "symlink" ? ["target"] : []
-		]);
-		need$12(pathAllowed(row.path) && !byPath.has(row.path), "CarrierContextPath");
-		if (sourceOnly) need$12(!["rootfs/carrier/manifest.json", "rootfs/bootstrap/global-bundle.pem"].includes(row.path), "CarrierSuppliedDerivedCollision");
-		need$12(["file", "symlink"].includes(row.type) && hex$7(row.sha256) && Number.isSafeInteger(row.bytesLength) && row.bytesLength >= 0 && row.bytesLength <= 67108864 && (row.type === "file" ? [292, 365].includes(row.mode) : row.mode === 511), "CarrierContextMember");
-		if (row.type === "symlink") need$12(row.path.startsWith(operatorPrefix) && typeof row.target === "string" && !row.target.includes("\\") && !/[\x00-\x1f\x7f]/.test(row.target) && !posix.isAbsolute(row.target) && sha$4(row.target) === row.sha256 && Buffer.byteLength(row.target) === row.bytesLength, "CarrierContextLink");
-		else if (fixedPaths.has(row.path)) need$12(row.mode === 292, "CarrierContextRecipeMode");
-		total += row.bytesLength;
-		need$12(Number.isSafeInteger(total) && total <= t.bounds.contextBytes, "CarrierContextSize");
-		byPath.set(row.path, row);
-	}
-	same$6(m.files.map((r) => r.path), [...byPath.keys()].sort((a, b) => a.localeCompare(b)), "CarrierContextOrder");
-	for (const row of m.files) {
-		let parent = dirname(row.path);
-		while (parent !== ".") {
-			need$12(!byPath.has(parent), "CarrierContextParent");
-			parent = dirname(parent);
-		}
-		if (row.type === "symlink") {
-			let path = row.path;
-			const seen = /* @__PURE__ */ new Set();
-			for (let i = 0; i < 32; i++) {
-				need$12(!seen.has(path), "CarrierContextLinkCycle");
-				seen.add(path);
-				const current = byPath.get(path);
-				need$12(current, "CarrierContextLinkTarget");
-				if (current.type === "file") break;
-				path = posix.normalize(posix.join(posix.dirname(path), current.target));
-				need$12(path.startsWith(operatorPrefix) && i < 31, "CarrierContextLinkEscape");
-			}
-		}
-	}
-	for (const path of [
-		...recipePaths,
-		"rootfs/carrier/legacy-audit.mjs",
-		...!sourceOnly ? ["rootfs/carrier/manifest.json"] : [],
-		...CARRIER_OPERATOR_FILES.map((p) => operatorPrefix + p)
-	]) need$12(byPath.get(path)?.type === "file", "CarrierContextMissingClosure");
-	if (baseEvidence !== void 0) need$12(byPath.has("rootfs/bootstrap/global-bundle.pem") === baseEvidence.ca.present, "CarrierContextCa");
-	const recipe = recipePaths.map((path) => {
-		const r = byPath.get(path);
-		return {
-			path,
-			sha256: r.sha256,
-			bytesLength: r.bytesLength
-		};
-	}).sort((a, b) => a.path.localeCompare(b.path));
-	need$12(canaryEvidenceHash(recipe) === t.recipe.sourceClosureHash && byPath.get("Dockerfile").sha256 === t.recipe.dockerfileHash && byPath.get("rootfs/carrier/guard-first.mjs").sha256 === t.recipe.guardHash && byPath.get("rootfs/carrier/legacy-audit.mjs").sha256 === t.anchors.hostCodeHash, "CarrierContextCodePin");
-	return {
-		byPath,
-		total
-	};
-}
-function inspectRuntime(runtime, m, plan, baseEvidence) {
-	exact$6(runtime, [
-		"version",
-		"legacyCodeHash",
-		"expandedSourceHash",
-		"minifiedSourceHash",
-		"dependencyHash",
-		"operatorInventoryHash",
-		"runtime",
-		"files",
-		"caPath"
-	]);
-	need$12(runtime.version === 1 && runtime.legacyCodeHash === plan.template.anchors.hostCodeHash && runtime.expandedSourceHash === plan.template.anchors.hostSourceHash && [
-		"minifiedSourceHash",
-		"dependencyHash",
-		"operatorInventoryHash"
-	].every((k) => hex$7(runtime[k])), "CarrierRuntimeManifest");
-	exact$6(runtime.runtime, ["nodeSha256", "setprivSha256"]);
-	need$12(Object.values(runtime.runtime).every(hex$7), "CarrierRuntimeNative");
-	if (baseEvidence !== void 0) same$6(runtime.runtime, baseEvidence.native, "CarrierRuntimeNative");
-	need$12(runtime.caPath === (m.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem") ? "/bootstrap/global-bundle.pem" : null), "CarrierRuntimeCa");
-	const expected = m.files.filter((r) => r.path !== "Dockerfile" && r.path !== "rootfs/carrier/manifest.json").map(({ path, bytesLength, ...r }) => ({
-		...r,
-		path: path.slice(6),
-		bytes: bytesLength
-	})).sort((a, b) => a.path.localeCompare(b.path));
-	need$12(Array.isArray(runtime.files), "CarrierRuntimeFiles");
-	same$6([...runtime.files].sort((a, b) => a.path.localeCompare(b.path)), expected, "CarrierRuntimeFiles");
-}
-async function materializeCarrierBuildContext({ stream, plan: input, baseEvidence: base, tempRoot, metadataReads, signal }) {
-	const plan = inspectCarrierFundingPlan(input), baseEvidence = base === void 0 ? void 0 : copyNonrootJson(base);
-	need$12(typeof metadataReads?.reserveLocal === "function" && typeof stream?.[Symbol.asyncIterator] === "function", "CarrierContextBudget");
-	need$12(resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot && (await lstat(tempRoot)).isDirectory(), "CarrierContextTemporaryRoot");
-	const check = () => {
-		signal?.throwIfAborted();
-		need$12(Date.now() < plan.deadlineMs, "CarrierContextExpired");
-		metadataReads.reserveLocal(zero$4());
-	};
-	const charge = (n) => {
-		check();
-		metadataReads.reserveLocal({
-			...zero$4(),
-			logicalBytes: n
-		});
-	};
-	check();
-	const directory = join(tempRoot, "mem9-carrier-context-" + randomBytes(16).toString("hex"));
-	await mkdir(directory, { mode: 448 });
-	const identities = /* @__PURE__ */ new Map(), directories = /* @__PURE__ */ new Map(), small = /* @__PURE__ */ new Map(), cursor = new Cursor$1(stream, plan.context.bytesLength, charge, check);
-	let complete = false;
-	directories.set(directory, await lstat(directory));
-	const parents = async (path) => {
-		const parts = dirname(path).split("/");
-		let at = directory;
-		for (const part of parts) {
-			if (part === ".") continue;
-			at = join(at, part);
-			if (!directories.has(at)) {
-				await mkdir(at, { mode: 448 });
-				directories.set(at, await lstat(at));
-			}
-		}
-	};
-	try {
-		need$12((await cursor.read(CARRIER_CONTEXT_MAGIC.length)).equals(CARRIER_CONTEXT_MAGIC), "CarrierContextMagic");
-		const headerSize = (await cursor.read(4)).readUInt32BE();
-		need$12(headerSize > 0 && headerSize <= 33554432 && headerSize + 4 + CARRIER_CONTEXT_MAGIC.length <= plan.context.bytesLength, "CarrierContextHeader");
-		const manifest = parse$3(await cursor.read(headerSize)), { total } = inspectManifest(manifest, plan, baseEvidence);
-		need$12(total + headerSize + 4 + CARRIER_CONTEXT_MAGIC.length === plan.context.bytesLength, "CarrierContextSize");
-		for (const row of manifest.files) {
-			check();
-			await parents(row.path);
-			const path = join(directory, row.path);
-			metadataReads.reserveLocal({
-				...zero$4(),
-				processedEntries: 1
-			});
-			if (row.type === "symlink") {
-				const bytes = await cursor.read(row.bytesLength);
-				need$12(decode$1(bytes) === row.target, "CarrierContextLinkBytes");
-				charge(bytes.length);
-				await symlink(row.target, path);
-			} else {
-				charge(row.bytesLength);
-				const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 384), digest = createHash("sha256"), pieces = [];
-				try {
-					for await (const bytes of cursor.chunks(row.bytesLength)) {
-						check();
-						digest.update(bytes);
-						let at = 0;
-						while (at < bytes.length) {
-							const r = await fd.write(bytes, at, bytes.length - at);
-							need$12(r.bytesWritten > 0, "CarrierContextWrite");
-							at += r.bytesWritten;
-						}
-						if (fixedPaths.has(row.path)) pieces.push(Buffer.from(bytes));
-					}
-					need$12(digest.digest("hex") === row.sha256, "CarrierContextFileHash");
-					await fd.sync();
-					await fd.chmod(row.mode);
-				} finally {
-					await fd.close();
-				}
-				if (fixedPaths.has(row.path)) small.set(row.path, Buffer.concat(pieces, row.bytesLength));
-			}
-			identities.set(path, await lstat(path));
-		}
-		need$12(!await cursor.available() && cursor.count === plan.context.bytesLength && cursor.digest.digest("hex") === plan.context.sha256, "CarrierContextWireHash");
-		const sourceOnly = manifest.version === 2;
-		need$12(small.get("Dockerfile").equals(Buffer.from(carrierDockerfile(plan.template.base, {
-			caPresent: sourceOnly || manifest.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem"),
-			derived: sourceOnly
-		}))), "CarrierCleanRecipeRequired");
-		const runtimeManifest = sourceOnly ? null : parse$3(small.get("rootfs/carrier/manifest.json"));
-		if (runtimeManifest) inspectRuntime(runtimeManifest, manifest, plan, baseEvidence);
-		const state = {
-			plan,
-			baseEvidence,
-			manifest,
-			runtimeManifest,
-			directory,
-			identities,
-			directories,
-			metadataReads,
-			check,
-			charge,
-			closed: false,
-			consumed: false
-		};
-		const handle = Object.freeze({ kind: "carrier-materialized-context" });
-		contexts$1.set(handle, state);
-		complete = true;
-		return handle;
-	} finally {
-		await cursor.close();
-		if (!complete) await rm(directory, {
-			recursive: true,
-			force: true
-		});
-	}
-}
-function context(handle) {
-	const s = contexts$1.get(handle);
-	need$12(s && !s.closed, "CarrierContextHandle");
-	s.check();
-	return s;
-}
-function inspectMaterializedCarrierContext(handle) {
-	const s = context(handle);
-	return Object.freeze({
-		directory: s.directory,
-		plan: copyNonrootJson(s.plan),
-		manifest: s.manifest,
-		runtimeManifest: s.runtimeManifest,
-		...s.runtimeManifest ? { nativePins: s.runtimeManifest.runtime } : { runtimeSource: s.manifest.runtimeSource }
-	});
-}
-async function verifyMaterializedCarrierContext(handle) {
-	const s = context(handle), expected = /* @__PURE__ */ new Set([...s.identities.keys(), ...s.directories.keys()]);
-	for (const [path, before] of s.directories) {
-		const now = await lstat(path);
-		need$12(now.isDirectory() && now.uid === process.getuid() && (now.mode & 511) === 448 && before.dev === now.dev && before.ino === now.ino && await realpath(path) === path, "CarrierContextDirectoryChanged");
-		for (const name of await readdir(path)) need$12(expected.has(join(path, name)), "CarrierContextUnknownFile");
-	}
-	for (const row of s.manifest.files) {
-		const path = join(s.directory, row.path), before = s.identities.get(path);
-		need$12(unchanged$2(before, await lstat(path)), "CarrierContextChanged");
-		if (row.type === "symlink") {
-			need$12(await readlink(path) === row.target, "CarrierContextChanged");
-			continue;
-		}
-		s.charge(row.bytesLength);
-		const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), digest = createHash("sha256");
-		let bytes = 0;
-		try {
-			need$12(unchanged$2(before, await fd.stat()) && before.nlink === 1 && before.uid === process.getuid(), "CarrierContextChanged");
-			const buffer = Buffer.alloc(65536);
-			while (true) {
-				s.check();
-				const r = await fd.read(buffer, 0, buffer.length, null);
-				if (!r.bytesRead) break;
-				bytes += r.bytesRead;
-				need$12(bytes <= row.bytesLength, "CarrierContextChanged");
-				digest.update(buffer.subarray(0, r.bytesRead));
-			}
-			need$12(bytes === row.bytesLength && digest.digest("hex") === row.sha256 && unchanged$2(before, await fd.stat()) && unchanged$2(before, await lstat(path)), "CarrierContextChanged");
-		} finally {
-			await fd.close();
-		}
-	}
-	return inspectMaterializedCarrierContext(handle);
-}
-async function consumeCarrierBuildContext(handle) {
-	const s = context(handle);
-	need$12(!s.consumed, "CarrierContextAlreadyConsumed");
-	s.consumed = true;
-	return verifyMaterializedCarrierContext(handle);
-}
-async function closeCarrierBuildContext(handle) {
-	const s = context(handle);
-	await verifyMaterializedCarrierContext(handle);
-	await rm(s.directory, { recursive: true });
-	s.closed = true;
-}
-var CARRIER_CONTEXT_MAGIC, CARRIER_OPERATOR_FILES, operator, operatorPrefix, recipePaths, fixedPaths, contexts$1, sha$4, need$12, exact$6, hex$7, zero$4, same$6, keys$3, unchanged$2, decode$1, parse$3, pathAllowed, Cursor$1;
-var init_ci_carrier_context = __esmMin((() => {
-	init_ci_carrier_before_copy();
-	init_production_nonroot_contracts();
-	init_ci_smoke_acquisition_format();
-	CARRIER_CONTEXT_MAGIC = Buffer.from("MEM9-CARRIER-CONTEXT-V1\n");
-	CARRIER_OPERATOR_FILES = Object.freeze([
-		"infra/gateway/service-auth.mjs",
-		"scripts/lib/canary-benchmark.mjs",
-		"scripts/lib/consolidation-preview-secrets.mjs",
-		"scripts/lib/production-artifacts.mjs",
-		"scripts/lib/production-canary-compatibility.mjs",
-		"scripts/lib/production-canary-continuation.mjs",
-		"scripts/lib/production-canary-paused-audit.mjs",
-		"scripts/lib/production-canary-performance.mjs",
-		"scripts/lib/production-canary-report.mjs",
-		"scripts/lib/production-canary-snapshot.mjs",
-		"scripts/lib/production-canary-verification.mjs",
-		"scripts/lib/production-runtime-config.mjs",
-		"scripts/lib/production-runtime-state.mjs",
-		"scripts/lib/runtime-credentials.mjs",
-		"scripts/lib/runtime-extension-catalog.mjs",
-		"scripts/production-consolidation-operator.mjs",
-		"node_modules/pg/lib/index.js",
-		"node_modules/pg/package.json",
-		"package.json",
-		"package-lock.json"
-	]);
-	operator = new Set(CARRIER_OPERATOR_FILES);
-	operatorPrefix = "rootfs/bootstrap/operator/";
-	recipePaths = [
-		"Dockerfile",
-		"rootfs/carrier/guard-first.mjs",
-		"rootfs/carrier/supplemental-readonly.mjs"
-	];
-	fixedPaths = /* @__PURE__ */ new Set([
-		...recipePaths,
-		"rootfs/carrier/legacy-audit.mjs",
-		"rootfs/carrier/manifest.json",
-		"rootfs/bootstrap/global-bundle.pem"
-	]);
-	contexts$1 = /* @__PURE__ */ new WeakMap();
-	sha$4 = (b) => createHash("sha256").update(b).digest("hex");
-	need$12 = (v, c = "CarrierContextInvalid") => {
-		if (!v) throw Error(c);
-	};
-	exact$6 = (v, k) => need$12(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.slice().sort().join(), "CarrierContextFields");
-	hex$7 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
-	zero$4 = () => ({
-		ecrRequests: 0,
-		httpBodyBytes: 0,
-		logicalBytes: 0,
-		uncompressedBytes: 0,
-		processedEntries: 0
-	});
-	same$6 = (a, b, c) => need$12(canaryEvidenceHash(a) === canaryEvidenceHash(b), c);
-	keys$3 = [
-		"dev",
-		"ino",
-		"uid",
-		"mode",
-		"nlink",
-		"size",
-		"mtimeMs",
-		"ctimeMs"
-	];
-	unchanged$2 = (a, b) => keys$3.every((k) => a[k] === b[k]);
-	decode$1 = (b) => new TextDecoder("utf-8", { fatal: true }).decode(b);
-	parse$3 = (b) => freeze$2(parseAcquisitionJson(b, 33554432));
-	pathAllowed = (path) => typeof path === "string" && Buffer.byteLength(path) <= 4096 && !path.includes("\\") && !/[\x00-\x1f\x7f]/.test(path) && !path.startsWith("/") && posix.normalize(path) === path && !path.split("/").some((p) => p === ".." || p === ".ssh" || p.startsWith(".env") || p.includes(".local.")) && (fixedPaths.has(path) || path.startsWith(operatorPrefix) && (operator.has(path.slice(26)) || path.startsWith(operatorPrefix + "node_modules/")));
-	Cursor$1 = class {
-		constructor(stream, cap, charge, check) {
-			this.iterator = stream[Symbol.asyncIterator]();
-			this.cap = cap;
-			this.charge = charge;
-			this.check = check;
-			this.buffer = Buffer.alloc(0);
-			this.position = 0;
-			this.count = 0;
-			this.digest = createHash("sha256");
-		}
-		async available() {
-			while (this.position === this.buffer.length) {
-				this.check();
-				const next = await this.iterator.next();
-				if (next.done) return false;
-				need$12(next.value instanceof Uint8Array && next.value.length <= 8388608, "CarrierContextChunk");
-				this.buffer = Buffer.from(next.value);
-				this.position = 0;
-				this.count += this.buffer.length;
-				need$12(this.count <= this.cap, "CarrierContextSize");
-				this.charge(this.buffer.length);
-				this.digest.update(this.buffer);
-				if (this.buffer.length) return true;
-			}
-			return true;
-		}
-		async *chunks(n) {
-			while (n) {
-				need$12(await this.available(), "CarrierContextTruncated");
-				const size = Math.min(n, this.buffer.length - this.position);
-				yield this.buffer.subarray(this.position, this.position + size);
-				this.position += size;
-				n -= size;
-			}
-		}
-		async read(n) {
-			need$12(n <= 33554432, "CarrierContextBuffer");
-			const chunks = [];
-			for await (const chunk of this.chunks(n)) chunks.push(Buffer.from(chunk));
-			return Buffer.concat(chunks, n);
-		}
-		async close() {
-			await this.iterator.return?.();
-		}
-	};
-}));
-//#endregion
 //#region scripts/lib/production-control-capacity.mjs
 function inspectFutureControlCapacity(value) {
-	need$11(nonrootHash(value) === FUTURE_CONTROL_CAPACITY_HASH, "FutureControlCapacityPolicy");
+	need$12(nonrootHash(value) === FUTURE_CONTROL_CAPACITY_HASH, "FutureControlCapacityPolicy");
 	return FUTURE_CONTROL_CAPACITY;
 }
 function verifyFutureControlGraphCapacity(nodes, policy) {
 	const p = inspectFutureControlCapacity(policy), seen = /* @__PURE__ */ new Map();
 	let graphBytes = 0, manifestNodes = 0, configNodes = 0, layerNodes = 0;
 	for (const d of nodes) {
-		need$11(/^sha256:[a-f0-9]{64}$/.test(d.digest) && nat(d.size) && (manifests$6.has(d.mediaType) || configs$1.has(d.mediaType) || layers.has(d.mediaType)), "FutureControlGraphDescriptor");
+		need$12(/^sha256:[a-f0-9]{64}$/.test(d.digest) && nat(d.size) && (manifests$6.has(d.mediaType) || configs$1.has(d.mediaType) || layers.has(d.mediaType)), "FutureControlGraphDescriptor");
 		const prior = seen.get(d.digest);
 		if (prior) {
-			need$11(prior.size === d.size && prior.mediaType === d.mediaType, "FutureControlGraphConflict");
+			need$12(prior.size === d.size && prior.mediaType === d.mediaType, "FutureControlGraphConflict");
 			continue;
 		}
 		seen.set(d.digest, d);
@@ -148676,7 +148234,7 @@ function verifyFutureControlGraphCapacity(nodes, policy) {
 		if (manifests$6.has(d.mediaType)) manifestNodes++;
 		else if (configs$1.has(d.mediaType)) configNodes++;
 		else layerNodes++;
-		need$11(graphBytes <= p.graphBytes && manifestNodes <= p.manifestNodes && configNodes <= p.configNodes && layerNodes <= p.layerNodes && configNodes + layerNodes <= p.blobNodes, "FutureControlGraphCapacity");
+		need$12(graphBytes <= p.graphBytes && manifestNodes <= p.manifestNodes && configNodes <= p.configNodes && layerNodes <= p.layerNodes && configNodes + layerNodes <= p.blobNodes, "FutureControlGraphCapacity");
 	}
 	return Object.freeze({
 		graphBytes,
@@ -148686,12 +148244,12 @@ function verifyFutureControlGraphCapacity(nodes, policy) {
 		capacityVerified: false
 	});
 }
-var M, need$11, nat, FUTURE_CONTROL_CAPACITY, FUTURE_CONTROL_CAPACITY_HASH, manifests$6, configs$1, layers;
+var M, need$12, nat, FUTURE_CONTROL_CAPACITY, FUTURE_CONTROL_CAPACITY_HASH, manifests$6, configs$1, layers;
 var init_production_control_capacity = __esmMin((() => {
 	init_production_nonroot_contracts();
 	M = 1048576;
 	8 * M;
-	need$11 = (v, c) => {
+	need$12 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	nat = (n) => Number.isSafeInteger(n) && n >= 0;
@@ -148766,572 +148324,6 @@ var init_production_image_custody = __esmMin((() => {
 	init_production_data_release();
 }));
 //#endregion
-//#region scripts/lib/production-image-filesystem.mjs
-function text$1(b) {
-	const end = b.indexOf(0);
-	return decoder().decode(end < 0 ? b : b.subarray(0, end));
-}
-function numeric(b, { negative = false } = {}) {
-	let value;
-	if (b[0] & 128) {
-		let n = BigInt(b[0] & 127);
-		for (const v of b.subarray(1)) n = n * 256n + BigInt(v);
-		if (b[0] & 64) n -= 1n << BigInt(b.length * 8 - 1);
-		value = Number(n);
-	} else {
-		const s = b.toString("ascii").replace(/\0.*$/s, "").trim();
-		need$10(s === "" || /^[0-7]+$/.test(s), "ImageTarNumber");
-		value = s === "" ? 0 : parseInt(s, 8);
-	}
-	need$10(Number.isSafeInteger(value) && (negative || value >= 0), "ImageTarNumber");
-	return value;
-}
-function normalize$2(path, { link = false, base = "" } = {}) {
-	need$10(typeof path === "string" && Buffer.byteLength(path) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && !path.includes("\0") && !path.includes("\\"), "ImageTarPath");
-	need$10(link || !path.startsWith("/"), "ImageTarAbsolutePath");
-	const parts = link && !path.startsWith("/") ? base.split("/").filter(Boolean) : [];
-	for (const part of path.split("/")) {
-		if (!part || part === ".") continue;
-		if (part === "..") {
-			need$10(link && parts.length > 0, "ImageTarEscape");
-			parts.pop();
-		} else parts.push(part);
-	}
-	return parts.join("/");
-}
-async function* unpacked(layer, diffId, readBlob, budget) {
-	const source = Readable.from(readBlob(layer), { highWaterMark: 65536 });
-	let output = source;
-	if (layer.mediaType === IMAGE_MEDIA.gzip || layer.mediaType === IMAGE_MEDIA.dockerGzip) output = createGunzip({ chunkSize: 65536 });
-	else if (layer.mediaType === IMAGE_MEDIA.zstd) output = createZstdDecompress({ chunkSize: 65536 });
-	else need$10(layer.mediaType === IMAGE_MEDIA.tar, "ImageFilesystemMedia");
-	if (output !== source) {
-		source.on("error", (e) => output.destroy(e));
-		output.on("error", (e) => source.destroy(e));
-		source.pipe(output);
-	}
-	const sha = createHash("sha256");
-	try {
-		for await (const chunk of output) {
-			need$10(chunk.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageFilesystemBuffer");
-			budget.uncompressed(chunk.length);
-			sha.update(chunk);
-			yield chunk;
-		}
-		need$10("sha256:" + sha.digest("hex") === diffId, "ImageLayerDiffId");
-	} finally {
-		output.destroy();
-		source.destroy();
-	}
-}
-function pax(bytes) {
-	const result = {};
-	let at = 0;
-	while (at < bytes.length) {
-		const space = bytes.indexOf(32, at);
-		need$10(space > at, "ImagePaxLength");
-		const digits = bytes.subarray(at, space).toString("ascii");
-		need$10(/^[1-9]\d*$/.test(digits), "ImagePaxLength");
-		const n = Number(digits);
-		need$10(Number.isSafeInteger(n) && n > space - at + 2 && at + n <= bytes.length && bytes[at + n - 1] === 10, "ImagePaxLength");
-		const record = decoder().decode(bytes.subarray(space + 1, at + n - 1)), equals = record.indexOf("=");
-		need$10(equals > 0, "ImagePaxRecord");
-		const key = record.slice(0, equals), value = record.slice(equals + 1);
-		need$10(!Object.hasOwn(result, key), "ImagePaxDuplicate");
-		need$10([
-			"path",
-			"linkpath",
-			"size",
-			"mtime",
-			"atime",
-			"ctime",
-			"uid",
-			"gid",
-			"uname",
-			"gname",
-			"comment",
-			"charset"
-		].includes(key) || /^SCHILY\.xattr\.[A-Za-z0-9_.-]+$/.test(key), "ImagePaxUnsupported");
-		result[key] = value;
-		at += n;
-	}
-	return result;
-}
-function resolved(nodes, path, { parent = false, missing = true, onLink } = {}) {
-	let rest = normalize$2(path).split("/").filter(Boolean), prefix = [], hops = 0;
-	while (rest.length) {
-		const part = rest.shift();
-		prefix.push(part);
-		const name = prefix.join("/"), node = nodes.get(name);
-		if (node?.type === "symlink" && (!parent || rest.length)) {
-			need$10(++hops <= IMAGE_TRANSITION_LIMITS.maxVirtualLinkHops, "ImageVirtualLinkLoop");
-			onLink?.(name, node);
-			rest = [...normalize$2(node.link, {
-				link: true,
-				base: prefix.slice(0, -1).join("/")
-			}).split("/").filter(Boolean), ...rest];
-			prefix = [];
-			continue;
-		}
-		if (rest.length && node) need$10(node.type === "directory", "ImageVirtualParent");
-		if (!node && !missing) imageFailure("ImageVirtualLinkMissing");
-	}
-	return prefix.join("/");
-}
-function parents(nodes, path, layer, budget) {
-	const parts = path.split("/");
-	parts.pop();
-	let parent = "";
-	for (const part of parts) {
-		parent = parent ? parent + "/" + part : part;
-		const found = nodes.get(parent);
-		if (found) need$10(found.type === "directory", "ImageVirtualParent");
-		else {
-			budget.entry();
-			nodes.set(parent, {
-				type: "directory",
-				layer,
-				implicit: true
-			});
-		}
-	}
-}
-function remove(nodes, path, { olderThan } = {}) {
-	for (const [name, node] of nodes) if ((name === path || name.startsWith(path + "/")) && (olderThan === void 0 || node.layer < olderThan)) nodes.delete(name);
-}
-async function applyLayer(nodes, layer, diffId, index, readBlob, budget) {
-	const cursor = new Cursor(unpacked(layer, diffId, readBlob, budget));
-	let local = {}, global = {}, longPath, longLink;
-	try {
-		while (true) {
-			budget.check();
-			const header = await cursor.read(512);
-			if (zero$3(header)) {
-				need$10(zero$3(await cursor.read(512)), "ImageTarTerminator");
-				need$10(!Object.keys(local).length && longPath === void 0 && longLink === void 0, "ImageTarDanglingExtension");
-				await cursor.drain({ zeros: true });
-				break;
-			}
-			budget.entry();
-			let checksum = 0;
-			for (let i = 0; i < 512; i++) checksum += i >= 148 && i < 156 ? 32 : header[i];
-			need$10(checksum === numeric(header.subarray(148, 156)), "ImageTarChecksum");
-			const type = String.fromCharCode(header[156] || 48), rawSize = numeric(header.subarray(124, 136));
-			need$10(rawSize <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, "ImageTarSize");
-			const magic = text$1(header.subarray(257, 263));
-			need$10(magic === "" || magic === "ustar" || magic === "ustar ", "ImageTarFormat");
-			if ([
-				"x",
-				"g",
-				"L",
-				"K"
-			].includes(type)) {
-				need$10(rawSize <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageTarExtensionSize");
-				const bytes = await cursor.read(rawSize);
-				await cursor.skip((512 - rawSize % 512) % 512);
-				if (type === "x") {
-					need$10(!Object.keys(local).length, "ImagePaxDuplicateHeader");
-					local = pax(bytes);
-				} else if (type === "g") {
-					const values = pax(bytes);
-					need$10(!Object.hasOwn(values, "path") && !Object.hasOwn(values, "linkpath") && !Object.hasOwn(values, "size"), "ImagePaxGlobalPath");
-					global = {
-						...global,
-						...values
-					};
-				} else {
-					const value = text$1(bytes);
-					need$10(Buffer.byteLength(value) <= IMAGE_TRANSITION_LIMITS.maxPathBytes);
-					if (type === "L") {
-						need$10(longPath === void 0);
-						longPath = value;
-					} else {
-						need$10(longLink === void 0);
-						longLink = value;
-					}
-				}
-				continue;
-			}
-			const values = {
-				...global,
-				...local
-			};
-			local = {};
-			const prefix = text$1(header.subarray(345, 500));
-			let path = values.path ?? longPath ?? (prefix ? prefix + "/" : "") + text$1(header.subarray(0, 100)), link = values.linkpath ?? longLink ?? text$1(header.subarray(157, 257));
-			longPath = longLink = void 0;
-			const size = values.size === void 0 ? rawSize : Number(values.size);
-			need$10(Number.isSafeInteger(size) && size >= 0 && size <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes && size + budget.usage().uncompressedBytes <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, "ImageTarSize");
-			path = normalize$2(path);
-			if (path === "") {
-				need$10(type === "5" && size === 0, "ImageTarRoot");
-				continue;
-			}
-			path = resolved(nodes, path, { parent: true });
-			parents(nodes, path, index, budget);
-			const name = posix.basename(path), parent = posix.dirname(path) === "." ? "" : posix.dirname(path);
-			if (name.startsWith(".wh.")) {
-				need$10(type === "0" && size === 0, "ImageWhiteoutInvalid");
-				if (name === ".wh..wh..opq") {
-					for (const [p, node] of nodes) if ((parent === "" || p.startsWith(parent + "/")) && node.layer < index) nodes.delete(p);
-				} else {
-					const target = name.slice(4);
-					need$10(target && target !== "." && target !== "..", "ImageWhiteoutInvalid");
-					remove(nodes, parent ? parent + "/" + target : target, { olderThan: index });
-				}
-				continue;
-			}
-			const metadata = {
-				layer: index,
-				layerDigest: layer.digest,
-				mode: numeric(header.subarray(100, 108)),
-				uid: numeric(header.subarray(108, 116)),
-				gid: numeric(header.subarray(116, 124)),
-				mtime: numeric(header.subarray(136, 148), { negative: true }),
-				pax: values
-			};
-			if (type === "0") {
-				const offset = cursor.offset, sha = createHash("sha256");
-				for await (const chunk of cursor.chunks(size)) sha.update(chunk);
-				await cursor.skip((512 - size % 512) % 512);
-				remove(nodes, path);
-				nodes.set(path, {
-					...metadata,
-					type: "file",
-					content: {
-						layer: index,
-						layerDigest: layer.digest,
-						offset,
-						size,
-						sha256: sha.digest("hex")
-					}
-				});
-			} else if (type === "5") {
-				need$10(size === 0, "ImageTarDirectorySize");
-				if (nodes.get(path)?.type !== "directory") remove(nodes, path);
-				nodes.set(path, {
-					...metadata,
-					type: "directory"
-				});
-			} else if (type === "2") {
-				need$10(size === 0 && link.length > 0, "ImageTarLink");
-				normalize$2(link, {
-					link: true,
-					base: parent
-				});
-				remove(nodes, path);
-				nodes.set(path, {
-					...metadata,
-					type: "symlink",
-					link
-				});
-			} else if (type === "1") {
-				need$10(size === 0 && link.length > 0, "ImageTarLink");
-				const target = nodes.get(resolved(nodes, normalize$2(link, { link: true }), { missing: false }));
-				need$10(target && ["file", "hardlink"].includes(target.type), "ImageHardlinkTarget");
-				remove(nodes, path);
-				nodes.set(path, {
-					...metadata,
-					type: "hardlink",
-					link,
-					content: target.content
-				});
-			} else imageFailure("ImageTarEntryUnsupported");
-		}
-	} finally {
-		await cursor.close();
-	}
-}
-async function packageDatabase(content, layers, diffIds, readBlob, budget, requirements) {
-	need$10(content.size <= IMAGE_TRANSITION_LIMITS.maxPackageDatabaseBytes, "ImagePackageDatabaseLimit");
-	const layer = layers[content.layer], cursor = new Cursor(unpacked(layer, diffIds[content.layer], readBlob, budget)), decode = decoder(), sha = createHash("sha256");
-	const matches = new Map(requirements.map((r) => [r.name, []]));
-	let pending = "", databaseText = "", pkg = {};
-	const line = (value) => {
-		if (value === "") {
-			if (Object.keys(pkg).length) {
-				need$10(pkg.P && pkg.V, "ImagePackageRecord");
-				if (matches.has(pkg.P)) matches.get(pkg.P).push(pkg.V);
-			}
-			pkg = {};
-			return;
-		}
-		if (value.startsWith("P:") || value.startsWith("V:")) {
-			need$10(!Object.hasOwn(pkg, value[0]), "ImagePackageDuplicateField");
-			pkg[value[0]] = value.slice(2);
-		}
-	};
-	try {
-		await cursor.skip(content.offset);
-		for await (const bytes of cursor.chunks(content.size)) {
-			sha.update(bytes);
-			const decoded = decode.decode(bytes, { stream: true });
-			databaseText += decoded;
-			pending += decoded;
-			need$10(Buffer.byteLength(pending) <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImagePackageLineLimit");
-			const rows = pending.split("\n");
-			pending = rows.pop();
-			for (const row of rows) line(row);
-		}
-		const final = decode.decode();
-		databaseText += final;
-		pending += final;
-		if (pending) line(pending);
-		line("");
-		await cursor.drain();
-		need$10(sha.digest("hex") === content.sha256, "ImagePackageDatabaseChanged");
-	} finally {
-		await cursor.close();
-	}
-	return {
-		databaseText,
-		databaseHash: content.sha256,
-		paths: requirements.map((r) => r.path),
-		packages: requirements.map((r) => {
-			const versions = matches.get(r.name);
-			need$10(versions.length === 1 && versions[0] === r.version, "ImagePackageVersion");
-			return {
-				path: r.path,
-				manager: r.manager,
-				name: r.name,
-				version: versions[0],
-				databaseSha256: content.sha256,
-				databaseSize: content.size,
-				layerDigest: content.layerDigest
-			};
-		})
-	};
-}
-/** No filesystem or credential APIs are used. readBlob comes only from the
-* verified cache. A private caller must isolate this parser from credentials. */
-async function inspectImageFilesystem(graph, { component, requirements = [], budget } = {}) {
-	const state = imageGraphState(graph);
-	budget ??= state.budget;
-	need$10(budget === state.budget, "ImageFilesystemBudget");
-	assertImageBudget(budget);
-	const image = state.images.get(component);
-	need$10(image, "ImageFilesystemComponent");
-	need$10(Array.isArray(requirements) && requirements.length <= 32 && new Set(requirements.map((r) => r.path + "\0" + r.name)).size === requirements.length, "ImagePackageRequirements");
-	for (const r of requirements) need$10(r && Object.keys(r).sort().join() === [
-		"path",
-		"manager",
-		"name",
-		"version"
-	].sort().join() && r.manager === "apk" && typeof r.path === "string" && r.path.startsWith("/") && typeof r.name === "string" && /^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name) && typeof r.version === "string" && /^[^\s\0]{1,512}$/.test(r.version), "ImagePackageRequirements");
-	const nodes = /* @__PURE__ */ new Map(), readBlob = (d) => state.store.open(d);
-	for (let i = 0; i < image.layers.length; i++) await applyLayer(nodes, image.layers[i], image.diffIds[i], i, readBlob, budget);
-	for (const [path, node] of nodes) if (node.type === "symlink") resolved(nodes, path);
-	const groups = /* @__PURE__ */ new Map();
-	for (const r of requirements) {
-		const name = resolved(nodes, normalize$2(r.path, { link: true }), { missing: false }), node = nodes.get(name);
-		need$10(node && ["file", "hardlink"].includes(node.type), "ImagePackageDatabaseMissing");
-		const key = node.content.layer + ":" + node.content.offset;
-		if (!groups.has(key)) groups.set(key, {
-			content: node.content,
-			requirements: []
-		});
-		groups.get(key).requirements.push(r);
-	}
-	const packages = [], databases = [];
-	for (const group of groups.values()) {
-		const db = await packageDatabase(group.content, image.layers, image.diffIds, readBlob, budget, group.requirements);
-		packages.push(...db.packages);
-		databases.push(db);
-	}
-	const entries = [...nodes].sort(([a], [b]) => a.localeCompare(b)).map(([path, node]) => ({
-		path,
-		...node
-	}));
-	const evidence = freeze$1({
-		version: 1,
-		graphHash: graph.graphHash,
-		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
-		component,
-		rootDigest: state.roots.find((r) => r.component === component).root.digest,
-		arm64Digest: image.manifest.digest,
-		entriesHash: canaryEvidenceHash(entries),
-		entryCount: entries.length,
-		requirementsHash: canaryEvidenceHash(requirements),
-		packages
-	});
-	const context = Object.freeze({ evidence });
-	verified.set(context, {
-		evidence,
-		databases,
-		entries: freeze$1(entries),
-		side: state.side,
-		graph,
-		requirements: structuredClone(requirements)
-	});
-	return context;
-}
-function inspectImageFilesystemEvidence(context) {
-	need$10(verified.has(context), "ImageFilesystemContextRequired");
-	return structuredClone(verified.get(context).evidence);
-}
-/** Read-only metadata from the actual verified virtual filesystem. This does
-* not create authority or expose a host filesystem path. Archive reconstruction
-* cannot claim a new live extraction through this accessor. */
-function inspectImageFilesystemEntries(context) {
-	const state = verified.get(context);
-	need$10(state && state.kind !== "archived-filesystem-evidence" && state.entries, "ImageFilesystemContextRequired");
-	need$10(canaryEvidenceHash(state.entries) === state.evidence.entriesHash, "ImageFilesystemEntriesChanged");
-	return structuredClone(state.entries);
-}
-/** File facts come from the verified final overlay and actual layer bytes.
-* No host path is opened and no archived JSON object creates this handle. */
-function inspectImageFilesystemFile(context, path) {
-	const state = verified.get(context);
-	need$10(state && state.kind !== "archived-filesystem-evidence" && state.entries, "ImageFilesystemContextRequired");
-	need$10(typeof path === "string" && path.startsWith("/") && path !== "/" && posix.normalize(path) === path && !path.endsWith("/"), "ImageRuntimeFilePath");
-	const nodes = new Map(state.entries.map(({ path, ...node }) => [path, node])), links = [];
-	const effectiveId = (node, key) => {
-		const raw = node.pax?.[key];
-		if (raw === void 0) return node[key];
-		need$10(typeof raw === "string" && /^(?:0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(Number(raw)), "ImageRuntimeFileOwner");
-		return Number(raw);
-	};
-	const metadata = (name, node) => ({
-		path: "/" + name,
-		type: node.type,
-		...node.implicit ? { implicit: true } : {},
-		...node.mode === void 0 ? {} : { mode: node.mode },
-		...effectiveId(node, "uid") === void 0 ? {} : { uid: effectiveId(node, "uid") },
-		...effectiveId(node, "gid") === void 0 ? {} : { gid: effectiveId(node, "gid") },
-		privilegeAttributes: Object.keys(node.pax ?? {}).filter((key) => key === "SCHILY.xattr.security.capability").sort(),
-		...node.type === "symlink" ? { link: node.link } : {}
-	});
-	const name = resolved(nodes, normalize$2(path, { link: true }), {
-		missing: false,
-		onLink: (name, node) => links.push(metadata(name, node))
-	}), node = nodes.get(name);
-	need$10(node?.type === "file" && node.content, "ImageRuntimeFileRequired");
-	const parentRecords = /* @__PURE__ */ new Map();
-	for (const start of [
-		normalize$2(path, { link: true }),
-		name,
-		...links.map((link) => link.path.slice(1))
-	]) {
-		let parent = posix.dirname(start);
-		while (parent !== "." && parent !== "/") {
-			const original = nodes.get(parent);
-			if (original) {
-				need$10(["directory", "symlink"].includes(original.type), "ImageVirtualParent");
-				parentRecords.set(parent, metadata(parent, original));
-			} else {
-				const actual = resolved(nodes, parent, { missing: false }), entry = nodes.get(actual);
-				need$10(entry?.type === "directory", "ImageVirtualParent");
-				parentRecords.set(actual, metadata(actual, entry));
-			}
-			parent = posix.dirname(parent);
-		}
-	}
-	return freeze$1({
-		...metadata(name, node),
-		path,
-		resolvedPath: "/" + name,
-		sha256: node.content.sha256,
-		size: node.content.size,
-		layerDigest: node.content.layerDigest,
-		symlinkChain: links,
-		parents: [...parentRecords.values()].sort((a, b) => a.path.localeCompare(b.path)),
-		rootMetadata: "not-recorded"
-	});
-}
-/** Bounded reads for source modules, passwd and loader metadata. Large
-* executables use their verified content hash, not an unbounded Buffer. */
-async function readImageFilesystemFile(context, path, { maxBytes = IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes } = {}) {
-	need$10(Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageRuntimeFileLimit");
-	const fact = inspectImageFilesystemFile(context, path);
-	need$10(fact.size <= maxBytes, "ImageRuntimeFileLimit");
-	const state = verified.get(context), graph = imageGraphState(state.graph), image = graph.images.get(state.evidence.component);
-	const content = new Map(state.entries.map(({ path, ...node }) => [path, node])).get(fact.resolvedPath.slice(1)).content, layer = image.layers[content.layer];
-	const cursor = new Cursor(unpacked(layer, image.diffIds[content.layer], (d) => graph.store.open(d), graph.budget));
-	try {
-		await cursor.skip(content.offset);
-		const bytes = await cursor.read(content.size);
-		await cursor.drain();
-		need$10(createHash("sha256").update(bytes).digest("hex") === fact.sha256, "ImageRuntimeFileChanged");
-		return bytes;
-	} finally {
-		await cursor.close();
-	}
-}
-function imageFilesystemVerificationKind(context) {
-	need$10(verified.has(context), "ImageFilesystemContextRequired");
-	return verified.get(context).kind ?? "live-filesystem-evidence";
-}
-var verified, decoder, need$10, freeze$1, zero$3, Cursor;
-var init_production_image_filesystem = __esmMin((() => {
-	init_production_image_transition();
-	init_production_canary_verification();
-	init_production_image_graph();
-	init_production_image_custody();
-	verified = /* @__PURE__ */ new WeakMap();
-	decoder = () => new TextDecoder("utf-8", { fatal: true });
-	need$10 = (v, code = "ImageFilesystemInvalid") => {
-		if (!v) imageFailure(code);
-	};
-	freeze$1 = (v) => {
-		if (v && typeof v === "object") {
-			Object.values(v).forEach(freeze$1);
-			Object.freeze(v);
-		}
-		return v;
-	};
-	zero$3 = (b) => b.every((v) => v === 0);
-	Cursor = class {
-		constructor(stream) {
-			this.iterator = stream[Symbol.asyncIterator]();
-			this.buffer = Buffer.alloc(0);
-			this.position = 0;
-			this.offset = 0;
-			this.done = false;
-		}
-		async available() {
-			while (this.position === this.buffer.length && !this.done) {
-				const next = await this.iterator.next();
-				this.done = next.done;
-				this.buffer = next.done ? Buffer.alloc(0) : next.value;
-				this.position = 0;
-			}
-			return this.buffer.length - this.position;
-		}
-		async *chunks(size) {
-			need$10(Number.isSafeInteger(size) && size >= 0);
-			while (size) {
-				need$10(await this.available() > 0, "ImageTarTruncated");
-				const count = Math.min(size, this.buffer.length - this.position);
-				const chunk = this.buffer.subarray(this.position, this.position + size);
-				this.position += count;
-				this.offset += count;
-				size -= count;
-				yield chunk;
-			}
-		}
-		async read(size) {
-			need$10(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageTarBuffer");
-			const all = [];
-			for await (const chunk of this.chunks(size)) all.push(chunk);
-			return Buffer.concat(all, size);
-		}
-		async skip(size) {
-			for await (const _ of this.chunks(size));
-		}
-		async drain({ zeros = false } = {}) {
-			while (await this.available()) {
-				const count = this.buffer.length - this.position;
-				if (zeros) need$10(zero$3(this.buffer.subarray(this.position)), "ImageTarTrailingData");
-				this.position += count;
-				this.offset += count;
-			}
-		}
-		async close() {
-			await this.iterator.return?.();
-		}
-	};
-}));
-//#endregion
 //#region scripts/lib/production-nonroot-control-cache.mjs
 /** Local CONTROL cache reader; it never executes image code. Metadata is not evidence:
 * every referenced byte passes the original CONTROL graph and FS parsers.
@@ -149348,26 +148340,26 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 	assertImageBudget(budget);
 	binding = copyNonrootJson(binding);
 	inventory = copyNonrootJson(inventory);
-	need$9(typeof directory === "string" && resolve(directory) === directory && await realpath(directory) === directory, "NonrootControlCachePath");
+	need$11(typeof directory === "string" && resolve(directory) === directory && await realpath(directory) === directory, "NonrootControlCachePath");
 	const initial = await lstat(directory);
-	need$9(initial.isDirectory() && initial.uid === process.getuid() && (initial.mode & 511) === 448, "NonrootControlCacheDirectory");
-	need$9(inventory.kind === "readonly-control-image-graph" && inventory.roots?.length === 1 && Array.isArray(inventory.nodes) && inventory.nodes.length > 0 && inventory.nodes.length <= IMAGE_TRANSITION_LIMITS.maxManifestNodes + IMAGE_TRANSITION_LIMITS.maxBlobNodes, "NonrootControlCacheInventory");
+	need$11(initial.isDirectory() && initial.uid === process.getuid() && (initial.mode & 511) === 448, "NonrootControlCacheDirectory");
+	need$11(inventory.kind === "readonly-control-image-graph" && inventory.roots?.length === 1 && Array.isArray(inventory.nodes) && inventory.nodes.length > 0 && inventory.nodes.length <= IMAGE_TRANSITION_LIMITS.maxManifestNodes + IMAGE_TRANSITION_LIMITS.maxBlobNodes, "NonrootControlCacheInventory");
 	const nodes = /* @__PURE__ */ new Map();
 	for (const node of inventory.nodes) {
-		need$9(!nodes.has(node.digest), "NonrootControlCacheInventory");
+		need$11(!nodes.has(node.digest), "NonrootControlCacheInventory");
 		validateImageDescriptor(node, manifests$5.has(node.mediaType) ? "manifest" : "blob");
 		nodes.set(node.digest, node);
 	}
 	const names = [...nodes.keys()].map((d) => d.slice(7)).sort(), identities = /* @__PURE__ */ new Map(), active = /* @__PURE__ */ new Set();
 	let closed = false, physicalCacheBytes = 0, reads = 0;
 	const check = () => {
-		need$9(!closed, "NonrootControlCacheClosed");
+		need$11(!closed, "NonrootControlCacheClosed");
 		budget.check();
 	};
 	const directoryUnchanged = async () => {
 		check();
 		const current = await lstat(directory);
-		need$9(await realpath(directory) === directory && unchanged$1(initial, current, [
+		need$11(await realpath(directory) === directory && unchanged$2(initial, current, [
 			"dev",
 			"ino",
 			"mode",
@@ -149378,18 +148370,18 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 	async function* bytes(descriptor) {
 		check();
 		const expected = nodes.get(descriptor.digest);
-		need$9(expected && expected.size === descriptor.size && expected.mediaType === descriptor.mediaType, "NonrootControlCacheDescriptor");
-		need$9(active.size < IMAGE_TRANSITION_LIMITS.maxConcurrency, "NonrootControlCacheConcurrency");
+		need$11(expected && expected.size === descriptor.size && expected.mediaType === descriptor.mediaType, "NonrootControlCacheDescriptor");
+		need$11(active.size < IMAGE_TRANSITION_LIMITS.maxConcurrency, "NonrootControlCacheConcurrency");
 		budget.cacheRead?.(descriptor.size);
 		const path = join(directory, descriptor.digest.slice(7));
-		need$9(await realpath(path) === path, "NonrootControlCacheAlias");
+		need$11(await realpath(path) === path, "NonrootControlCacheAlias");
 		const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		active.add(fd);
 		try {
 			const before = await fd.stat();
-			need$9(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size === descriptor.size, "NonrootControlCacheFile");
+			need$11(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size === descriptor.size, "NonrootControlCacheFile");
 			const prior = identities.get(descriptor.digest);
-			if (prior) need$9(unchanged$1(prior, before, fileKeys$1), "NonrootControlCacheChanged");
+			if (prior) need$11(unchanged$2(prior, before, fileKeys$1), "NonrootControlCacheChanged");
 			else identities.set(descriptor.digest, before);
 			const digest = createHash("sha256"), buffer = Buffer.alloc(65536);
 			let size = 0;
@@ -149400,21 +148392,21 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 				if (!bytesRead) break;
 				size += bytesRead;
 				physicalCacheBytes += bytesRead;
-				need$9(size <= descriptor.size && Number.isSafeInteger(physicalCacheBytes), "NonrootControlCacheSize");
+				need$11(size <= descriptor.size && Number.isSafeInteger(physicalCacheBytes), "NonrootControlCacheSize");
 				const chunk = Buffer.from(buffer.subarray(0, bytesRead));
 				digest.update(chunk);
 				yield chunk;
 			}
 			const after = await fd.stat(), named = await lstat(path);
-			need$9(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
-			need$9(unchanged$1(before, after, fileKeys$1) && unchanged$1(before, named, fileKeys$1), "NonrootControlCacheChanged");
+			need$11(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
+			need$11(unchanged$2(before, after, fileKeys$1) && unchanged$2(before, named, fileKeys$1), "NonrootControlCacheChanged");
 		} finally {
 			active.delete(fd);
 			await fd.close();
 		}
 	}
 	const reader = (request) => {
-		need$9(request.repositoryName === binding.repositoryName, "NonrootControlCacheRepository");
+		need$11(request.repositoryName === binding.repositoryName, "NonrootControlCacheRepository");
 		return bytes(request.descriptor);
 	};
 	const store = {
@@ -149426,10 +148418,10 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 			for await (const chunk of stream) {
 				check();
 				size += chunk.length;
-				need$9(size <= descriptor.size, "NonrootControlCacheSize");
+				need$11(size <= descriptor.size, "NonrootControlCacheSize");
 				digest.update(chunk);
 			}
-			need$9(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
+			need$11(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
 		}
 	};
 	const before = budget.usage();
@@ -149437,7 +148429,7 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 		closed = true;
 		const pending = [...active];
 		await Promise.all(pending.map((fd) => fd.close()));
-		need$9(pending.length === 0, "NonrootControlCacheActive");
+		need$11(pending.length === 0, "NonrootControlCacheActive");
 	};
 	return Object.freeze({
 		store,
@@ -149447,14 +148439,14 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 			let size = 0;
 			for await (const chunk of reader(request)) {
 				size += chunk.length;
-				need$9(size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "NonrootControlCacheManifest");
+				need$11(size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "NonrootControlCacheManifest");
 				chunks.push(chunk);
 			}
 			return Buffer.concat(chunks, size);
 		},
 		check: async () => {
 			await directoryUnchanged();
-			need$9(active.size === 0, "NonrootControlCacheActive");
+			need$11(active.size === 0, "NonrootControlCacheActive");
 		},
 		close,
 		usage: () => copyNonrootJson({
@@ -149497,16 +148489,16 @@ async function verifyOwnedNonrootControlCache({ directory, binding, inventory, b
 		throw error;
 	}
 }
-var need$9, unchanged$1, fileKeys$1, manifests$5;
+var need$11, unchanged$2, fileKeys$1, manifests$5;
 var init_production_nonroot_control_cache = __esmMin((() => {
 	init_production_image_graph();
 	init_production_image_filesystem();
 	init_production_nonroot_contracts();
 	init_production_image_transition();
-	need$9 = (ok, code = "NonrootControlCacheInvalid") => {
+	need$11 = (ok, code = "NonrootControlCacheInvalid") => {
 		if (!ok) throw Error(code);
 	};
-	unchanged$1 = (a, b, keys) => keys.every((key) => a[key] === b[key]);
+	unchanged$2 = (a, b, keys) => keys.every((key) => a[key] === b[key]);
 	fileKeys$1 = [
 		"dev",
 		"ino",
@@ -149531,17 +148523,21 @@ var init_production_nonroot_control_cache = __esmMin((() => {
 * local watchdog can shorten work; only reserveLocal owns source/owner expiry.
 * No credential lifetime is invented for already cached bytes. */
 function createPrepaidControlCacheBudget(options = {}) {
-	need$8(record$1(options) && Object.keys(options).every((k) => [
+	need$10(record$1(options) && Object.keys(options).every((k) => [
 		"metadataReads",
 		"now",
 		"deadlineMs",
-		"signal"
+		"signal",
+		"uncompressedBytesLimit"
 	].includes(k)), "ControlCacheBudgetOptions");
 	const metadataReads = options.metadataReads, now = options.now ?? Date.now, capacity = metadataReads?.controlCapacity ? inspectFutureControlCapacity(metadataReads.controlCapacity) : null;
-	need$8(metadataReads && typeof metadataReads.reserveLocal === "function" && typeof now === "function", "ControlCachePrepaymentRequired");
+	need$10(metadataReads && typeof metadataReads.reserveLocal === "function" && typeof now === "function", "ControlCachePrepaymentRequired");
+	const declaredU = options.uncompressedBytesLimit;
+	need$10(declaredU === void 0 || integer(declaredU) && declaredU > 0, "ControlCacheUncompressedLimit");
+	const uncompressedBytesLimit = declaredU === void 0 ? void 0 : Math.min(declaredU, IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity);
 	const startedMs = now(), deadlineMs = options.deadlineMs ?? startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs;
-	need$8(integer(startedMs) && Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs + IMAGE_TRANSITION_LIMITS.cleanupReserveMs && deadlineMs <= startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs, "ControlCacheDeadline");
-	need$8(canaryEvidenceHash(IMAGE_TRANSITION_LIMITS) === IMAGE_TRANSITION_LIMITS_HASH, "ImageLimitsChanged");
+	need$10(integer(startedMs) && Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs + IMAGE_TRANSITION_LIMITS.cleanupReserveMs && deadlineMs <= startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs, "ControlCacheDeadline");
+	need$10(canaryEvidenceHash(IMAGE_TRANSITION_LIMITS) === IMAGE_TRANSITION_LIMITS_HASH, "ImageLimitsChanged");
 	const zero = () => ({
 		ecrRequests: 0,
 		logicalBytes: 0,
@@ -149563,11 +148559,11 @@ function createPrepaidControlCacheBudget(options = {}) {
 		}
 	};
 	const check = () => {
-		need$8(!held, "ControlCacheBudgetHeld");
+		need$10(!held, "ControlCacheBudgetHeld");
 		try {
 			options.signal?.throwIfAborted();
 			const t = now();
-			need$8(integer(t) && t >= startedMs && t < deadlineMs - IMAGE_TRANSITION_LIMITS.cleanupReserveMs, "ControlCacheDeadline");
+			need$10(integer(t) && t >= startedMs && t < deadlineMs - IMAGE_TRANSITION_LIMITS.cleanupReserveMs, "ControlCacheDeadline");
 			reserve(zero());
 		} catch (error) {
 			held = true;
@@ -149580,7 +148576,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		validateImageDescriptor(d, isManifest ? "manifest" : "blob");
 		const prior = seen.get(d.digest);
 		if (prior) {
-			need$8(prior.size === d.size && prior.isManifest === isManifest, "ImageDescriptorConflict");
+			need$10(prior.size === d.size && prior.isManifest === isManifest, "ImageDescriptorConflict");
 			return;
 		}
 		if (capacity) {
@@ -149592,8 +148588,8 @@ function createPrepaidControlCacheBudget(options = {}) {
 				throw error;
 			}
 		}
-		need$8(uniqueBytes + d.size <= IMAGE_TRANSITION_LIMITS.maxUniqueCompressedGraphBytes, "ImageGraphByteLimit");
-		need$8(isManifest ? manifestNodes < IMAGE_TRANSITION_LIMITS.maxManifestNodes : blobNodes < IMAGE_TRANSITION_LIMITS.maxBlobNodes, "ImageGraphNodeLimit");
+		need$10(uniqueBytes + d.size <= IMAGE_TRANSITION_LIMITS.maxUniqueCompressedGraphBytes, "ImageGraphByteLimit");
+		need$10(isManifest ? manifestNodes < IMAGE_TRANSITION_LIMITS.maxManifestNodes : blobNodes < IMAGE_TRANSITION_LIMITS.maxBlobNodes, "ImageGraphNodeLimit");
 		seen.set(d.digest, {
 			size: d.size,
 			isManifest
@@ -149605,6 +148601,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 	const noNetwork = () => imageFailure("ControlCacheNetworkForbidden");
 	const budget = {
 		kind: "prepaid-local-control-cache",
+		...uncompressedBytesLimit === void 0 ? {} : { uncompressedBytesLimit },
 		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
 		startedMs,
 		deadlineMs,
@@ -149615,16 +148612,16 @@ function createPrepaidControlCacheBudget(options = {}) {
 		blob: (d) => add(d, false),
 		edge(key) {
 			check();
-			need$8(typeof key === "string");
+			need$10(typeof key === "string");
 			if (!edges.has(key)) {
-				need$8(edges.size < IMAGE_TRANSITION_LIMITS.maxEdges, "ImageGraphEdgeLimit");
+				need$10(edges.size < IMAGE_TRANSITION_LIMITS.maxEdges, "ImageGraphEdgeLimit");
 				edges.add(key);
 			}
 		},
 		cacheRead(size) {
 			check();
-			need$8(integer(size) && logicalBytes + size <= IMAGE_TRANSITION_LIMITS.maxTransferredBytes, "ImageTransferLimit");
-			need$8(localReads < IMAGE_TRANSITION_LIMITS.maxEcrCalls, "ImageCallLimit");
+			need$10(integer(size) && logicalBytes + size <= IMAGE_TRANSITION_LIMITS.maxTransferredBytes, "ImageTransferLimit");
+			need$10(localReads < IMAGE_TRANSITION_LIMITS.maxEcrCalls, "ImageCallLimit");
 			reserve({
 				...zero(),
 				logicalBytes: size
@@ -149634,7 +148631,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		uncompressed(size) {
 			check();
-			need$8(integer(size) && uncompressedBytes + size <= Math.min(IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity), "ImageUncompressedLimit");
+			need$10(integer(size) && uncompressedBytes + size <= Math.min(IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity), "ImageUncompressedLimit");
 			reserve({
 				...zero(),
 				uncompressedBytes: size
@@ -149643,7 +148640,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		entry() {
 			check();
-			need$8(fsEntries < Math.min(IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity), "ImageFilesystemEntryLimit");
+			need$10(fsEntries < Math.min(IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity), "ImageFilesystemEntryLimit");
 			reserve({
 				...zero(),
 				processedEntries: 1
@@ -149652,7 +148649,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		enter() {
 			check();
-			need$8(active < IMAGE_TRANSITION_LIMITS.maxConcurrency, "ImageConcurrencyLimit");
+			need$10(active < IMAGE_TRANSITION_LIMITS.maxConcurrency, "ImageConcurrencyLimit");
 			active++;
 			let closed = false;
 			return () => {
@@ -149688,7 +148685,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 	return Object.freeze(budget);
 }
 function assertImageBudget(budget) {
-	need$8(budgets.has(budget), "ImageBudgetRequired");
+	need$10(budgets.has(budget), "ImageBudgetRequired");
 	budget.check();
 	return budget;
 }
@@ -149696,11 +148693,11 @@ function assertImageBudget(budget) {
 * data accounting only; callers reserve it before decode, and meter the cache
 * write/read separately. The containing manifest already paid its wire bytes. */
 function imageDescriptorDataLocalBytes(d) {
-	need$8(record$1(d), "ImageDescriptorFields");
+	need$10(record$1(d), "ImageDescriptorFields");
 	if (!Object.hasOwn(d, "data")) return 0;
-	need$8(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
+	need$10(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
 	const size = Buffer.byteLength(d.data, "base64");
-	need$8(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
+	need$10(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
 	return Buffer.byteLength(d.data) + 2 * size;
 }
 function validateImageDescriptor(d, kind) {
@@ -149710,7 +148707,7 @@ function validateImageDescriptor(d, kind) {
 /** Returns actual verified embedded bytes, or undefined. No network response,
 * registry presence, graph handle or authorization is implied by this data. */
 function decodeImageDescriptorData(d, kind) {
-	need$8(record$1(d) && Object.keys(d).every((k) => [
+	need$10(record$1(d) && Object.keys(d).every((k) => [
 		"mediaType",
 		"digest",
 		"size",
@@ -149719,18 +148716,18 @@ function decodeImageDescriptorData(d, kind) {
 		"artifactType",
 		"data"
 	].includes(k)), "ImageDescriptorFields");
-	need$8(hexDigest(d.digest) && integer(d.size) && media.has(d.mediaType), "ImageDescriptorInvalid");
-	if (kind === "manifest") need$8(manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "ImageManifestLimit");
-	if (kind === "blob") need$8(!manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxBlobBytes, "ImageBlobLimit");
-	if (configs.has(d.mediaType)) need$8(d.size <= IMAGE_TRANSITION_LIMITS.maxConfigBytes, "ImageConfigLimit");
-	if (d.mediaType === IMAGE_MEDIA.attestation) need$8(d.size <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes, "ImageAttestationLimit");
-	if (d.annotations !== void 0) need$8(record$1(d.annotations) && Object.entries(d.annotations).every(([k, v]) => typeof v === "string" && Buffer.byteLength(k) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && Buffer.byteLength(v) <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes), "ImageAnnotations");
-	if (d.platform !== void 0) need$8(record$1(d.platform) && typeof d.platform.os === "string" && typeof d.platform.architecture === "string", "ImagePlatform");
+	need$10(hexDigest(d.digest) && integer(d.size) && media.has(d.mediaType), "ImageDescriptorInvalid");
+	if (kind === "manifest") need$10(manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "ImageManifestLimit");
+	if (kind === "blob") need$10(!manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxBlobBytes, "ImageBlobLimit");
+	if (configs.has(d.mediaType)) need$10(d.size <= IMAGE_TRANSITION_LIMITS.maxConfigBytes, "ImageConfigLimit");
+	if (d.mediaType === IMAGE_MEDIA.attestation) need$10(d.size <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes, "ImageAttestationLimit");
+	if (d.annotations !== void 0) need$10(record$1(d.annotations) && Object.entries(d.annotations).every(([k, v]) => typeof v === "string" && Buffer.byteLength(k) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && Buffer.byteLength(v) <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes), "ImageAnnotations");
+	if (d.platform !== void 0) need$10(record$1(d.platform) && typeof d.platform.os === "string" && typeof d.platform.architecture === "string", "ImagePlatform");
 	if (Object.hasOwn(d, "data")) {
-		need$8(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
-		need$8(Buffer.byteLength(d.data, "base64") <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
+		need$10(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
+		need$10(Buffer.byteLength(d.data, "base64") <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
 		const bytes = Buffer.from(d.data, "base64");
-		need$8(bytes.toString("base64") === d.data && bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageEmbeddedDataInvalid");
+		need$10(bytes.toString("base64") === d.data && bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageEmbeddedDataInvalid");
 		return bytes;
 	}
 }
@@ -149738,14 +148735,14 @@ function decodeImageDescriptorData(d, kind) {
 * attestation predicates. Raw bytes are separately retained and hashed. */
 async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 	assertImageBudget(budget);
-	need$8(integer(maxBytes) && maxBytes <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes);
+	need$10(integer(maxBytes) && maxBytes <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes);
 	const iterator = stream[Symbol.asyncIterator](), decoder = new TextDecoder("utf-8", { fatal: true });
 	let text = "", offset = 0, total = 0, ended = false, steps = 0;
 	const limitAt = Math.min(budget.deadlineMs - IMAGE_TRANSITION_LIMITS.cleanupReserveMs, budget.now() + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs);
 	const peek = async () => {
 		if (++steps % 4096 === 0) {
 			budget.check();
-			need$8(budget.now() < limitAt, "ImageJsonTimeout");
+			need$10(budget.now() < limitAt, "ImageJsonTimeout");
 		}
 		while (offset === text.length && !ended) {
 			const item = await iterator.next();
@@ -149756,7 +148753,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 			} else {
 				const bytes = bytesOf(item.value);
 				total += bytes.length;
-				need$8(total <= maxBytes, "ImageJsonSize");
+				need$10(total <= maxBytes, "ImageJsonSize");
 				text = decoder.decode(bytes, { stream: true });
 				offset = 0;
 			}
@@ -149765,7 +148762,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 	};
 	const take = async () => {
 		const c = await peek();
-		need$8(c !== null, "ImageJsonTruncated");
+		need$10(c !== null, "ImageJsonTruncated");
 		offset++;
 		return c;
 	};
@@ -149778,28 +148775,28 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 		].includes(await peek())) offset++;
 	};
 	const string = async (keep) => {
-		need$8(await take() === "\"");
+		need$10(await take() === "\"");
 		let raw = keep ? "\"" : "", rawBytes = 1, previousHigh = false;
 		const append = (c) => {
 			if (!keep) return;
 			const n = c.charCodeAt(0);
 			rawBytes += previousHigh && n >= 56320 && n <= 57343 ? 1 : Buffer.byteLength(c);
 			previousHigh = n >= 55296 && n <= 56319;
-			need$8(rawBytes <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
+			need$10(rawBytes <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
 			raw += c;
 		};
 		while (true) {
 			const c = await take();
 			append(c);
 			if (c === "\"") break;
-			need$8(c.charCodeAt(0) >= 32, "ImageJsonString");
+			need$10(c.charCodeAt(0) >= 32, "ImageJsonString");
 			if (c === "\\") {
 				const e = await take();
 				append(e);
-				need$8("\"\\/bfnrtu".includes(e), "ImageJsonEscape");
+				need$10("\"\\/bfnrtu".includes(e), "ImageJsonEscape");
 				if (e === "u") for (let n = 0; n < 4; n++) {
 					const h = await take();
-					need$8(/[a-fA-F0-9]/.test(h), "ImageJsonEscape");
+					need$10(/[a-fA-F0-9]/.test(h), "ImageJsonEscape");
 					append(h);
 				}
 			}
@@ -149807,7 +148804,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 		return keep ? JSON.parse(raw) : void 0;
 	};
 	const value = async (depth, keep) => {
-		need$8(depth <= IMAGE_TRANSITION_LIMITS.maxJsonDepth, "ImageJsonDepth");
+		need$10(depth <= IMAGE_TRANSITION_LIMITS.maxJsonDepth, "ImageJsonDepth");
 		await whitespace();
 		const c = await peek();
 		if (c === "\"") return string(keep);
@@ -149824,10 +148821,10 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 				let key;
 				if (object) {
 					key = await string(true);
-					need$8(!keys.has(key), "ImageJsonDuplicateKey");
+					need$10(!keys.has(key), "ImageJsonDuplicateKey");
 					keys.add(key);
 					await whitespace();
-					need$8(await take() === ":", "ImageJsonColon");
+					need$10(await take() === ":", "ImageJsonColon");
 				}
 				const capture = keep && (!object || depth !== 0 || !fields || fields.includes(key)), child = await value(depth + 1, capture);
 				if (capture) {
@@ -149842,7 +148839,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 				await whitespace();
 				const delimiter = await take();
 				if (delimiter === end) break;
-				need$8(delimiter === ",", "ImageJsonDelimiter");
+				need$10(delimiter === ",", "ImageJsonDelimiter");
 				await whitespace();
 			}
 			return result;
@@ -149860,17 +148857,17 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 				"}"
 			].includes(q)) break;
 			raw += await take();
-			need$8(raw.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
+			need$10(raw.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
 		}
-		need$8(raw === "null" || raw === "true" || raw === "false" || /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw), "ImageJsonValue");
+		need$10(raw === "null" || raw === "true" || raw === "false" || /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw), "ImageJsonValue");
 		const parsed = JSON.parse(raw);
-		need$8(typeof parsed !== "number" || Number.isFinite(parsed), "ImageJsonNumber");
+		need$10(typeof parsed !== "number" || Number.isFinite(parsed), "ImageJsonNumber");
 		return keep ? parsed : void 0;
 	};
 	try {
 		const result = await value(0, true);
 		await whitespace();
-		need$8(await peek() === null, "ImageJsonTrailing");
+		need$10(await peek() === null, "ImageJsonTrailing");
 		return result;
 	} finally {
 		await iterator.return?.();
@@ -149885,14 +148882,14 @@ async function* verifyImageBytes(stream, descriptor, budget, { transfer = false 
 	try {
 		for await (const value of stream) {
 			budget.check();
-			need$8(budget.now() < until, "ImageBlobTimeout");
+			need$10(budget.now() < until, "ImageBlobTimeout");
 			const bytes = bytesOf(value);
 			count += bytes.length;
-			need$8(count <= descriptor.size, "ImageBlobSize");
+			need$10(count <= descriptor.size, "ImageBlobSize");
 			h.update(bytes);
 			yield bytes;
 		}
-		need$8(count === descriptor.size && "sha256:" + h.digest("hex") === descriptor.digest, "ImageBlobDigest");
+		need$10(count === descriptor.size && "sha256:" + h.digest("hex") === descriptor.digest, "ImageBlobDigest");
 		complete = true;
 	} finally {
 		if (!complete) {
@@ -149905,7 +148902,7 @@ async function* verifyImageBytes(stream, descriptor, budget, { transfer = false 
 /** A separate read-only class for the single CONTROL image. It is never a
 * three-image DATA graph, a source-copy handle or a publication permission. */
 function validateControlBinding(binding) {
-	need$8(record$1(binding) && Object.keys(binding).sort().join() === [
+	need$10(record$1(binding) && Object.keys(binding).sort().join() === [
 		"account",
 		"region",
 		"repositoryName",
@@ -149913,12 +148910,12 @@ function validateControlBinding(binding) {
 		"arm64Digest",
 		"configDigest"
 	].sort().join(), "ControlImageBinding");
-	need$8(typeof binding.account === "string" && /^\d{12}$/.test(binding.account) && typeof binding.region === "string" && /^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/.test(binding.region) && ["mem9-on-aws/bootstrap", "mem9-on-aws/preview/bootstrap"].includes(binding.repositoryName) && hexDigest(binding.arm64Digest) && hexDigest(binding.configDigest), "ControlImageScope");
+	need$10(typeof binding.account === "string" && /^\d{12}$/.test(binding.account) && typeof binding.region === "string" && /^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/.test(binding.region) && ["mem9-on-aws/bootstrap", "mem9-on-aws/preview/bootstrap"].includes(binding.repositoryName) && hexDigest(binding.arm64Digest) && hexDigest(binding.configDigest), "ControlImageScope");
 	validateImageDescriptor(binding.root, "manifest");
-	need$8(indexes$3.has(binding.root.mediaType), "ImageRootIndexRequired");
+	need$10(indexes$3.has(binding.root.mediaType), "ImageRootIndexRequired");
 }
 function controlGraph(binding, options) {
-	const pinned = freeze(structuredClone(binding));
+	const pinned = freeze$1(structuredClone(binding));
 	return readGraph([{
 		component: "bootstrap",
 		repositoryName: pinned.repositoryName,
@@ -149934,7 +148931,7 @@ function controlGraph(binding, options) {
 * avoids a module-initialization cycle; the ordinary graph API stays pure IO.
 */
 async function readOwnedControlImageCache(binding, options = {}) {
-	need$8(record$1(options) && Object.keys(options).every((k) => [
+	need$10(record$1(options) && Object.keys(options).every((k) => [
 		"directory",
 		"inventory",
 		"budget",
@@ -149944,9 +148941,9 @@ async function readOwnedControlImageCache(binding, options = {}) {
 	const { budget } = options;
 	assertImageBudget(budget);
 	const prepaid = prepaidControlBudgets.get(budget);
-	if (options.metadataReads !== void 0) need$8(prepaid?.metadataReads === options.metadataReads, "ControlCacheAcquisitionMismatch");
+	if (options.metadataReads !== void 0) need$10(prepaid?.metadataReads === options.metadataReads, "ControlCacheAcquisitionMismatch");
 	if (prepaid) {
-		need$8(!prepaid.used, "ControlCacheBudgetConsumed");
+		need$10(!prepaid.used, "ControlCacheBudgetConsumed");
 		prepaid.used = true;
 	}
 	const { openOwnedNonrootControlCache } = await Promise.resolve().then(() => (init_production_nonroot_control_cache(), production_nonroot_control_cache_exports));
@@ -149961,7 +148958,7 @@ async function readOwnedControlImageCache(binding, options = {}) {
 			readManifest: cache.readManifest,
 			readBlob: cache.readBlob
 		});
-		need$8(canaryEvidenceHash(graph.inventory) === canaryEvidenceHash(options.inventory), "NonrootControlCacheGraphChanged");
+		need$10(canaryEvidenceHash(graph.inventory) === canaryEvidenceHash(options.inventory), "NonrootControlCacheGraphChanged");
 		return {
 			graph,
 			cache
@@ -149975,7 +148972,7 @@ async function readOwnedControlImageCache(binding, options = {}) {
 * graph receipt. The fixed local reader reconstructs every edge/attestation,
 * then requires exact coverage of the downloaded nodes before returning it. */
 async function readCollectedControlImageCache(binding, options = {}) {
-	need$8(record$1(options) && Object.keys(options).every((k) => [
+	need$10(record$1(options) && Object.keys(options).every((k) => [
 		"directory",
 		"nodes",
 		"budget",
@@ -149985,11 +148982,11 @@ async function readCollectedControlImageCache(binding, options = {}) {
 	const { budget } = options;
 	assertImageBudget(budget);
 	const prepaid = prepaidControlBudgets.get(budget);
-	need$8(prepaid && prepaid.metadataReads === options.metadataReads && !prepaid.used, "ControlCacheAcquisitionMismatch");
+	need$10(prepaid && prepaid.metadataReads === options.metadataReads && !prepaid.used, "ControlCacheAcquisitionMismatch");
 	prepaid.used = true;
-	need$8(Array.isArray(options.nodes) && options.nodes.length > 0, "NonrootControlCacheInventory");
+	need$10(Array.isArray(options.nodes) && options.nodes.length > 0, "NonrootControlCacheInventory");
 	const nodes = structuredClone(options.nodes).sort((a, b) => a.digest.localeCompare(b.digest));
-	for (const node of nodes) need$8(record$1(node) && Object.keys(node).sort().join() === "digest,mediaType,size", "NonrootControlCacheDescriptor");
+	for (const node of nodes) need$10(record$1(node) && Object.keys(node).sort().join() === "digest,mediaType,size", "NonrootControlCacheDescriptor");
 	const inventory = {
 		kind: "readonly-control-image-graph",
 		roots: [{
@@ -150014,7 +149011,7 @@ async function readCollectedControlImageCache(binding, options = {}) {
 			readManifest: cache.readManifest,
 			readBlob: cache.readBlob
 		});
-		need$8(canaryEvidenceHash(graph.inventory.nodes) === canaryEvidenceHash(nodes), "NonrootControlCacheGraphChanged");
+		need$10(canaryEvidenceHash(graph.inventory.nodes) === canaryEvidenceHash(nodes), "NonrootControlCacheGraphChanged");
 		await cache.check();
 		return {
 			graph,
@@ -150028,11 +149025,11 @@ async function readCollectedControlImageCache(binding, options = {}) {
 async function readGraph(roots, { readManifest, readBlob, source, store, budget, side }, controlBinding) {
 	readManifest ??= source && (({ repositoryName, descriptor }) => source.manifest(repositoryName, descriptor));
 	readBlob ??= source && (({ repositoryName, descriptor }) => source.blob(repositoryName, descriptor));
-	need$8(typeof readManifest === "function" && typeof readBlob === "function" && typeof store?.put === "function" && typeof store.open === "function", "ImageReadAdapter");
+	need$10(typeof readManifest === "function" && typeof readBlob === "function" && typeof store?.put === "function" && typeof store.open === "function", "ImageReadAdapter");
 	const manifestMap = /* @__PURE__ */ new Map(), blobs = /* @__PURE__ */ new Map(), descriptors = /* @__PURE__ */ new Map(), visiting = /* @__PURE__ */ new Set(), done = /* @__PURE__ */ new Set(), origins = /* @__PURE__ */ new Set(), edges = [], attestations = [], images = /* @__PURE__ */ new Map(), readbacks = [];
 	const register = (d) => {
 		const before = descriptors.get(d.digest);
-		if (before) need$8(before.size === d.size && before.mediaType === d.mediaType, "ImageDescriptorConflict");
+		if (before) need$10(before.size === d.size && before.mediaType === d.mediaType, "ImageDescriptorConflict");
 		else descriptors.set(d.digest, {
 			digest: d.digest,
 			size: d.size,
@@ -150064,7 +149061,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			})();
 			if (!blobs.has(d.digest)) {
 				await store.put(d, checked);
-				need$8(consumed, "ImageBlobNotConsumed");
+				need$10(consumed, "ImageBlobNotConsumed");
 				blobs.set(d.digest, { ...descriptors.get(d.digest) });
 			} else for await (const _ of checked);
 			readbacks.push({
@@ -150088,12 +149085,12 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		edges.push(row);
 	};
 	const visit = async (root, d, depth) => {
-		need$8(depth <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "ImageGraphDepth");
+		need$10(depth <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "ImageGraphDepth");
 		validateImageDescriptor(d, "manifest");
 		register(d);
 		budget.manifest(d);
 		const repositoryName = side === "control" ? root.repositoryName : side === "source" ? root.sourceRepository : root.destinationRepository, key = repositoryName + "\0" + d.digest;
-		need$8(!visiting.has(key), "ImageGraphCycle");
+		need$10(!visiting.has(key), "ImageGraphCycle");
 		if (done.has(key)) return;
 		visiting.add(key);
 		const leave = budget.enter();
@@ -150108,7 +149105,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 				descriptor: d,
 				signal: budget.signal
 			}));
-			need$8(bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageManifestDigest");
+			need$10(bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageManifestDigest");
 		} finally {
 			leave();
 		}
@@ -150116,7 +149113,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			maxBytes: IMAGE_TRANSITION_LIMITS.maxManifestBytes,
 			budget
 		});
-		need$8(record$1(document) && document.schemaVersion === 2 && document.mediaType === d.mediaType, "ImageManifestSchema");
+		need$10(record$1(document) && document.schemaVersion === 2 && document.mediaType === d.mediaType, "ImageManifestSchema");
 		readbacks.push({
 			repositoryName,
 			...descriptors.get(d.digest)
@@ -150137,7 +149134,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			"subject",
 			"artifactType"
 		];
-		need$8(Object.keys(document).every((k) => allowed.includes(k)), "ImageManifestFields");
+		need$10(Object.keys(document).every((k) => allowed.includes(k)), "ImageManifestFields");
 		if (!manifestMap.has(d.digest)) {
 			await store.put(d, oneChunk(bytes));
 			manifestMap.set(d.digest, {
@@ -150146,17 +149143,17 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			});
 		}
 		if (indexes$3.has(d.mediaType)) {
-			need$8(Array.isArray(document.manifests) && document.manifests.length > 0 && document.manifests.length <= IMAGE_TRANSITION_LIMITS.maxEdges, "ImageIndexChildren");
+			need$10(Array.isArray(document.manifests) && document.manifests.length > 0 && document.manifests.length <= IMAGE_TRANSITION_LIMITS.maxEdges, "ImageIndexChildren");
 			const children = /* @__PURE__ */ new Set();
 			for (const [index, child] of document.manifests.entries()) {
-				need$8(!children.has(child.digest), "ImageDuplicateManifestEdge");
+				need$10(!children.has(child.digest), "ImageDuplicateManifestEdge");
 				children.add(child.digest);
 				edge(root.component, d.digest, child, "manifest", index);
 				await visit(root, child, depth + 1);
 			}
-			if (d.digest === root.root.digest) need$8(document.manifests.filter((c) => c.digest === root.arm64Digest && c.platform?.os === "linux" && c.platform.architecture === "arm64").length === 1, "ImageArm64Selection");
+			if (d.digest === root.root.digest) need$10(document.manifests.filter((c) => c.digest === root.arm64Digest && c.platform?.os === "linux" && c.platform.architecture === "arm64").length === 1, "ImageArm64Selection");
 		} else {
-			need$8(Array.isArray(document.layers) && document.layers.length <= IMAGE_TRANSITION_LIMITS.maxBlobNodes && configs.has(document.config?.mediaType), "ImageManifestConfig");
+			need$10(Array.isArray(document.layers) && document.layers.length <= IMAGE_TRANSITION_LIMITS.maxBlobNodes && configs.has(document.config?.mediaType), "ImageManifestConfig");
 			edge(root.component, d.digest, document.config, "config", 0);
 			await blob(repositoryName, document.config);
 			const config = await readImageJson(verifyImageBytes(store.open(document.config), document.config, budget), {
@@ -150168,11 +149165,11 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 					"rootfs"
 				]
 			});
-			need$8(record$1(config), "ImageConfigSchema");
-			if (document.config.mediaType === IMAGE_MEDIA.emptyConfig) need$8(Object.keys(config).length === 0, "ImageEmptyConfig");
+			need$10(record$1(config), "ImageConfigSchema");
+			if (document.config.mediaType === IMAGE_MEDIA.emptyConfig) need$10(Object.keys(config).length === 0, "ImageEmptyConfig");
 			let payloads = 0;
 			for (const [index, layer] of document.layers.entries()) {
-				need$8(IMAGE_LAYER_MEDIA.includes(layer.mediaType) || layer.mediaType === IMAGE_MEDIA.attestation, "ImageLayerMedia");
+				need$10(IMAGE_LAYER_MEDIA.includes(layer.mediaType) || layer.mediaType === IMAGE_MEDIA.attestation, "ImageLayerMedia");
 				edge(root.component, d.digest, layer, "layer", index);
 				await blob(repositoryName, layer);
 				if (layer.mediaType === IMAGE_MEDIA.attestation) {
@@ -150186,7 +149183,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 							"predicateType"
 						]
 					});
-					need$8(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && Array.isArray(payload.subject) && payload.subject.length > 0 && payload.subject.every((s) => record$1(s) && record$1(s.digest) && Object.keys(s.digest).length === 1 && s.digest.sha256 === root.arm64Digest.slice(7)), "ImageAttestationSubject");
+					need$10(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && Array.isArray(payload.subject) && payload.subject.length > 0 && payload.subject.every((s) => record$1(s) && record$1(s.digest) && Object.keys(s.digest).length === 1 && s.digest.sha256 === root.arm64Digest.slice(7)), "ImageAttestationSubject");
 					attestations.push({
 						component: root.component,
 						manifestDigest: d.digest,
@@ -150197,12 +149194,12 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 				}
 			}
 			if (payloads) {
-				need$8(payloads === document.layers.length, "ImageMixedArtifactLayers");
-				if (d.annotations?.["vnd.docker.reference.digest"] !== void 0) need$8(d.annotations["vnd.docker.reference.digest"] === root.arm64Digest, "ImageAttestationSubject");
-				if (d.annotations?.["vnd.docker.reference.type"] !== void 0) need$8(d.annotations["vnd.docker.reference.type"] === "attestation-manifest", "ImageAttestationType");
-			} else need$8(config.os === "linux" && ["arm64", "amd64"].includes(config.architecture) && config.rootfs?.type === "layers" && Array.isArray(config.rootfs.diff_ids) && config.rootfs.diff_ids.length === document.layers.length && config.rootfs.diff_ids.every(hexDigest), "ImageRuntimeConfig");
+				need$10(payloads === document.layers.length, "ImageMixedArtifactLayers");
+				if (d.annotations?.["vnd.docker.reference.digest"] !== void 0) need$10(d.annotations["vnd.docker.reference.digest"] === root.arm64Digest, "ImageAttestationSubject");
+				if (d.annotations?.["vnd.docker.reference.type"] !== void 0) need$10(d.annotations["vnd.docker.reference.type"] === "attestation-manifest", "ImageAttestationType");
+			} else need$10(config.os === "linux" && ["arm64", "amd64"].includes(config.architecture) && config.rootfs?.type === "layers" && Array.isArray(config.rootfs.diff_ids) && config.rootfs.diff_ids.length === document.layers.length && config.rootfs.diff_ids.every(hexDigest), "ImageRuntimeConfig");
 			if (d.digest === root.arm64Digest) {
-				need$8(!payloads && config.architecture === "arm64", "ImageArm64Config");
+				need$10(!payloads && config.architecture === "arm64", "ImageArm64Config");
 				images.set(root.component, {
 					manifest: descriptors.get(d.digest),
 					config: document.config,
@@ -150212,7 +149209,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			}
 		}
 		if (document.subject) {
-			need$8(document.subject.digest === root.arm64Digest, "ImageArtifactSubject");
+			need$10(document.subject.digest === root.arm64Digest, "ImageArtifactSubject");
 			edge(root.component, d.digest, document.subject, "subject", 0);
 			await visit(root, document.subject, depth + 1);
 		}
@@ -150220,9 +149217,9 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		done.add(key);
 	};
 	for (const root of roots) await visit(root, root.root, 0);
-	need$8(images.size === (controlBinding ? 1 : 3), "ImageMissingArm64");
-	if (controlBinding) need$8(images.get("bootstrap")?.config.digest === controlBinding.configDigest, "ControlImageConfigBinding");
-	const inventory = freeze({
+	need$10(images.size === (controlBinding ? 1 : 3), "ImageMissingArm64");
+	if (controlBinding) need$10(images.get("bootstrap")?.config.digest === controlBinding.configDigest, "ControlImageConfigBinding");
+	const inventory = freeze$1({
 		version: 1,
 		...controlBinding ? { kind: "readonly-control-image-graph" } : {},
 		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
@@ -150237,7 +149234,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
 		inventory
 	});
-	contexts.set(handle, {
+	contexts$1.set(handle, {
 		roots: structuredClone(roots),
 		side,
 		controlBinding,
@@ -150246,16 +149243,16 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		manifests: manifestMap,
 		blobs,
 		images,
-		readbacks: freeze(readbacks)
+		readbacks: freeze$1(readbacks)
 	});
 	return handle;
 }
 function controlImageGraphBinding(handle) {
-	const state = contexts.get(handle);
-	need$8(state?.side === "control" && state.controlBinding, "ControlImageContextRequired");
+	const state = contexts$1.get(handle);
+	need$10(state?.side === "control" && state.controlBinding, "ControlImageContextRequired");
 	state.budget.check();
 	const binding = state.controlBinding;
-	return freeze({
+	return freeze$1({
 		account: binding.account,
 		region: binding.region,
 		repositoryName: binding.repositoryName,
@@ -150266,24 +149263,24 @@ function controlImageGraphBinding(handle) {
 	});
 }
 function imageGraphState(handle) {
-	need$8(contexts.has(handle), "ImageGraphContextRequired");
-	const s = contexts.get(handle);
+	need$10(contexts$1.has(handle), "ImageGraphContextRequired");
+	const s = contexts$1.get(handle);
 	return {
-		roots: freeze(structuredClone(s.roots)),
+		roots: freeze$1(structuredClone(s.roots)),
 		side: s.side,
 		budget: s.budget,
-		manifests: new Map([...s.manifests].map(([k, v]) => [k, freeze(structuredClone(v))])),
-		blobs: new Map([...s.blobs].map(([k, v]) => [k, freeze(structuredClone(v))])),
-		images: new Map([...s.images].map(([k, v]) => [k, freeze(structuredClone(v))])),
+		manifests: new Map([...s.manifests].map(([k, v]) => [k, freeze$1(structuredClone(v))])),
+		blobs: new Map([...s.blobs].map(([k, v]) => [k, freeze$1(structuredClone(v))])),
+		images: new Map([...s.images].map(([k, v]) => [k, freeze$1(structuredClone(v))])),
 		readbacks: structuredClone(s.readbacks),
 		store: Object.freeze({ open(d) {
 			const known = s.blobs.get(d.digest) ?? s.manifests.get(d.digest);
-			need$8(known && known.size === d.size && known.mediaType === d.mediaType, "ImageCacheDescriptor");
+			need$10(known && known.size === d.size && known.mediaType === d.mediaType, "ImageCacheDescriptor");
 			return verifyImageBytes(s.store.open(d), d, s.budget);
 		} })
 	};
 }
-var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts, budgets, prepaidControlBudgets, imageDigest, imageFailure, need$8, record$1, integer, hexDigest, freeze, bytesOf, oneChunk;
+var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts$1, budgets, prepaidControlBudgets, imageDigest, imageFailure, need$10, record$1, integer, hexDigest, freeze$1, bytesOf, oneChunk;
 var init_production_image_graph = __esmMin((() => {
 	init_production_control_capacity();
 	init_production_image_transition();
@@ -150327,7 +149324,7 @@ var init_production_image_graph = __esmMin((() => {
 		IMAGE_MEDIA.attestation,
 		...IMAGE_LAYER_MEDIA
 	]);
-	contexts = /* @__PURE__ */ new WeakMap();
+	contexts$1 = /* @__PURE__ */ new WeakMap();
 	budgets = /* @__PURE__ */ new WeakSet();
 	prepaidControlBudgets = /* @__PURE__ */ new WeakMap();
 	imageDigest = (bytes) => "sha256:" + createHash("sha256").update(bytes).digest("hex");
@@ -150337,12 +149334,569 @@ var init_production_image_graph = __esmMin((() => {
 			hold: true
 		});
 	};
-	need$8 = (ok, code = "ImageGraphInvalid") => {
+	need$10 = (ok, code = "ImageGraphInvalid") => {
 		if (!ok) imageFailure(code);
 	};
 	record$1 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 	integer = (v) => Number.isSafeInteger(v) && v >= 0;
 	hexDigest = (v) => typeof v === "string" && /^sha256:[a-f0-9]{64}$/.test(v);
+	freeze$1 = (v) => {
+		if (v && typeof v === "object") {
+			Object.values(v).forEach(freeze$1);
+			Object.freeze(v);
+		}
+		return v;
+	};
+	bytesOf = (value) => {
+		need$10(value instanceof Uint8Array, "ImageByteStreamRequired");
+		need$10(value.byteLength <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageStreamBufferLimit");
+		return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+	};
+	oneChunk = (bytes) => (async function* () {
+		yield bytes;
+	})();
+}));
+//#endregion
+//#region scripts/lib/production-image-filesystem.mjs
+function text$1(b) {
+	const end = b.indexOf(0);
+	return decoder().decode(end < 0 ? b : b.subarray(0, end));
+}
+function numeric(b, { negative = false } = {}) {
+	let value;
+	if (b[0] & 128) {
+		let n = BigInt(b[0] & 127);
+		for (const v of b.subarray(1)) n = n * 256n + BigInt(v);
+		if (b[0] & 64) n -= 1n << BigInt(b.length * 8 - 1);
+		value = Number(n);
+	} else {
+		const s = b.toString("ascii").replace(/\0.*$/s, "").trim();
+		need$9(s === "" || /^[0-7]+$/.test(s), "ImageTarNumber");
+		value = s === "" ? 0 : parseInt(s, 8);
+	}
+	need$9(Number.isSafeInteger(value) && (negative || value >= 0), "ImageTarNumber");
+	return value;
+}
+function normalize$2(path, { link = false, base = "" } = {}) {
+	need$9(typeof path === "string" && Buffer.byteLength(path) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && !path.includes("\0") && !path.includes("\\"), "ImageTarPath");
+	need$9(link || !path.startsWith("/"), "ImageTarAbsolutePath");
+	const parts = link && !path.startsWith("/") ? base.split("/").filter(Boolean) : [];
+	for (const part of path.split("/")) {
+		if (!part || part === ".") continue;
+		if (part === "..") {
+			need$9(link && parts.length > 0, "ImageTarEscape");
+			parts.pop();
+		} else parts.push(part);
+	}
+	return parts.join("/");
+}
+function uncompressedPass(budget) {
+	const limit = budget.uncompressedBytesLimit;
+	return {
+		limit,
+		bytes: 0,
+		check(size) {
+			need$9(Number.isSafeInteger(size) && size >= 0 && (limit === void 0 || size <= limit), "ImageUncompressedLimit");
+		},
+		add(size) {
+			this.check(this.bytes + size);
+			budget.uncompressed(size);
+			this.bytes += size;
+		}
+	};
+}
+async function* unpacked(layer, diffId, readBlob, budget, pass = uncompressedPass(budget)) {
+	const source = Readable.from(readBlob(layer), {
+		highWaterMark: 65536,
+		objectMode: false
+	});
+	let output = source;
+	if (layer.mediaType === IMAGE_MEDIA.gzip || layer.mediaType === IMAGE_MEDIA.dockerGzip) output = createGunzip({ chunkSize: 65536 });
+	else if (layer.mediaType === IMAGE_MEDIA.zstd) output = createZstdDecompress({ chunkSize: 65536 });
+	else need$9(layer.mediaType === IMAGE_MEDIA.tar, "ImageFilesystemMedia");
+	if (output !== source) {
+		source.on("error", (e) => output.destroy(e));
+		output.on("error", (e) => source.destroy(e));
+		source.pipe(output);
+	}
+	const sha = createHash("sha256");
+	try {
+		for await (const chunk of output) {
+			need$9(chunk.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageFilesystemBuffer");
+			pass.add(chunk.length);
+			sha.update(chunk);
+			yield chunk;
+		}
+		need$9("sha256:" + sha.digest("hex") === diffId, "ImageLayerDiffId");
+	} finally {
+		const stopped = [.../* @__PURE__ */ new Set([output, source])].map((stream) => finished(stream, { cleanup: true }).catch((error) => {
+			if (error?.code !== "ERR_STREAM_PREMATURE_CLOSE" && error?.code !== "ABORT_ERR") throw error;
+		}));
+		output.destroy();
+		source.destroy();
+		await Promise.all(stopped);
+	}
+}
+function pax(bytes) {
+	const result = {};
+	let at = 0;
+	while (at < bytes.length) {
+		const space = bytes.indexOf(32, at);
+		need$9(space > at, "ImagePaxLength");
+		const digits = bytes.subarray(at, space).toString("ascii");
+		need$9(/^[1-9]\d*$/.test(digits), "ImagePaxLength");
+		const n = Number(digits);
+		need$9(Number.isSafeInteger(n) && n > space - at + 2 && at + n <= bytes.length && bytes[at + n - 1] === 10, "ImagePaxLength");
+		const record = decoder().decode(bytes.subarray(space + 1, at + n - 1)), equals = record.indexOf("=");
+		need$9(equals > 0, "ImagePaxRecord");
+		const key = record.slice(0, equals), value = record.slice(equals + 1);
+		need$9(!Object.hasOwn(result, key), "ImagePaxDuplicate");
+		need$9([
+			"path",
+			"linkpath",
+			"size",
+			"mtime",
+			"atime",
+			"ctime",
+			"uid",
+			"gid",
+			"uname",
+			"gname",
+			"comment",
+			"charset"
+		].includes(key) || /^SCHILY\.xattr\.[A-Za-z0-9_.-]+$/.test(key), "ImagePaxUnsupported");
+		result[key] = value;
+		at += n;
+	}
+	return result;
+}
+function resolved(nodes, path, { parent = false, missing = true, onLink } = {}) {
+	let rest = normalize$2(path).split("/").filter(Boolean), prefix = [], hops = 0;
+	while (rest.length) {
+		const part = rest.shift();
+		prefix.push(part);
+		const name = prefix.join("/"), node = nodes.get(name);
+		if (node?.type === "symlink" && (!parent || rest.length)) {
+			need$9(++hops <= IMAGE_TRANSITION_LIMITS.maxVirtualLinkHops, "ImageVirtualLinkLoop");
+			onLink?.(name, node);
+			rest = [...normalize$2(node.link, {
+				link: true,
+				base: prefix.slice(0, -1).join("/")
+			}).split("/").filter(Boolean), ...rest];
+			prefix = [];
+			continue;
+		}
+		if (rest.length && node) need$9(node.type === "directory", "ImageVirtualParent");
+		if (!node && !missing) imageFailure("ImageVirtualLinkMissing");
+	}
+	return prefix.join("/");
+}
+function parents(nodes, path, layer, budget) {
+	const parts = path.split("/");
+	parts.pop();
+	let parent = "";
+	for (const part of parts) {
+		parent = parent ? parent + "/" + part : part;
+		const found = nodes.get(parent);
+		if (found) need$9(found.type === "directory", "ImageVirtualParent");
+		else {
+			budget.entry();
+			nodes.set(parent, {
+				type: "directory",
+				layer,
+				implicit: true
+			});
+		}
+	}
+}
+function remove(nodes, path, { olderThan } = {}) {
+	for (const [name, node] of nodes) if ((name === path || name.startsWith(path + "/")) && (olderThan === void 0 || node.layer < olderThan)) nodes.delete(name);
+}
+async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
+	const layerStart = pass.bytes, cursor = new Cursor$1(unpacked(layer, diffId, readBlob, budget, pass));
+	let local = {}, global = {}, longPath, longLink;
+	try {
+		while (true) {
+			budget.check();
+			const header = await cursor.read(512);
+			if (zero$4(header)) {
+				need$9(zero$4(await cursor.read(512)), "ImageTarTerminator");
+				need$9(!Object.keys(local).length && longPath === void 0 && longLink === void 0, "ImageTarDanglingExtension");
+				await cursor.drain({ zeros: true });
+				break;
+			}
+			budget.entry();
+			let checksum = 0;
+			for (let i = 0; i < 512; i++) checksum += i >= 148 && i < 156 ? 32 : header[i];
+			need$9(checksum === numeric(header.subarray(148, 156)), "ImageTarChecksum");
+			const type = String.fromCharCode(header[156] || 48), rawSize = numeric(header.subarray(124, 136));
+			need$9(rawSize <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, "ImageTarSize");
+			const magic = text$1(header.subarray(257, 263));
+			need$9(magic === "" || magic === "ustar" || magic === "ustar ", "ImageTarFormat");
+			if ([
+				"x",
+				"g",
+				"L",
+				"K"
+			].includes(type)) {
+				pass.check(layerStart + cursor.offset + Math.ceil(rawSize / 512) * 512);
+				need$9(rawSize <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageTarExtensionSize");
+				const bytes = await cursor.read(rawSize);
+				await cursor.skip((512 - rawSize % 512) % 512);
+				if (type === "x") {
+					need$9(!Object.keys(local).length, "ImagePaxDuplicateHeader");
+					local = pax(bytes);
+				} else if (type === "g") {
+					const values = pax(bytes);
+					need$9(!Object.hasOwn(values, "path") && !Object.hasOwn(values, "linkpath") && !Object.hasOwn(values, "size"), "ImagePaxGlobalPath");
+					global = {
+						...global,
+						...values
+					};
+				} else {
+					const value = text$1(bytes);
+					need$9(Buffer.byteLength(value) <= IMAGE_TRANSITION_LIMITS.maxPathBytes);
+					if (type === "L") {
+						need$9(longPath === void 0);
+						longPath = value;
+					} else {
+						need$9(longLink === void 0);
+						longLink = value;
+					}
+				}
+				continue;
+			}
+			const values = {
+				...global,
+				...local
+			};
+			local = {};
+			const prefix = text$1(header.subarray(345, 500));
+			let path = values.path ?? longPath ?? (prefix ? prefix + "/" : "") + text$1(header.subarray(0, 100)), link = values.linkpath ?? longLink ?? text$1(header.subarray(157, 257));
+			longPath = longLink = void 0;
+			const size = values.size === void 0 ? rawSize : Number(values.size);
+			need$9(Number.isSafeInteger(size) && size >= 0 && size <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes && size + budget.usage().uncompressedBytes <= IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, "ImageTarSize");
+			pass.check(layerStart + cursor.offset + Math.ceil(size / 512) * 512);
+			path = normalize$2(path);
+			if (path === "") {
+				need$9(type === "5" && size === 0, "ImageTarRoot");
+				continue;
+			}
+			path = resolved(nodes, path, { parent: true });
+			parents(nodes, path, index, budget);
+			const name = posix.basename(path), parent = posix.dirname(path) === "." ? "" : posix.dirname(path);
+			if (name.startsWith(".wh.")) {
+				need$9(type === "0" && size === 0, "ImageWhiteoutInvalid");
+				if (name === ".wh..wh..opq") {
+					for (const [p, node] of nodes) if ((parent === "" || p.startsWith(parent + "/")) && node.layer < index) nodes.delete(p);
+				} else {
+					const target = name.slice(4);
+					need$9(target && target !== "." && target !== "..", "ImageWhiteoutInvalid");
+					remove(nodes, parent ? parent + "/" + target : target, { olderThan: index });
+				}
+				continue;
+			}
+			const metadata = {
+				layer: index,
+				layerDigest: layer.digest,
+				mode: numeric(header.subarray(100, 108)),
+				uid: numeric(header.subarray(108, 116)),
+				gid: numeric(header.subarray(116, 124)),
+				mtime: numeric(header.subarray(136, 148), { negative: true }),
+				pax: values
+			};
+			if (type === "0") {
+				const offset = cursor.offset, sha = createHash("sha256");
+				for await (const chunk of cursor.chunks(size)) sha.update(chunk);
+				await cursor.skip((512 - size % 512) % 512);
+				remove(nodes, path);
+				nodes.set(path, {
+					...metadata,
+					type: "file",
+					content: {
+						layer: index,
+						layerDigest: layer.digest,
+						offset,
+						size,
+						sha256: sha.digest("hex")
+					}
+				});
+			} else if (type === "5") {
+				need$9(size === 0, "ImageTarDirectorySize");
+				if (nodes.get(path)?.type !== "directory") remove(nodes, path);
+				nodes.set(path, {
+					...metadata,
+					type: "directory"
+				});
+			} else if (type === "2") {
+				need$9(size === 0 && link.length > 0, "ImageTarLink");
+				normalize$2(link, {
+					link: true,
+					base: parent
+				});
+				remove(nodes, path);
+				nodes.set(path, {
+					...metadata,
+					type: "symlink",
+					link
+				});
+			} else if (type === "1") {
+				need$9(size === 0 && link.length > 0, "ImageTarLink");
+				const target = nodes.get(resolved(nodes, normalize$2(link, { link: true }), { missing: false }));
+				need$9(target && ["file", "hardlink"].includes(target.type), "ImageHardlinkTarget");
+				remove(nodes, path);
+				nodes.set(path, {
+					...metadata,
+					type: "hardlink",
+					link,
+					content: target.content
+				});
+			} else imageFailure("ImageTarEntryUnsupported");
+		}
+	} finally {
+		await cursor.close();
+	}
+}
+async function packageDatabase(content, layers, diffIds, readBlob, budget, requirements) {
+	need$9(content.size <= IMAGE_TRANSITION_LIMITS.maxPackageDatabaseBytes, "ImagePackageDatabaseLimit");
+	const layer = layers[content.layer], cursor = new Cursor$1(unpacked(layer, diffIds[content.layer], readBlob, budget)), decode = decoder(), sha = createHash("sha256");
+	const matches = new Map(requirements.map((r) => [r.name, []]));
+	let pending = "", databaseText = "", pkg = {};
+	const line = (value) => {
+		if (value === "") {
+			if (Object.keys(pkg).length) {
+				need$9(pkg.P && pkg.V, "ImagePackageRecord");
+				if (matches.has(pkg.P)) matches.get(pkg.P).push(pkg.V);
+			}
+			pkg = {};
+			return;
+		}
+		if (value.startsWith("P:") || value.startsWith("V:")) {
+			need$9(!Object.hasOwn(pkg, value[0]), "ImagePackageDuplicateField");
+			pkg[value[0]] = value.slice(2);
+		}
+	};
+	try {
+		await cursor.skip(content.offset);
+		for await (const bytes of cursor.chunks(content.size)) {
+			sha.update(bytes);
+			const decoded = decode.decode(bytes, { stream: true });
+			databaseText += decoded;
+			pending += decoded;
+			need$9(Buffer.byteLength(pending) <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImagePackageLineLimit");
+			const rows = pending.split("\n");
+			pending = rows.pop();
+			for (const row of rows) line(row);
+		}
+		const final = decode.decode();
+		databaseText += final;
+		pending += final;
+		if (pending) line(pending);
+		line("");
+		await cursor.drain();
+		need$9(sha.digest("hex") === content.sha256, "ImagePackageDatabaseChanged");
+	} finally {
+		await cursor.close();
+	}
+	return {
+		databaseText,
+		databaseHash: content.sha256,
+		paths: requirements.map((r) => r.path),
+		packages: requirements.map((r) => {
+			const versions = matches.get(r.name);
+			need$9(versions.length === 1 && versions[0] === r.version, "ImagePackageVersion");
+			return {
+				path: r.path,
+				manager: r.manager,
+				name: r.name,
+				version: versions[0],
+				databaseSha256: content.sha256,
+				databaseSize: content.size,
+				layerDigest: content.layerDigest
+			};
+		})
+	};
+}
+/** No filesystem or credential APIs are used. readBlob comes only from the
+* verified cache. A private caller must isolate this parser from credentials. */
+async function inspectImageFilesystem(graph, { component, requirements = [], budget } = {}) {
+	const state = imageGraphState(graph);
+	budget ??= state.budget;
+	need$9(budget === state.budget, "ImageFilesystemBudget");
+	assertImageBudget(budget);
+	const image = state.images.get(component);
+	need$9(image, "ImageFilesystemComponent");
+	need$9(Array.isArray(requirements) && requirements.length <= 32 && new Set(requirements.map((r) => r.path + "\0" + r.name)).size === requirements.length, "ImagePackageRequirements");
+	for (const r of requirements) need$9(r && Object.keys(r).sort().join() === [
+		"path",
+		"manager",
+		"name",
+		"version"
+	].sort().join() && r.manager === "apk" && typeof r.path === "string" && r.path.startsWith("/") && typeof r.name === "string" && /^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name) && typeof r.version === "string" && /^[^\s\0]{1,512}$/.test(r.version), "ImagePackageRequirements");
+	const nodes = /* @__PURE__ */ new Map(), readBlob = (d) => state.store.open(d), pass = uncompressedPass(budget);
+	for (let i = 0; i < image.layers.length; i++) await applyLayer(nodes, image.layers[i], image.diffIds[i], i, readBlob, budget, pass);
+	for (const [path, node] of nodes) if (node.type === "symlink") resolved(nodes, path);
+	const groups = /* @__PURE__ */ new Map();
+	for (const r of requirements) {
+		const name = resolved(nodes, normalize$2(r.path, { link: true }), { missing: false }), node = nodes.get(name);
+		need$9(node && ["file", "hardlink"].includes(node.type), "ImagePackageDatabaseMissing");
+		const key = node.content.layer + ":" + node.content.offset;
+		if (!groups.has(key)) groups.set(key, {
+			content: node.content,
+			requirements: []
+		});
+		groups.get(key).requirements.push(r);
+	}
+	const packages = [], databases = [];
+	for (const group of groups.values()) {
+		const db = await packageDatabase(group.content, image.layers, image.diffIds, readBlob, budget, group.requirements);
+		packages.push(...db.packages);
+		databases.push(db);
+	}
+	const entries = [...nodes].sort(([a], [b]) => a.localeCompare(b)).map(([path, node]) => ({
+		path,
+		...node
+	}));
+	const evidence = freeze({
+		version: 1,
+		graphHash: graph.graphHash,
+		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
+		component,
+		rootDigest: state.roots.find((r) => r.component === component).root.digest,
+		arm64Digest: image.manifest.digest,
+		entriesHash: canaryEvidenceHash(entries),
+		entryCount: entries.length,
+		requirementsHash: canaryEvidenceHash(requirements),
+		packages
+	});
+	const context = Object.freeze({ evidence });
+	verified.set(context, {
+		evidence,
+		databases,
+		uncompressedBytes: pass.bytes,
+		entries: freeze(entries),
+		side: state.side,
+		graph,
+		requirements: structuredClone(requirements)
+	});
+	return context;
+}
+/** Native use binds actual complete geometry to its original allocation.
+* This value comes only from live parser state, not serialized evidence. */
+function assertImageFilesystemUncompressedLimit(context, limit) {
+	const state = verified.get(context);
+	need$9(state && state.kind !== "archived-filesystem-evidence" && Number.isSafeInteger(state.uncompressedBytes), "ImageFilesystemContextRequired");
+	need$9(Number.isSafeInteger(limit) && limit > 0, "ImageFilesystemUncompressedLimit");
+	need$9(state.uncompressedBytes <= Math.min(limit, IMAGE_TRANSITION_LIMITS.maxUncompressedBytes), "ImageUncompressedLimit");
+	return state.uncompressedBytes;
+}
+function inspectImageFilesystemEvidence(context) {
+	need$9(verified.has(context), "ImageFilesystemContextRequired");
+	return structuredClone(verified.get(context).evidence);
+}
+/** Read-only metadata from the actual verified virtual filesystem. This does
+* not create authority or expose a host filesystem path. Archive reconstruction
+* cannot claim a new live extraction through this accessor. */
+function inspectImageFilesystemEntries(context) {
+	const state = verified.get(context);
+	need$9(state && state.kind !== "archived-filesystem-evidence" && state.entries, "ImageFilesystemContextRequired");
+	need$9(canaryEvidenceHash(state.entries) === state.evidence.entriesHash, "ImageFilesystemEntriesChanged");
+	return structuredClone(state.entries);
+}
+/** File facts come from the verified final overlay and actual layer bytes.
+* No host path is opened and no archived JSON object creates this handle. */
+function inspectImageFilesystemFile(context, path) {
+	const state = verified.get(context);
+	need$9(state && state.kind !== "archived-filesystem-evidence" && state.entries, "ImageFilesystemContextRequired");
+	need$9(typeof path === "string" && path.startsWith("/") && path !== "/" && posix.normalize(path) === path && !path.endsWith("/"), "ImageRuntimeFilePath");
+	const nodes = new Map(state.entries.map(({ path, ...node }) => [path, node])), links = [];
+	const effectiveId = (node, key) => {
+		const raw = node.pax?.[key];
+		if (raw === void 0) return node[key];
+		need$9(typeof raw === "string" && /^(?:0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(Number(raw)), "ImageRuntimeFileOwner");
+		return Number(raw);
+	};
+	const metadata = (name, node) => ({
+		path: "/" + name,
+		type: node.type,
+		...node.implicit ? { implicit: true } : {},
+		...node.mode === void 0 ? {} : { mode: node.mode },
+		...effectiveId(node, "uid") === void 0 ? {} : { uid: effectiveId(node, "uid") },
+		...effectiveId(node, "gid") === void 0 ? {} : { gid: effectiveId(node, "gid") },
+		privilegeAttributes: Object.keys(node.pax ?? {}).filter((key) => key === "SCHILY.xattr.security.capability").sort(),
+		...node.type === "symlink" ? { link: node.link } : {}
+	});
+	const name = resolved(nodes, normalize$2(path, { link: true }), {
+		missing: false,
+		onLink: (name, node) => links.push(metadata(name, node))
+	}), node = nodes.get(name);
+	need$9(node?.type === "file" && node.content, "ImageRuntimeFileRequired");
+	const parentRecords = /* @__PURE__ */ new Map();
+	for (const start of [
+		normalize$2(path, { link: true }),
+		name,
+		...links.map((link) => link.path.slice(1))
+	]) {
+		let parent = posix.dirname(start);
+		while (parent !== "." && parent !== "/") {
+			const original = nodes.get(parent);
+			if (original) {
+				need$9(["directory", "symlink"].includes(original.type), "ImageVirtualParent");
+				parentRecords.set(parent, metadata(parent, original));
+			} else {
+				const actual = resolved(nodes, parent, { missing: false }), entry = nodes.get(actual);
+				need$9(entry?.type === "directory", "ImageVirtualParent");
+				parentRecords.set(actual, metadata(actual, entry));
+			}
+			parent = posix.dirname(parent);
+		}
+	}
+	return freeze({
+		...metadata(name, node),
+		path,
+		resolvedPath: "/" + name,
+		sha256: node.content.sha256,
+		size: node.content.size,
+		layerDigest: node.content.layerDigest,
+		symlinkChain: links,
+		parents: [...parentRecords.values()].sort((a, b) => a.path.localeCompare(b.path)),
+		rootMetadata: "not-recorded"
+	});
+}
+/** Bounded reads for source modules, passwd and loader metadata. Large
+* executables use their verified content hash, not an unbounded Buffer. */
+async function readImageFilesystemFile(context, path, { maxBytes = IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes } = {}) {
+	need$9(Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageRuntimeFileLimit");
+	const fact = inspectImageFilesystemFile(context, path);
+	need$9(fact.size <= maxBytes, "ImageRuntimeFileLimit");
+	const state = verified.get(context), graph = imageGraphState(state.graph), image = graph.images.get(state.evidence.component);
+	const content = new Map(state.entries.map(({ path, ...node }) => [path, node])).get(fact.resolvedPath.slice(1)).content, layer = image.layers[content.layer];
+	const cursor = new Cursor$1(unpacked(layer, image.diffIds[content.layer], (d) => graph.store.open(d), graph.budget));
+	try {
+		await cursor.skip(content.offset);
+		const bytes = await cursor.read(content.size);
+		await cursor.drain();
+		need$9(createHash("sha256").update(bytes).digest("hex") === fact.sha256, "ImageRuntimeFileChanged");
+		return bytes;
+	} finally {
+		await cursor.close();
+	}
+}
+function imageFilesystemVerificationKind(context) {
+	need$9(verified.has(context), "ImageFilesystemContextRequired");
+	return verified.get(context).kind ?? "live-filesystem-evidence";
+}
+var verified, decoder, need$9, freeze, zero$4, Cursor$1;
+var init_production_image_filesystem = __esmMin((() => {
+	init_production_image_transition();
+	init_production_canary_verification();
+	init_production_image_graph();
+	init_production_image_custody();
+	verified = /* @__PURE__ */ new WeakMap();
+	decoder = () => new TextDecoder("utf-8", { fatal: true });
+	need$9 = (v, code = "ImageFilesystemInvalid") => {
+		if (!v) imageFailure(code);
+	};
 	freeze = (v) => {
 		if (v && typeof v === "object") {
 			Object.values(v).forEach(freeze);
@@ -150350,14 +149904,499 @@ var init_production_image_graph = __esmMin((() => {
 		}
 		return v;
 	};
-	bytesOf = (value) => {
-		need$8(value instanceof Uint8Array, "ImageByteStreamRequired");
-		need$8(value.byteLength <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageStreamBufferLimit");
-		return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+	zero$4 = (b) => b.every((v) => v === 0);
+	Cursor$1 = class {
+		constructor(stream) {
+			this.iterator = stream[Symbol.asyncIterator]();
+			this.buffer = Buffer.alloc(0);
+			this.position = 0;
+			this.offset = 0;
+			this.done = false;
+		}
+		async available() {
+			while (this.position === this.buffer.length && !this.done) {
+				const next = await this.iterator.next();
+				this.done = next.done;
+				this.buffer = next.done ? Buffer.alloc(0) : next.value;
+				this.position = 0;
+			}
+			return this.buffer.length - this.position;
+		}
+		async *chunks(size) {
+			need$9(Number.isSafeInteger(size) && size >= 0);
+			while (size) {
+				need$9(await this.available() > 0, "ImageTarTruncated");
+				const count = Math.min(size, this.buffer.length - this.position);
+				const chunk = this.buffer.subarray(this.position, this.position + size);
+				this.position += count;
+				this.offset += count;
+				size -= count;
+				yield chunk;
+			}
+		}
+		async read(size) {
+			need$9(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageTarBuffer");
+			const all = [];
+			for await (const chunk of this.chunks(size)) all.push(chunk);
+			return Buffer.concat(all, size);
+		}
+		async skip(size) {
+			for await (const _ of this.chunks(size));
+		}
+		async drain({ zeros = false } = {}) {
+			while (await this.available()) {
+				const count = this.buffer.length - this.position;
+				if (zeros) need$9(zero$4(this.buffer.subarray(this.position)), "ImageTarTrailingData");
+				this.position += count;
+				this.offset += count;
+			}
+		}
+		async close() {
+			await this.iterator.return?.();
+		}
 	};
-	oneChunk = (bytes) => (async function* () {
-		yield bytes;
-	})();
+}));
+//#endregion
+//#region scripts/lib/ci-carrier-context.mjs
+/** Decode only the owner's R9 framed context. No tar extraction, package
+* installation, credentials, user-selected recipe or executable callbacks. */
+function carrierDockerfile(base, { caPresent = false, derived = false } = {}) {
+	const image = base.account + ".dkr.ecr." + base.region + ".amazonaws.com/" + base.repositoryName + "@" + base.rootDigest;
+	need$8(!derived || caPresent, "CarrierDerivedCaRequired");
+	return `FROM ${image}\nUSER 0:0\nRUN rm -rf /bootstrap/operator /carrier\nCOPY --chown=0:0 rootfs/ /\n${derived ? "COPY --from=carrier_runtime --chown=0:0 rootfs/ /\n" : ""}RUN chmod 0555 /bootstrap && find /carrier /bootstrap/operator -type d -exec chmod 0555 {} +\nENV PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp NODE_EXTRA_CA_CERTS=${caPresent ? "/bootstrap/global-bundle.pem" : ""}\nUSER 1000:1000\nENTRYPOINT ["/bin/setpriv","--no-new-privs","--","/usr/local/bin/node","/carrier/guard-first.mjs","audit-original-root"]\nCMD []\n`;
+}
+function inspectManifest(m, plan, baseEvidence) {
+	const t = plan.template, sourceOnly = m.version === 2 && m.kind === "carrier-build-source-context";
+	exact$6(m, [
+		"version",
+		"kind",
+		"templateHash",
+		"sourceTree",
+		"provenance",
+		"files",
+		...sourceOnly ? ["runtimeSource"] : []
+	]);
+	need$8((sourceOnly || m.version === 1 && m.kind === "carrier-build-context") && m.templateHash === plan.templateHash && m.sourceTree === t.source.candidateTree && canaryEvidenceHash(m) === plan.context.manifestHash, "CarrierContextBinding");
+	if (sourceOnly) {
+		exact$6(m.runtimeSource, [
+			"legacyCodeHash",
+			"expandedSourceHash",
+			"minifiedSourceHash",
+			"dependencyHash",
+			"operatorInventoryHash"
+		]);
+		need$8(Object.values(m.runtimeSource).every(hex$7) && m.runtimeSource.legacyCodeHash === t.anchors.hostCodeHash && m.runtimeSource.expandedSourceHash === t.anchors.hostSourceHash, "CarrierRuntimeSource");
+		need$8(baseEvidence === void 0, "CarrierSourceContextNoNativeFacts");
+	}
+	same$6(m.provenance, {
+		oldImageHash: canaryEvidenceHash(t.anchors.oldImage),
+		oldImageEvidenceHash: t.anchors.oldImageEvidenceHash,
+		hostEvidenceHash: t.anchors.hostEvidenceHash,
+		sourceCiHash: t.anchors.sourceCiHash,
+		baseEvidenceHash: t.anchors.baseEvidenceHash
+	}, "CarrierContextProvenance");
+	if (baseEvidence !== void 0) {
+		exact$6(baseEvidence, [
+			"version",
+			"kind",
+			"image",
+			"native",
+			"ca"
+		]);
+		need$8(baseEvidence.version === 1 && baseEvidence.kind === "carrier-secure-base-evidence" && canaryEvidenceHash(baseEvidence) === t.anchors.baseEvidenceHash, "CarrierContextBaseEvidence");
+		same$6(baseEvidence.image, t.base, "CarrierContextBaseImage");
+		exact$6(baseEvidence.native, ["nodeSha256", "setprivSha256"]);
+		need$8(Object.values(baseEvidence.native).every(hex$7), "CarrierContextNativePin");
+		need$8(typeof baseEvidence.ca?.present === "boolean", "CarrierContextCa");
+		exact$6(baseEvidence.ca, baseEvidence.ca.present ? [
+			"present",
+			"ref",
+			"sourceEvidenceHash"
+		] : ["present"]);
+	}
+	need$8(Array.isArray(m.files) && m.files.length > 0 && m.files.length <= t.bounds.contextFiles, "CarrierContextFileCount");
+	const byPath = /* @__PURE__ */ new Map();
+	let total = 0;
+	for (const row of m.files) {
+		exact$6(row, [
+			"path",
+			"type",
+			"mode",
+			"sha256",
+			"bytesLength",
+			...row.type === "symlink" ? ["target"] : []
+		]);
+		need$8(pathAllowed(row.path) && !byPath.has(row.path), "CarrierContextPath");
+		if (sourceOnly) need$8(!["rootfs/carrier/manifest.json", "rootfs/bootstrap/global-bundle.pem"].includes(row.path), "CarrierSuppliedDerivedCollision");
+		need$8(["file", "symlink"].includes(row.type) && hex$7(row.sha256) && Number.isSafeInteger(row.bytesLength) && row.bytesLength >= 0 && row.bytesLength <= 67108864 && (row.type === "file" ? [292, 365].includes(row.mode) : row.mode === 511), "CarrierContextMember");
+		if (row.type === "symlink") need$8(row.path.startsWith(operatorPrefix) && typeof row.target === "string" && !row.target.includes("\\") && !/[\x00-\x1f\x7f]/.test(row.target) && !posix.isAbsolute(row.target) && sha$4(row.target) === row.sha256 && Buffer.byteLength(row.target) === row.bytesLength, "CarrierContextLink");
+		else if (fixedPaths.has(row.path)) need$8(row.mode === 292, "CarrierContextRecipeMode");
+		total += row.bytesLength;
+		need$8(Number.isSafeInteger(total) && total <= t.bounds.contextBytes, "CarrierContextSize");
+		byPath.set(row.path, row);
+	}
+	same$6(m.files.map((r) => r.path), [...byPath.keys()].sort((a, b) => a.localeCompare(b)), "CarrierContextOrder");
+	for (const row of m.files) {
+		let parent = dirname(row.path);
+		while (parent !== ".") {
+			need$8(!byPath.has(parent), "CarrierContextParent");
+			parent = dirname(parent);
+		}
+		if (row.type === "symlink") {
+			let path = row.path;
+			const seen = /* @__PURE__ */ new Set();
+			for (let i = 0; i < 32; i++) {
+				need$8(!seen.has(path), "CarrierContextLinkCycle");
+				seen.add(path);
+				const current = byPath.get(path);
+				need$8(current, "CarrierContextLinkTarget");
+				if (current.type === "file") break;
+				path = posix.normalize(posix.join(posix.dirname(path), current.target));
+				need$8(path.startsWith(operatorPrefix) && i < 31, "CarrierContextLinkEscape");
+			}
+		}
+	}
+	for (const path of [
+		...recipePaths,
+		"rootfs/carrier/legacy-audit.mjs",
+		...!sourceOnly ? ["rootfs/carrier/manifest.json"] : [],
+		...CARRIER_OPERATOR_FILES.map((p) => operatorPrefix + p)
+	]) need$8(byPath.get(path)?.type === "file", "CarrierContextMissingClosure");
+	if (baseEvidence !== void 0) need$8(byPath.has("rootfs/bootstrap/global-bundle.pem") === baseEvidence.ca.present, "CarrierContextCa");
+	const recipe = recipePaths.map((path) => {
+		const r = byPath.get(path);
+		return {
+			path,
+			sha256: r.sha256,
+			bytesLength: r.bytesLength
+		};
+	}).sort((a, b) => a.path.localeCompare(b.path));
+	need$8(canaryEvidenceHash(recipe) === t.recipe.sourceClosureHash && byPath.get("Dockerfile").sha256 === t.recipe.dockerfileHash && byPath.get("rootfs/carrier/guard-first.mjs").sha256 === t.recipe.guardHash && byPath.get("rootfs/carrier/legacy-audit.mjs").sha256 === t.anchors.hostCodeHash, "CarrierContextCodePin");
+	return {
+		byPath,
+		total
+	};
+}
+function inspectRuntime(runtime, m, plan, baseEvidence) {
+	exact$6(runtime, [
+		"version",
+		"legacyCodeHash",
+		"expandedSourceHash",
+		"minifiedSourceHash",
+		"dependencyHash",
+		"operatorInventoryHash",
+		"runtime",
+		"files",
+		"caPath"
+	]);
+	need$8(runtime.version === 1 && runtime.legacyCodeHash === plan.template.anchors.hostCodeHash && runtime.expandedSourceHash === plan.template.anchors.hostSourceHash && [
+		"minifiedSourceHash",
+		"dependencyHash",
+		"operatorInventoryHash"
+	].every((k) => hex$7(runtime[k])), "CarrierRuntimeManifest");
+	exact$6(runtime.runtime, ["nodeSha256", "setprivSha256"]);
+	need$8(Object.values(runtime.runtime).every(hex$7), "CarrierRuntimeNative");
+	if (baseEvidence !== void 0) same$6(runtime.runtime, baseEvidence.native, "CarrierRuntimeNative");
+	need$8(runtime.caPath === (m.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem") ? "/bootstrap/global-bundle.pem" : null), "CarrierRuntimeCa");
+	const expected = m.files.filter((r) => r.path !== "Dockerfile" && r.path !== "rootfs/carrier/manifest.json").map(({ path, bytesLength, ...r }) => ({
+		...r,
+		path: path.slice(6),
+		bytes: bytesLength
+	})).sort((a, b) => a.path.localeCompare(b.path));
+	need$8(Array.isArray(runtime.files), "CarrierRuntimeFiles");
+	same$6([...runtime.files].sort((a, b) => a.path.localeCompare(b.path)), expected, "CarrierRuntimeFiles");
+}
+async function materializeCarrierBuildContext({ stream, plan: input, baseEvidence: base, tempRoot, metadataReads, signal }) {
+	const plan = inspectCarrierFundingPlan(input), baseEvidence = base === void 0 ? void 0 : copyNonrootJson(base);
+	need$8(typeof metadataReads?.reserveLocal === "function" && typeof stream?.[Symbol.asyncIterator] === "function", "CarrierContextBudget");
+	need$8(resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot && (await lstat(tempRoot)).isDirectory(), "CarrierContextTemporaryRoot");
+	const check = () => {
+		signal?.throwIfAborted();
+		need$8(Date.now() < plan.deadlineMs, "CarrierContextExpired");
+		metadataReads.reserveLocal(zero$3());
+	};
+	const charge = (n) => {
+		check();
+		metadataReads.reserveLocal({
+			...zero$3(),
+			logicalBytes: n
+		});
+	};
+	check();
+	const directory = join(tempRoot, "mem9-carrier-context-" + randomBytes(16).toString("hex"));
+	await mkdir(directory, { mode: 448 });
+	const identities = /* @__PURE__ */ new Map(), directories = /* @__PURE__ */ new Map(), small = /* @__PURE__ */ new Map(), cursor = new Cursor(stream, plan.context.bytesLength, charge, check);
+	let complete = false;
+	directories.set(directory, await lstat(directory));
+	const parents = async (path) => {
+		const parts = dirname(path).split("/");
+		let at = directory;
+		for (const part of parts) {
+			if (part === ".") continue;
+			at = join(at, part);
+			if (!directories.has(at)) {
+				await mkdir(at, { mode: 448 });
+				directories.set(at, await lstat(at));
+			}
+		}
+	};
+	try {
+		need$8((await cursor.read(CARRIER_CONTEXT_MAGIC.length)).equals(CARRIER_CONTEXT_MAGIC), "CarrierContextMagic");
+		const headerSize = (await cursor.read(4)).readUInt32BE();
+		need$8(headerSize > 0 && headerSize <= 33554432 && headerSize + 4 + CARRIER_CONTEXT_MAGIC.length <= plan.context.bytesLength, "CarrierContextHeader");
+		const manifest = parse$3(await cursor.read(headerSize)), { total } = inspectManifest(manifest, plan, baseEvidence);
+		need$8(total + headerSize + 4 + CARRIER_CONTEXT_MAGIC.length === plan.context.bytesLength, "CarrierContextSize");
+		for (const row of manifest.files) {
+			check();
+			await parents(row.path);
+			const path = join(directory, row.path);
+			metadataReads.reserveLocal({
+				...zero$3(),
+				processedEntries: 1
+			});
+			if (row.type === "symlink") {
+				const bytes = await cursor.read(row.bytesLength);
+				need$8(decode$1(bytes) === row.target, "CarrierContextLinkBytes");
+				charge(bytes.length);
+				await symlink(row.target, path);
+			} else {
+				charge(row.bytesLength);
+				const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 384), digest = createHash("sha256"), pieces = [];
+				try {
+					for await (const bytes of cursor.chunks(row.bytesLength)) {
+						check();
+						digest.update(bytes);
+						let at = 0;
+						while (at < bytes.length) {
+							const r = await fd.write(bytes, at, bytes.length - at);
+							need$8(r.bytesWritten > 0, "CarrierContextWrite");
+							at += r.bytesWritten;
+						}
+						if (fixedPaths.has(row.path)) pieces.push(Buffer.from(bytes));
+					}
+					need$8(digest.digest("hex") === row.sha256, "CarrierContextFileHash");
+					await fd.sync();
+					await fd.chmod(row.mode);
+				} finally {
+					await fd.close();
+				}
+				if (fixedPaths.has(row.path)) small.set(row.path, Buffer.concat(pieces, row.bytesLength));
+			}
+			identities.set(path, await lstat(path));
+		}
+		need$8(!await cursor.available() && cursor.count === plan.context.bytesLength && cursor.digest.digest("hex") === plan.context.sha256, "CarrierContextWireHash");
+		const sourceOnly = manifest.version === 2;
+		need$8(small.get("Dockerfile").equals(Buffer.from(carrierDockerfile(plan.template.base, {
+			caPresent: sourceOnly || manifest.files.some((r) => r.path === "rootfs/bootstrap/global-bundle.pem"),
+			derived: sourceOnly
+		}))), "CarrierCleanRecipeRequired");
+		const runtimeManifest = sourceOnly ? null : parse$3(small.get("rootfs/carrier/manifest.json"));
+		if (runtimeManifest) inspectRuntime(runtimeManifest, manifest, plan, baseEvidence);
+		const state = {
+			plan,
+			baseEvidence,
+			manifest,
+			runtimeManifest,
+			directory,
+			identities,
+			directories,
+			metadataReads,
+			check,
+			charge,
+			closed: false,
+			consumed: false
+		};
+		const handle = Object.freeze({ kind: "carrier-materialized-context" });
+		contexts.set(handle, state);
+		complete = true;
+		return handle;
+	} finally {
+		await cursor.close();
+		if (!complete) await rm(directory, {
+			recursive: true,
+			force: true
+		});
+	}
+}
+function context(handle) {
+	const s = contexts.get(handle);
+	need$8(s && !s.closed, "CarrierContextHandle");
+	s.check();
+	return s;
+}
+function inspectMaterializedCarrierContext(handle) {
+	const s = context(handle);
+	return Object.freeze({
+		directory: s.directory,
+		plan: copyNonrootJson(s.plan),
+		manifest: s.manifest,
+		runtimeManifest: s.runtimeManifest,
+		...s.runtimeManifest ? { nativePins: s.runtimeManifest.runtime } : { runtimeSource: s.manifest.runtimeSource }
+	});
+}
+async function verifyMaterializedCarrierContext(handle) {
+	const s = context(handle), expected = /* @__PURE__ */ new Set([...s.identities.keys(), ...s.directories.keys()]);
+	for (const [path, before] of s.directories) {
+		const now = await lstat(path);
+		need$8(now.isDirectory() && now.uid === process.getuid() && (now.mode & 511) === 448 && before.dev === now.dev && before.ino === now.ino && await realpath(path) === path, "CarrierContextDirectoryChanged");
+		for (const name of await readdir(path)) need$8(expected.has(join(path, name)), "CarrierContextUnknownFile");
+	}
+	for (const row of s.manifest.files) {
+		const path = join(s.directory, row.path), before = s.identities.get(path);
+		need$8(unchanged$1(before, await lstat(path)), "CarrierContextChanged");
+		if (row.type === "symlink") {
+			need$8(await readlink(path) === row.target, "CarrierContextChanged");
+			continue;
+		}
+		s.charge(row.bytesLength);
+		const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK), digest = createHash("sha256");
+		let bytes = 0;
+		try {
+			need$8(unchanged$1(before, await fd.stat()) && before.nlink === 1 && before.uid === process.getuid(), "CarrierContextChanged");
+			const buffer = Buffer.alloc(65536);
+			while (true) {
+				s.check();
+				const r = await fd.read(buffer, 0, buffer.length, null);
+				if (!r.bytesRead) break;
+				bytes += r.bytesRead;
+				need$8(bytes <= row.bytesLength, "CarrierContextChanged");
+				digest.update(buffer.subarray(0, r.bytesRead));
+			}
+			need$8(bytes === row.bytesLength && digest.digest("hex") === row.sha256 && unchanged$1(before, await fd.stat()) && unchanged$1(before, await lstat(path)), "CarrierContextChanged");
+		} finally {
+			await fd.close();
+		}
+	}
+	return inspectMaterializedCarrierContext(handle);
+}
+async function consumeCarrierBuildContext(handle) {
+	const s = context(handle);
+	need$8(!s.consumed, "CarrierContextAlreadyConsumed");
+	s.consumed = true;
+	return verifyMaterializedCarrierContext(handle);
+}
+async function closeCarrierBuildContext(handle) {
+	const s = context(handle);
+	await verifyMaterializedCarrierContext(handle);
+	await rm(s.directory, { recursive: true });
+	s.closed = true;
+}
+var CARRIER_CONTEXT_MAGIC, CARRIER_OPERATOR_FILES, operator, operatorPrefix, recipePaths, fixedPaths, contexts, sha$4, need$8, exact$6, hex$7, zero$3, same$6, keys$2, unchanged$1, decode$1, parse$3, pathAllowed, Cursor;
+var init_ci_carrier_context = __esmMin((() => {
+	init_ci_carrier_before_copy();
+	init_production_nonroot_contracts();
+	init_ci_smoke_acquisition_format();
+	CARRIER_CONTEXT_MAGIC = Buffer.from("MEM9-CARRIER-CONTEXT-V1\n");
+	CARRIER_OPERATOR_FILES = Object.freeze([
+		"infra/gateway/service-auth.mjs",
+		"scripts/lib/canary-benchmark.mjs",
+		"scripts/lib/consolidation-preview-secrets.mjs",
+		"scripts/lib/production-artifacts.mjs",
+		"scripts/lib/production-canary-compatibility.mjs",
+		"scripts/lib/production-canary-continuation.mjs",
+		"scripts/lib/production-canary-paused-audit.mjs",
+		"scripts/lib/production-canary-performance.mjs",
+		"scripts/lib/production-canary-report.mjs",
+		"scripts/lib/production-canary-snapshot.mjs",
+		"scripts/lib/production-canary-verification.mjs",
+		"scripts/lib/production-runtime-config.mjs",
+		"scripts/lib/production-runtime-state.mjs",
+		"scripts/lib/runtime-credentials.mjs",
+		"scripts/lib/runtime-extension-catalog.mjs",
+		"scripts/production-consolidation-operator.mjs",
+		"node_modules/pg/lib/index.js",
+		"node_modules/pg/package.json",
+		"package.json",
+		"package-lock.json"
+	]);
+	operator = new Set(CARRIER_OPERATOR_FILES);
+	operatorPrefix = "rootfs/bootstrap/operator/";
+	recipePaths = [
+		"Dockerfile",
+		"rootfs/carrier/guard-first.mjs",
+		"rootfs/carrier/supplemental-readonly.mjs"
+	];
+	fixedPaths = /* @__PURE__ */ new Set([
+		...recipePaths,
+		"rootfs/carrier/legacy-audit.mjs",
+		"rootfs/carrier/manifest.json",
+		"rootfs/bootstrap/global-bundle.pem"
+	]);
+	contexts = /* @__PURE__ */ new WeakMap();
+	sha$4 = (b) => createHash("sha256").update(b).digest("hex");
+	need$8 = (v, c = "CarrierContextInvalid") => {
+		if (!v) throw Error(c);
+	};
+	exact$6 = (v, k) => need$8(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.slice().sort().join(), "CarrierContextFields");
+	hex$7 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+	zero$3 = () => ({
+		ecrRequests: 0,
+		httpBodyBytes: 0,
+		logicalBytes: 0,
+		uncompressedBytes: 0,
+		processedEntries: 0
+	});
+	same$6 = (a, b, c) => need$8(canaryEvidenceHash(a) === canaryEvidenceHash(b), c);
+	keys$2 = [
+		"dev",
+		"ino",
+		"uid",
+		"mode",
+		"nlink",
+		"size",
+		"mtimeMs",
+		"ctimeMs"
+	];
+	unchanged$1 = (a, b) => keys$2.every((k) => a[k] === b[k]);
+	decode$1 = (b) => new TextDecoder("utf-8", { fatal: true }).decode(b);
+	parse$3 = (b) => freeze$2(parseAcquisitionJson(b, 33554432));
+	pathAllowed = (path) => typeof path === "string" && Buffer.byteLength(path) <= 4096 && !path.includes("\\") && !/[\x00-\x1f\x7f]/.test(path) && !path.startsWith("/") && posix.normalize(path) === path && !path.split("/").some((p) => p === ".." || p === ".ssh" || p.startsWith(".env") || p.includes(".local.")) && (fixedPaths.has(path) || path.startsWith(operatorPrefix) && (operator.has(path.slice(26)) || path.startsWith(operatorPrefix + "node_modules/")));
+	Cursor = class {
+		constructor(stream, cap, charge, check) {
+			this.iterator = stream[Symbol.asyncIterator]();
+			this.cap = cap;
+			this.charge = charge;
+			this.check = check;
+			this.buffer = Buffer.alloc(0);
+			this.position = 0;
+			this.count = 0;
+			this.digest = createHash("sha256");
+		}
+		async available() {
+			while (this.position === this.buffer.length) {
+				this.check();
+				const next = await this.iterator.next();
+				if (next.done) return false;
+				need$8(next.value instanceof Uint8Array && next.value.length <= 8388608, "CarrierContextChunk");
+				this.buffer = Buffer.from(next.value);
+				this.position = 0;
+				this.count += this.buffer.length;
+				need$8(this.count <= this.cap, "CarrierContextSize");
+				this.charge(this.buffer.length);
+				this.digest.update(this.buffer);
+				if (this.buffer.length) return true;
+			}
+			return true;
+		}
+		async *chunks(n) {
+			while (n) {
+				need$8(await this.available(), "CarrierContextTruncated");
+				const size = Math.min(n, this.buffer.length - this.position);
+				yield this.buffer.subarray(this.position, this.position + size);
+				this.position += size;
+				n -= size;
+			}
+		}
+		async read(n) {
+			need$8(n <= 33554432, "CarrierContextBuffer");
+			const chunks = [];
+			for await (const chunk of this.chunks(n)) chunks.push(Buffer.from(chunk));
+			return Buffer.concat(chunks, n);
+		}
+		async close() {
+			await this.iterator.return?.();
+		}
+	};
 })), NONROOT_FORBIDDEN_ENVIRONMENT;
 var init_production_nonroot_launch = __esmMin((() => {
 	init_production_nonroot_contracts();
@@ -153531,6 +153570,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 	const { graphHash, ...base } = controlImageGraphBinding(baseGraph), filesystem = inspectImageFilesystemEvidence(baseFilesystem);
 	same$2(base, t.base, "CarrierDerivationBase");
 	need$22(filesystem.graphHash === graphHash && imageFilesystemVerificationKind(baseFilesystem) === "live-filesystem-evidence", "CarrierDerivationFilesystem");
+	assertImageFilesystemUncompressedLimit(baseFilesystem, t.bounds.uncompressedBytes);
 	attempted$1.add(context);
 	await verifyMaterializedCarrierContext(context);
 	const check = () => {
@@ -153992,6 +154032,7 @@ function assertBuiltClosure(filesystem, context, derived) {
 }
 async function buildCarrierOffline({ context: handle, baseGraph, baseFilesystem, metadataReads, tempRoot, signal, derived: derivedHandle }) {
 	const context = inspectMaterializedCarrierContext(handle), plan = context.plan, t = plan.template, baseBinding = controlImageGraphBinding(baseGraph), state = imageGraphState(baseGraph);
+	assertImageFilesystemUncompressedLimit(baseFilesystem, t.bounds.uncompressedBytes);
 	const derivedBindings = {
 		context: handle,
 		baseGraph,
@@ -154216,6 +154257,7 @@ async function buildCarrierOffline({ context: handle, baseGraph, baseFilesystem,
 		};
 		stage = "output-graph-verification";
 		const cacheDirectory = join(directory, "output/blobs/sha256"), budget = createPrepaidControlCacheBudget({
+			uncompressedBytesLimit: t.bounds.uncompressedBytes,
 			metadataReads,
 			deadlineMs: Math.min(plan.deadlineMs, Date.now() + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs),
 			signal
@@ -154372,6 +154414,7 @@ var init_production_nonroot_carrier_build = __esmMin((() => {
 		"ControlImageConfigBinding",
 		"ControlImageScope",
 		"ImageRootIndexRequired",
+		"ImageUncompressedLimit",
 		"ImageDescriptorFields",
 		"ImageDescriptorInvalid",
 		"ImageManifestFields",
@@ -174686,6 +174729,7 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 	const admission = consumer.admission, plan = admission.config.plan, b = inspectCarrierOfflineBuild(built);
 	need$22(!attempted.has(built) && b.record.templateHash === plan.templateHash && b.record.contextHash === plan.context.sha256 && sourceContext === admission.source.sourceContext, "CarrierSqlAcceptanceInputs");
 	need$22(context && derived && fixture && oldSource, "CarrierSqlAcceptanceDependencies");
+	assertImageFilesystemUncompressedLimit(b.filesystem, plan.template.bounds.uncompressedBytes);
 	attempted.add(built);
 	consumer.check();
 	const startedMs = Date.now(), { graphHash, ...image } = controlImageGraphBinding(b.graph);
@@ -175334,6 +175378,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				need$22(phase === "base" && !current && !output && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerBaseIncomplete");
 				const built = inspectCarrierOfflineBuild(handle);
 				need$22(built.record.templateHash === config.templateHash && built.record.contextHash === p.context.sha256 && (!sqlAcceptance || sqlBuilt === handle), "CarrierConsumerBuildBinding");
+				assertImageFilesystemUncompressedLimit(built.filesystem, t.bounds.uncompressedBytes);
 				output = built;
 				outputNodes = built.graph.inventory.nodes;
 				append("built", { record: built.record });
@@ -175434,6 +175479,7 @@ function assertCarrierConsumer(value) {
 }
 var manifests$1, indexes$1, handles, normalized, same;
 var init_ci_carrier_consumer = __esmMin((() => {
+	init_production_image_filesystem();
 	init_ci_carrier_local_counter();
 	init_production_image_response();
 	init_ci_carrier_startup();
@@ -177703,6 +177749,7 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 			configDigest: t.base.configDigest
 		};
 		const budget = createPrepaidControlCacheBudget({
+			uncompressedBytesLimit: t.bounds.uncompressedBytes,
 			metadataReads: consumer,
 			deadlineMs: Math.min(p.deadlineMs, Date.now() + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs)
 		});

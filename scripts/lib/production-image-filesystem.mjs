@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
 import {Readable} from 'node:stream';
+import {finished} from 'node:stream/promises';
 import {createGunzip,createZstdDecompress} from 'node:zlib';
 import {posix} from 'node:path';
 import {IMAGE_TRANSITION_LIMITS as L,IMAGE_TRANSITION_LIMITS_HASH} from './production-image-transition.mjs';
@@ -24,16 +25,27 @@ function normalize(path,{link=false,base=''}={}){
  for(const part of path.split('/')){if(!part||part==='.')continue;if(part==='..'){need(link&&parts.length>0,'ImageTarEscape');parts.pop();}else parts.push(part);}
  return parts.join('/');
 }
-async function* unpacked(layer,diffId,readBlob,budget){
- const source=Readable.from(readBlob(layer),{highWaterMark:65536});let output=source;
+function uncompressedPass(budget){
+ const limit=budget.uncompressedBytesLimit;
+ return {limit,bytes:0,check(size){need(Number.isSafeInteger(size)&&size>=0&&(limit===undefined||size<=limit),'ImageUncompressedLimit');},
+  add(size){this.check(this.bytes+size);budget.uncompressed(size);this.bytes+=size;}};
+}
+async function* unpacked(layer,diffId,readBlob,budget,pass=uncompressedPass(budget)){
+ // Bound the input queue in bytes, including while a decoder is stopping.
+ const source=Readable.from(readBlob(layer),{highWaterMark:65536,objectMode:false});let output=source;
  if(layer.mediaType===IMAGE_MEDIA.gzip||layer.mediaType===IMAGE_MEDIA.dockerGzip)output=createGunzip({chunkSize:65536});
  else if(layer.mediaType===IMAGE_MEDIA.zstd)output=createZstdDecompress({chunkSize:65536});
  else need(layer.mediaType===IMAGE_MEDIA.tar,'ImageFilesystemMedia');
  if(output!==source){source.on('error',e=>output.destroy(e));output.on('error',e=>source.destroy(e));source.pipe(output);}
  const sha=createHash('sha256');
- try{for await(const chunk of output){need(chunk.length<=L.maxBufferPerStreamBytes,'ImageFilesystemBuffer');budget.uncompressed(chunk.length);sha.update(chunk);yield chunk;}
+ try{for await(const chunk of output){need(chunk.length<=L.maxBufferPerStreamBytes,'ImageFilesystemBuffer');pass.add(chunk.length);sha.update(chunk);yield chunk;}
   need('sha256:'+sha.digest('hex')===diffId,'ImageLayerDiffId');
- }finally{output.destroy();source.destroy();}
+ }finally{
+  // Join teardown of asynchronous cache reads before the caller closes the
+  // cache; destroy alone does not prove that its owned descriptors are closed.
+  const stopped=[...new Set([output,source])].map(stream=>finished(stream,{cleanup:true}).catch(error=>{if(error?.code!=='ERR_STREAM_PREMATURE_CLOSE'&&error?.code!=='ABORT_ERR')throw error;}));
+  output.destroy();source.destroy();await Promise.all(stopped);
+ }
 }
 class Cursor{
  constructor(stream){this.iterator=stream[Symbol.asyncIterator]();this.buffer=Buffer.alloc(0);this.position=0;this.offset=0;this.done=false;}
@@ -64,19 +76,22 @@ function parents(nodes,path,layer,budget){
  for(const part of parts){parent=parent?parent+'/'+part:part;const found=nodes.get(parent);if(found)need(found.type==='directory','ImageVirtualParent');else{budget.entry();nodes.set(parent,{type:'directory',layer,implicit:true});}}
 }
 function remove(nodes,path,{olderThan}={}){for(const [name,node]of nodes)if((name===path||name.startsWith(path+'/'))&&(olderThan===undefined||node.layer<olderThan))nodes.delete(name);}
-async function applyLayer(nodes,layer,diffId,index,readBlob,budget){
- const cursor=new Cursor(unpacked(layer,diffId,readBlob,budget));let local={},global={},longPath,longLink;
+async function applyLayer(nodes,layer,diffId,index,readBlob,budget,pass){
+ const layerStart=pass.bytes,cursor=new Cursor(unpacked(layer,diffId,readBlob,budget,pass));let local={},global={},longPath,longLink;
  try{while(true){budget.check();const header=await cursor.read(512);if(zero(header)){need(zero(await cursor.read(512)),'ImageTarTerminator');need(!Object.keys(local).length&&longPath===undefined&&longLink===undefined,'ImageTarDanglingExtension');await cursor.drain({zeros:true});break;}
    budget.entry();let checksum=0;for(let i=0;i<512;i++)checksum+=i>=148&&i<156?32:header[i];need(checksum===numeric(header.subarray(148,156)),'ImageTarChecksum');
    const type=String.fromCharCode(header[156]||48),rawSize=numeric(header.subarray(124,136));need(rawSize<=L.maxUncompressedBytes,'ImageTarSize');
    const magic=text(header.subarray(257,263));need(magic===''||magic==='ustar'||magic==='ustar ','ImageTarFormat');
    if(['x','g','L','K'].includes(type)){
+    pass.check(layerStart+cursor.offset+Math.ceil(rawSize/512)*512);
     need(rawSize<=L.maxBufferPerStreamBytes,'ImageTarExtensionSize');const bytes=await cursor.read(rawSize);await cursor.skip((512-rawSize%512)%512);
     if(type==='x'){need(!Object.keys(local).length,'ImagePaxDuplicateHeader');local=pax(bytes);}else if(type==='g'){const values=pax(bytes);need(!Object.hasOwn(values,'path')&&!Object.hasOwn(values,'linkpath')&&!Object.hasOwn(values,'size'),'ImagePaxGlobalPath');global={...global,...values};}
     else{const value=text(bytes);need(Buffer.byteLength(value)<=L.maxPathBytes);if(type==='L'){need(longPath===undefined);longPath=value;}else{need(longLink===undefined);longLink=value;}}continue;
    }
    const values={...global,...local};local={};const prefix=text(header.subarray(345,500));let path=values.path??longPath??(prefix?prefix+'/':'')+text(header.subarray(0,100)),link=values.linkpath??longLink??text(header.subarray(157,257));longPath=longLink=undefined;
    const size=values.size===undefined?rawSize:Number(values.size);need(Number.isSafeInteger(size)&&size>=0&&size<=L.maxUncompressedBytes&&size+budget.usage().uncompressedBytes<=L.maxUncompressedBytes,'ImageTarSize');
+   // Reject an impossible advertised body before hashing or parsing it.
+   pass.check(layerStart+cursor.offset+Math.ceil(size/512)*512);
    path=normalize(path);if(path===''){need(type==='5'&&size===0,'ImageTarRoot');continue;}
    path=resolved(nodes,path,{parent:true});parents(nodes,path,index,budget);
    const name=posix.basename(path),parent=posix.dirname(path)==='.'?'':posix.dirname(path);
@@ -113,8 +128,8 @@ export async function inspectImageFilesystem(graph,{component,requirements=[],bu
  const state=imageGraphState(graph);budget??=state.budget;need(budget===state.budget,'ImageFilesystemBudget');assertImageBudget(budget);const image=state.images.get(component);need(image,'ImageFilesystemComponent');
  need(Array.isArray(requirements)&&requirements.length<=32&&new Set(requirements.map(r=>r.path+'\0'+r.name)).size===requirements.length,'ImagePackageRequirements');
  for(const r of requirements)need(r&&Object.keys(r).sort().join()===['path','manager','name','version'].sort().join()&&r.manager==='apk'&&typeof r.path==='string'&&r.path.startsWith('/')&&typeof r.name==='string'&&/^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name)&&typeof r.version==='string'&&/^[^\s\0]{1,512}$/.test(r.version),'ImagePackageRequirements');
- const nodes=new Map(),readBlob=d=>state.store.open(d);
- for(let i=0;i<image.layers.length;i++)await applyLayer(nodes,image.layers[i],image.diffIds[i],i,readBlob,budget);
+ const nodes=new Map(),readBlob=d=>state.store.open(d),pass=uncompressedPass(budget);
+ for(let i=0;i<image.layers.length;i++)await applyLayer(nodes,image.layers[i],image.diffIds[i],i,readBlob,budget,pass);
  // Dangling runtime symlinks remain inert metadata; required files and all
  // hardlinks must resolve. Cycles/escapes are rejected even for unused links.
  for(const [path,node]of nodes)if(node.type==='symlink')resolved(nodes,path);
@@ -122,7 +137,7 @@ export async function inspectImageFilesystem(graph,{component,requirements=[],bu
  const packages=[],databases=[];for(const group of groups.values()){const db=await packageDatabase(group.content,image.layers,image.diffIds,readBlob,budget,group.requirements);packages.push(...db.packages);databases.push(db);}
  const entries=[...nodes].sort(([a],[b])=>a.localeCompare(b)).map(([path,node])=>({path,...node}));
  const evidence=freeze({version:1,graphHash:graph.graphHash,limitsHash:IMAGE_TRANSITION_LIMITS_HASH,component,rootDigest:state.roots.find(r=>r.component===component).root.digest,arm64Digest:image.manifest.digest,entriesHash:hash(entries),entryCount:entries.length,requirementsHash:hash(requirements),packages});
- const context=Object.freeze({evidence});verified.set(context,{evidence,databases,entries:freeze(entries),side:state.side,graph,requirements:structuredClone(requirements)});return context;
+ const context=Object.freeze({evidence});verified.set(context,{evidence,databases,uncompressedBytes:pass.bytes,entries:freeze(entries),side:state.side,graph,requirements:structuredClone(requirements)});return context;
 }
 /** A new copy requires this exact live source graph, not destination or archive
  * evidence with the same public hashes. The caller supplies policy-bound pins. */
@@ -130,6 +145,15 @@ export function assertImageFilesystemSource(context,graph,{requirementsHash}={})
  const state=verified.get(context);need(state&&state.kind!=='archived-filesystem-evidence'&&state.side==='source'&&state.graph===graph,'ImageFilesystemSourceRequired');
  need(typeof requirementsHash==='string'&&/^[a-f0-9]{64}$/.test(requirementsHash)&&state.evidence.requirementsHash===requirementsHash&&hash(state.requirements)===requirementsHash,'ImageFilesystemRequirementsChanged');
  return structuredClone(state.evidence);
+}
+/** Native use binds actual complete geometry to its original allocation.
+ * This value comes only from live parser state, not serialized evidence. */
+export function assertImageFilesystemUncompressedLimit(context,limit){
+ const state=verified.get(context);
+ need(state&&state.kind!=='archived-filesystem-evidence'&&Number.isSafeInteger(state.uncompressedBytes),'ImageFilesystemContextRequired');
+ need(Number.isSafeInteger(limit)&&limit>0,'ImageFilesystemUncompressedLimit');
+ need(state.uncompressedBytes<=Math.min(limit,L.maxUncompressedBytes),'ImageUncompressedLimit');
+ return state.uncompressedBytes;
 }
 export function inspectImageFilesystemEvidence(context){need(verified.has(context),'ImageFilesystemContextRequired');return structuredClone(verified.get(context).evidence);}
 /** Read-only metadata from the actual verified virtual filesystem. This does

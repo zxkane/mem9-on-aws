@@ -6,7 +6,7 @@ import {NONROOT_LIMITS as L,NONROOT_LIMITS_HASH,NONROOT_DATA_COMPONENTS as COMPO
 import {forkNonrootArchive,nonrootArchiveBindings,nonrootArchiveResolvers,resolveNonrootArchiveCommitment,resolveNonrootArchiveRawJson,assertNonrootArchiveConsumed} from './production-nonroot-archive.mjs';
 import {inspectNonrootDigestOnlyCopy,nonrootArtifactCacheMaterial,verifyNonrootCacheDestinationMetadata,verifyNonrootCacheReadAccounting,verifyNonrootCombinedCustody} from './production-nonroot-cache.mjs';
 import {inspectCommittedNonrootBudgetEnvelope} from './production-nonroot-budget-revision.mjs';
-import {dataLaunchPolicy,controlLaunchPolicy,validateNonrootEnvironment,verifyCarrierRunTaskBinding} from './production-nonroot-launch.mjs';
+import {dataLaunchPolicy,controlLaunchPolicy,validateNonrootEnvironment,verifyCarrierRunTaskBinding,verifyDataRuntimePathEvidence} from './production-nonroot-launch.mjs';
 import {NONROOT_DEPLOYED_CONTROL_IMAGE_SLOT,verifyNonrootDeploymentSource} from './production-nonroot-provenance.mjs';
 import {inspectNonrootRuntimeIdentity} from './production-nonroot-runtime.mjs';
 import {verifyNonrootControlRuntimeObservation} from './production-nonroot-observation.mjs';
@@ -254,7 +254,7 @@ async function sourceInputs(proof,r,now){
  let expectedFinalization,expectedFenceAcquisition;
  if(p.version===3&&Object.hasOwn(p,'fenceAcquisition'))expectedFenceAcquisition=await r.json(p.fenceAcquisition);
  if(p.version===3&&Object.hasOwn(p,'finalization')){exact(p.finalization,['budget','archiveManifestHash']);need(hex(p.finalization.archiveManifestHash),'NonrootFinalizationArchive');expectedFinalization={budget:await r.json(p.finalization.budget),archiveManifestHash:p.finalization.archiveManifestHash};}
- return {source,origin,recipe:recipes[0],buildLog:await r.bytes(d.buildLog),...(p.version===3?{remainingWorkEnvelope:await r.json(p.remainingWorkBudget)}:{}),...(expectedFinalization?{expectedFinalization}:{}),...(expectedFenceAcquisition?{expectedFenceAcquisition}:{})};
+ return {source,origin,recipe:recipes[0],dataClosure:p.dataClosure,buildLog:await r.bytes(d.buildLog),...(p.version===3?{remainingWorkEnvelope:await r.json(p.remainingWorkBudget)}:{}),...(expectedFinalization?{expectedFinalization}:{}),...(expectedFenceAcquisition?{expectedFenceAcquisition}:{})};
 }
 
 function pathRecord(entries,path){
@@ -356,7 +356,7 @@ async function audit(proof,value,r,archive,at){
  return {plan,review};
 }
 
-async function taskPlan(proof,r,artifact){
+async function taskPlan(proof,r,artifact,source){
  const plan=proof.taskPlan,targets={},before={},metadata={};
  same(plan.controlLaunches,plan.deployedControlBuildContract.launchTemplates,'NonrootControlTemplates');same(plan.deployedControlBuildContract.candidate,proof.deploymentControl,'NonrootControlCandidate');
  for(const row of plan.tasks){
@@ -372,8 +372,7 @@ async function taskPlan(proof,r,artifact){
     const launch=plan.dataLaunches.find(l=>l.taskKey===row.taskKey&&l.containerName===c.name);need(launch,'NonrootDataLaunchMissing');same(launch.image,proof.dataOrigin.images[component]);same(launch.targetEntryPoint,next.entryPoint);same(launch.targetCommand,next.command??[]);same(launch.originalEntryPoint,c.entryPoint??artifact.imageConfigs[component].config?.Entrypoint??[]);same(launch.originalCommand,c.command??artifact.imageConfigs[component].config?.Cmd??[]);
     const primitive=await r.json(launch.primitiveEvidence);same(primitive,artifact.primitives[component]);
     const path=await r.json(launch.pathEvidence),configured=artifact.imageConfigs[component].config;
-    same(path.image,proof.dataOrigin.images[component]);need(Array.isArray(configured?.Env)&&configured.Env.filter(e=>e.startsWith('PATH=')).length===1&&configured.Env.find(e=>e.startsWith('PATH=')).slice(5)===path.path&&path.resolvedNode==='/usr/local/bin/node','NonrootDataPath');
-    if(key!=='mnemo-server'){const dirs=path.path.split(':'),nodes=new Map(artifact.paths[component].map(p=>[p.path,p]));let selected;for(const dir of dirs){need(dir.startsWith('/')&&!dir.split('/').includes('..'),'NonrootDataPath');if(nodes.has(dir.slice(1)+'/node')){selected=dir+'/node';break;}}need(selected===path.resolvedNode,'NonrootDataNodeShadow');}
+    verifyDataRuntimePathEvidence(path,{component,key,contractVersion:plan.deployedControlBuildContract.version,image:proof.dataOrigin.images[component],config:configured,entries:artifact.paths[component],sourceFile:key==='mnemo-server'&&plan.deployedControlBuildContract.version===2?source.dataClosure.files.find(f=>f.path==='docker/mnemo-server/entrypoint.sh'):undefined});
     if(c.healthCheck){need(launch.healthLaunch.kind==='fixed-health-nnp');same(launch.healthLaunch.before,c.healthCheck.command);same(launch.healthLaunch.after,next.healthCheck.command);}else need(launch.healthLaunch.kind==='absent');
    }else{const purpose=controlPurposes[row.taskKey];need(purpose,'NonrootTaskKind');next={...controlLaunchPolicy(purpose,c),image:NONROOT_DEPLOYED_CONTROL_IMAGE_SLOT};const launch=plan.controlLaunches.find(l=>l.taskKey===row.taskKey);need(launch&&launch.containerName===c.name);same(launch.entryPoint,next.entryPoint);same(launch.command,next.command);}
    expected.containerDefinitions[i]=next;
@@ -423,7 +422,7 @@ async function derive(value,{expected,evidence,now,mode='admission',existing=fal
   for(const row of historical.inventory.roots)need(row.targetTag==='mem9-'+proof.dataOrigin.revision.slice(0,7),'NonrootTaggedCopyRequired');
  }
  same(historical.inventory,artifact.receipt.inventory,'NonrootCopyGraphChanged');same(historical.destinationReadback,await r.json(proof.historicalCopy.destinationReadback));
- const audited=await audit(proof,proof.predeploymentAudit,r,archive,at),planned=await taskPlan(proof,r,artifact);
+ const audited=await audit(proof,proof.predeploymentAudit,r,archive,at),planned=await taskPlan(proof,r,artifact,source);
  for(const [record,purpose,kind]of [[proof.dataOrigin,'protocol',undefined],[proof.historicalCopy,'protocol','historical-copy-adoption'],[proof.artifactReverification,'protocol',proof.artifactReverification.kind],[proof.taskPlan,'protocol','exact-nnp-task-plan'],[proof.taskPlan.carrierBuild,'protocol','premerge-audit-carrier'],[proof.taskPlan.permissions,'protocol','existing-permissions-preflight'],[proof.predeploymentAudit.preauditPermit,'protocol','premerge-readonly-audit-permit'],[proof.predeploymentAudit,'protocol','old-root-readonly-audit']])same(await resolveNonrootArchiveCommitment(archive,hash(record),{purpose,kind}),record);
  await r.closure(audited.plan);await r.closure(proof);assertNonrootArchiveConsumed(archive);
  return {proof,pins,evidence,archive,r,parameter,predecessor,parent,serving,source,artifact,audited,planned,verificationMode:mode,origin:published?'archive':proof.artifactReverification.version===2?'cache':'live',proofHash:hash(proof)};

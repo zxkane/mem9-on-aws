@@ -33,6 +33,50 @@ const dataSpecs=Object.freeze({
   planner:{name:'Mem9ConsolidationPlanner',entry:['node'],command:['/app/scripts/consolidation-worker.mjs'],prefix:'/usr/bin/setpriv'},
   executor:{name:'Mem9ConsolidationExecutor',entry:['node'],command:['/app/scripts/consolidation-worker.mjs'],prefix:'/usr/bin/setpriv'},
 });
+
+/** Fresh Go DATA evidence has no Node PATH assertion. The two file rows
+ * must come from the independently verified image filesystem, and the shell
+ * launcher must match the already verified original DATA source closure.
+ * No file read, image selection, loader override or authority is created. */
+export function describeGoDataPathEvidence({component,image,path,entrypoint,executable,sourceFile}){
+  need(component==='mnemo-server','NonrootGoComponent');
+  exact(image,['rootDigest','arm64Digest','configDigest']);
+  need(Object.values(image).every(d=>typeof d==='string'&&/^sha256:[a-f0-9]{64}$/.test(d)),'NonrootGoImage');
+  need(typeof path==='string'&&path.length>0&&path.length<=4096&&path.split(':').every(p=>p.startsWith('/')&&!p.split('/').includes('..')),'NonrootGoPath');
+  const file=(row,wanted)=>{
+    need(row&&row.path===wanted.slice(1)&&row.type==='file'&&row.mode===0o755,'NonrootGoFile');
+    for(const key of ['uid','gid'])need(row[key]===0&&(row.pax?.[key]===undefined||row.pax[key]==='0'),'NonrootGoFileOwner');
+    need(!Object.keys(row.pax??{}).some(k=>k.includes('security.capability')),'NonrootGoFilePrivilege');
+    need(row.content&&h64(row.content.sha256)&&Number.isSafeInteger(row.content.size)&&row.content.size>0,'NonrootGoFileContent');
+    return {path:wanted,sha256:row.content.sha256,bytesLength:row.content.size};
+  };
+  const launcher=file(entrypoint,'/usr/local/bin/entrypoint.sh'),program=file(executable,'/usr/local/bin/mnemo-server');
+  need(sourceFile?.path==='docker/mnemo-server/entrypoint.sh'&&sourceFile.sha256===launcher.sha256&&sourceFile.bytes===launcher.bytesLength,'NonrootGoSource');
+  return copyNonrootJson({version:2,kind:'fixed-go-data-runtime',component,image:imageOnly(image),path,nodePath:'not-applicable',entrypoint:launcher,executable:program});
+}
+
+/** Paired proof consumer. Image/file rows have already passed the complete
+ * independent graph/FS checks. The v2 Go form is accepted only in its fixed
+ * component and contract; all Node launchers keep their original PATH check. */
+export function verifyDataRuntimePathEvidence(value,{component,key,contractVersion,image,config,entries,sourceFile}){
+  need([1,2].includes(contractVersion),'NonrootDataContractVersion');
+  need(NONROOT_DATA_COMPONENTS.includes(component)&&(key===component||component==='llm-proxy'&&['planner','executor'].includes(key)),'NonrootDataComponent');
+  same(value.image,image);
+  need(Array.isArray(config?.Env)&&config.Env.filter(e=>e.startsWith('PATH=')).length===1&&config.Env.find(e=>e.startsWith('PATH=')).slice(5)===value.path,'NonrootDataPath');
+  if(key==='mnemo-server'&&contractVersion===2){
+    same(config.Entrypoint,['/usr/local/bin/entrypoint.sh'],'NonrootGoEntrypoint');
+    const nodes=new Map(entries.map(p=>[p.path,p]));
+    same(value,describeGoDataPathEvidence({component,image,path:value.path,entrypoint:nodes.get('usr/local/bin/entrypoint.sh'),executable:nodes.get('usr/local/bin/mnemo-server'),sourceFile}),'NonrootGoRuntimeEvidence');
+  }else{
+    need(value.version!==2&&value.kind!=='fixed-go-data-runtime','NonrootGoComponent');
+    need(value.resolvedNode==='/usr/local/bin/node','NonrootDataPath');
+    if(key!=='mnemo-server'){
+      const dirs=value.path.split(':'),nodes=new Map(entries.map(p=>[p.path,p]));let selected;
+      for(const dir of dirs){need(dir.startsWith('/')&&!dir.split('/').includes('..'),'NonrootDataPath');if(nodes.has(dir.slice(1)+'/node')){selected=dir+'/node';break;}}
+      need(selected===value.resolvedNode,'NonrootDataNodeShadow');
+    }
+  }
+}
 function harden(original,namedUserIdentity){
   const value=mutable(original);need(record(value));
   if(Object.hasOwn(value,'privileged'))need(value.privileged===false);
