@@ -148528,13 +148528,17 @@ function createPrepaidControlCacheBudget(options = {}) {
 		"now",
 		"deadlineMs",
 		"signal",
-		"uncompressedBytesLimit"
+		"uncompressedBytesLimit",
+		"processedEntriesLimit"
 	].includes(k)), "ControlCacheBudgetOptions");
 	const metadataReads = options.metadataReads, now = options.now ?? Date.now, capacity = metadataReads?.controlCapacity ? inspectFutureControlCapacity(metadataReads.controlCapacity) : null;
 	need$10(metadataReads && typeof metadataReads.reserveLocal === "function" && typeof now === "function", "ControlCachePrepaymentRequired");
 	const declaredU = options.uncompressedBytesLimit;
 	need$10(declaredU === void 0 || integer(declaredU) && declaredU > 0, "ControlCacheUncompressedLimit");
 	const uncompressedBytesLimit = declaredU === void 0 ? void 0 : Math.min(declaredU, IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity);
+	const declaredEntries = options.processedEntriesLimit;
+	need$10(declaredEntries === void 0 || integer(declaredEntries) && declaredEntries > 0, "ControlCacheProcessedEntriesLimit");
+	const processedEntriesLimit = declaredEntries === void 0 ? void 0 : Math.min(declaredEntries, IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity);
 	const startedMs = now(), deadlineMs = options.deadlineMs ?? startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs;
 	need$10(integer(startedMs) && Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs + IMAGE_TRANSITION_LIMITS.cleanupReserveMs && deadlineMs <= startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs, "ControlCacheDeadline");
 	need$10(canaryEvidenceHash(IMAGE_TRANSITION_LIMITS) === IMAGE_TRANSITION_LIMITS_HASH, "ImageLimitsChanged");
@@ -148602,6 +148606,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 	const budget = {
 		kind: "prepaid-local-control-cache",
 		...uncompressedBytesLimit === void 0 ? {} : { uncompressedBytesLimit },
+		...processedEntriesLimit === void 0 ? {} : { processedEntriesLimit },
 		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
 		startedMs,
 		deadlineMs,
@@ -149390,11 +149395,12 @@ function normalize$2(path, { link = false, base = "" } = {}) {
 	}
 	return parts.join("/");
 }
-function uncompressedPass(budget) {
-	const limit = budget.uncompressedBytesLimit;
+function filesystemPass(budget) {
+	const limit = budget.uncompressedBytesLimit, entryLimit = budget.processedEntriesLimit;
 	return {
 		limit,
 		bytes: 0,
+		entries: 0,
 		check(size) {
 			need$9(Number.isSafeInteger(size) && size >= 0 && (limit === void 0 || size <= limit), "ImageUncompressedLimit");
 		},
@@ -149402,10 +149408,15 @@ function uncompressedPass(budget) {
 			this.check(this.bytes + size);
 			budget.uncompressed(size);
 			this.bytes += size;
+		},
+		entry() {
+			need$9(entryLimit === void 0 || this.entries < entryLimit, "ImageFilesystemEntryLimit");
+			budget.entry();
+			this.entries++;
 		}
 	};
 }
-async function* unpacked(layer, diffId, readBlob, budget, pass = uncompressedPass(budget)) {
+async function* unpacked(layer, diffId, readBlob, budget, pass = filesystemPass(budget)) {
 	const source = Readable.from(readBlob(layer), {
 		highWaterMark: 65536,
 		objectMode: false
@@ -149491,7 +149502,7 @@ function resolved(nodes, path, { parent = false, missing = true, onLink } = {}) 
 	}
 	return prefix.join("/");
 }
-function parents(nodes, path, layer, budget) {
+function parents(nodes, path, layer, pass) {
 	const parts = path.split("/");
 	parts.pop();
 	let parent = "";
@@ -149500,7 +149511,7 @@ function parents(nodes, path, layer, budget) {
 		const found = nodes.get(parent);
 		if (found) need$9(found.type === "directory", "ImageVirtualParent");
 		else {
-			budget.entry();
+			pass.entry();
 			nodes.set(parent, {
 				type: "directory",
 				layer,
@@ -149525,7 +149536,7 @@ async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
 				await cursor.drain({ zeros: true });
 				break;
 			}
-			budget.entry();
+			pass.entry();
 			let checksum = 0;
 			for (let i = 0; i < 512; i++) checksum += i >= 148 && i < 156 ? 32 : header[i];
 			need$9(checksum === numeric(header.subarray(148, 156)), "ImageTarChecksum");
@@ -149583,7 +149594,7 @@ async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
 				continue;
 			}
 			path = resolved(nodes, path, { parent: true });
-			parents(nodes, path, index, budget);
+			parents(nodes, path, index, pass);
 			const name = posix.basename(path), parent = posix.dirname(path) === "." ? "" : posix.dirname(path);
 			if (name.startsWith(".wh.")) {
 				need$9(type === "0" && size === 0, "ImageWhiteoutInvalid");
@@ -149733,7 +149744,7 @@ async function inspectImageFilesystem(graph, { component, requirements = [], bud
 		"name",
 		"version"
 	].sort().join() && r.manager === "apk" && typeof r.path === "string" && r.path.startsWith("/") && typeof r.name === "string" && /^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name) && typeof r.version === "string" && /^[^\s\0]{1,512}$/.test(r.version), "ImagePackageRequirements");
-	const nodes = /* @__PURE__ */ new Map(), readBlob = (d) => state.store.open(d), pass = uncompressedPass(budget);
+	const nodes = /* @__PURE__ */ new Map(), readBlob = (d) => state.store.open(d), pass = filesystemPass(budget);
 	for (let i = 0; i < image.layers.length; i++) await applyLayer(nodes, image.layers[i], image.diffIds[i], i, readBlob, budget, pass);
 	for (const [path, node] of nodes) if (node.type === "symlink") resolved(nodes, path);
 	const groups = /* @__PURE__ */ new Map();
@@ -149774,6 +149785,7 @@ async function inspectImageFilesystem(graph, { component, requirements = [], bud
 		evidence,
 		databases,
 		uncompressedBytes: pass.bytes,
+		processedEntries: pass.entries,
 		entries: freeze(entries),
 		side: state.side,
 		graph,
@@ -149789,6 +149801,15 @@ function assertImageFilesystemUncompressedLimit(context, limit) {
 	need$9(Number.isSafeInteger(limit) && limit > 0, "ImageFilesystemUncompressedLimit");
 	need$9(state.uncompressedBytes <= Math.min(limit, IMAGE_TRANSITION_LIMITS.maxUncompressedBytes), "ImageUncompressedLimit");
 	return state.uncompressedBytes;
+}
+/** Complete pass work includes overwritten/whiteout/extension entries and
+* implicit directories. Final filesystem entryCount is not this quantity. */
+function assertImageFilesystemEntryLimit(context, limit) {
+	const state = verified.get(context);
+	need$9(state && state.kind !== "archived-filesystem-evidence" && Number.isSafeInteger(state.processedEntries), "ImageFilesystemContextRequired");
+	need$9(Number.isSafeInteger(limit) && limit > 0, "ImageFilesystemProcessedEntriesLimit");
+	need$9(state.processedEntries <= Math.min(limit, IMAGE_TRANSITION_LIMITS.maxFsEntries), "ImageFilesystemEntryLimit");
+	return state.processedEntries;
 }
 function inspectImageFilesystemEvidence(context) {
 	need$9(verified.has(context), "ImageFilesystemContextRequired");
@@ -153571,6 +153592,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 	same$2(base, t.base, "CarrierDerivationBase");
 	need$22(filesystem.graphHash === graphHash && imageFilesystemVerificationKind(baseFilesystem) === "live-filesystem-evidence", "CarrierDerivationFilesystem");
 	assertImageFilesystemUncompressedLimit(baseFilesystem, t.bounds.uncompressedBytes);
+	assertImageFilesystemEntryLimit(baseFilesystem, t.bounds.processedEntries);
 	attempted$1.add(context);
 	await verifyMaterializedCarrierContext(context);
 	const check = () => {
@@ -154033,6 +154055,7 @@ function assertBuiltClosure(filesystem, context, derived) {
 async function buildCarrierOffline({ context: handle, baseGraph, baseFilesystem, metadataReads, tempRoot, signal, derived: derivedHandle }) {
 	const context = inspectMaterializedCarrierContext(handle), plan = context.plan, t = plan.template, baseBinding = controlImageGraphBinding(baseGraph), state = imageGraphState(baseGraph);
 	assertImageFilesystemUncompressedLimit(baseFilesystem, t.bounds.uncompressedBytes);
+	assertImageFilesystemEntryLimit(baseFilesystem, t.bounds.processedEntries);
 	const derivedBindings = {
 		context: handle,
 		baseGraph,
@@ -154258,6 +154281,7 @@ async function buildCarrierOffline({ context: handle, baseGraph, baseFilesystem,
 		stage = "output-graph-verification";
 		const cacheDirectory = join(directory, "output/blobs/sha256"), budget = createPrepaidControlCacheBudget({
 			uncompressedBytesLimit: t.bounds.uncompressedBytes,
+			processedEntriesLimit: t.bounds.processedEntries,
 			metadataReads,
 			deadlineMs: Math.min(plan.deadlineMs, Date.now() + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs),
 			signal
@@ -154415,6 +154439,7 @@ var init_production_nonroot_carrier_build = __esmMin((() => {
 		"ControlImageScope",
 		"ImageRootIndexRequired",
 		"ImageUncompressedLimit",
+		"ImageFilesystemEntryLimit",
 		"ImageDescriptorFields",
 		"ImageDescriptorInvalid",
 		"ImageManifestFields",
@@ -174730,6 +174755,7 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 	need$22(!attempted.has(built) && b.record.templateHash === plan.templateHash && b.record.contextHash === plan.context.sha256 && sourceContext === admission.source.sourceContext, "CarrierSqlAcceptanceInputs");
 	need$22(context && derived && fixture && oldSource, "CarrierSqlAcceptanceDependencies");
 	assertImageFilesystemUncompressedLimit(b.filesystem, plan.template.bounds.uncompressedBytes);
+	assertImageFilesystemEntryLimit(b.filesystem, plan.template.bounds.processedEntries);
 	attempted.add(built);
 	consumer.check();
 	const startedMs = Date.now(), { graphHash, ...image } = controlImageGraphBinding(b.graph);
@@ -175379,6 +175405,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				const built = inspectCarrierOfflineBuild(handle);
 				need$22(built.record.templateHash === config.templateHash && built.record.contextHash === p.context.sha256 && (!sqlAcceptance || sqlBuilt === handle), "CarrierConsumerBuildBinding");
 				assertImageFilesystemUncompressedLimit(built.filesystem, t.bounds.uncompressedBytes);
+				assertImageFilesystemEntryLimit(built.filesystem, t.bounds.processedEntries);
 				output = built;
 				outputNodes = built.graph.inventory.nodes;
 				append("built", { record: built.record });
@@ -177750,6 +177777,7 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 		};
 		const budget = createPrepaidControlCacheBudget({
 			uncompressedBytesLimit: t.bounds.uncompressedBytes,
+			processedEntriesLimit: t.bounds.processedEntries,
 			metadataReads: consumer,
 			deadlineMs: Math.min(p.deadlineMs, Date.now() + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs)
 		});

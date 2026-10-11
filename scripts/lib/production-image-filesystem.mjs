@@ -25,12 +25,15 @@ function normalize(path,{link=false,base=''}={}){
  for(const part of path.split('/')){if(!part||part==='.')continue;if(part==='..'){need(link&&parts.length>0,'ImageTarEscape');parts.pop();}else parts.push(part);}
  return parts.join('/');
 }
-function uncompressedPass(budget){
- const limit=budget.uncompressedBytesLimit;
- return {limit,bytes:0,check(size){need(Number.isSafeInteger(size)&&size>=0&&(limit===undefined||size<=limit),'ImageUncompressedLimit');},
-  add(size){this.check(this.bytes+size);budget.uncompressed(size);this.bytes+=size;}};
+function filesystemPass(budget){
+ const limit=budget.uncompressedBytesLimit,entryLimit=budget.processedEntriesLimit;
+ return {limit,bytes:0,entries:0,check(size){need(Number.isSafeInteger(size)&&size>=0&&(limit===undefined||size<=limit),'ImageUncompressedLimit');},
+  add(size){this.check(this.bytes+size);budget.uncompressed(size);this.bytes+=size;},
+  // Count every original tar/implicit-parent admission, not final map size.
+  // The original cumulative payer is charged before this diagnostic advances.
+  entry(){need(entryLimit===undefined||this.entries<entryLimit,'ImageFilesystemEntryLimit');budget.entry();this.entries++;}};
 }
-async function* unpacked(layer,diffId,readBlob,budget,pass=uncompressedPass(budget)){
+async function* unpacked(layer,diffId,readBlob,budget,pass=filesystemPass(budget)){
  // Bound the input queue in bytes, including while a decoder is stopping.
  const source=Readable.from(readBlob(layer),{highWaterMark:65536,objectMode:false});let output=source;
  if(layer.mediaType===IMAGE_MEDIA.gzip||layer.mediaType===IMAGE_MEDIA.dockerGzip)output=createGunzip({chunkSize:65536});
@@ -71,15 +74,15 @@ function resolved(nodes,path,{parent=false,missing=true,onLink}={}){
   if(!node&&!missing)imageFailure('ImageVirtualLinkMissing');
  }return prefix.join('/');
 }
-function parents(nodes,path,layer,budget){
+function parents(nodes,path,layer,pass){
  const parts=path.split('/');parts.pop();let parent='';
- for(const part of parts){parent=parent?parent+'/'+part:part;const found=nodes.get(parent);if(found)need(found.type==='directory','ImageVirtualParent');else{budget.entry();nodes.set(parent,{type:'directory',layer,implicit:true});}}
+ for(const part of parts){parent=parent?parent+'/'+part:part;const found=nodes.get(parent);if(found)need(found.type==='directory','ImageVirtualParent');else{pass.entry();nodes.set(parent,{type:'directory',layer,implicit:true});}}
 }
 function remove(nodes,path,{olderThan}={}){for(const [name,node]of nodes)if((name===path||name.startsWith(path+'/'))&&(olderThan===undefined||node.layer<olderThan))nodes.delete(name);}
 async function applyLayer(nodes,layer,diffId,index,readBlob,budget,pass){
  const layerStart=pass.bytes,cursor=new Cursor(unpacked(layer,diffId,readBlob,budget,pass));let local={},global={},longPath,longLink;
  try{while(true){budget.check();const header=await cursor.read(512);if(zero(header)){need(zero(await cursor.read(512)),'ImageTarTerminator');need(!Object.keys(local).length&&longPath===undefined&&longLink===undefined,'ImageTarDanglingExtension');await cursor.drain({zeros:true});break;}
-   budget.entry();let checksum=0;for(let i=0;i<512;i++)checksum+=i>=148&&i<156?32:header[i];need(checksum===numeric(header.subarray(148,156)),'ImageTarChecksum');
+   pass.entry();let checksum=0;for(let i=0;i<512;i++)checksum+=i>=148&&i<156?32:header[i];need(checksum===numeric(header.subarray(148,156)),'ImageTarChecksum');
    const type=String.fromCharCode(header[156]||48),rawSize=numeric(header.subarray(124,136));need(rawSize<=L.maxUncompressedBytes,'ImageTarSize');
    const magic=text(header.subarray(257,263));need(magic===''||magic==='ustar'||magic==='ustar ','ImageTarFormat');
    if(['x','g','L','K'].includes(type)){
@@ -93,7 +96,7 @@ async function applyLayer(nodes,layer,diffId,index,readBlob,budget,pass){
    // Reject an impossible advertised body before hashing or parsing it.
    pass.check(layerStart+cursor.offset+Math.ceil(size/512)*512);
    path=normalize(path);if(path===''){need(type==='5'&&size===0,'ImageTarRoot');continue;}
-   path=resolved(nodes,path,{parent:true});parents(nodes,path,index,budget);
+   path=resolved(nodes,path,{parent:true});parents(nodes,path,index,pass);
    const name=posix.basename(path),parent=posix.dirname(path)==='.'?'':posix.dirname(path);
    if(name.startsWith('.wh.')){
     need(type==='0'&&size===0,'ImageWhiteoutInvalid');if(name==='.wh..wh..opq')for(const [p,node]of nodes){if((parent===''||p.startsWith(parent+'/'))&&node.layer<index)nodes.delete(p);}
@@ -128,7 +131,7 @@ export async function inspectImageFilesystem(graph,{component,requirements=[],bu
  const state=imageGraphState(graph);budget??=state.budget;need(budget===state.budget,'ImageFilesystemBudget');assertImageBudget(budget);const image=state.images.get(component);need(image,'ImageFilesystemComponent');
  need(Array.isArray(requirements)&&requirements.length<=32&&new Set(requirements.map(r=>r.path+'\0'+r.name)).size===requirements.length,'ImagePackageRequirements');
  for(const r of requirements)need(r&&Object.keys(r).sort().join()===['path','manager','name','version'].sort().join()&&r.manager==='apk'&&typeof r.path==='string'&&r.path.startsWith('/')&&typeof r.name==='string'&&/^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name)&&typeof r.version==='string'&&/^[^\s\0]{1,512}$/.test(r.version),'ImagePackageRequirements');
- const nodes=new Map(),readBlob=d=>state.store.open(d),pass=uncompressedPass(budget);
+ const nodes=new Map(),readBlob=d=>state.store.open(d),pass=filesystemPass(budget);
  for(let i=0;i<image.layers.length;i++)await applyLayer(nodes,image.layers[i],image.diffIds[i],i,readBlob,budget,pass);
  // Dangling runtime symlinks remain inert metadata; required files and all
  // hardlinks must resolve. Cycles/escapes are rejected even for unused links.
@@ -137,7 +140,7 @@ export async function inspectImageFilesystem(graph,{component,requirements=[],bu
  const packages=[],databases=[];for(const group of groups.values()){const db=await packageDatabase(group.content,image.layers,image.diffIds,readBlob,budget,group.requirements);packages.push(...db.packages);databases.push(db);}
  const entries=[...nodes].sort(([a],[b])=>a.localeCompare(b)).map(([path,node])=>({path,...node}));
  const evidence=freeze({version:1,graphHash:graph.graphHash,limitsHash:IMAGE_TRANSITION_LIMITS_HASH,component,rootDigest:state.roots.find(r=>r.component===component).root.digest,arm64Digest:image.manifest.digest,entriesHash:hash(entries),entryCount:entries.length,requirementsHash:hash(requirements),packages});
- const context=Object.freeze({evidence});verified.set(context,{evidence,databases,uncompressedBytes:pass.bytes,entries:freeze(entries),side:state.side,graph,requirements:structuredClone(requirements)});return context;
+ const context=Object.freeze({evidence});verified.set(context,{evidence,databases,uncompressedBytes:pass.bytes,processedEntries:pass.entries,entries:freeze(entries),side:state.side,graph,requirements:structuredClone(requirements)});return context;
 }
 /** A new copy requires this exact live source graph, not destination or archive
  * evidence with the same public hashes. The caller supplies policy-bound pins. */
@@ -154,6 +157,15 @@ export function assertImageFilesystemUncompressedLimit(context,limit){
  need(Number.isSafeInteger(limit)&&limit>0,'ImageFilesystemUncompressedLimit');
  need(state.uncompressedBytes<=Math.min(limit,L.maxUncompressedBytes),'ImageUncompressedLimit');
  return state.uncompressedBytes;
+}
+/** Complete pass work includes overwritten/whiteout/extension entries and
+ * implicit directories. Final filesystem entryCount is not this quantity. */
+export function assertImageFilesystemEntryLimit(context,limit){
+ const state=verified.get(context);
+ need(state&&state.kind!=='archived-filesystem-evidence'&&Number.isSafeInteger(state.processedEntries),'ImageFilesystemContextRequired');
+ need(Number.isSafeInteger(limit)&&limit>0,'ImageFilesystemProcessedEntriesLimit');
+ need(state.processedEntries<=Math.min(limit,L.maxFsEntries),'ImageFilesystemEntryLimit');
+ return state.processedEntries;
 }
 export function inspectImageFilesystemEvidence(context){need(verified.has(context),'ImageFilesystemContextRequired');return structuredClone(verified.get(context).evidence);}
 /** Read-only metadata from the actual verified virtual filesystem. This does

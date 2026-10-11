@@ -9,7 +9,7 @@ import {constants} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {inspectMaterializedCarrierContext,consumeCarrierBuildContext,verifyMaterializedCarrierContext} from './ci-carrier-context.mjs';
 import {controlImageGraphBinding,imageGraphState,IMAGE_MEDIA,validateImageDescriptor,imageDescriptorDataLocalBytes,createPrepaidControlCacheBudget,readCollectedControlImageCache} from './production-image-graph.mjs';
-import {inspectImageFilesystem,inspectImageFilesystemEvidence,inspectImageFilesystemFile,inspectImageFilesystemEntries,assertImageFilesystemUncompressedLimit} from './production-image-filesystem.mjs';
+import {inspectImageFilesystem,inspectImageFilesystemEvidence,inspectImageFilesystemFile,inspectImageFilesystemEntries,assertImageFilesystemUncompressedLimit,assertImageFilesystemEntryLimit} from './production-image-filesystem.mjs';
 import {parseAcquisitionJson,hash,freeze} from './ci-smoke-acquisition-format.mjs';
 import {CARRIER_BUILD_SUPERVISOR_SOURCE} from './production-nonroot-carrier-build-supervisor.mjs';
 import {consumeCarrierRuntimeMaterial,inspectCarrierRuntimeMaterial} from './ci-carrier-derived.mjs';
@@ -22,7 +22,7 @@ const parse=(b,cap=1048576)=>parseAcquisitionJson(b,cap);
 const padded=n=>Math.ceil(n/512)*512;
 const held=(directory,proof)=>Object.assign(Error('CarrierBuildOutcomeHeld'),{code:'ECLEANUP',operationDirectory:directory,processStopped:Boolean(proof),...(proof?{termination:proof}:{})});
 const imageName=base=>base.account+'.dkr.ecr.'+base.region+'.amazonaws.com/'+base.repositoryName+'@'+base.rootDigest;
-const verificationCodes=new Set(['ControlCacheAcquisitionMismatch','ControlCacheDeadline','ControlCacheBudgetOptions','ControlImageBinding','ControlImageConfigBinding','ControlImageScope','ImageRootIndexRequired','ImageUncompressedLimit','ImageDescriptorFields','ImageDescriptorInvalid','ImageManifestFields','ImageManifestSchema','ImageAttestationSubject','ImageArm64Selection','ImageBlobDigest','ImageBlobSize','ImageGraphInvalid','ImageJsonSize','ImageJsonValue','ImageJsonNumber','ImageRuntimeConfig','ImageEmptyConfig','NonrootContractInvalid','NonrootControlCacheFile','NonrootControlCacheGraphChanged','NonrootControlCacheInventory']);
+const verificationCodes=new Set(['ControlCacheAcquisitionMismatch','ControlCacheDeadline','ControlCacheBudgetOptions','ControlImageBinding','ControlImageConfigBinding','ControlImageScope','ImageRootIndexRequired','ImageUncompressedLimit','ImageFilesystemEntryLimit','ImageDescriptorFields','ImageDescriptorInvalid','ImageManifestFields','ImageManifestSchema','ImageAttestationSubject','ImageArm64Selection','ImageBlobDigest','ImageBlobSize','ImageGraphInvalid','ImageJsonSize','ImageJsonValue','ImageJsonNumber','ImageRuntimeConfig','ImageEmptyConfig','NonrootContractInvalid','NonrootControlCacheFile','NonrootControlCacheGraphChanged','NonrootControlCacheInventory']);
 
 /** Last matching source-policy rule wins. No remote resolver, frontend,
  * registry credentials or daemon registry cache can substitute the OCI input. */
@@ -112,7 +112,7 @@ function assertBuiltClosure(filesystem,context,derived){
 
 export async function buildCarrierOffline({context:handle,baseGraph,baseFilesystem,metadataReads,tempRoot,signal,derived:derivedHandle}){
  const context=inspectMaterializedCarrierContext(handle),plan=context.plan,t=plan.template,baseBinding=controlImageGraphBinding(baseGraph),state=imageGraphState(baseGraph);
- assertImageFilesystemUncompressedLimit(baseFilesystem,t.bounds.uncompressedBytes);
+ assertImageFilesystemUncompressedLimit(baseFilesystem,t.bounds.uncompressedBytes);assertImageFilesystemEntryLimit(baseFilesystem,t.bounds.processedEntries);
  const derivedBindings={context:handle,baseGraph,baseFilesystem,metadataReads};
  need(context.manifest.version===2?derivedHandle!==undefined:derivedHandle===undefined,'CarrierDerivedRequired');
  const derived=derivedHandle?await consumeCarrierRuntimeMaterial(derivedHandle,derivedBindings):null,pins=derived?.nativePins??context.nativePins;
@@ -177,7 +177,7 @@ export async function buildCarrierOffline({context:handle,baseGraph,baseFilesyst
   // readers. Original export/metadata bytes retain their hash commitments;
   // legacy builds retain their full exporter descriptor and historical hashes.
   const builtBinding={account:t.scope.account,region:t.scope.region,repositoryName:t.scope.repositoryName,root:derived?actual:index.manifests[0],arm64Digest:arms[0].digest,configDigest};
-  stage='output-graph-verification';const cacheDirectory=join(directory,'output/blobs/sha256'),budget=createPrepaidControlCacheBudget({uncompressedBytesLimit:t.bounds.uncompressedBytes,metadataReads,deadlineMs:Math.min(plan.deadlineMs,Date.now()+L.maxBlobTransferMs),signal});
+  stage='output-graph-verification';const cacheDirectory=join(directory,'output/blobs/sha256'),budget=createPrepaidControlCacheBudget({uncompressedBytesLimit:t.bounds.uncompressedBytes,processedEntriesLimit:t.bounds.processedEntries,metadataReads,deadlineMs:Math.min(plan.deadlineMs,Date.now()+L.maxBlobTransferMs),signal});
   verified=await readCollectedControlImageCache(builtBinding,{directory:cacheDirectory,nodes:[...nodes.values()],budget,metadataReads});
   stage='output-filesystem';const filesystem=await inspectImageFilesystem(verified.graph,{component:'bootstrap'});stage='output-closure';assertBuiltClosure(filesystem,context,derived);stage='output-config';
   const config=parse(await read('blobs/sha256/'+configDigest.slice(7),1048576));

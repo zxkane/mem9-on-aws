@@ -43,7 +43,7 @@ export async function collectCarrierBase({consumer,transport,tempRoot}){
  };
  try{
   await visit({digest:t.base.rootDigest});const binding={account:t.base.account,region:t.base.region,repositoryName:t.base.repositoryName,root,arm64Digest:t.base.arm64Digest,configDigest:t.base.configDigest};
-  const budget=createPrepaidControlCacheBudget({uncompressedBytesLimit:t.bounds.uncompressedBytes,metadataReads:consumer,deadlineMs:Math.min(p.deadlineMs,Date.now()+L.maxBlobTransferMs)});verified=await readCollectedControlImageCache(binding,{directory:cache,nodes:[...nodes.values()],budget,metadataReads:consumer});
+  const budget=createPrepaidControlCacheBudget({uncompressedBytesLimit:t.bounds.uncompressedBytes,processedEntriesLimit:t.bounds.processedEntries,metadataReads:consumer,deadlineMs:Math.min(p.deadlineMs,Date.now()+L.maxBlobTransferMs)});verified=await readCollectedControlImageCache(binding,{directory:cache,nodes:[...nodes.values()],budget,metadataReads:consumer});
   const filesystem=await inspectImageFilesystem(verified.graph,{component:'bootstrap'});return {directory,cacheDirectory:cache,graph:verified.graph,filesystem,close:verified.cache.close};
  }catch(e){await verified?.cache.close();await rm(directory,{recursive:true,force:true});throw e;}
 }

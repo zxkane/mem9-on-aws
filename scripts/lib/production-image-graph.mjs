@@ -67,7 +67,7 @@ export function createRemainingWorkImageBudget(options){
  * local watchdog can shorten work; only reserveLocal owns source/owner expiry.
  * No credential lifetime is invented for already cached bytes. */
 export function createPrepaidControlCacheBudget(options={}){
- need(record(options)&&Object.keys(options).every(k=>['metadataReads','now','deadlineMs','signal','uncompressedBytesLimit'].includes(k)),'ControlCacheBudgetOptions');
+ need(record(options)&&Object.keys(options).every(k=>['metadataReads','now','deadlineMs','signal','uncompressedBytesLimit','processedEntriesLimit'].includes(k)),'ControlCacheBudgetOptions');
  const metadataReads=options.metadataReads,now=options.now??Date.now,capacity=metadataReads?.controlCapacity?inspectFutureControlCapacity(metadataReads.controlCapacity):null;
  need(metadataReads&&typeof metadataReads.reserveLocal==='function'&&typeof now==='function','ControlCachePrepaymentRequired');
  // The caller's per-image geometry bound never resets cumulative debits.
@@ -75,6 +75,9 @@ export function createPrepaidControlCacheBudget(options={}){
  const declaredU=options.uncompressedBytesLimit;
  need(declaredU===undefined||integer(declaredU)&&declaredU>0,'ControlCacheUncompressedLimit');
  const uncompressedBytesLimit=declaredU===undefined?undefined:Math.min(declaredU,L.maxUncompressedBytes,capacity?.uncompressedBytes??Infinity);
+ const declaredEntries=options.processedEntriesLimit;
+ need(declaredEntries===undefined||integer(declaredEntries)&&declaredEntries>0,'ControlCacheProcessedEntriesLimit');
+ const processedEntriesLimit=declaredEntries===undefined?undefined:Math.min(declaredEntries,L.maxFsEntries,capacity?.processedEntries??Infinity);
  const startedMs=now(),deadlineMs=options.deadlineMs??startedMs+L.maxBlobTransferMs;
  need(integer(startedMs)&&Number.isSafeInteger(deadlineMs)&&deadlineMs>startedMs+L.cleanupReserveMs&&deadlineMs<=startedMs+L.maxBlobTransferMs,'ControlCacheDeadline');
  need(hash(L)===IMAGE_TRANSITION_LIMITS_HASH,'ImageLimitsChanged');
@@ -99,7 +102,7 @@ export function createPrepaidControlCacheBudget(options={}){
   seen.set(d.digest,{size:d.size,isManifest});uniqueBytes+=d.size;if(isManifest)manifestNodes++;else blobNodes++;
  };
  const noNetwork=()=>imageFailure('ControlCacheNetworkForbidden');
- const budget={kind:'prepaid-local-control-cache',...(uncompressedBytesLimit===undefined?{}:{uncompressedBytesLimit}),limitsHash:IMAGE_TRANSITION_LIMITS_HASH,startedMs,deadlineMs,now,signal:options.signal,check,
+ const budget={kind:'prepaid-local-control-cache',...(uncompressedBytesLimit===undefined?{}:{uncompressedBytesLimit}),...(processedEntriesLimit===undefined?{}:{processedEntriesLimit}),limitsHash:IMAGE_TRANSITION_LIMITS_HASH,startedMs,deadlineMs,now,signal:options.signal,check,
   manifest:d=>add(d,true),blob:d=>add(d,false),
   edge(key){check();need(typeof key==='string');if(!edges.has(key)){need(edges.size<L.maxEdges,'ImageGraphEdgeLimit');edges.add(key);}},
   cacheRead(size){check();need(integer(size)&&logicalBytes+size<=L.maxTransferredBytes,'ImageTransferLimit');need(localReads<L.maxEcrCalls,'ImageCallLimit');reserve({...zero(),logicalBytes:size});logicalBytes+=size;localReads++;},

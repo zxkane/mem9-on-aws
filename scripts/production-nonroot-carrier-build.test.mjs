@@ -9,7 +9,7 @@ import {inspectImageFilesystem,inspectImageFilesystemEntries} from './lib/produc
 import {carrierContextFixture,sha,zero} from './ci-carrier.fixture.mjs';
 
 function nativeTar(entries){const blocks=[];for(const e of entries){const b=Buffer.from(e.body??''),h=Buffer.alloc(512),oct=(n,at,len)=>h.write(n.toString(8).padStart(len-1,'0')+'\0',at,len);h.write(e.path,0,100);oct(e.mode??0o555,100,8);oct(0,108,8);oct(0,116,8);oct(b.length,124,12);oct(0,136,12);h.fill(32,148,156);h[156]=(e.type??'0').charCodeAt(0);h.write(e.link??'',157,100);h.write('ustar\0',257,6);h.write('00',263,2);h.write([...h].reduce((a,b)=>a+b,0).toString(8).padStart(6,'0')+'\0 ',148,8);blocks.push(h,b,Buffer.alloc((512-b.length%512)%512));}blocks.push(Buffer.alloc(1024));return Buffer.concat(blocks);}
-async function fixture(use,{oversize=false}={}){
+async function fixture(use,{oversize=false,entryOverflow=false}={}){
  const tempRoot=await mkdtemp(join(tmpdir(),'carrier-build-test-')),cache=join(tempRoot,'cache'),spent=zero(),charges=[];await mkdir(cache,{mode:0o700});
  const metadataReads={reserveLocal(c){charges.push({...c});for(const k of Object.keys(spent)){expect(c[k]).toBeGreaterThanOrEqual(0);spent[k]+=c[k];}if(spent.logicalBytes>536870912)throw Error('SyntheticCarrierBudget');}};let base;
  try{
@@ -25,6 +25,7 @@ async function fixture(use,{oversize=false}={}){
   for(const {d,b}of data.values())await writeFile(join(cache,d.digest.slice(7)),b,{mode:0o600});
   const binding={account:'123456789012',region:'ap-northeast-1',repositoryName:'mem9-on-aws/bootstrap',root,arm64Digest:arm.digest,configDigest:config.digest};
   const f=carrierContextFixture({baseImage:{account:binding.account,region:binding.region,repositoryName:binding.repositoryName,rootDigest:root.digest,arm64Digest:arm.digest,configDigest:config.digest},nativePins:{nodeSha256:sha(busybox),setprivSha256:sha(busybox)}});
+  if(entryOverflow)f.template.bounds.processedEntries=16;
   f.template.bounds.compressedBytes=16777216;f.template.bounds.uncompressedBytes=oversize?layer.size:33554432;f.rebind();
   // Rebind the synthetic framing after changing its static test bounds.
   f.manifest.templateHash=f.plan.templateHash;const header=Buffer.from(JSON.stringify(f.manifest)),len=Buffer.alloc(4);len.writeUInt32BE(header.length);
@@ -74,4 +75,17 @@ describe.skipIf(process.env.MEM9_CARRIER_NATIVE_TEST!=='1')('native declared-U r
   // then removes the private fixture tree. Nothing can publish a build handle.
   expect((await readdir(error.operationDirectory)).includes('build.log')).toBe(true);
  },{oversize:true}),180000);
+});
+
+describe.skipIf(process.env.MEM9_CARRIER_NATIVE_TEST!=='1')('native per-output entry bound',()=>{
+ it('rejects actual BuildKit output above the declared entries while original aggregate still has capacity',()=>fixture(async input=>{
+  const beforeEntries=input.spent.processedEntries;
+  let built,error;try{built=await buildCarrierOffline(input);}catch(e){error=e;}finally{if(built)await closeCarrierOfflineBuild(built);}
+  expect(error).toBeDefined();expect(error.code).toBe('ECLEANUP');
+  expect(error.stage).toBe('output-filesystem');expect(error.failureCode).toBe('ImageFilesystemEntryLimit');
+  expect(error.processStopped).toBe(true);expect(error.termination.cleanupComplete).toBe(true);expect(error.termination.leaderEnded).toBe(true);expect(error.termination.status).toBe(0);
+  expect(beforeEntries).toBeGreaterThanOrEqual(input.f.template.bounds.processedEntries);
+  expect(input.spent.processedEntries).toBe(beforeEntries+input.f.template.bounds.processedEntries);
+  expect(input.spent.processedEntries).toBeLessThan(input.f.template.fundedLocal.ci.processedEntries);
+ },{entryOverflow:true}),180000);
 });
