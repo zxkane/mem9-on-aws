@@ -150,10 +150,10 @@ function sessionCredentials(credentials){
  return {accessKeyId,secretAccessKey,sessionToken,expiration:new Date(expiration)};
 }
 
-async function withClient(commitment,options,operation){
- return withLocatedClient(ciSmokeArchiveLocation(options.config,commitment),options,operation);
+async function withClient(commitment,options,operation,fixedSdk=false){
+ return withLocatedClient(ciSmokeArchiveLocation(options.config,commitment),options,operation,undefined,fixedSdk);
 }
-async function withLocatedClient(config,options,operation,meter){
+async function withLocatedClient(config,options,operation,meter,fixedSdk=false){
  const now=options.now??Date.now;need(typeof now==='function');let held=sessionCredentials(options.credentials);integer(options.deadlineMs,1);
  const expires=held.expiration.getTime(),check=()=>{const t=now();integer(t,1);need(!controller.signal.aborted&&t<options.deadlineMs&&t<expires,'CiSmokeArchiveExpired');};
  const controller=new AbortController();if(options.signal?.aborted)controller.abort();const abort=()=>controller.abort();options.signal?.addEventListener('abort',abort,{once:true});
@@ -177,7 +177,9 @@ async function withLocatedClient(config,options,operation,meter){
    }
    return response;
   },destroy(){transport.destroy();}};
-  client=new S3Client({region:config.region,endpoint:`https://s3.${config.region}.amazonaws.com`,forcePathStyle:true,followRegionRedirects:false,maxAttempts:1,ignoreConfiguredEndpointUrls:true,requestChecksumCalculation:'WHEN_REQUIRED',responseChecksumValidation:'WHEN_REQUIRED',credentials:async()=>{check();need(held,'CiSmokeArchiveSessionClosed');return held;},requestHandler:handler});
+  client=new S3Client({region:config.region,endpoint:`https://s3.${config.region}.amazonaws.com`,forcePathStyle:true,followRegionRedirects:false,maxAttempts:1,ignoreConfiguredEndpointUrls:true,requestChecksumCalculation:'WHEN_REQUIRED',responseChecksumValidation:'WHEN_REQUIRED',
+   ...(fixedSdk?{defaultsMode:'legacy',retryMode:'standard',useFipsEndpoint:false,useDualstackEndpoint:false,useArnRegion:false,useAccelerateEndpoint:false,disableMultiregionAccessPoints:true}:{}),
+   credentials:async()=>{check();need(held,'CiSmokeArchiveSessionClosed');return held;},requestHandler:handler});
   const closeBody=()=>{if(body&&!body.destroyed){try{need(typeof body.destroy==='function');body.destroy();}catch{cleanupFailed=true;}}};controller.signal.addEventListener('abort',closeBody,{once:true});
   try{return await operation({config,check,signal:controller.signal,PutObjectCommand,GetObjectCommand,send:command=>{check();return client.send(command,{abortSignal:controller.signal});},setBody:value=>{body=value;}});}
   finally{
@@ -216,6 +218,12 @@ export async function putCiSmokeEnvelope(encoded,options){
  });}catch(error){if(error?.code==='ECLEANUP')throw cleanupError();fail('CiSmokePrivatePutHeld');}
 }
 export async function getCiSmokeEnvelope(commitment,options){
+ return getEnvelope(commitment,options,false);
+}
+export async function getCiSmokeCompositionEnvelope(commitment,options){
+ return getEnvelope(commitment,options,true);
+}
+async function getEnvelope(commitment,options,fixedSdk){
  const c=inspectCiSmokeCommitment(commitment);
  try{return await withClient(c,options,async({config,check,GetObjectCommand,send,setBody})=>{
   // Do not request a version, extra metadata API or KMS checksum mode. The
@@ -225,7 +233,7 @@ export async function getCiSmokeEnvelope(commitment,options){
   const body=response.Body;need(body&&typeof body[Symbol.asyncIterator]==='function'&&typeof body.destroy==='function','CiSmokeArchiveBody');const parts=[];let length=0;
   for await(const chunk of body){check();need(chunk instanceof Uint8Array,'CiSmokeArchiveBody');length+=chunk.byteLength;need(length<=c.bytesLength&&length<=CI_SMOKE_ARCHIVE_LIMITS.envelopeBytes,'CiSmokeArchiveLimit');parts.push(Buffer.from(chunk));}
   check();need(length===c.bytesLength,'CiSmokeArchiveGetLength');const decoded=decodeCiSmokeEnvelope(Buffer.concat(parts,length),c);check();return decoded;
- });}catch(error){if(error?.code==='ECLEANUP')throw cleanupError();fail('CiSmokePrivateGetHeld');}
+ },fixedSdk);}catch(error){if(error?.code==='ECLEANUP')throw cleanupError();fail('CiSmokePrivateGetHeld');}
 }
 
 function controlMeter(operation,selector,options){

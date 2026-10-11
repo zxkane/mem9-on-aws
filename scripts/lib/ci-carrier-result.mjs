@@ -1,3 +1,4 @@
+import {inspectCarrierLocalEvidence} from './ci-carrier-local-policy.mjs';
 /** Immutable CI build facts. Completion and security are added by the owner
  * after the real job finishes; neither is claimed by this build result. */
 import {copyNonrootJson,inspectNonrootRecord,nonrootHash as hash} from './production-nonroot-contracts.mjs';
@@ -16,7 +17,8 @@ const same=(a,b)=>need(hash(a)===hash(b),'CarrierResultBinding');
 // reimburse a slot, or reconstruct a mutable budget. The result's own PUT and
 // subsequent cleanup are outside this prefix and remain prepaid in full.
 function consumerPrefix(value,{plan,binding,claim,buildEvidence,sqlAcceptance}){
- const t=plan.template,v=value;exact(v,['events','lastHash','local','wire','used','blobUsage']);
+ const t=plan.template,v=value;exact(v,['events','lastHash','local','wire','used','blobUsage',...(t.ciLocalPolicy?['ciLocal']:[])]);
+ if(t.ciLocalPolicy){const local=inspectCarrierLocalEvidence(v.ciLocal,{plan,binding});same(local.spent,v.local);}
  counter(v.local);counter(v.wire);
  for(const k of COUNTERS)need(v.local[k]<=t.fundedLocal.ci[k],'CarrierResultLocalBudget');
  need(v.local.ecrRequests===0&&v.local.httpBodyBytes===0,'CarrierResultLocalBudget');

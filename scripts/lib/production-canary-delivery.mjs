@@ -12,10 +12,29 @@ import {discoverSchedulerTasks} from '../consolidation-scheduler-e2e.mjs';
 import {loadWorkerDataRelease} from './production-data-release-loader.mjs';
 import {productionSourceTree} from '../run-production-runtime.mjs';
 import {sendMaintenanceCommand,maintenanceWorkerTarget} from './production-maintenance-admission.mjs';
+import {dataLaunchPolicy,NONROOT_FORBIDDEN_ENVIRONMENT} from './production-nonroot-launch.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=()=>{throw Error('ProductionCanaryDeliveryFailed');};
 const env=container=>Object.fromEntries((container?.environment??[]).map(item=>[item.name,item.value]));
+
+function validWorkerLaunch(definition,container,kind,dataRelease){
+  if(dataRelease?.data.version!==3)return container?.entryPoint?.join()==='node';
+  if(!container||definition.runtimePlatform?.operatingSystemFamily!=='LINUX')return false;
+  try{
+    if(canaryEvidenceHash(container)!==canaryEvidenceHash(dataLaunchPolicy(kind,container)))return false;
+    const names=new Set();
+    for(const [rows,field]of [[container.environment??[],'value'],[container.secrets??[],'valueFrom']]){
+      if(!Array.isArray(rows))return false;
+      for(const row of rows){
+        if(!row||Object.keys(row).sort().join()!==['name',field].sort().join()||typeof row.name!=='string'||typeof row[field]!=='string'||
+          names.has(row.name)||row.name.startsWith('LD_')||NONROOT_FORBIDDEN_ENVIRONMENT.includes(row.name))return false;
+        names.add(row.name);
+      }
+    }
+    return true;
+  }catch{return false;}
+}
 
 export function productionCanarySchedule(template,target,{wave,nonce,when,actions,admission}){
   if(!['plan','apply','repeat-a','repeat-b'].includes(wave)||!/^[a-f0-9]{32}$/.test(nonce??'')||!Number.isSafeInteger(when)||
@@ -90,7 +109,7 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
   const actual=Object.fromEntries((container?.secrets??[]).map(secret=>[secret.name,secret.valueFrom]));
   if(definition?.taskDefinitionArn!==worker.taskDefinitionArn||definition.containerDefinitions?.length!==1||container.name!==containerName||
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||container.environmentFiles?.length||
-    container.entryPoint?.join()!=='node'||container.command?.join()!=='/app/scripts/consolidation-worker.mjs'||
+    !validWorkerLaunch(definition,container,kind,dataRelease)||container.command?.join()!=='/app/scripts/consolidation-worker.mjs'||
     container.image!==worker.image||
     values.MEM9_STAGE!=='prod'||values.MEM9_WORKER_KIND!==kind||values.MEM9_WORKER_GENERATION!==manifest.generation||
     values.MEM9_DB_HOST!==approved.host||values.MEM9_DB_NAME!==approved.database||values.MEM9_DB_PORT!==String(approved.port)||

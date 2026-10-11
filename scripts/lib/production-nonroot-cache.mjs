@@ -11,6 +11,7 @@ import {inspectFutureFundingPlan} from './ci-smoke-grants.mjs';
 import {verifyNonrootBeforeCopyAccounting} from './production-nonroot-before-copy-accounting.mjs';
 import {nonrootAccountingPolicy} from './production-nonroot-budget-revision.mjs';
 import {verifyNonrootFinalizationPlan} from './production-nonroot-finalization-accounting.mjs';
+import {verifyNonrootCopyReplayStart} from './production-nonroot-copy-replay.mjs';
 
 const contexts=new WeakMap(),consumed=new WeakSet(),combinedPasses=new WeakMap();
 const need=(ok,code='NonrootCacheInvalid')=>{if(!ok)throw Error(code);};
@@ -236,18 +237,20 @@ export async function verifyNonrootCombinedCustody(copyReceipt,{readCopyRecord})
 
 /** Reconcile the one pre-seal DATA pass with its original acquisition debits.
  * Copy checkpoint is independently pinned; this never restores a live handle. */
-export function verifyNonrootCombinedCopyAccounting(value,{copyCheckpoint,copyReceipt,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling}){
- const record=copyNonrootJson(value),c=copyReceipt,p=c.combinedPass;exact(record,['startRaw','events',...(Object.hasOwn(record,'payments')?['payments']:[])]);
+export function verifyNonrootCombinedCopyAccounting(value,{copyCheckpoint,copyReceipt,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFenceAcquisition,expectedCopyReplay,requireSettledCopyReplay=false}){
+ const record=copyNonrootJson(value),c=copyReceipt,p=c.combinedPass;exact(record,['startRaw','events',...(Object.hasOwn(record,'payments')?['payments']:[]),...(Object.hasOwn(record,'copyReplay')?['copyReplay']:[])]);
+ if(Object.hasOwn(record,'copyReplay')){if(expectedCopyReplay!==undefined)same(record.copyReplay,expectedCopyReplay,'NonrootCopyReplayContextConflict');expectedCopyReplay=record.copyReplay;}
  need(c.version===3&&p,'NonrootCombinedReceipt');
  exact(p,['version','kind','binding','custody','settledReadbackHash','verifierClosureHash','ledgerStartHash','firstSequence','lastSequence','lastEventHash','startedMs','completedMs','filesystemHash','readUsage']);
  exact(p.custody,['physicalStopRef','originalHandleCleanupRef','sourcePreflightRef']);
  need(p.version===1&&p.kind==='combined-data-pass'&&[p.settledReadbackHash,p.verifierClosureHash,p.ledgerStartHash,p.lastEventHash,p.filesystemHash].every(v=>/^[a-f0-9]{64}$/.test(v)),'NonrootCombinedReceipt');
  need(typeof record.startRaw==='string'&&record.startRaw.length<=32768,'NonrootCacheStartRaw');const raw=Buffer.from(record.startRaw,'base64');need(raw.toString('base64')===record.startRaw&&sha(raw)===p.ledgerStartHash,'NonrootCacheStartRaw');
- const start=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(raw));exact(start,['version','kind','binding','startingCounters','reserve','deadlineMs','mode',...(Object.hasOwn(start,'budgetRevision')?['budgetRevision']:[])]);
+ const start=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(raw));exact(start,['version','kind','binding','startingCounters','reserve','deadlineMs','mode',...(Object.hasOwn(start,'budgetRevision')?['budgetRevision']:[]),...(Object.hasOwn(start,'copyReplay')?['copyReplay']:[])]);
  const policy=nonrootAccountingPolicy(start.budgetRevision,expectedBudgetRevision,expectedBudgetCeiling),{caps:CAPS,counter}=policy,revision=policy.budgetRevision?{budgetRevision:policy.budgetRevision}:{};
  need(start.version===policy.version&&start.kind==='custody-ledger-start'&&start.mode==='copy'&&start.deadlineMs===c.summary.startedMs+IMAGE_LIMITS.maxStageMs,'NonrootCombinedStart');
  if(policy.version===2)same(copyCheckpoint.budgetRevision,policy.budgetRevision,'NonrootBudgetRevisionMismatch');
  const binding={owner:c.owner,executionId:copyCheckpoint.binding.executionId,planHash:c.planHash,publicationHash:c.publicationHash};same(start.binding,binding);same(p.binding,binding);same(copyCheckpoint.binding,binding);
+ verifyNonrootCopyReplayStart(start,{startRaw:record.startRaw,copyCheckpoint,copyReceipt:c,policy,expectedCopyReplay,requireSettled:requireSettledCopyReplay});
  need(positive(p.startedMs)&&p.startedMs>=c.summary.startedMs&&p.completedMs>=p.startedMs&&p.completedMs===c.summary.completedMs&&p.completedMs<start.deadlineMs,'NonrootCombinedTime');
  const objects=new Map(c.destinationReadback.reads.map(d=>[d.repositoryName+'\0'+d.digest,d])),charged=new Map(),begun=new Set(),completed=new Set(),fs=new Set(),source=new Map(),ids=new Set(),active=new Map();
  let previous=null,opened=false,finished=false,sealed=false,logical=0,uncompressed=0,entries=0;
@@ -257,7 +260,8 @@ export function verifyNonrootCombinedCopyAccounting(value,{copyCheckpoint,copyRe
  const check=()=>{const exposure=[...active.values()].reduce((n,r)=>n+r.bound,0)+scan.active.size*8388608;for(const k of Object.keys(CAPS))need(spent[k]+remaining[k]+(k==='httpBodyBytes'?exposure:0)<=CAPS[k],'NonrootCacheCumulativeLimit');};
  need(Array.isArray(record.events)&&record.events.length>0&&record.events.length<=20000,'NonrootCacheAccountingEvents');check();
  const rootReservations=verifyRootOwnerReservations(record.events),rootPool=createRootOwnerPoolReplay();
- const beforeCopy=Object.hasOwn(record,'payments')?verifyNonrootBeforeCopyAccounting(record.payments,{startRaw:record.startRaw,events:record.events,copyReceipt:c,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling}):{prepayments:new Map(),legacyReservations:new Set(),legacyFilesystemSequences:new Set()};
+ const beforeCopy=Object.hasOwn(record,'payments')?verifyNonrootBeforeCopyAccounting(record.payments,{startRaw:record.startRaw,events:record.events,copyReceipt:c,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFenceAcquisition}):{prepayments:new Map(),legacyReservations:new Set(),legacyFilesystemSequences:new Set()};
+ need(!expectedFenceAcquisition||Object.hasOwn(record,'payments'),'NonrootFencePaymentRequired');
  for(const [i,e]of record.events.entries()){
   exact(e,['version','sequence','owner','executionId','planHash','publicationHash','previousHash','type','data','spent','remaining',...Object.keys(revision)]);need(!sealed&&e.version===policy.version&&e.sequence===i+1&&e.previousHash===previous,'NonrootCacheEventChain');if(policy.version===2)same(e.budgetRevision,policy.budgetRevision,'NonrootBudgetRevisionMismatch');for(const k of Object.keys(binding))need(e[k]===binding[k],'NonrootCacheEventOwner');const d=e.data;
   need(e.type.startsWith('root-pool-')||!rootPool.plan||rootPool.closed,'NonrootRootPoolExclusive');
@@ -316,7 +320,7 @@ export function verifyNonrootCombinedCopyAccounting(value,{copyCheckpoint,copyRe
  * checkpoint and the byte verifier's measured work. Residual reservations are
  * carried forward. V2 prepaid charges require independently bound static plans;
  * they never count as actual graph/FS measurements or execution authority. */
-export function verifyNonrootCacheReadAccounting(value,{copyCheckpoint,copyReceipt,readUsage,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFinalization}){
+export function verifyNonrootCacheReadAccounting(value,{copyCheckpoint,copyReceipt,readUsage,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFinalization,expectedFenceAcquisition,expectedCopyReplay}){
  const record=copyNonrootJson(value),hasFinalization=Object.hasOwn(record,'finalizationPlan');exact(record,['version','kind','start','events','checkpoint',...([2,3].includes(record.version)?['startRaw','fundingPlans']:[]),...(record.version===3?['combinedCopy']:[]),...(hasFinalization?['finalizationPlan']:[])]);
  need(hasFinalization===(expectedFinalization!==undefined),'NonrootFinalizationExpected');
  need([1,2,3].includes(record.version)&&record.kind==='nonroot-cache-read-accounting','NonrootCacheAccounting');
@@ -330,7 +334,9 @@ export function verifyNonrootCacheReadAccounting(value,{copyCheckpoint,copyRecei
  need(copyCheckpoint.sealed===true&&copyCheckpoint.active===0,'NonrootCacheAccountingPrior');
  same(start.startingCounters,copyCheckpoint.counters,'NonrootCacheCounterReset');same(start.reserve,copyCheckpoint.remainingReservation,'NonrootCacheReservationReset');
  need((record.version===3)===(copyReceipt.version===3),'NonrootCombinedAccountingVersion');
- const combinedUsage=record.version===3?verifyNonrootCombinedCopyAccounting(record.combinedCopy,{copyCheckpoint,copyReceipt,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling}):null;
+ need(!expectedFenceAcquisition||record.version===3,'NonrootFenceAccountingVersion');
+ need(record.version===3||expectedCopyReplay===undefined,'NonrootCopyReplayExpectedJoin');
+ const combinedUsage=record.version===3?verifyNonrootCombinedCopyAccounting(record.combinedCopy,{copyCheckpoint,copyReceipt,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFenceAcquisition,expectedCopyReplay,requireSettledCopyReplay:true}):null;
  if(record.version===3){need(Array.isArray(record.fundingPlans)&&typeof record.startRaw==='string'&&record.startRaw.length<=32768,'NonrootCacheFundingPlans');const raw=Buffer.from(record.startRaw,'base64');need(raw.toString('base64')===record.startRaw,'NonrootCacheStartRaw');same(parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(raw)),record.start,'NonrootCacheStartRaw');}
  const plans=(record.version===2||record.version===3&&record.fundingPlans.length)&&!(hasFinalization&&Array.isArray(record.fundingPlans)&&record.fundingPlans.length===0)?fundingPlans(record,copyCheckpoint,copyReceipt,expectedFunding):new Map(),paid=new Set();
  let finalization=null,finalizationPaid=false;

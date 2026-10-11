@@ -26,7 +26,8 @@ export function previewProgramSourceFixture({replace={},corrupt={}}={}){
   });
   const byPath=new Map(entries.map(e=>[e.path,e])),blobs=new Map();
   const dirty=readGit(['diff','--name-only','-z','HEAD']).toString().split('\0').filter(Boolean);
-  const changed=new Map([...dirty,'scripts/lib/production-nonroot-preview-programs.mjs'].map(path=>[path,readFileSync(join(root,path))]));
+  const added=readGit(['ls-files','--others','--exclude-standard','-z']).toString().split('\0').filter(Boolean);
+  const changed=new Map([...new Set([...dirty,...added])].map(path=>[path,readFileSync(join(root,path))]));
   for(const [path,value]of Object.entries(replace))changed.set(path,value===null?null:Buffer.from(value));
   for(const [path,raw]of changed){
    if(raw===null){byPath.delete(path);continue;}

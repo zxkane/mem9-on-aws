@@ -1,3 +1,5 @@
+import {inspectProductionControlBuildContract} from './production-control-composition-recipe.mjs';
+import {inspectProductionControlCompositionCapture} from './production-control-composition-provenance.mjs';
 import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-image-response.mjs';
 /** Materialize the published CONTROL image through the existing prepaid
  * readers, then reconstruct its graph and filesystem from owned local bytes. */
@@ -6,7 +8,7 @@ import {constants} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {IMAGE_MEDIA,decodeImageDescriptorData,imageDescriptorDataLocalBytes,createPrepaidControlCacheBudget,readCollectedControlImageCache} from './production-image-graph.mjs';
-import {inspectImageFilesystem} from './production-image-filesystem.mjs';
+import {inspectImageFilesystem,inspectImageFilesystemEvidence} from './production-image-filesystem.mjs';
 import {IMAGE_TRANSITION_LIMITS as L} from './production-image-transition.mjs';
 import {inspectNonrootRecord,parseNonrootJson,nonrootHash as hash} from './production-nonroot-contracts.mjs';
 import {inspectAllocatedControlResources,registerControlCache} from './ci-smoke-control-resources.mjs';
@@ -18,14 +20,22 @@ const manifests=new Set([...indexes,IMAGE_MEDIA.manifest,IMAGE_MEDIA.dockerManif
 const zero=()=>({ecrRequests:0,httpBodyBytes:0,logicalBytes:0,uncompressedBytes:0,processedEntries:0});
 
 export async function collectNonrootControlImage({capture,contract:input,budgetedReads,metadataReads,tempRoot,resourceHandle,signal,clock=Date.now}){
- const contract=inspectNonrootRecord('ControlBuildContractV1',input),scope=contract.output;
- need(capture?.kind==='nonroot-control-build-action-capture'&&capture.contractHash===hash(contract)&&/^sha256:[a-f0-9]{64}$/.test(capture.outputDigest),'NonrootControlDownloadCapture');
- const metadata=parseNonrootJson(capture.metadata),configDigest=metadata['containerimage.config.digest'];
- need(metadata['containerimage.digest']===capture.outputDigest&&/^sha256:[a-f0-9]{64}$/.test(configDigest),'NonrootControlDownloadCapture');
- need(capture.source?.repository===contract.repository&&capture.source.checkout?.tree===contract.candidate.tree,'NonrootControlDownloadSource');
+ const contract=inspectProductionControlBuildContract(input),scope=contract.output;
+ let rootDigest,configDigest;
+ if(contract.version===2){
+  const c=inspectProductionControlCompositionCapture(capture),m=c.actualMain;
+  need(c.planHash===contract.recipe.composition.planHash&&['account','region','repositoryName'].every(k=>c.image[k]===scope[k]),'NonrootControlDownloadCapture');
+  need(m.repository===contract.repository&&m.prNumber===contract.prNumber&&m.candidateRevision===contract.candidate.revision&&m.candidateTree===contract.candidate.tree&&m.baseRevision===contract.candidate.baseRevision&&m.mainTree===contract.candidate.tree,'NonrootControlDownloadSource');
+  rootDigest=c.image.rootDigest;configDigest=c.image.configDigest;
+ }else{
+  need(capture?.kind==='nonroot-control-build-action-capture'&&capture.contractHash===hash(contract)&&/^sha256:[a-f0-9]{64}$/.test(capture.outputDigest),'NonrootControlDownloadCapture');
+  const metadata=parseNonrootJson(capture.metadata);configDigest=metadata['containerimage.config.digest'];rootDigest=capture.outputDigest;
+  need(metadata['containerimage.digest']===rootDigest&&/^sha256:[a-f0-9]{64}$/.test(configDigest),'NonrootControlDownloadCapture');
+  need(capture.source?.repository===contract.repository&&capture.source.checkout?.tree===contract.candidate.tree,'NonrootControlDownloadSource');
+ }
  need(typeof budgetedReads?.readJson==='function'&&typeof budgetedReads?.readBlob==='function'&&typeof metadataReads?.reserveLocal==='function','NonrootControlDownloadBudget');
  need(typeof tempRoot==='string'&&resolve(tempRoot)===tempRoot&&await realpath(tempRoot)===tempRoot,'NonrootControlDownloadDirectory');
- if(resourceHandle!==undefined){const owned=await inspectAllocatedControlResources(resourceHandle);need(owned.tempRoot===tempRoot&&owned.rootDigest===capture.outputDigest&&owned.configDigest===configDigest,'NonrootControlDownloadResource');}
+ if(resourceHandle!==undefined){const owned=await inspectAllocatedControlResources(resourceHandle);need(owned.tempRoot===tempRoot&&owned.rootDigest===rootDigest&&owned.configDigest===configDigest,'NonrootControlDownloadResource');}
  const startedMs=clock(),deadlineMs=startedMs+L.maxBlobTransferMs;
  const check=()=>{signal?.throwIfAborted();need(clock()>=startedMs&&clock()<deadlineMs-L.cleanupReserveMs,'NonrootControlDownloadExpired');metadataReads.reserveLocal(zero());};check();
  const directory=await mkdtemp(join(tempRoot,'mem9-control-download-')),cacheDirectory=join(directory,'blobs');
@@ -74,7 +84,7 @@ export async function collectNonrootControlImage({capture,contract:input,budgete
  // consumers. Its explicit final cleanup owns deletion; close releases IO.
  const close=async()=>{if(closed)return;closed=true;try{await verified?.cache.close();}finally{if(resourceHandle===undefined)await rm(directory,{recursive:true,force:true});}};
  try{
-  await visit({digest:capture.outputDigest},0);
+  await visit({digest:rootDigest},0);
   need(documents.get(arm64Digest)?.config?.digest===configDigest,'NonrootControlDownloadConfig');
   for(const node of nodes.values())if(!manifests.has(node.mediaType)){
    if(embeddedBlobs.has(node.digest)){const raw=embeddedBlobs.get(node.digest);await write(node,file=>file.writeFile(raw));embeddedBlobs.delete(node.digest);continue;}
@@ -86,6 +96,10 @@ export async function collectNonrootControlImage({capture,contract:input,budgete
   check();const binding={...scope,root,arm64Digest,configDigest},budget=createPrepaidControlCacheBudget({metadataReads,deadlineMs,now:clock,signal});
   verified=await readCollectedControlImageCache(binding,{directory:cacheDirectory,nodes:[...nodes.values()],budget,metadataReads});
   const filesystem=await inspectImageFilesystem(verified.graph,{component:'bootstrap'});await verified.cache.check();check();
+  if(contract.version===2){
+   need(hash(root)===hash(capture.rootDescriptor)&&arm64Digest===capture.image.arm64Digest&&hash(verified.graph.inventory)===capture.graphHash,'NonrootControlDownloadNativeGraph');
+   need(hash(inspectImageFilesystemEvidence(filesystem))===hash(capture.filesystem),'NonrootControlDownloadNativeFilesystem');
+  }
   const completedMs=clock();
   if(resourceHandle!==undefined)await registerControlCache(resourceHandle,{graph:verified.graph,cacheDirectory,startedMs,completedMs});
   return Object.freeze({binding,cacheDirectory,graph:verified.graph,filesystem,inventory:verified.graph.inventory,startedMs,completedMs,close});

@@ -8,7 +8,7 @@ import {CI_SMOKE_POLICY} from './lib/ci-smoke-policy.mjs';
 import {CI_SMOKE_ROUTES,CI_SMOKE_JOB_NAME,verifyArchivedCiSmoke} from './lib/ci-smoke-isolation.mjs';
 import {captureCiSmokeGithub} from './lib/ci-smoke-github.mjs';
 import {ciSmokeHost,smokeHash as sha,smokeNeed as need,smokePrivateRead,smokePrivateWrite,smokeDirectory,removeSmokeDirectory,smokeEnvironment,captureSmokeTree} from './lib/ci-smoke-host.mjs';
-import {CI_SMOKE_ARCHIVE_LIMITS,inspectCiSmokeCommitment,encodeCiSmokeEnvelope,decodeCiSmokeEnvelope,ciSmokeArchiveKey,ciSmokeArchiveLocation,putCiSmokeEnvelope,getCiSmokeEnvelope} from './lib/ci-smoke-private-archive.mjs';
+import {CI_SMOKE_ARCHIVE_LIMITS,inspectCiSmokeCommitment,encodeCiSmokeEnvelope,decodeCiSmokeEnvelope,ciSmokeArchiveKey,ciSmokeArchiveLocation,putCiSmokeEnvelope,getCiSmokeEnvelope,getCiSmokeCompositionEnvelope} from './lib/ci-smoke-private-archive.mjs';
 import {NONROOT_SMOKE_DATABASE_IMAGE,createCiSmokeProducerInput,expectedCiSmokeCommandCatalog} from './run-mnemo-nonroot-smoke.mjs';
 import {localImageMetadata} from './lib/mnemo-nonroot-smoke-helper.mjs';
 import {assertPreviewPhaseOperation} from './lib/production-nonroot-preview-operations.mjs';
@@ -228,22 +228,28 @@ export async function verifyDecoded(decoded,provenance,now){
  need(Buffer.byteLength(JSON.stringify(completion))<=CI_SMOKE_ARCHIVE_LIMITS.objectBytes,'CiSmokeCompletionLimit');
  return Object.freeze({...checked,completion});
 }
-async function sourceGate(host,route,{precheckOnly=false}={}){
+async function sourceGate(host,route,{precheckOnly=false,compositionRoot,signal,seams={}}={}){
+ const composition=compositionRoot!==undefined;
+ if(composition)need(route==='build-image-transition-control'&&!precheckOnly,'CiSmokeCompositionSourceRoute');
  const selected=await selectSource(host,route);if(precheckOnly)return {phase:'smoke-source-prechecked'};
  const config=archiveInput(smokeArchiveConfig(host.env,selected.stage,selected.commitment));
  const {withCiSmokeReadSession}=await import('./lib/ci-smoke-session.mjs');
  // Leave cleanup and server timestamp rounding inside the 900-second session.
  const deadlineMs=Math.min(selected.job.expiresMs,Date.now()+840000);
  const verifySmoke=async({credentials,signal,requestHandler,deadlineMs:readerDeadline=deadlineMs})=>{
-  const decoded=await getCiSmokeEnvelope(selected.commitment,{config,credentials,signal,deadlineMs:Math.min(readerDeadline,credentials.expiration.getTime()),...(requestHandler?{requestHandler}:{})});
+  const read=composition?getCiSmokeCompositionEnvelope:getCiSmokeEnvelope;
+  const decoded=await read(selected.commitment,{config,credentials,signal,deadlineMs:Math.min(readerDeadline,credentials.expiration.getTime()),...(requestHandler?{requestHandler}:{})});
   const checked=await verifyDecoded(decoded,selected.provenance,Date.now());return {raw:decoded.envelopeBytes,checked};
  };
- let observed,receiptExpiresMs=selected.job.expiresMs;
+ let observed,receiptExpiresMs=selected.job.expiresMs,compositionAllocation;
+ try{
  if(['deploy-preview','runtime-cutover-preview'].includes(route)){
   observed=await withCiSmokeReadSession({config,commitment:selected.commitment,env:host.env,deadlineMs},verifySmoke);
  }else{
-  const {withCiSmokeSourceAllowance}=await import('./lib/ci-smoke-source-allowance.mjs');
-  const result=await withCiSmokeSourceAllowance({env:host.env,host,scope:{kind:'source',jobKey:route,route,phase:'source',checkpoint:route+'/source'},config,commitment:selected.commitment,jobExpiresMs:selected.job.expiresMs},verifySmoke);
+  const readers=await import('./lib/ci-smoke-source-allowance.mjs'),read=composition?readers.withCiSmokeCompositionSourceAllowance:readers.withCiSmokeSourceAllowance;
+  const result=await read({env:host.env,host,scope:{kind:'source',jobKey:route,route,phase:'source',checkpoint:route+'/source'},config,commitment:selected.commitment,jobExpiresMs:selected.job.expiresMs,
+   ...(composition?{compositionRoot,signal}:{})},verifySmoke,composition?seams:{});
+  compositionAllocation=result.compositionAllocation;
   observed=result.observed;receiptExpiresMs=Math.min(receiptExpiresMs,result.expiresMs);
  }
  // Both production readers have completed physical cleanup before exporting
@@ -256,7 +262,30 @@ async function sourceGate(host,route,{precheckOnly=false}={}){
   envelopeFile,envelopeHash:sha(observed.raw),isolationHash:observed.checked.source.isolationHash,observedMs:Date.now(),expiresMs:receiptExpiresMs};
  const receiptFile=join(directory,'receipt.json'),receiptHash=await smokePrivateWrite(receiptFile,receipt);
  need(Date.now()<receiptExpiresMs,'CiSmokeSourceReceiptExpired');
- await smokeEnvironment(host.env,{MEM9_CI_SMOKE_SOURCE_RECEIPT:receiptFile,MEM9_CI_SMOKE_SOURCE_RECEIPT_HASH:receiptHash});return {phase:'smoke-source-verified'};
+ await smokeEnvironment(host.env,{MEM9_CI_SMOKE_SOURCE_RECEIPT:receiptFile,MEM9_CI_SMOKE_SOURCE_RECEIPT_HASH:receiptHash});
+ if(composition){
+  const {requireProductionControlCompositionAllocation}=await import('./lib/production-control-composition-lifetime.mjs');
+  const {createNonrootActualMainRecord}=await import('./lib/production-nonroot-source-reader.mjs');
+  const original=requireProductionControlCompositionAllocation(compositionAllocation),raw=Buffer.from(JSON.stringify(original.source));
+  const actualMain=createNonrootActualMainRecord(original.source,{bytesHash:sha(raw),bytesLength:raw.length,canonicalHash:hash(original.source)},original.plan.input.source);
+  return Object.freeze({phase:'smoke-source-verified',compositionAllocation,actualMain,sourceReceipt:Object.freeze({file:receiptFile,sha256:receiptHash,expiresMs:receiptExpiresMs})});
+ }
+ return {phase:'smoke-source-verified'};
+ }catch(error){
+  if(compositionAllocation){
+   const {holdProductionControlComposition,closeProductionControlCompositionAllocation}=await import('./lib/production-control-composition-lifetime.mjs');
+   holdProductionControlComposition(compositionAllocation,error.message);let cleanupError;
+   try{await removeSmokeDirectory(host.env,'mem9-ci-smoke-source');}catch(e){cleanupError=e;}
+   try{closeProductionControlCompositionAllocation(compositionAllocation,{cleanupComplete:!cleanupError});}catch(e){cleanupError??=e;}
+   if(cleanupError)throw Object.assign(cleanupError,{cause:error});
+  }
+  throw error;
+ }
+}
+/** Called only by the fixed native composition entry. Legacy source CLI
+ * modes retain their original path and never receive this native child. */
+export async function openProductionControlCompositionSourceGate({host,tempRoot,signal},seams={}){
+ return sourceGate(host,'build-image-transition-control',{compositionRoot:tempRoot,signal,seams});
 }
 async function sourceReceipt(host,route){
  need(route===host.env.GITHUB_JOB,'CiSmokeActualRoute');const directory=await smokeDirectory(host.env,'mem9-ci-smoke-source'),file=join(directory,'receipt.json');

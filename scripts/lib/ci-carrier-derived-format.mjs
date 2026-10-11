@@ -6,7 +6,6 @@ import {inspectCarrierFundingPlan} from './ci-carrier-before-copy.mjs';
 import {carrierDockerfile,inspectMaterializedCarrierContext} from './ci-carrier-context.mjs';
 import {IMAGE_MEDIA,validateImageDescriptor,controlImageGraphBinding,imageGraphState} from './production-image-graph.mjs';
 import {inspectImageFilesystemFile} from './production-image-filesystem.mjs';
-import {inspectNonrootControlPrerequisites} from './production-nonroot-control-prerequisites.mjs';
 const need=(v,c='CarrierDerivedInvalid')=>{if(!v)throw Error(c);},same=(a,b,c='CarrierDerivedBinding')=>need(hash(a)===hash(b),c);
 const exact=(v,keys)=>need(v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join()===keys.slice().sort().join(),'CarrierDerivedFields');
 const sha=b=>createHash('sha256').update(b).digest('hex'),hex=v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
@@ -54,6 +53,7 @@ export function inspectCarrierDerivedMaterial(value,{plan:input,grantHash,contex
 /** Serialize the producer's existing real probe; no second probe or download. */
 export async function formatCarrierDerivedMaterial({context,grantHash,baseGraph,baseFilesystem,prerequisites,sourceContext,metadataReads}){
  const c=inspectMaterializedCarrierContext(context),p=c.plan,m=inspectCarrierSourceManifest(c.manifest,p),{graphHash,...baseImage}=controlImageGraphBinding(baseGraph);same(baseImage,p.template.base);
+ const {inspectNonrootControlPrerequisites}=await import('./production-nonroot-control-prerequisites.mjs');
  const n=inspectNonrootControlPrerequisites(prerequisites,{controlVerification:{graph:baseGraph,filesystem:baseFilesystem},sourceContext}),charge=bytes=>{need(Date.now()<p.deadlineMs,'CarrierDerivedExpired');metadataReads.reserveLocal({...zero(),logicalBytes:bytes});};
  need(n.environment.caBindings.length===1,'CarrierDerivedCa');const caRef=n.environment.caBindings[0].file,bytes=n.objects.find(o=>hash(o.ref)===hash(caRef))?.bytes;
  need(bytes instanceof Uint8Array,'CarrierDerivedCa');const fact=inspectImageFilesystemFile(baseFilesystem,'/bootstrap/global-bundle.pem');need(fact.sha256===caRef.sha256&&fact.size===caRef.bytesLength,'CarrierDerivedCa');

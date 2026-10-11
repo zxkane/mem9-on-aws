@@ -1,3 +1,4 @@
+import {carrierNativeBuildAdmissionBytes} from './ci-carrier-stage-admission.mjs';
 /** Fixed offline R9 build. Input/output handles prove local bytes only; this
  * function cannot issue a CI record, grant, registry operation or root permit. */
 import {execFile,spawn} from 'node:child_process';
@@ -115,7 +116,7 @@ export async function buildCarrierOffline({context:handle,baseGraph,baseFilesyst
  need(context.manifest.version===2?derivedHandle!==undefined:derivedHandle===undefined,'CarrierDerivedRequired');
  const derived=derivedHandle?await consumeCarrierRuntimeMaterial(derivedHandle,derivedBindings):null,pins=derived?.nativePins??context.nativePins;
  const {graphHash,...base}=baseBinding;need(hash(base)===hash(t.base)&&inspectImageFilesystemEvidence(baseFilesystem).graphHash===graphHash,'CarrierBuildBaseBinding');
- need(state.budget.kind==='prepaid-local-control-cache'&&typeof metadataReads?.reserveLocal==='function','CarrierBuildBudget');
+ need(state.budget.kind==='prepaid-local-control-cache'&&typeof metadataReads?.reserveLocal==='function'&&(!t.ciLocalPolicy||typeof metadataReads.assertLocalStage==='function'),'CarrierBuildBudget');
  need(process.platform==='linux'&&process.arch==='arm64','CarrierBuildNativeArm64');
  need(resolve(tempRoot)===tempRoot&&await realpath(tempRoot)===tempRoot&&context.directory.startsWith(tempRoot+'/'),'CarrierBuildDirectory');
  nativeFile(baseFilesystem,'/usr/local/bin/node',pins.nodeSha256);nativeFile(baseFilesystem,'/bin/setpriv',pins.setprivSha256);
@@ -142,7 +143,7 @@ export async function buildCarrierOffline({context:handle,baseGraph,baseFilesyst
   // bytes or a refund if BuildKit reuses local content-addressed bytes.
   const contextBytes=context.manifest.files.reduce((n,r)=>n+r.bytesLength,0)+(derived?derived.record.files.reduce((n,r)=>n+r.bytesLength,0):0),baseBytes=baseGraph.inventory.nodes.reduce((n,d)=>n+d.size,0);
   const nativeBound=2*t.bounds.uncompressedBytes+2*contextBytes+baseBytes+2*1048576;
-  need(Number.isSafeInteger(nativeBound),'CarrierBuildLocalBound');charge(nativeBound);await verifyMaterializedCarrierContext(handle);if(derived)await inspectCarrierRuntimeMaterial(derivedHandle,derivedBindings);check();
+  need(Number.isSafeInteger(nativeBound),'CarrierBuildLocalBound');metadataReads.assertLocalStage?.('build',carrierNativeBuildAdmissionBytes({nativeBound,contextBytes:context.manifest.files.reduce((n,r)=>n+r.bytesLength,0),derivedBytes:derived?derived.record.files.reduce((n,r)=>n+r.bytesLength,0):0}));charge(nativeBound);await verifyMaterializedCarrierContext(handle);if(derived)await inspectCarrierRuntimeMaterial(derivedHandle,derivedBindings);check();
   attempted=true;stage='build-process';const result=await buildProcess({directory,inputHash:sha(inputBytes),deadlineMs:plan.deadlineMs,signal,collect:stream=>collectOutput(stream,{directory:join(directory,'output'),bounds:t.bounds,charge,check})});termination=result.termination;stage='output-metadata';
   const metadataFile=join(directory,'metadata.json'),stat=await lstat(metadataFile);need(stat.isFile()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&stat.nlink===1&&stat.size<=1048576,'CarrierBuildMetadata');charge(stat.size);const metadataRaw=await readFile(metadataFile),metadata=parse(metadataRaw);
   const metadataDigest=metadata['containerimage.digest'];need(/^sha256:[a-f0-9]{64}$/.test(metadataDigest),'CarrierBuildMetadata');
@@ -171,7 +172,10 @@ export async function buildCarrierOffline({context:handle,baseGraph,baseFilesyst
   const configDigest=documents.get(arms[0].digest)?.config?.digest;
   need(/^sha256:[a-f0-9]{64}$/.test(configDigest)&&(metadata['containerimage.config.digest']===undefined||metadata['containerimage.config.digest']===configDigest),'CarrierBuildMetadata');
   const declared=metadata['containerimage.descriptor'],actual=nodes.get(metadataDigest);need(declared.size===actual.size&&declared.mediaType===actual.mediaType,'CarrierBuildMetadata');
-  const builtBinding={account:t.scope.account,region:t.scope.region,repositoryName:t.scope.repositoryName,root:index.manifests[0],arm64Digest:arms[0].digest,configDigest};
+  // Derived builds use the verified core descriptor also available to registry
+  // readers. Original export/metadata bytes retain their hash commitments;
+  // legacy builds retain their full exporter descriptor and historical hashes.
+  const builtBinding={account:t.scope.account,region:t.scope.region,repositoryName:t.scope.repositoryName,root:derived?actual:index.manifests[0],arm64Digest:arms[0].digest,configDigest};
   stage='output-graph-verification';const cacheDirectory=join(directory,'output/blobs/sha256'),budget=createPrepaidControlCacheBudget({metadataReads,deadlineMs:Math.min(plan.deadlineMs,Date.now()+L.maxBlobTransferMs),signal});
   verified=await readCollectedControlImageCache(builtBinding,{directory:cacheDirectory,nodes:[...nodes.values()],budget,metadataReads});
   stage='output-filesystem';const filesystem=await inspectImageFilesystem(verified.graph,{component:'bootstrap'});stage='output-closure';assertBuiltClosure(filesystem,context,derived);stage='output-config';

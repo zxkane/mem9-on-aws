@@ -1,6 +1,7 @@
 /** Closed COPY-prefix accounting only. These records cannot restore a reader,
  * issue credentials, spend a slot, or authenticate a build/security result. */
 import {copyNonrootJson,parseNonrootJson} from './production-nonroot-contracts.mjs';
+import {verifyNonrootFenceAcquisitionPayment} from './production-nonroot-fence-accounting.mjs';
 import {nonrootAccountingPolicy} from './production-nonroot-budget-revision.mjs';
 import {need,exact,same,hash,sha,hex,integer,counter,zero,parseAcquisitionJson} from './ci-smoke-acquisition-format.mjs';
 import {compileOriginalIssuersBudget,inspectOriginalIssuerPlan,inspectOriginalIssuerSource,verifyOriginalIssuerJournal,ORIGINAL_ISSUER_LIMITS} from './production-nonroot-original-issuer-accounting.mjs';
@@ -146,8 +147,8 @@ function legacyAccounting(value,{start,events,carrier,sourceTags,issuerSource}){
  * ORIGINAL file bytes>}; assumeRequest contains no credential or response body.
  * The enclosing replay owns all counter updates and full DATA completion.
  * Returned sets/maps identify accepted ORIGINAL events, never new debits. */
-export function verifyNonrootBeforeCopyAccounting(value,{startRaw,events,copyReceipt,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling}){
- const payments=copyNonrootJson(value);exact(payments,['version','originalIssuers','carrierGrant',...(Object.hasOwn(payments,'legacyBootstrap')?['legacyBootstrap']:[])]);need(payments.version===1,'NonrootBeforeCopyVersion');
+export function verifyNonrootBeforeCopyAccounting(value,{startRaw,events,copyReceipt,expectedFunding,expectedBudgetRevision,expectedBudgetCeiling,expectedFenceAcquisition}){
+ const payments=copyNonrootJson(value);exact(payments,['version','originalIssuers','carrierGrant',...(Object.hasOwn(payments,'legacyBootstrap')?['legacyBootstrap']:[]),...(Object.hasOwn(payments,'fenceAcquisition')?['fenceAcquisition']:[])]);need(payments.version===1,'NonrootBeforeCopyVersion');
  need(typeof startRaw==='string'&&startRaw.length<=32768,'NonrootBeforeCopyStart');const raw=Buffer.from(startRaw,'base64');need(raw.toString('base64')===startRaw&&sha(raw)===copyReceipt.combinedPass.ledgerStartHash,'NonrootBeforeCopyStart');
  const start=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(raw));need(start.mode==='copy','NonrootBeforeCopyStart');
  const policy=nonrootAccountingPolicy(start.budgetRevision,expectedBudgetRevision,expectedBudgetCeiling);
@@ -176,7 +177,14 @@ export function verifyNonrootBeforeCopyAccounting(value,{startRaw,events,copyRec
  const carrierEvent=add(g.planHash,g.debit.events.at(-1).data.scopeHash,verified.budget.total);
  need(carrierEvent.sequence===n&&issuerEvents.get('ci-reader').sequence<n&&n<issuerEvents.get('copy').sequence&&p.template.scope.account===copyReceipt.summary.account&&p.template.scope.region===copyReceipt.summary.region,'NonrootBeforeCopyCarrierBinding');
  if(expectedFunding){const keys=['repository','prNumber','candidateRevision','candidateTree','baseRevision'];same(Object.fromEntries(keys.map(k=>[k,p.template.source[k]])),expectedFunding.source,'NonrootBeforeCopyProofSource');}
- need(all.length===prepayments.size&&prepayments.size===3,'NonrootBeforeCopyUnknownPayment');
+ need(Object.hasOwn(payments,'fenceAcquisition')===(expectedFenceAcquisition!==undefined),'NonrootFenceExpected');
+ if(expectedFenceAcquisition){
+  exact(expectedFenceAcquisition,['budget','ownerAuthorizationHash','parentStartHash']);exact(payments.fenceAcquisition,['version','plan']);need(payments.fenceAcquisition.version===1,'NonrootFencePaymentVersion');
+  const rootStart=events.find(r=>r.type==='root-pool-prepayment');
+  const checked=verifyNonrootFenceAcquisitionPayment(payments.fenceAcquisition,{expected:{...expectedFenceAcquisition,ledgerBinding:binding,ledgerStartHash:sha(raw),budgetRevision:policy.budgetRevision,deadlineMs:start.deadlineMs},events,carrierSequence:carrierEvent.sequence,rootSequence:rootStart?.sequence});
+  add(checked.planHash,checked.scopeHash,checked.charge);
+ }
+ need(all.length===prepayments.size&&prepayments.size===(expectedFenceAcquisition?4:3),'NonrootBeforeCopyUnknownPayment');
  let legacy={reservations:new Set(),filesystemSequences:new Set()};
  if(payments.legacyBootstrap){legacy=legacyAccounting(payments.legacyBootstrap,{start,events,carrier:{...p,debitSequence:n},sourceTags,issuerSource:compiled.source});need(legacy.firstSequence>issuerEvents.get('ci-reader').sequence&&legacy.lastSequence<n,'NonrootBeforeCopyLegacyOrder');}
  else need(!events.some(e=>e.type==='reservation'&&e.data.action.startsWith('LegacyBootstrap')||e.type==='filesystem'&&(e.data.phase==='control-before-copy'||e.data.component.startsWith('legacy-'))),'NonrootBeforeCopyLegacyRequired');

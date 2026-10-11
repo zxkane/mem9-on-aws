@@ -16,6 +16,7 @@ import {encodeControlBuildCapture} from './lib/production-control-capture-archiv
 import {collectNonrootControlPrerequisites} from './lib/production-nonroot-control-prerequisites.mjs';
 import {verifyNonrootDeploymentSource} from './lib/production-nonroot-provenance.mjs';
 import {verifyNonrootControlRuntimeObservation} from './lib/production-nonroot-observation.mjs';
+import {selectCiRootControlOriginals} from './lib/ci-smoke-root-request.mjs';
 import {readNonrootEvidence} from './lib/production-nonroot-runtime.mjs';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 
@@ -109,6 +110,9 @@ describe.skipIf(process.env.MEM9_NONROOT_CONTAINER_TEST!=='1')('CONTROL material
   expect(verifyNonrootControlRuntimeObservation(result.evidence.runtimeObservation,result.build,options).cleanupConfirmed).toBe(true);
   expect(result.archiveAdditions.find(row=>row.ref.sha256===result.build.buildLog.sha256)?.purpose).toBe('build');
   const wire=await exportNonrootArchive(result.evidence.archive);expect(JSON.parse(wire.manifest).files.some(row=>row.purpose==='artifact')).toBe(false);
+  let selectedBytes=0;const originals=await selectCiRootControlOriginals({archive:result.evidence.archive,deploymentSource:result.deploymentSource,source:input.completedCapture.capture.source,chargeLocal:n=>{selectedBytes+=n;}});
+  expect(originals).toHaveLength(7);expect(selectedBytes).toBeLessThanOrEqual(33554432);
+  for(const row of originals)expect(Buffer.from(row.base64,'base64')).toEqual(await readers.resolveJson(row.ref));
  },120000);
  it.each([
   ['context','NonrootProofContextRequired'],['prerequisites','NonrootPrerequisitesContextRequired'],['source','NonrootControlMaterialSourceContext'],

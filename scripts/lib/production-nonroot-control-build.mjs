@@ -7,6 +7,7 @@ import {createNonrootActualMainRecord} from './production-nonroot-source-reader.
 import {readNonrootEvidence} from './production-nonroot-runtime.mjs';
 import {controlImageGraphBinding,imageGraphState,IMAGE_MEDIA} from './production-image-graph.mjs';
 import {inspectImageFilesystemEvidence,imageFilesystemVerificationKind} from './production-image-filesystem.mjs';
+import {inspectProductionControlCompositionCapture} from './production-control-composition-provenance.mjs';
 
 const need=(ok,code='NonrootControlBuildCaptureInvalid')=>{if(!ok)throw Error(code);};
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -85,11 +86,11 @@ export async function completeControlRecorderJob(host,material,capture,{now=Date
 /** A small inventory references the layers already retained in the owned
  * cache/ECR. Only the three bounded JSON objects are included as bytes. */
 export async function captureNonrootControlArtifact(capture,{graph,filesystem}){
- const c=inspectCapture(capture),{graphHash,...image}=controlImageGraphBinding(graph),state=imageGraphState(graph),fs=inspectImageFilesystemEvidence(filesystem);
+ const native=capture?.kind==='native-control-composition-capture',c=native?inspectProductionControlCompositionCapture(capture):inspectCapture(capture),{graphHash,...image}=controlImageGraphBinding(graph),state=imageGraphState(graph),fs=inspectImageFilesystemEvidence(filesystem);
  need(imageFilesystemVerificationKind(filesystem)==='live-filesystem-evidence'&&fs.component==='bootstrap'&&fs.graphHash===graphHash,'NonrootControlBuildFilesystem');
- need(image.rootDigest===c.outputDigest&&image.repositoryName==='mem9-on-aws/bootstrap','NonrootControlBuildOutput');
- const metadata=parseNonrootJson(c.metadata,{maxBytes:1048576});
- need(metadata['containerimage.config.digest']===image.configDigest,'NonrootControlBuildOutput');
+ need(image.rootDigest===(native?c.image.rootDigest:c.outputDigest)&&image.repositoryName==='mem9-on-aws/bootstrap','NonrootControlBuildOutput');
+ if(native){same(image,c.image,'NonrootControlBuildOutput');need(c.graphHash===graphHash,'NonrootControlBuildGraph');same(fs,c.filesystem,'NonrootControlBuildFilesystem');}
+ else{const metadata=parseNonrootJson(c.metadata,{maxBytes:1048576});need(metadata['containerimage.config.digest']===image.configDigest,'NonrootControlBuildOutput');}
  const arm=state.images.get('bootstrap'),descriptors=[graph.inventory.roots[0].root,arm.manifest,arm.config],objects=[];
  let total=0;
  for(const descriptor of descriptors){

@@ -1,3 +1,5 @@
+import {controlSourcePaths} from './production-control-source.mjs';
+import {carrierPublicationAdmissionBytes,carrierSqlStageAdmissionBytes} from './ci-carrier-stage-admission.mjs';
 import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-image-response.mjs';
 /** Actual carrier pipeline, separate from every production SOURCE/TARGET gate.
  * Defaults use the official artifact client, SDK HTTP and fixed native build. */
@@ -13,7 +15,7 @@ import {buildCarrierOffline,inspectCarrierOfflineBuild,closeCarrierOfflineBuild}
 import {deriveCarrierRuntimeMaterial,closeCarrierRuntimeMaterial} from './ci-carrier-derived.mjs';
 import {materializeCarrierSqlPackage,verifyCarrierSqlPackage,closeCarrierSqlPackage} from './ci-carrier-sql-package.mjs';
 import {openCarrierSqlFixture,closeCarrierSqlFixture} from './ci-carrier-sql-fixture.mjs';
-import {runCarrierSqlAcceptance} from './ci-carrier-sql-acceptance.mjs';
+import {runCarrierSqlAcceptance,inspectCarrierSqlRuntimeBudget} from './ci-carrier-sql-acceptance.mjs';
 import {carrierSqlRuntimeFixedBudget} from './ci-carrier-sql-runtime-budget.mjs';
 import {assertCarrierSqlDatabasePin} from './ci-carrier-sql-acceptance-format.mjs';
 import {IMAGE_MEDIA,decodeImageDescriptorData,imageDescriptorDataLocalBytes,createPrepaidControlCacheBudget,readCollectedControlImageCache,imageGraphState} from './production-image-graph.mjs';
@@ -83,6 +85,7 @@ export async function runCarrierBeforeCopy(env=process.env,seams={}){
   base=await collectCarrierBase({consumer,transport,tempRoot:env.RUNNER_TEMP});
   if(inspectMaterializedCarrierContext(context).manifest.version===2)derived=await deriveCarrierRuntimeMaterial({context,baseGraph:base.graph,baseFilesystem:base.filesystem,baseCacheDirectory:base.cacheDirectory,sourceContext:consumer.admission.source.sourceContext,metadataReads:consumer,tempRoot:env.RUNNER_TEMP});
   built=await buildCarrierOffline({context,baseGraph:base.graph,baseFilesystem:base.filesystem,metadataReads:consumer,tempRoot:env.RUNNER_TEMP,...(derived?{derived}:{})});
+  if(config.plan.template.ciLocalPolicy){const runtime=inspectCarrierSqlRuntimeBudget(built),image=inspectCarrierOfflineBuild(built);consumer.assertLocalStage('sql',carrierSqlStageAdmissionBytes({runtime:runtime.budget,packageLocal:pgLocal,counterRecordBytes:consumer.admission.local.snapshot().recordBytes,sourceReads:1+controlSourcePaths(consumer.admission.source.sourceContext).filter(p=>p.startsWith('docker/bootstrap/')&&(p.endsWith('.sql')||p==='docker/bootstrap/schema-digest.sh')).length,fixtureCaptureBytes:config.plan.template.profiles.fixtureGet.responseBytes,publicationBytes:carrierPublicationAdmissionBytes(config.plan.template,image.graph.inventory.nodes)}));}
   databasePackage=await transport.getFixture(stream=>materializeCarrierSqlPackage({stream,consumer,tempRoot:env.RUNNER_TEMP}));
   await verifyCarrierSqlPackage(databasePackage,{consumer});
   fixture=await openCarrierSqlFixture({databasePackage,tempRoot:env.RUNNER_TEMP,metadataReads:consumer,deadlineMs:config.plan.deadlineMs});
@@ -93,6 +96,7 @@ export async function runCarrierBeforeCopy(env=process.env,seams={}){
  }catch(e){problem=e;throw e;}
  finally{
   let cleanupFailure=false;
+  try{consumer?.beginCleanup();}catch{cleanupFailure=true;}
   try{if(fixture)await closeCarrierSqlFixture(fixture);}catch{cleanupFailure=true;}
   try{await transport?.close();}catch{cleanupFailure=true;}
   try{await base?.close();if(built)await closeCarrierOfflineBuild(built);}catch{cleanupFailure=true;}
@@ -102,7 +106,7 @@ export async function runCarrierBeforeCopy(env=process.env,seams={}){
    try{if(databasePackage)await closeCarrierSqlPackage(databasePackage,{consumer});}catch{cleanupFailure=true;}
    try{if(derived)await closeCarrierRuntimeMaterial(derived,{context,baseGraph:base.graph,baseFilesystem:base.filesystem,metadataReads:consumer});if(context)await closeCarrierBuildContext(context);if(base)await rm(base.directory,{recursive:true});if(result)await rm(result.directory,{recursive:true});}catch{cleanupFailure=true;}
   }
-  try{await consumer?.close();}catch{cleanupFailure=true;}
+  try{await consumer?.close({cleanupConfirmed:published&&!problem&&!cleanupFailure});}catch{cleanupFailure=true;}
   if(cleanupFailure)throw Object.assign(Error('CarrierWorkerCleanupHeld'),{code:'ECLEANUP'});
  }
 }

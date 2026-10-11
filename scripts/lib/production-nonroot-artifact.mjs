@@ -1,3 +1,4 @@
+import {inspectProductionDeployedControlBuild} from './production-control-composition-recipe.mjs';
 /** Host/isolated-verifier code only. Do not import through the regular
  * bootstrap compatibility/runtime path: graph and filesystem verification
  * intentionally have a different dependency and credential boundary. */
@@ -26,7 +27,7 @@ export function inspectNonrootControlArtifactBinding(value,options){
  * never replaced by a JSON permission claim. The full provenance gate must
  * resolve those observations through a separately authenticated runtime check. */
 export async function verifyNonrootControlArtifactFiles(value,options){
- const b=inspectNonrootRecord('DeployedControlBuildV1',value),actual=controlArtifact(b,options),unknown=new Set(),checked=new Map();
+ const b=inspectProductionDeployedControlBuild(value),actual=controlArtifact(b,options),unknown=new Set(),checked=new Map();
  const checkMetadata=row=>{
   if(row.implicit||!Number.isSafeInteger(row.mode)||!Number.isSafeInteger(row.uid)||!Number.isSafeInteger(row.gid)){unknown.add(row.path);return;}
   need(row.uid===0&&row.gid===0&&(row.mode&0o6000)===0&&!row.privilegeAttributes.length,'NonrootControlPathPrivilege');

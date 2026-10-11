@@ -1,3 +1,4 @@
+import {inspectProductionControlBuildContract} from './production-control-composition-recipe.mjs';
 /** Scan-only producer over the caller's existing paid reader. No credentials,
  * new counter, scan-start operation, review service or cross-job transport. */
 import {createHash} from 'node:crypto';
@@ -16,7 +17,7 @@ const zero=()=>({ecrRequests:0,httpBodyBytes:0,logicalBytes:0,uncompressedBytes:
 
 export async function collectNonrootControlScan(input,{clock=Date.now,signal}={}){
  exact(input,['contract','sourceContext','graph','archive','budgetedReads','maximumExpiresMs']);
- const {sourceContext,archive,budgetedReads}=input,contract=inspectNonrootRecord('ControlBuildContractV1',input.contract),{graphHash,...image}=controlImageGraphBinding(input.graph);
+ const {sourceContext,archive,budgetedReads}=input,contract=inspectProductionControlBuildContract(input.contract),{graphHash,...image}=controlImageGraphBinding(input.graph);
  need(typeof clock==='function'&&typeof budgetedReads?.readJson==='function'&&typeof budgetedReads?.reserveLocal==='function','NonrootControlScanReader');
  need(['account','region','repositoryName'].every(key=>image[key]===contract.output[key]),'NonrootControlScanScope');
  nonrootArchiveBindings(archive);const startedMs=clock();need(positive(startedMs)&&positive(input.maximumExpiresMs),'NonrootControlScanWindow');

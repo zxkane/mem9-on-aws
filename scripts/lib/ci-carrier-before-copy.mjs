@@ -1,3 +1,4 @@
+import {inspectCarrierLocalPolicy} from './ci-carrier-local-policy.mjs';
 /** R9 artifact-only copy-phase format. No file/network access or business
  * authority. Static templates never contain their descendants' commitments. */
 import {copyNonrootJson,nonrootHash as hash} from './production-nonroot-contracts.mjs';
@@ -81,8 +82,9 @@ function sqlFixture(f){
  return f;
 }
 export function inspectCarrierBeforeCopyTemplate(value){
- const t=copyNonrootJson(value);exact(t,['version','kind','purpose','owner','executionId','slotNonce','source','scope','anchors','base','recipe','bounds','profiles','preFundingPreparation','fundedLocal','ownerGithubActorId','sqlFixture',...(Object.hasOwn(t,'ownerSource')?['ownerSource']:[]),...(Object.hasOwn(t,'cumulativeLimitsHash')?['cumulativeLimitsHash']:[])]);
+ const t=copyNonrootJson(value);exact(t,['version','kind','purpose','owner','executionId','slotNonce','source','scope','anchors','base','recipe','bounds','profiles','preFundingPreparation','fundedLocal','ownerGithubActorId','sqlFixture',...(Object.hasOwn(t,'ownerSource')?['ownerSource']:[]),...(Object.hasOwn(t,'cumulativeLimitsHash')?['cumulativeLimitsHash']:[]),...(Object.hasOwn(t,'ciLocalPolicy')?['ciLocalPolicy']:[])]);
  need(t.version===1&&t.kind==='carrier-before-copy-template'&&t.purpose==='premerge-carrier-build'&&hex(t.owner,32)&&hex(t.executionId,32)&&hex(t.slotNonce,32)&&pos(t.ownerGithubActorId),'CarrierTemplate');
+ if(Object.hasOwn(t,'ciLocalPolicy')){const policy=inspectCarrierLocalPolicy(t.ciLocalPolicy);need(t.fundedLocal.ci.logicalBytes===policy.logicalBytes&&t.cumulativeLimitsHash===NONROOT_REMAINING_WORK_LIMITS_HASH_V2,'CarrierLocalPolicyBinding');}
  const s=t.source;exact(s,['repository','prNumber','candidateRevision','candidateTree','baseRevision','candidateRef','workflowPath','workflowSha','jobKey','jobName','jobDefinitionHash','roleDefinitionHash']);
  need(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s.repository)&&pos(s.prNumber)&&['candidateRevision','candidateTree','baseRevision','workflowSha'].every(k=>hex(s[k],40))&&s.workflowSha===s.candidateRevision,'CarrierSource');
  need(/^refs\/heads\/[A-Za-z0-9_./-]+$/.test(s.candidateRef)&&!s.candidateRef.includes('..')&&/^\.github\/workflows\/[a-z0-9-]+\.ya?ml$/.test(s.workflowPath)&&/^[a-z][a-z0-9-]{0,63}$/.test(s.jobKey)&&text(s.jobName),'CarrierSource');

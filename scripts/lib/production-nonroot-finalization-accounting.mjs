@@ -9,10 +9,19 @@ export const NONROOT_FINALIZATION_LIMITS=freeze({normalWireBytes:128*MiB,unknown
  maxRequests:266,maxRecords:1024,cleanupRecords:32,requestMs:15000,recordBytes:65536,objectBytes:32*MiB,descriptorBytes:NONROOT_LIMITS.maxDescriptorBytes,
  counts:{'s3.GetObject':192,'s3.PutObject':32,'s3.DeleteObject':1,'ssm.GetParameters':32,'ssm.PutParameter':1,'sts.GetCallerIdentity':8},
  issuerLocalBytes:32*MiB,issuerCleanupLocalBytes:4*MiB});
-const L=NONROOT_FINALIZATION_LIMITS,scopeKeys=['copyOwner','account','region','runtimeNonce','authorizationId','bucket','kmsKeyArn','lockKey','parameterProtection','sourceRevision','sourceTree','rootBindingHash','priorParameter'];
+const limitsV3=freeze({...NONROOT_FINALIZATION_LIMITS,localBytes:2048*MiB});
+/** Closed source policies. Existing allocations retain their original version;
+ * callers cannot supply limits or upgrade a previously issued allocation. */
+export function nonrootFinalizationLimits(version=2){
+ need(version===2||version===3,'FinalizationBudgetVersion');
+ return version===2?NONROOT_FINALIZATION_LIMITS:limitsV3;
+}
+const scopeKeys=['copyOwner','account','region','runtimeNonce','authorizationId','bucket','kmsKeyArn','lockKey','parameterProtection','sourceRevision','sourceTree','rootBindingHash','priorParameter'];
 const key=(v,s)=>typeof v==='string'&&new RegExp('^arn:aws:kms:'+s.region+':'+s.account+':key/(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|mrk-[a-f0-9]{32})$').test(v);
 
-export function describeNonrootFinalizationBudget(scope,issuer){
+export function describeNonrootFinalizationBudget(scope,issuer,options={version:2}){
+ exact(options,['version']);const {version}=options;
+ need(version===2||version===3,'FinalizationBudgetVersion');const L=nonrootFinalizationLimits(version);
  exact(scope,scopeKeys);const s=copyNonrootJson(scope);
  need(hex(s.copyOwner,32)&&hex(s.authorizationId,32)&&hex(s.runtimeNonce,32)&&hex(s.sourceRevision,40)&&hex(s.sourceTree,40)&&hex(s.rootBindingHash),'FinalizationScope');
  need(/^\d{12}$/.test(s.account)&&/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(s.region)&&/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(s.bucket)&&key(s.kmsKeyArn,s),'FinalizationScope');
@@ -29,13 +38,14 @@ export function describeNonrootFinalizationBudget(scope,issuer){
  const issuers={...copyNonrootJson(issuer),modes:['supersession-publisher-read','supersession-publisher-write'],durationSeconds:3600,operations,
   normalWireBytes:2*operations.reduce((n,r)=>n+r.requestBytes+r.responseBytes,0),localBytes:L.issuerLocalBytes,cleanupLocalBytes:L.issuerCleanupLocalBytes,sharesPublisherUnknown:true};
  const charge={...zero(),logicalBytes:L.localBytes,httpBodyBytes:L.normalWireBytes+L.unknownBytes},prefix=`data-authorizations/${s.runtimeNonce}/${s.authorizationId}/`;
- return freeze({version:2,kind:'remaining-finalization-publisher-budget',scope:s,issuers,parameterName:'/mem9-on-aws/prod/consolidation-runtime/data-release',prefix,limits:L,charge,
+ return freeze({version,kind:'remaining-finalization-publisher-budget',scope:s,issuers,parameterName:'/mem9-on-aws/prod/consolidation-runtime/data-release',prefix,limits:L,charge,
   additionalAfterCopy:{...charge,httpBodyBytes:charge.httpBodyBytes-L.objectBytes},
   archive:{key:prefix+'nonroot-proof-archive.json',maximumBytes:L.objectBytes,replacesDataArchiveWireBytes:L.objectBytes,source:'same-original-complete-nonroot-archive'},
   semantics:'prepaid quota, not observed usage; source, STS and publisher share one wire pool and unknown lane; unused quota is forfeited'});
 }
 export function inspectNonrootFinalizationBudget(value){
- const result=describeNonrootFinalizationBudget(value.scope,{source:value.issuers?.source,scope:value.issuers?.scope});same(value,result,'FinalizationBudgetChanged');return result;
+ need(value?.version===2||value?.version===3,'FinalizationBudgetVersion');
+ const result=describeNonrootFinalizationBudget(value.scope,{source:value.issuers?.source,scope:value.issuers?.scope},{version:value.version});same(value,result,'FinalizationBudgetChanged');return result;
 }
 
 export function createNonrootFinalizationPlan({budget,ledgerBinding,ledgerStartHash,copyCheckpointHash,archiveManifestHash,budgetRevision,deadlineMs}){

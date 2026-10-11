@@ -7,6 +7,7 @@ import {types} from 'node:util';
 import {parseCiSmokeJson} from './ci-smoke-evidence.mjs';
 import {ciSmokeArchiveLocation,buildCiSmokeReadPolicy} from './ci-smoke-private-archive.mjs';
 import {sourceAllowanceLocation} from './ci-smoke-source-allowance.mjs';
+import {inspectCompositionStsXml} from './production-control-composition-xml.mjs';
 
 const STS_REGION='us-west-2',STS_HOST='sts.us-west-2.amazonaws.com',AUDIENCE='sts.amazonaws.com';
 const MAX_BODY=131072,MAX_TOKEN=65536,CLEANUP_MS=1000;
@@ -62,6 +63,8 @@ export async function withCiSmokeReadSession(input,use,seams={}){
 export async function withCiSmokeAllowanceReadSession(input,use,seams={}){
  return withReadSession('allowance',input,use,seams);
 }
+export async function withCiSmokeCompositionReadSession(input,use,seams={}){return withReadSession('smoke',input,use,seams,true);}
+export async function withCiSmokeCompositionAllowanceReadSession(input,use,seams={}){return withReadSession('allowance',input,use,seams,true);}
 export function buildCiSmokeAllowanceReadPolicy(input){
  const c=sourceAllowanceLocation(input),actions=['sts:GetCallerIdentity','s3:GetObject','kms:Decrypt'];
  // Keep both the action and resource exclusions: a direct resource-policy
@@ -78,7 +81,7 @@ export function buildCiSmokeAllowanceReadPolicy(input){
  for(const [key,value]of Object.entries(conditions))Statement.push({Effect:'Deny',Action:'kms:Decrypt',Resource:'*',Condition:{StringNotEquals:{[key]:value}}});
  const Policy=JSON.stringify({Version:'2012-10-17',Statement});need(Buffer.byteLength(Policy)<=2048,'CiSmokeReadSessionInput');return Object.freeze({Policy,DurationSeconds:900});
 }
-async function withReadSession(purpose,input,use,seams){
+async function withReadSession(purpose,input,use,seams,fixedSdk=false){
  let phase='precheck',client,transport,agent,controller,timer,envInfo,credential,assumeOutput,assumeCommand,jwt,identityOutput;
  let cleanupFailed=false,destroyed=false,removeOuter=()=>{},removeAbort=()=>{};
  const bodies=new Set(),buffers=new Set(),requests=new Set(),pending=new Set();let now=Date.now,expires=Infinity;
@@ -110,14 +113,14 @@ async function withReadSession(purpose,input,use,seams){
    need(phase==='oidc'?request.method==='GET'&&request.path===url.pathname:request.method==='POST'&&request.path==='/','CiSmokeReadSessionEndpoint');requests.add(request);
    need(request.body===undefined||typeof request.body==='string'||request.body instanceof Uint8Array,'CiSmokeReadSessionBody');
    need(Buffer.byteLength(request.body??'')<=(phase==='identity'?1024:MAX_BODY)&&Buffer.byteLength(JSON.stringify(request.headers??{}))<=MAX_BODY,'CiSmokeReadSessionBodyLimit');
-   return track((async()=>{let body;try{const out=await transport.handle(request,options);body=out.response?.body;if(body)bodies.add(body);check();const bytes=await collect(body);need(out.response.statusCode===200,'CiSmokeReadSessionHttp');return {response:{...out.response,body:bytes}};}finally{closeBody(body);}})());
+   return track((async()=>{let body;try{const out=await transport.handle(request,options);body=out.response?.body;if(body)bodies.add(body);check();const bytes=await collect(body);need(out.response.statusCode===200,'CiSmokeReadSessionHttp');if(fixedSdk&&phase!=='oidc')inspectCompositionStsXml(bytes,phase==='assume'?'AssumeRoleWithWebIdentity':'GetCallerIdentity');return {response:{...out.response,body:bytes}};}finally{closeBody(body);}})());
   },destroy};
   phase='oidc';const tokenResponse=await wait(handler.handle({protocol:'https:',hostname:url.hostname,method:'GET',path:url.pathname,query:Object.fromEntries(url.searchParams),headers:{authorization:'Bearer '+envInfo.token,accept:'application/json'},body:undefined},{abortSignal:controller.signal}));check();
   let tokenPayload;try{tokenPayload=parseCiSmokeJson(new TextDecoder('utf-8',{fatal:true}).decode(tokenResponse.response.body),{maxBytes:MAX_BODY});}catch{throw Error('CiSmokeReadSessionToken');}
   fields(tokenPayload,['value'],['count']);need(tokenPayload.count===undefined||tokenPayload.count===1,'CiSmokeReadSessionToken');jwt=tokenPayload.value;tokenPayload=undefined;
   need(typeof jwt==='string'&&jwt.length>0&&jwt.length<=MAX_TOKEN&&/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(jwt),'CiSmokeReadSessionToken');envInfo.token='';
   const sessionName=`ci-smoke-read-${envInfo.run}-${envInfo.attempt}-${randomBytes(8).toString('hex')}`;need(sessionName.length<=64);
-  client=new STSClient({region:STS_REGION,endpoint:'https://'+STS_HOST,ignoreConfiguredEndpointUrls:true,maxAttempts:1,requestHandler:handler,credentials:async()=>{check();need(phase==='identity'&&credential,'CiSmokeReadSessionNoAmbientCredentials');return credential;}});
+  client=new STSClient({region:STS_REGION,endpoint:'https://'+STS_HOST,ignoreConfiguredEndpointUrls:true,maxAttempts:1,...(fixedSdk?{defaultsMode:'legacy',retryMode:'standard',useFipsEndpoint:false,useDualstackEndpoint:false}:{}),requestHandler:handler,credentials:async()=>{check();need(phase==='identity'&&credential,'CiSmokeReadSessionNoAmbientCredentials');return credential;}});
   phase='assume';assumeCommand=new AssumeRoleWithWebIdentityCommand({RoleArn:config.roleArn,RoleSessionName:sessionName,WebIdentityToken:jwt,...policy});check();
   assumeOutput=await wait(client.send(assumeCommand,{abortSignal:controller.signal}));check();assumeCommand.input.WebIdentityToken='';jwt=undefined;
   const issued=assumeOutput.Credentials;need(issued&&['AccessKeyId','SecretAccessKey','SessionToken'].every(k=>typeof issued[k]==='string'&&issued[k].length>0&&issued[k].length<=MAX_TOKEN)&&issued.Expiration instanceof Date,'CiSmokeReadSessionCredentials');

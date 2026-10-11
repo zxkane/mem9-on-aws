@@ -6,7 +6,7 @@ const M=1048576,UNKNOWN=8*M;
 const need=(v,c)=>{if(!v)throw Error(c);};
 const nat=n=>Number.isSafeInteger(n)&&n>=0;
 export const CONTROL_CAPACITY_CENSUS_CHARGE=Object.freeze({ecrRequests:2176,
- logicalBytes:9*1024**3,httpBodyBytes:4337324032,uncompressedBytes:16*1024**3,processedEntries:65536});
+ logicalBytes:3*1024**3,httpBodyBytes:4337324032,uncompressedBytes:16*1024**3,processedEntries:65536});
 export const FUTURE_CONTROL_CAPACITY=Object.freeze({version:1,kind:'future-control-capacity',
  graphBytes:660*M,manifestNodes:3,configNodes:2,layerNodes:64,blobNodes:66,
  uncompressedBytes:2*1024*M,processedEntries:50000,httpBodyBytes:727842816,

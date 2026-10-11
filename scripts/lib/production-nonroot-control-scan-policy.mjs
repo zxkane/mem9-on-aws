@@ -1,3 +1,4 @@
+import {inspectProductionControlBuildContract} from './production-control-composition-recipe.mjs';
 /** The fixed CONTROL scan rule. It grants no exception and creates no human
  * approval. Source membership, raw scan bytes and all other gates remain
  * independently required. Numeric ECR timestamps are seconds, never ms. */
@@ -28,7 +29,7 @@ export function ecrScanTimestampMs(value){
 }
 
 export async function assertNonrootControlScanPolicy(contract,sourceContext){
- const c=inspectNonrootRecord('ControlBuildContractV1',contract);
+ const c=inspectProductionControlBuildContract(contract);
  need(c.artifactPolicyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH&&c.output.repositoryName===P.repositoryName,'NonrootControlScanPolicy');
  need(sourceContext?.tree===c.candidate.tree,'NonrootControlScanPolicySource');
  const source=await readControlSourceFile(sourceContext,CONTROL_ZERO_FINDINGS_POLICY_SOURCE);

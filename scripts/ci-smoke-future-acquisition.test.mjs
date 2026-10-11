@@ -20,6 +20,10 @@ import {DefaultArtifactClient} from '@actions/artifact';
 import {NodeHttpHandler} from '@smithy/node-http-handler';
 import {GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {GetParametersCommand} from '@aws-sdk/client-ssm';
+import {GetObjectCommand} from '@aws-sdk/client-s3';
+import {createProspectiveCiRootRequestPolicy} from './lib/ci-smoke-root-request-cost.mjs';
+import {ciRootReadyStatus} from './lib/ci-smoke-root-request.mjs';
+import {createFutureOwnerDeliveryTemplate} from './lib/ci-smoke-owner-delivery.mjs';
 import {ListTasksCommand,DescribeTasksCommand,DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
 import {nonrootHash as hash,NONROOT_LIMITS_HASH} from './lib/production-nonroot-contracts.mjs';
 import {zero,sha,addCounters} from './lib/ci-smoke-acquisition-format.mjs';
@@ -70,6 +74,10 @@ function fundedGrant(f){
   const row=catalog.consumers[0];catalog.consumers=f.config.startup.consumers.map(scope=>({...structuredClone(row),scope,controlCapacity:FUTURE_CONTROL_CAPACITY}));
   const root={version:1,kind:'future-owner-root-template',rootBindingHash:'b'.repeat(64),carrierTemplateHash:'c'.repeat(64),carrierSlot:{owner:ledgerBinding.owner,executionId:ledgerBinding.executionId,slotNonce:'e'.repeat(32)},source:f.config.startup.source};catalog.owner.roots=root;
   rootCarrier={...root,kind:'future-owner-root-carrier',carrierBuildHash:'f'.repeat(64),image:{account:f.config.account,region:f.config.region,repositoryName:'mem9-on-aws/preview/bootstrap',rootDigest:'sha256:'+'a'.repeat(64),arm64Digest:'sha256:'+'b'.repeat(64),configDigest:'sha256:'+'c'.repeat(64)}};
+  if(f.prospectiveRoot){
+   catalog.owner.delivery=createFutureOwnerDeliveryTemplate({source:{profile:'default',provider:'instance-metadata',configFile:'/synthetic/config',credentialsFile:'/synthetic/credentials',configHash:'a'.repeat(64),credentialsHash:null},storage:f.config.storage});
+   for(const row of catalog.consumers){row.rootRequest=createProspectiveCiRootRequestPolicy(row.scope.checkpoint);row.profiles.push({...profile('root-audit','GetObject',{Bucket:f.config.storage.bucket,ExpectedBucketOwner:f.config.account},{requestBytes:0,responseBytes:33554432}),kind:'OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT',late:{field:'Key',checkpoint:row.scope.checkpoint}});}
+  }
  }
  const plan=createFutureFundingPlan({...(f.controlCapacity?{rootCarrier,budgetRevision:f.config.budgetRevision,compiledCeiling:f.config.compiledCeiling}:{}),binding:{grantSetId:f.config.startup.grantSetId,source:f.config.startup.source,anchors:{predecessorParameterHash:'a'.repeat(64),rootBindingHash:'b'.repeat(64),copyCheckpointHash:'c'.repeat(64),authorizationId:f.config.ownerRoot.authorizationId,nextParameterVersion:f.config.target.parameterVersion}},catalogRaw:Buffer.from(JSON.stringify(catalog)).toString('base64'),ledgerStartHash:sha(startRaw),ownerGithubActorId:42,ownerStateDirectory:'/synthetic/grant-'+f.config.startup.grantSetId,issuedMs:tick-1000});
  const funding=inspectFutureFundingPlan(plan),spent=f.controlCapacity?Object.fromEntries(Object.keys(zero()).map(k=>[k,start.startingCounters[k]+plan.budget[k]])):addCounters(start.startingCounters,plan.budget),remaining=Object.fromEntries(Object.entries(reserve).map(([k,v])=>[k,v-plan.budget[k]]));
@@ -267,13 +275,23 @@ async function realControlSetup({capacity=false}={}){
  f.bundle=async()=>f.save('bundle.json',{kind:'image-security-nonroot-deployment-bundle',phase:'deployment',source:f.source,parameter:f.parameter,proof:w.built.proof,deploymentSource:w.deploymentSource,phaseReceipt:{phase:f.scope.phase,sourceReceiptHash:sourceRef.sha256,observedMs:tick,expiresMs:tick+120000}});
  return {f,w,build,records,encoded};
 }
-it.each([false,true])('aggregate SDK graph/FS and public replay enforce original admitted caps; tamper=%s',async tamper=>{
+it.each(['clean','tamper','root-clean','root-drift','root-put-held','root-other-guard'])('aggregate SDK graph/FS and public replay enforce original admitted caps; mode=%s',async mode=>{
+ const tamper=mode==='tamper',prospectiveRoot=mode.startsWith('root-');
  const {f,w,build,records}=await realControlSetup({capacity:true}),v=w.d.controlVerification;let allocation,loaded=false;
+ if(prospectiveRoot){f.prospectiveRoot=true;f.funding=fundedGrant(f);Object.assign(f.config.startup,f.funding.expected);f.binding=makeCiStartupRunBinding(f.config.startup,f.source);f.env.MEM9_CI_ACQUISITION_CONFIG=JSON.stringify(f.config);f.env.GH_TOKEN='synthetic-root-reader';}
+ const rootBytes=Buffer.from(JSON.stringify(w.phaseEvidence));
  const docker=async args=>{if(args[1]==='rm'){loaded=false;return {status:0,stdout:'Untagged',stderr:''};}return loaded?{status:0,stdout:JSON.stringify([{Id:build.capture.outputDigest,Descriptor:{digest:build.capture.outputDigest},RepoTags:[allocation.tag],Os:'linux',Architecture:'arm64'}]),stderr:''}:{status:1,stdout:'',stderr:'No such image: '+args[2]};};
  const old=f.handler.handle;let blobReads=0,metadataReads=0;
  f.handler.handle=vi.fn(async request=>{
   let value,raw;
-  if(request.hostname.startsWith('api.ecr.')){
+  if(prospectiveRoot&&request.path.endsWith('/root-request.json')){
+   const files=await readdir(join(f.root,'mem9-ci-future-acquisitions')),journal=files.find(n=>n.endsWith('-local.ndjson'));
+   const lines=(await readFile(join(f.root,'mem9-ci-future-acquisitions',journal),'utf8')).trim().split('\n').map(JSON.parse);
+   expect(lines.filter(r=>r.logicalBytes===createProspectiveCiRootRequestPolicy(f.scope.checkpoint).localBytes)).toHaveLength(1);
+   if(mode==='root-put-held')return {response:{statusCode:503,headers:{'content-length':'2'},body:Readable.from([Buffer.from('{}')],{objectMode:false})}};
+   return {response:{statusCode:200,headers:{'content-length':'0','x-amz-server-side-encryption':'aws:kms','x-amz-server-side-encryption-aws-kms-key-id':f.config.storage.kmsKeyArn,'x-amz-server-side-encryption-bucket-key-enabled':'true'},body:Readable.from([],{objectMode:false})}};
+  }else if(prospectiveRoot&&request.path.endsWith('/root-audit.json'))raw=rootBytes;
+  else if(request.hostname.startsWith('api.ecr.')){
    metadataReads++;const q=JSON.parse(request.body);
    if(request.headers['x-amz-target'].endsWith('.BatchGetImage')){const d=v.graph.inventory.nodes.find(d=>d.digest===q.imageIds[0].imageDigest);value=digestAliases({images:[{registryId:f.config.account,repositoryName:q.repositoryName,imageId:q.imageIds[0],imageManifest:v.blobs.get(d.digest).toString(),imageManifestMediaType:d.mediaType}],failures:[]});}
    else if(request.headers['x-amz-target'].endsWith('.GetDownloadUrlForLayer')){
@@ -286,7 +304,8 @@ it.each([false,true])('aggregate SDK graph/FS and public replay enforce original
   else return old(request);
   return {response:{statusCode:200,headers:{'content-length':String(raw.length),'content-type':'application/json'},body:Readable.from([raw],{objectMode:false})}};
  });
- const a=await openFutureCiSmokeAcquisition(f.input,{...f.seams,controlResourceDocker:docker});
+ const rootGithubRequest=async()=>{const bytes=Buffer.from(JSON.stringify([{...ciRootReadyStatus(f.config,f.scope,sha(rootBytes)),creator:{id:42}}])),body=Readable.from([bytes],{objectMode:false});body.statusCode=200;body.headers={'content-length':String(bytes.length)};return body;};
+ const a=await openFutureCiSmokeAcquisition(f.input,{...f.seams,controlResourceDocker:docker,...(prospectiveRoot?{rootGithubRequest}:{})});
  expect(a.controlCapacity).toEqual(FUTURE_CONTROL_CAPACITY);await f.readRequired(a);await a.bindControlBuild({context:w.authorization,records,build});
  allocation=await a.allocateControlResources();
  const transport=createNonrootBudgetedReads({region:f.config.region,env:f.env,metadataReads:a,requestHandler:f.handler});
@@ -296,6 +315,20 @@ it.each([false,true])('aggregate SDK graph/FS and public replay enforce original
  for(const name of ['index.json','oci-layout','image.tar'])await writeFile(join(loaderDirectory,name),name,{mode:0o600});
  await beginControlImageLoad(allocation.handle,{loaderDirectory});loaded=true;await recordControlImageLoad(allocation.handle,{outcome:'loaded',completedMs:Date.now()});
  let bundleRef=await f.bundle();const bundle=JSON.parse(await readFile(bundleRef.path));bundle.controlCache={directory:collected.cacheDirectory,inventory:collected.inventory};bundleRef=await f.save('bundle.json',bundle);
+ if(prospectiveRoot){
+  const requestRoot=()=>a.requestRootAudit({context:w.authorization,records,parameter:f.parameter,source:f.source,phase:f.scope.phase,deploymentSource:w.deploymentSource,targetObservation:{...w.targetObservation,serviceObservation:w.serviceObservation}});
+  if(mode==='root-put-held'){
+   await expect(requestRoot()).rejects.toThrow();const calls=f.handler.handle.mock.calls.length;await expect(requestRoot()).rejects.toThrow();expect(f.handler.handle.mock.calls).toHaveLength(calls);
+   const directory=join(f.root,'mem9-ci-future-acquisitions'),name=(await readdir(directory)).find(n=>n.endsWith('-root-local-accounting.json')),held=JSON.parse(await readFile(join(directory,name)));
+   expect(held.checkpoints.at(-1).held).toBe(true);expect(held.debit.logicalBytes).toBe(createProspectiveCiRootRequestPolicy(f.scope.checkpoint).localBytes);
+   await expect(a.finish({bundleRef})).rejects.toThrow();await expect(readFile(held.claimRef.path.replace(/-claim\.json$/,'-complete.json'))).rejects.toMatchObject({code:'ENOENT'});
+   await collected.close();transport.close();return;
+  }
+  const result=await requestRoot();
+  expect(result.archiveHash).toBe(sha(rootBytes));
+  const {runtimeNonce,authorizationId}=f.config.ownerRoot,Key=`data-authorizations/${runtimeNonce}/${authorizationId}/ci-grants/${f.config.startup.grantSetId}/${hash(f.scope.checkpoint)}/root-audit.json`;
+  const response=await transport.clients.s3.send(new GetObjectCommand({Bucket:f.config.storage.bucket,Key,ExpectedBucketOwner:f.config.account}));await response.Body.transformToByteArray();
+ }
  const resourceReceiptRef=await a.sealControlResources({bundleRef}),done=await a.finish({bundleRef,resourceReceiptRef});
  if(tamper){
   const completion=JSON.parse(await readFile(done.receiptRef.path));
@@ -306,9 +339,15 @@ it.each([false,true])('aggregate SDK graph/FS and public replay enforce original
   // native resource binding; rejection occurs before replay can spend LOCAL.
   await expect(openCiSmokeDeploymentLocalReplay({env:f.env,completionRef:{...done.receiptRef,sha256:sha(completeRaw)},bundleRef,knownParameter:f.parameter})).rejects.toThrow('CiControlResourceBinding');
  }else{
-  const replay=await openCiSmokeDeploymentLocalReplay({env:f.env,completionRef:done.receiptRef,bundleRef,knownParameter:f.parameter});expect(replay.controlCapacity).toEqual(FUTURE_CONTROL_CAPACITY);await replay.finish();
+  const replay=await openCiSmokeDeploymentLocalReplay({env:f.env,completionRef:done.receiptRef,bundleRef,knownParameter:f.parameter});expect(replay.controlCapacity).toEqual(FUTURE_CONTROL_CAPACITY);
+  if(mode==='root-drift'){const completion=JSON.parse(await readFile(done.receiptRef.path)),exchange=JSON.parse(await readFile(completion.rootExchangeRef.path));const requestPath=completion.rootExchangeRef.path.replace(/root-exchange-complete\.json$/,'')+exchange.requestRef.path;const bytes=await readFile(requestPath);bytes[20]^=1;await writeFile(requestPath,bytes);}
+  if(prospectiveRoot)for(let i=0;i<100;i++)replay.reserveLocal(zero());
+  if(mode==='root-other-guard'){
+   const before=f.env.MEM9_CI_ACQUISITION_CONFIG;f.env.MEM9_CI_ACQUISITION_CONFIG='{}';expect(()=>replay.reserveLocal(zero())).toThrow('CiFutureLocalExpired');f.env.MEM9_CI_ACQUISITION_CONFIG=before;
+   await expect(replay.finish()).rejects.toThrow('CiFutureLocalClosed');await replay.hold();
+  }else if(mode==='root-drift')await expect(replay.finish()).rejects.toThrow();else await replay.finish();
  }
- const receipt=JSON.parse(await readFile(done.receiptRef.path));expect(receipt.reads.length).toBe(13);
+ const receipt=JSON.parse(await readFile(done.receiptRef.path));expect(receipt.reads.length).toBe(prospectiveRoot?14:13);
  const blobResults=await Promise.all(receipt.reads.map(async r=>JSON.parse(await readFile(r.resultRef.path))));expect(blobResults.filter(r=>r.value?.layerDigest&&r.value.size!==undefined).length).toBe(4);
  await collected.close();transport.close();
  if(tamper)await expect(cleanupCiSmokeControlResources({env:f.env},{docker})).rejects.toThrow('CiControlResourceCleanupHeld');

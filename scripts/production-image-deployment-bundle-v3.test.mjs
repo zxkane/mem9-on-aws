@@ -24,6 +24,9 @@ import {controlSourcePaths,readControlSourceFile} from './lib/production-control
 import {openCiSmokeAcquisition,acquisitionOwnerKey} from './lib/ci-smoke-acquisition.mjs';
 import {zero,prepaidSlotBudget,sha} from './lib/ci-smoke-acquisition-format.mjs';
 import {S3Client} from '@aws-sdk/client-s3';
+import {prospectiveDeploymentReplayFixture} from './production-image-deployment-root-replay.fixture.mjs';
+import * as deploymentProvider from './lib/production-nonroot-deployment-provider.mjs';
+import {createProspectiveCiRootRequestPolicy} from './lib/ci-smoke-root-request-cost.mjs';
 
 describe.skipIf(process.env.MEM9_NONROOT_CONTAINER_TEST!=='1')('v3 deployment bundle with real opaque evidence',()=>{
  let docker,f,records,evidence,context,bundle,options;
@@ -43,6 +46,48 @@ describe.skipIf(process.env.MEM9_NONROOT_CONTAINER_TEST!=='1')('v3 deployment bu
   expect(bundle.phaseReceipt.phase).toBe('preconfigure');expect(bundle.phaseReceipt.sourceReceiptHash).toBe(records.sourceReceiptHash);
   expect(bundle).not.toHaveProperty('runtimeObservation');expect(bundle).not.toHaveProperty('sourceContext');
  });
+ it.each(['preconfigure','presst'].flatMap(phase=>['clean','tamper'].map(mode=>({phase,mode}))))('outer restore replays prospective root policy v2: $phase / $mode',async({phase,mode})=>{
+  const replay=await prospectiveDeploymentReplayFixture({wrapper:f,records,evidence,phase});let observer,returned;
+  try{
+   const completed=JSON.parse(await readFile(replay.completionRef.path)),exchange=JSON.parse(await readFile(completed.rootExchangeRef.path));
+   expect(completed.version).toBe(3);expect(exchange.version).toBe(2);
+   expect(exchange.localAccountingRef.path).toBe('root-local-accounting.json');expect(exchange.requestRef.path).toBe('root-request.json');
+   const rootPrefix=completed.rootExchangeRef.path.slice(0,-'root-exchange-complete.json'.length),rootRequestPath=rootPrefix+'root-request.json';
+   const accountingRaw=await readFile(rootPrefix+'root-local-accounting.json'),accounting=JSON.parse(accountingRaw);expect(sha(accountingRaw)).toBe(exchange.localAccountingRef.sha256);
+   const policy=createProspectiveCiRootRequestPolicy(replay.scope.checkpoint),debit={...zero(),logicalBytes:policy.localBytes};
+   expect(accounting.debit).toEqual(debit);expect(accounting.claimRef).toEqual(completed.claimRef);
+   const creationJournal=(await readFile(completed.localRef.path,'utf8')).trim().split('\n').map(JSON.parse);
+   expect(creationJournal.filter(row=>JSON.stringify(row)===JSON.stringify(debit))).toHaveLength(1);
+   expect(creationJournal[accounting.debitSequence-1]).toEqual(debit);
+   expect(replay.events).toEqual(['artifact','put','get','root-put','root-ready','root-get']);
+   const wireCalls=replay.httpCalls.length,originalCollector=deploymentProvider.collectOwnedNonrootControlEvidence;
+   observer=vi.spyOn(deploymentProvider,'collectOwnedNonrootControlEvidence').mockImplementation(async input=>{
+    // Pass through the real cache/FS, Git source and Docker runtime collector.
+    // The only injected effect occurs after entry authenticated the root files.
+    const collected=await originalCollector(input);
+    if(mode==='tamper'){const bytes=await readFile(rootRequestPath);bytes[20]^=1;await writeFile(rootRequestPath,bytes);}
+    return collected;
+   });
+   const restore=restoreImageDeploymentBundle(replay.bundle,{parameter:f.parameter,expected:options.expected,controlRevision:options.controlRevision,now:f.f.now,env:replay.env}).then(value=>{returned=value;return value;});
+   if(mode==='tamper'){
+    await expect(restore).rejects.toThrow('CiRootReplayChanged');expect(returned).toBeUndefined();
+   }else{
+    const restored=await restore;expect(getNonrootTargetRegistration(restored,'control')).toEqual(f.d.controlBodies.get('control'));
+    expect(createImageDeploymentPhaseReceipt(restored,{sourceReceiptHash:replay.bundle.sourceReceiptHash,phase,now:f.f.now})).toEqual(replay.bundle.phaseReceipt);
+   }
+   expect(observer).toHaveBeenCalledTimes(1);expect(replay.httpCalls).toHaveLength(wireCalls);
+   const directory=join(replay.root,'mem9-ci-future-acquisitions'),names=await readdir(directory),suffix=phase==='presst'?'sst':'configure',localPrefix='-local-replay-'+suffix;
+   const success=names.filter(n=>n.endsWith(localPrefix+'-complete.json')),held=names.filter(n=>n.endsWith(localPrefix+'-held.json'));
+   expect(success).toHaveLength(mode==='clean'?1:0);expect(held).toHaveLength(mode==='tamper'?1:0);
+   if(mode==='clean'){
+    const terminal=JSON.parse(await readFile(join(directory,success[0]))),claim=JSON.parse(await readFile(terminal.claimRef.path));
+    expect(claim.startingLocalUsed).toEqual(completed.localUsed);expect(terminal.localUsed.logicalBytes).toBeGreaterThan(completed.localUsed.logicalBytes);
+    expect(terminal.localUsed.ecrRequests).toBe(0);expect(terminal.localUsed.httpBodyBytes).toBe(0);expect(terminal.ownerRefund).toBe(0);
+    if(phase==='presst')expect(JSON.parse(await readFile(join(replay.root,'mem9-nonroot-deployment','allocation.json')))).toMatchObject({kind:'prepaid-sst-capture-local',claimRef:terminal.claimRef,localRef:terminal.localRef,localUsed:terminal.localUsed});
+   }
+   if(mode==='tamper'||phase==='preconfigure')await expect(readFile(join(replay.root,'mem9-nonroot-deployment','allocation.json'))).rejects.toMatchObject({code:'ENOENT'});
+  }finally{observer?.mockRestore();await replay.close();}
+ },125000);
  it.each(['preconfigure','presst'])('restores genuine evidence through the actual %s entry in a separate process',async phase=>{
   const root=await mkdtemp(join(tmpdir(),'nonroot-sst-replay-')),cache=join(root,'cache'),repo=join(root,'repo');let owned,send;
   const put=async(name,value)=>{const bytes=Buffer.from(JSON.stringify(value)),path=join(root,name);await writeFile(path,bytes,{mode:0o600});return {path,sha256:sha(bytes)};};

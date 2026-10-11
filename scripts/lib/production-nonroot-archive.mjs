@@ -74,6 +74,9 @@ export function nonrootArchiveBindings(archive){
  const s=get(archive);return freeze({kind:s.kind,authority:false,owner:s.manifest.owner,manifestHash:s.manifestHash,manifestRef:{...s.manifestRef},...(s.binding?{binding:structuredClone(s.binding)}:{})});
 }
 
+/** Original frozen inventory only; selecting rows never reads object bodies. */
+export function nonrootArchiveInventory(archive){return get(archive).manifest;}
+
 /** Byte-preserving resolver pair for the shared runtime/launch verifiers. A
  * reference must select one inventory entry even when no purpose is supplied.
  * These functions do not accept caller filenames or parsed evidence objects. */

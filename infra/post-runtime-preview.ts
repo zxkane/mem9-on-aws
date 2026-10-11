@@ -69,7 +69,7 @@ export function postRuntimePreviewOperator(ecs:EcsOutputs,db:DbOutputs,config:Co
         args.inlinePolicies=[{name:'PostRuntimePreviewSecrets',policy:inputs.apply(v=>JSON.stringify(postRuntimeExecutionPolicy(Object.values(v.credentials) as string[],v.kmsKeyArn,v.region)))}];
       },
       taskDefinition:args=>{
-        args.tags={...(args.tags as Record<string,string>??{}),...tags};
+        args.tags={...(args.tags as Record<string,string>??{}),...tags,'sst:app':$app.name,'sst:stage':$app.stage};
         args.trackLatest=false;
         const definitions=args.containerDefinitions as Output<string>;
         if(!definitions||typeof definitions.apply!=='function')throw Error('InvalidPostRuntimePreviewDefinition');
@@ -88,10 +88,13 @@ export function postRuntimePreviewOperator(ecs:EcsOutputs,db:DbOutputs,config:Co
       controlSourceTree:inputs.apply(v=>v.controlSourceTree),clusterArn:inputs.apply(v=>v.proof.manifest.clusterArn),taskDefinitionArn:task.taskDefinition,
       containerName:POST_RUNTIME_OPERATOR,image:inputs.apply(v=>v.image),taskRoleArn:task.nodes.taskRole.arn,executionRoleArn:task.nodes.executionRole.arn,
       subnets:inputs.apply(v=>v.subnets),securityGroup:db.taskSecurityGroupId,host:db.host,port:db.port,database:db.database,kmsKeyArn:key.arn,credentials:references});
-  const guardedRoute=task.nodes.taskDefinition.apply(()=>{
+  const guardedRoute=task.nodes.taskDefinition.apply(definition=>{
     if(!generatedRegistration)throw Error('NonrootPreviewGeneratedDefinitionMissing');
     return generatedRegistration.apply(raw=>route.apply(routeText=>{
       const value=JSON.parse(routeText),registration=previewRegistrationFromProviderArgs(JSON.parse(raw));
+      // Keep the base pause definition first in the dependency chain even
+      // when its purpose appears later in the map's preserved order.
+      let previousDefinition=definition;
       const records=POST_RUNTIME_PURPOSES.map(purpose=>{
         const target:Record<string,unknown>=structuredClone(registration);
         if(purpose!=='preview-fixture-pause'){
@@ -100,10 +103,14 @@ export function postRuntimePreviewOperator(ecs:EcsOutputs,db:DbOutputs,config:Co
           target.containerDefinitions=[controlLaunchPolicy(purpose,c)];
         }
         const {containerDefinitions,tags:definitionTags,...fields}=target;
-        const arn=purpose==='preview-fixture-pause'?task.taskDefinition:new aws.ecs.TaskDefinition('Mem9PostFixturePurpose'+purpose.split('-').map(p=>p[0].toUpperCase()+p.slice(1)).join(''),{
-          ...fields,containerDefinitions:JSON.stringify(containerDefinitions),tags:Object.fromEntries((definitionTags as Array<{key:string;value:string}>).map(t=>[t.key,t.value])),
-          trackLatest:false,skipDestroy:true,
-        } as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1]).arn;
+        let arn=task.taskDefinition;
+        if(purpose!=='preview-fixture-pause'){
+          const additional=new aws.ecs.TaskDefinition('Mem9PostFixturePurpose'+purpose.split('-').map(p=>p[0].toUpperCase()+p.slice(1)).join(''),{
+            ...fields,containerDefinitions:JSON.stringify(containerDefinitions),tags:Object.fromEntries((definitionTags as Array<{key:string;value:string}>).map(t=>[t.key,t.value])),
+            trackLatest:false,skipDestroy:true,
+          } as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1],{dependsOn:[previousDefinition]});
+          previousDefinition=additional;arn=additional.arn;
+        }
         return arn.apply(async taskDefinition=>{
           const client=new ECSClient({region:value.region});
           try{

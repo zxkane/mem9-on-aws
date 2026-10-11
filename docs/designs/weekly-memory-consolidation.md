@@ -159,26 +159,23 @@ The local PostgreSQL rehearsal uses a deterministic embedding substitute; only
 the deployed acceptance verifies Qwen and Scheduler. Neither proves real-memory
 semantic quality or production backlog throughput.
 
-A production pass examined 17,236 memories and 1,978 clusters. It committed ten
-merge actions using the entire 20-row mutation budget: seven surviving records
-were rewritten and thirteen fragments were soft-deleted. The 2,130 review or
-deferral records included 2,089 `CAP_DEFERRED` actions, referencing 5,276 memory
-IDs across those records. References are not a promise of that many deletions.
-Eleven classification failures and three oversized clusters were separate cases.
+The legacy weekly job charges canonical rewrites and soft deletions against the
+same 20-row mutation budget. A merge action can therefore consume more than one
+unit, and a successful run can leave most eligible work deferred. References in
+`CAP_DEFERRED` records do not establish a deletion count: candidates can overlap,
+require different numbers of writes, or become stale before execution.
 
 The implementation completes an O(N squared) comparison of embeddings and all
-model classifications before checking the execution budget. The observed pass
-took approximately 151 minutes, including approximately 24 minutes of clustering.
-The digest stores topic hashes, not executable decisions. A later run therefore
+model classifications before checking the execution budget. The digest stores
+topic hashes, not executable decisions. A later run therefore
 pays for classification again, including candidates left by the previous cap.
 
 The redesign must deliver all of the following:
 
-- Consume the existing automatically eligible backlog within the user-confirmed
+- Consume the existing automatically eligible backlog within the design's
   24–72 hour target under the calibrated service budget. Cases that require human
-  judgment are excluded. The target was confirmed on 2026-09-28; eligibility and
-  measured drain time still need validation, including for the 2,089 historical
-  records.
+  judgment are excluded. Eligibility and measured drain time require validation
+  against the deployment's current backlog.
 - Discover newly changed memories without reclassifying the unchanged corpus.
 - Continue applying durable candidates across task restarts and schedule ticks.
 - Bound the blast radius of each atomic action and transaction, and enforce
@@ -584,11 +581,11 @@ deletions, subject to the shared total and stage limits. This is materially
 different from 20/week while remaining bounded. It is not authorization to use
 those limits before rollout acceptance.
 
-The 5,276 historical ID references suggest the order of magnitude of work, but
-are not an executable row budget: actions can overlap, be invalid, require fewer
+Historical ID references are not an executable row budget: actions can overlap,
+be invalid, require fewer
 writes, or become stale. The new planner computes valid worst-case and actual
 costs. The acceptance report must show the resulting drain ETA and whether the
-user-confirmed 24–72 hour target fits the calibrated daily/rate/model limits.
+design's 24–72 hour target fits the calibrated daily/rate/model limits.
 If not, explicitly revise policy or capacity; do not hide the miss as a
 successful empty run.
 
@@ -777,8 +774,8 @@ Detailed planned cases are in
 [test-cases/weekly-memory-consolidation.md](../test-cases/weekly-memory-consolidation.md).
 Implementation is complete only when evidence proves:
 
-1. A synthetic workload shaped like the observed 17k corpus and 2k deferred-action
-   backlog drains all automatically eligible work within the user-confirmed
+1. A synthetic workload with 17k memories and 2k planted eligible actions
+   drains all automatically eligible work within the design's
    24–72 hour target under its real policy limits, without repeated full model
    classification. Judge discovery/completion against planted ground-truth safe
    candidates and reference retrieval, not only what the new planner emits.
@@ -944,17 +941,12 @@ instead of introducing speculative whole-batch reservations. The anti-churn
 rule uses strict net reduction rather than a daily per-survivor cap that would
 prevent large components from draining.
 
-The user confirmed the 24–72 hour goal for clearing the existing automatically
-eligible backlog on 2026-09-28, excluding cases that require human judgment.
-This confirms the business target; it does not establish that the target has
-been achieved or authorize production activation. The subsequent user instruction
-authorizes implementation after the implementation-readiness review passes.
-Codex, GLM-5 and Opus 4.8 each returned PASS on that review, with no P0/P1 blocker.
-Initial budgets, concurrency, and cost/quality thresholds remain proposed calibration
-parameters requiring shadow-run and load-test evidence. Engineering review and
-target confirmation do not approve these uncalibrated values; implementation
-must supply the measurements and release evidence above before changing live
-behavior.
+The 24–72 hour backlog target excludes cases requiring human judgment. Initial
+budgets, concurrency, and cost/quality thresholds are calibration parameters
+requiring shadow-run and load-test evidence. Design review does not establish
+achieved throughput or authorize production activation; each deployment must
+supply the measurements and release evidence above before changing live behavior.
+Keep operator approvals and rollout measurements in private deployment records.
 
 ## Source checks
 
@@ -973,10 +965,9 @@ The linked service behavior is not authorization to provision new resources:
 
 ## Production cutover with a bounded maintenance window
 
-Status: implementation approved by Codex, GLM-5 and Kiro Opus 4.8 after six
-review rounds. Production activation still requires the evidence below. The
-operator permits a brief interruption of reads and writes, with a maximum
-maintenance window of two hours. All image builds, resource preparation, role
+Production activation requires the evidence below and a separately authorized
+maintenance window. The implementation supports a maximum window of two hours.
+All image builds, resource preparation, role
 policy review and rehearsal happen before this window. Automatically eligible
 historical work retains the 24–72 hour drain target; maintenance duration and
 backlog drain duration are separate clocks.
@@ -1269,8 +1260,8 @@ persisted daily allowance capable of draining eligible work in 24–72 hours,
 with stage/namespace quotas, one worker per kind and a foreground p95 regression
 limit of 10%. A canary-sized quota is never silently the steady-state policy.
 If exact candidates are sparse, report semantic/model readiness separately;
-13 candidate groups observed in preflight are neither the complete backlog
-nor a promised deletion count. No unchecked semantic policy is enabled merely
+candidate groups found in preflight establish neither the complete backlog
+nor a deletion count. No unchecked semantic policy is enabled merely
 to satisfy a throughput target. Stop claims/commits on retirement, authority,
 load, budget or invariant failures; retain receipts and unresolved work.
 
@@ -1873,6 +1864,10 @@ authorization and its concrete planner/executor registrations. It retains the
 exact protected parameter version, source tag, image and role checks. This
 worker-only lookup cannot resolve a CONTROL image slot or replace the fresh
 deployment context required by deployment and registration paths.
+For a V3 non-root DATA descriptor, canary discovery requires the complete fixed
+worker launch policy, Linux platform and unique environment/secret names without
+runtime injection variables before checking roles or schedules. Removing the
+guard prefix, UID or capability settings cannot select the historical launch.
 
 Root and capacity inspections bind the original parent and current control
 source. They execute fixed queries under the existing advisory lease and one
@@ -2193,6 +2188,51 @@ canonical launch exposes its exact journal identity to durable persistence
 before any AWS write; cancellation or a missed original due time cannot retime
 that launch.
 
+Root-request payload and local-accounting versions are independent. The final
+readiness request carries exactly seven original CONTROL records: the resolved
+task plan, authenticated main-source record, and five launch registration bodies.
+Select them from the complete authenticated archive and validate purpose, order,
+membership, raw-byte hash and canonical hash before encoding. The other four
+checkpoints retain their version-one request bytes. All requests retain the
+1 MiB body limit; ready responses retain their 8 MiB aggregate wire limit and
+128-call limit.
+
+Prospective root-local policy version two prices each checkpoint from the source
+limits and its actual caller path. New preparation derives a fresh scope-plan
+version three before constructing carrier and funding bindings, retaining the
+original plan and its reference. It preserves the planned authorization ID,
+parameter version and storage scope. The original acquisition prepays the whole
+local catalog once, before selecting records or dispatching a request. Private
+in-memory counters consume that payment; a bounded accounting record binds the
+original claim, scope, catalog and debit position. Serialized checkpoints cannot
+create credits. Failure forfeits unused payment, and existing grants, journals
+and scope-plan versions one and two keep their original rules.
+
+Version-two exchange records use fixed local filenames and hashes. Resolve them
+only within the original acquisition's validated directory and prefix. This
+avoids repeatedly serializing a filesystem prefix while preserving exact file
+identity and content checks. The cost catalog includes preparation rejection,
+request encoding, bounded response processing, durable records, replay and
+cleanup. Include its five checkpoint prices once in the complete future budget;
+keep the owner-root and publication allocations separate. A partial subtotal or
+passing arithmetic test cannot establish that the full cumulative route fits.
+
+Only deployment checkpoints `/17` and `/19` perform LOCAL replay. They each
+verify the retained root-exchange files at entry and again before successful
+completion. Intermediate operations consume the privately retained,
+authenticated result; they never reread unchecked root evidence. Other source,
+deadline, resource and budget guards remain active. Overwrite, replacement,
+symlink, permission or content drift causes a hold before a deployment context,
+success receipt or post-apply allocation is returned. The actual outer restore
+path must be tested with the prospective policy, including clean and tampered
+container cases. Complete native integration must fund and consume this policy
+from the original owner flow, rather than substituting a direct request call.
+
+Numeric preview services explicitly disable ECS Exec to satisfy their serving
+contract. The service update forces replacement tasks so the observed task
+setting matches the service setting. Production audit access follows its
+separate configuration.
+
 Recurring activation receives the certified backend binding explicitly and
 verifies it before changing schedule admission. Recurring target payloads carry
 Scheduler context attributes. Acceptance correlates authenticated role identity,
@@ -2494,3 +2534,266 @@ remain errors. Post-update phases require current-source bindings and active
 retained authorization, and every observation retains its stable reread checks.
 The CI action reports only fixed target-stage and error classifications, never
 raw provider errors, parameter values or credentials.
+
+The fixed CONTROL census prepays 3 GiB of cumulative LOCAL work before provider
+access: 2 GiB for graph processing and 1 GiB for the existing ancillary and
+cleanup lanes. Complete metadata discovery must prove that the unique graph is
+at most 512 MiB and that three graph passes plus every config, attestation and
+runtime-layer reread fit the graph allowance before payload downloads begin.
+Shared references retain their reread multiplicity. The worker independently
+reconstructs the complete plan and consumes only the allowance remaining after
+parent graph work. Oversized input holds the full payment; no graph members are
+discarded to fit. Other call, wire, unpack, entry and global cumulative ceilings
+remain unchanged. These are enforced prospective limits, not observations or
+authorization for a different main build.
+
+A separate continuation-material forecast is bound into the COPY configuration
+and independently recomputed before retention reads or census admission. It
+protects the complete cumulative maximum without changing the original COPY
+envelope or debiting it. The later native material allocation must fit the same
+forecast and is paid once, including uncertain-write recovery and cleanup.
+Missing, changed or insufficient forecasts reject before execution. Source
+changes require rebuilding and verifying worker metadata and compiling the full
+route again; arithmetic alone cannot establish runtime readiness.
+
+The publisher's cumulative LOCAL processing budget has its own version. Version
+two remains the default and reconstructs its original 1 GiB budget and payment
+bytes exactly. Fresh preparation may explicitly select version three, which
+prepays 2 GiB. Both versions reserve 16 MiB for cleanup and retain the same
+wire, request, record, object and deadline limits. These values bound cumulative
+processing work; they are not task-memory allocations. Reject unknown versions,
+caller-selected capacities and mismatched version/limit combinations.
+
+Bind the validated publisher policy to the original prepaid token before proof
+assembly or owner work begins. Every LOCAL meter, preflight, snapshot, publisher
+catalog and event bound uses that policy through cleanup. Publisher admission
+cannot enlarge an existing token. Legacy and held payments retain their original
+policy, charges and hashes, with no refunds or replacement ownership handles.
+
+Fresh preparation and the independent remaining-work verifier include the entire
+prospective payment once, including the full 1 GiB increase for version three.
+The enclosing forecast still includes historical consumption and every other
+remaining obligation under the unchanged five-dimensional cumulative ceilings,
+including 64 GiB LOCAL. Preserve the adaptive bound on complete gate records;
+neither a larger prospective allocation nor a passing partial forecast replaces
+complete source validation, a full native execution or the final route check.
+
+Native integration must forward the original proof-store accounting callback
+through every fixture wrapper and retained-store path. Failure diagnostics may
+retain bounded numeric cost rows and the existing closed-event counters before
+test cleanup, without reading additional proof bodies, changing accounting or
+claiming that a diagnostic snapshot grants execution authority.
+
+The native owner acquires its deployment fence before the first root audit and
+retains that same fence through COPY and publication. A versioned input pins an
+acquisition specification and its separate budget before execution. The legacy
+held-fence reference remains a distinct input form; reject mixed forms. Actual
+acquisition receipts and the opaque custody handle are runtime outputs, never
+replacements for pinned inputs. The acquisition commitment binds the finalized
+configuration, original payment, process and deadline without predicting a
+future publication proof or operation.
+
+Prepay the complete acquisition, issuance, journal, handoff, unknown-outcome and
+early-abort obligations before the first acquisition I/O. Include this separate
+component in the complete before-COPY forecast and independent payment replay;
+do not change the four carrier parts or borrow their allocations. The later
+publisher payment retains its existing obligations and receives no refund.
+Closing root resources or sealing the COPY ledger preserves custody without
+creating a second debit or reopening the root transport.
+
+Publication adopts custody once through the original native owner path. Join
+the authorized reviewed proof, genuine completed root/COPY objects, active
+publisher token and actual validated operation to the acquisition authority.
+Require the supported same-owner binding, exact mutex body/ETag, complete gate
+receipt and original gate-before state. Fresh readbacks and a durable transfer
+must precede protected publication writes. Keep the gate held and the witness
+unchanged throughout; the previous holder loses release authority after transfer.
+An archived TRUE gate or matching owner string alone cannot grant custody.
+
+The original holder owns early cleanup, including failures before COPY returns a
+completion object. Release requires unchanged ownership, confirmed task/worker
+cleanup, known no-send state and no uncertain mutation. After adoption, only the
+publisher may perform verified terminal release. Unknown acquisition, transfer,
+write or release outcomes hold custody; expiry never authorizes an unlock or a
+new clock. Integration tests share one gate and object store across the whole
+lifetime, preserving conditional-write behavior and rejecting state resets.
+
+Derive provider and retention source closures from module syntax. Include
+static and side-effect imports, re-exports and literal dynamic imports; preserve
+the existing handling of external packages and computed imports. Comments,
+ordinary strings and captured command logs do not declare local dependencies.
+An actual missing dependency still rejects, including an absolute path that
+also appears in a log example. Preserve source hashes, file ownership and mode
+checks, complete membership and existing aggregate source limits.
+
+Pin the parser implementation and its resolving package metadata. Reserve the
+declared input-size-based decoding, parsing, traversal and output charge before
+parsing starts; failure retains that charge. Account for each actual invocation,
+including a shared file parsed in separate provider scopes. Parser work is
+additional to existing source reads, and read-pass counts do not imply the same
+number of parses. Preparation, execution and independent replay must agree on
+these payments and reject insufficient capacity before invoking the parser.
+
+Prospective retention read finalization separately budgets the fixed identity,
+role-assumption and stack-read requests at the raw HTTP boundary. Command output
+limits remain processing limits and cannot establish network-byte coverage.
+Bind the new transport version, complete request catalog, source credentials,
+SDK decoder closure and limits before execution. Source identity and role
+assumption use the same authenticated credential snapshot; scoped identity is
+verified before registering its native session. Metadata resolution has its own
+fixed prepaid slots, with no default credential chain or refresh fallback.
+
+Each raw request requires its original grant slot and durable intent, exact
+request and region binding, and at most one dispatch. Price request and response
+buffers, decoding, faithful output conversion, evidence, replay, uncertainty and
+cleanup before work. Unknown outcomes stop further dispatch; transports and
+decoders drain before credentials are released. Credential-bearing bodies remain
+ephemeral; receipts contain only safe hashes, sizes, status and cleanup facts.
+Preserve existing decoded-output limits and timestamp/template semantics. New
+transport execution requires the new plan and grant version, while historical
+reconstruction and charges remain unchanged. Include the complete addition once
+in every affected cumulative budget dimension before production admission.
+
+The carrier CI payment is a prospective aggregate allocation. Complete route
+accounting sums that selected payment once, rather than adding its internal
+operation limits again. Independent maximum response or object sizes do not
+establish a lower bound on the actual workload. They also do not establish that
+a smaller aggregate allocation is sufficient: every producer operation needs
+accounting, and the complete genuine scope must finish within the selected
+allocation before capacity acceptance.
+
+Claim the original funding slot before startup source capture. Start its
+processing counter before Git or GitHub capture and carry that same state
+through the authenticated startup handle into the consumer. Bind the policy,
+plan, grant, source, context and job; the counter itself grants no provider
+authority. Failed startup, a copied handle or repeated consumption cannot obtain
+a fresh zero counter. Exact authenticated context sizes may inform prospective
+admission while preserving every file and full-content recheck.
+
+Protect cleanup, abort/join and terminal-record capacity before acquiring each
+resource. Normal work cannot consume it after holding or expiry; cleanup remains
+restricted to owned resources and the original cleanup clock. Admit the full
+native build charge before dispatch, and use genuine output handles to admit
+all eight SQL cases plus remaining publication and cleanup work before that
+stage. Insufficient capacity holds the operation instead of reducing validation
+coverage. Internal reservations use the original payment and do not create
+another global debit. Preserve separately priced profile charges, legacy payment
+reconstruction and historical consumption; neither remaining capacity nor a
+passing smaller fixture refunds or certifies a full production allocation.
+
+Fresh census admission records use a version-three commitment to the complete
+verified remaining-work result instead of embedding its source-reference lists
+in the journal. Preserve the input reference/hash, catalog, charge, projection,
+operation identity, owner/predecessor bindings and original clocks. Replay must
+rerun all input, producer, source and provenance checks before comparing the
+commitment. The digest covers every field, including the result's own proof
+hash; it does not replace verification or grant authority.
+
+Before reading or verifying inputs for this format, reserve 16 MiB of processing
+work within the existing 128 MiB input allowance. Apply the existing 4 MiB inert
+JSON bound to the complete verified object, reject oversize without truncation,
+and use the existing canonical hash once. Preserve the complete existing input
+cost accumulator, including preview-verification work, and add this reservation
+to it. The original admission handle carries the total to the transport meter
+before provider access. Replay compares the precomputed commitment directly.
+Keep version-two inline records and their validation unchanged, require matching
+admission/settlement versions, and reject mixed field shapes. The journal's
+64 KiB record limit, census payment, global ceilings and historical charges
+remain unchanged; no sidecar object, provider read or refund is introduced.
+
+Proof archives retain the SQL acceptance records, manifests, certificates and
+case output as ordinary verified evidence. The fixed external SQL package is a
+download descriptor only at the original carrier accounting path and the two
+corresponding acceptance-record locations. Before recognizing those locations,
+both assembly and verification bind the package hash and size to the same paid
+carrier grant, build, source, image and complete SQL acceptance. An identical
+byte reference elsewhere still requires its actual archived contents; neither
+an arbitrary descriptor nor a record kind can bypass archive verification.
+The independently committed carrier launch plan is also traversed after its
+validation, so its network, platform and health evidence must resolve actual
+archive bytes even when the proof refers to the plan only through its hash.
+
+Reviewed historical host SQL evidence has a separate package descriptor. A
+shared data-only validator binds its original review, source modules, material,
+funding plan and behavior records to the current grant's host commitment before
+recognizing the three package locations in that one capture. Its manifests,
+certificates and case outputs remain ordinary archived bytes. The historical
+capture grants no execution authority and cannot substitute for current paid
+SQL acceptance. Descriptor recognition is local to the authenticated document
+and path; it never exempts that byte hash elsewhere in the archive.
+
+Preview bootstrap and post-runtime operator revisions share their respective
+task families. Register the original SST definition first, then each additional
+purpose through an explicit dependency chain. Preserve purpose-map order and
+all exact readbacks; a failed predecessor prevents later registrations and a
+usable map. This applies even when the original purpose is not first in the map.
+Capture the framework's application and stage tags together with the component
+tags before constructing expected registrations. Every tag remains part of the
+exact readback comparison, including rejection of missing or additional tags.
+
+Target identity uses the complete root, arm64 and config image digests from the
+authenticated DATA proof. The published descriptor retains its root/arm64 pair.
+The owner checks that pair before opening the target window; the CI reader
+independently checks every complete pre/post image against the proof before
+replaying observations. Descriptor comparison uses its two declared fields,
+while config identity remains bound to the proof throughout replay.
+
+Preview workload comparison treats an absent capability-add list and an empty
+list as equivalent on comparison copies only. Captured provider evidence stays
+byte-faithful; nonempty additions, changed drops and unknown fields remain
+invalid. The schema-bootstrap workflow step requires evidence for the actual
+runtime-bootstrap program it invokes; schema-seed evidence alone cannot admit
+that launch.
+
+Fresh version-four census admission combines authenticated candidate capture
+and runtime census under the existing single census identity. The initial
+admission prepays both children before network access or decoding. Candidate
+run, job and artifact selectors become evidence only after their complete
+source joins are authenticated; immutable phase records bind the resulting
+image before activating the census child. Activation is consumed before any
+asynchronous work and cannot be retried after failure. Settlement retains the
+entire combined payment, including unused capacity, on success or failure.
+Preserve the original history prefix, legacy census formats and COPY sequence.
+
+Measurement admission verifies the original history, retained reserve and all
+outstanding liabilities. It may defer explicitly unissued production work while
+acquiring the measurements required to price that work; it does not certify the
+complete forecast or admit COPY. Final admission still recomputes every remaining
+component against all five original cumulative limits. Later planning and proof
+readers authenticate the raw capture, journal, decoded artifact and census with
+newly prepaid work from their own original caller. They cannot reuse a settled
+capture handle, omit decompression or entry costs, or charge the census twice.
+
+Ordinary engineering CI remains an independently authorized, separately billed
+producer. Its authenticated immutable build records establish input provenance,
+not owner execution authority or available quota. The production owner pays for
+each new acquisition, verification, replay and cleanup operation that consumes
+those records. Preserve failed attempts and their original identities; a later
+successful run does not change their outcome or restore a consumed owner slot.
+
+The main CONTROL build uses a fixed Node.js composer with canonical uncompressed
+USTAR and OCI output. It authenticates the complete immutable candidate graph and
+filesystem, tools and source packs, and the full source-bound COPY map. Preserve
+inherited runtime layers, validate every emitted path, byte, mode and ownership
+field, and verify the complete resulting graph and filesystem. Its provenance
+identifies the native composer and actual main source; it cannot claim a
+BuildKit invocation or replace the older build formats' validation rules.
+
+SOURCE verification and composition share one foreground controller with
+separate original prepaid children. Closing the SOURCE child does not close or
+recreate the composition child. Source validation, pack acquisition, composition,
+publication, capture and cleanup all remain inside that original job lifetime.
+Capture authenticates its own job and output and performs a conditional write
+and readback. A later independent reader requires genuine successful job and
+step completion with the original capture interval inside them. Uploaded output
+from a failed job cannot qualify. Unknown outcomes retain the original charges
+and owned cleanup obligations without another publication attempt.
+
+The complete prospective calculator prices source and tool checks, pack
+materialization, base acquisition, tar and metadata production, independent
+graph/filesystem validation, raw requests and responses, journals, publication
+readback, uncertainty and cleanup. Count owner and CI parts once in their
+respective original allocations. Derive bounds from authenticated descriptors,
+complete source inventories and fixed implementation passes; neither independent
+maximums nor a smaller passing fixture establishes full-route capacity. Preserve
+the three SOURCE checkpoints, five TARGET checkpoints and two complete replays.

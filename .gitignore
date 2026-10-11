@@ -18,6 +18,10 @@ dist/
 /.github/actions/ci-carrier-before-copy/dist/*
 !/.github/actions/ci-carrier-before-copy/dist/index.mjs
 !/.github/actions/ci-carrier-before-copy/dist/toolchain.json
+!/.github/actions/control-composition/dist/
+/.github/actions/control-composition/dist/*
+!/.github/actions/control-composition/dist/index.mjs
+!/.github/actions/control-composition/dist/toolchain.json
 coverage/
 *.tsbuildinfo
 # SST auto-generates these link-type files on `sst deploy`/`sst dev`.

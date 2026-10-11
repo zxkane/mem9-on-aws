@@ -133,7 +133,7 @@ export async function assembleRootAuditRefs({anchors,material,phase,targetObserv
  const targetJoin=await r.json(material.targetJoin),post=phase==='prereadiness';need(post?targetJoin.kind==='same-target-window':targetJoin.kind==='not-applicable','RootMaterialTargetJoin');
  if(post){const target=targetJoin.targetEvidence?.target,actual=targetObservation.serviceObservation;need(target&&target.account===root.account&&target.region===root.region&&target.taskArn===actual.task.taskArn&&target.taskDefinitionArn===actual.task.taskDefinitionArn&&target.clusterArn===actual.task.clusterArn,'RootMaterialTargetBinding');
   const deployment=actual.service?.deployments?.find(d=>d.status==='PRIMARY');need(deployment&&target.serviceDeploymentId===deployment.id,'RootMaterialTargetBinding');
-  for(const c of target.containers){const observed=actual.task.containers.find(v=>v.name===c.name);need(observed&&observed.runtimeId===c.runtimeId,'RootMaterialTargetBinding');same(c.image,parseNonrootJson(parameter.Value).images[c.name],'RootMaterialTargetImage');}
+  for(const c of target.containers){const observed=actual.task.containers.find(v=>v.name===c.name);need(observed&&observed.runtimeId===c.runtimeId,'RootMaterialTargetBinding');same({rootDigest:c.image.rootDigest,arm64Digest:c.image.arm64Digest},parseNonrootJson(parameter.Value).images[c.name],'RootMaterialTargetImage');}
  }
  const provenance={ownerMaterial:material.sourceReceipt,legacyOutput:material.stdout,carrierManifest:material.carrierManifest,legacyCodeHash:manifest.legacyCodeHash,supplementalSourceHash:s.sourceHash,legacyObservedMs:legacy.observedMs,supplementalObservedMs:s.databaseObservedMs};
  const value={version:2,kind:'old-root-readonly-audit',phase:post?'postdeployment-preservation':'predeployment',root,predecessorParameter:anchors.predecessorParameter,oldMaterial:anchors.oldMaterial,oldCertificate:anchors.oldCertificate,carrierBuild:build,preauditPermit:permit,carrierIdentity:identity,taskObservation:material.taskObservation,targetJoin,startedMs,databaseObservedMs:legacy.observedMs,cloudObservedMs:Math.max(census.completedMs,scheduler.completedMs,fence.observedMs),completedMs,cleanupComplete:true,
@@ -173,7 +173,7 @@ export function decodeOwnerRootAuditMaterial(raw,{owner,source,phase,parameter,p
 /** Fixed production reader entry. The owner must publish its real capture to
  * the fixed grant/checkpoint key before use. This issues only the already
  * funded exact GetObject; no polling, payment, RunTask or new credentials. */
-export async function collectRootAudit({context,records,parameter,source,phase,deploymentSource,targetObservation,clients,metadataReads,signal,deadlineMs}){
+export async function collectRootAudit({context,records,parameter,source,phase,deploymentSource,targetObservation,controlOriginals,clients,metadataReads,signal,deadlineMs}){
  signal?.throwIfAborted();const now=Date.now(),bindings=nonrootAuthorizationBindings(context),data=parseNonrootJson(parameter.Value);
  need(['preupdate','preconfigure','presst','prereadiness'].includes(phase)&&parameter.Version===bindings.parameterVersion&&hash(records.proof)===bindings.proofHash,'RootCollectorContext');
  need(source?.checkout?.tree===bindings.control.sourceTree&&source.repository===bindings.control.repository&&Number.isSafeInteger(source.run?.id)&&source.run.id>0&&Number.isSafeInteger(source.run.attempt)&&source.run.attempt>0,'RootCollectorSource');
@@ -195,7 +195,7 @@ export async function collectRootAudit({context,records,parameter,source,phase,d
  // The existing source gate must already have authenticated these CI records.
  // Fail here for a local-build placeholder before spending the root GET.
  const original=nonrootArchiveResolvers(records.proofArchive);await carrierCi(records.proof.taskPlan.carrierBuild,{json:ref=>readNonrootEvidence(ref,original)});
- const exchange=funded?await metadataReads.requestRootAudit({context,records,parameter,source,phase,deploymentSource,targetObservation}):undefined;
+ const exchange=funded?await metadataReads.requestRootAudit({context,records,parameter,source,phase,deploymentSource,targetObservation,...(controlOriginals?{controlOriginals}:{})}):undefined;
  const response=await clients.s3.send(new GetObjectCommand({Bucket:location.bucket,Key:location.key,ExpectedBucketOwner:data.account}),{abortSignal:signal});
  let raw;try{
   need(response.DeleteMarker!==true&&response.ServerSideEncryption==='aws:kms'&&response.SSEKMSKeyId===location.kmsKeyArn&&response.BucketKeyEnabled===true&&Number.isSafeInteger(response.ContentLength)&&response.ContentLength>0&&response.ContentLength<=33554432,'RootOwnerResponse');

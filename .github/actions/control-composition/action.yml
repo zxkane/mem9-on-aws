@@ -1,0 +1,12 @@
+name: Native CONTROL composition
+description: Verify SOURCE and compose, publish and capture CONTROL in one prepaid Node lifetime
+outputs:
+  image_tag:
+    description: Tag bound to the authenticated actual main revision
+  digest:
+    description: Independently verified published CONTROL root digest
+  commitment:
+    description: Opaque commitment to the private native build capture
+runs:
+  using: node24
+  main: dist/index.mjs

@@ -12,9 +12,12 @@ import {collectNonrootControlRuntime} from './production-nonroot-observation.mjs
 import {verifyNonrootDeployedControlBuild,verifyNonrootDeploymentSource,NONROOT_DEPLOYED_CONTROL_IMAGE_SLOT} from './production-nonroot-provenance.mjs';
 import {validateNonrootEnvironment} from './production-nonroot-launch.mjs';
 import {PRODUCTION_DATA_RELEASE_PARAMETER} from './production-data-issuance.mjs';
+import {inspectProductionDeployedControlBuild} from './production-control-composition-recipe.mjs';
+import {completeProductionControlCompositionBuildCapture} from './production-control-composition-capture-reader.mjs';
 
 const MAX=32*1024*1024;
 const keys=['context','parameter','proof','archive','completedCapture','controlVerification','sourceContext','prerequisites','guardImportAudit'];
+const inputKeys=input=>[...keys,...(Object.hasOwn(input,'metadataReads')?['metadataReads']:[])];
 const need=(ok,code='NonrootControlMaterialInvalid')=>{if(!ok)throw Error(code);};
 const exact=(value,fields)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===fields.slice().sort().join(),'NonrootControlMaterialFields');
 const same=(a,b,code='NonrootControlMaterialBinding')=>need(hash(a)===hash(b),code);
@@ -50,7 +53,7 @@ async function additionsFor(archive){
 }
 
 async function prepare(input,at){
- exact(input,keys);need(Number.isSafeInteger(at)&&at>0,'NonrootControlMaterialTime');
+ exact(input,inputKeys(input));need(Number.isSafeInteger(at)&&at>0,'NonrootControlMaterialTime');
  exact(input.controlVerification,['graph','filesystem']);
  const bindings=nonrootAuthorizationBindings(input.context),proof=inspectNonrootRecord('NonrootImageProofV2',input.proof);
  need(hash(proof)===bindings.proofHash,'NonrootControlMaterialProof');
@@ -60,15 +63,21 @@ async function prepare(input,at){
  const contract=proof.taskPlan.deployedControlBuildContract,c=input.completedCapture;
  need(c&&c.sourceContext===input.sourceContext,'NonrootControlMaterialSourceContext');same(c.contract,contract,'NonrootControlMaterialContract');
  const sourceOptions={...nonrootArchiveResolvers(input.archive),expected:{sourceContext:input.sourceContext}};
- const capture=await captureNonrootControlBuildAction({...copyNonrootJson(c.capture),contract},sourceOptions);
- same(capture,c.capture,'NonrootControlMaterialCapture');
  need(Number.isSafeInteger(c.completion?.observedMs)&&c.completion.observedMs<=at,'NonrootControlMaterialCompletionTime');
- const completion=completeNonrootControlBuildAction(capture,{contract,run:c.completion.run,job:c.completion.job,buildLog:c.buildLog,now:c.completion.observedMs});
- same(completion,c.completion,'NonrootControlMaterialCompletion');
+ let capture,completion,sourceBytes,source,capsuleRef;
+ if(contract.version===2){
+  const checked=completeProductionControlCompositionBuildCapture(c.envelopeBytes,{commitment:c.commitment,contract,source:c.source,run:c.completion.run,job:c.completion.job,buildLog:c.buildLog,metadataReads:input.metadataReads,now:c.completion.observedMs});
+  capture=checked.capture;completion=checked.completion;sourceBytes=checked.sourceBytes;source=checked.source;capsuleRef=checked.ref;
+ }else{
+ capture=await captureNonrootControlBuildAction({...copyNonrootJson(c.capture),contract},sourceOptions);
+ completion=completeNonrootControlBuildAction(capture,{contract,run:c.completion.run,job:c.completion.job,buildLog:c.buildLog,now:c.completion.observedMs});
  const commitment=inspectControlBuildCommitment(c.commitment);
  for(const [key,wanted]of Object.entries({runId:capture.source.run.id,runAttempt:capture.source.run.attempt,sourceRevision:capture.source.checkout.sha,sourceTree:capture.source.checkout.tree,buildJobId:capture.job.id,outputDigest:capture.outputDigest}))need(commitment[key]===wanted,'NonrootControlMaterialCommitment');
  need(c.prepared?.contractHash===hash(contract)&&c.prepared.fingerprint?.tree===contract.candidate.tree&&c.prepared.preparedMs<=instant(capture.action.started_at),'NonrootControlMaterialPrepared');
  same(c.prepared.identity,{repository:capture.source.repository,revision:capture.source.checkout.sha,runId:capture.source.run.id,attempt:capture.source.run.attempt},'NonrootControlMaterialPrepared');
+ source=capture.source;sourceBytes=Buffer.from(JSON.stringify(source));
+ }
+ same(capture,c.capture,'NonrootControlMaterialCapture');same(completion,c.completion,'NonrootControlMaterialCompletion');
  const prerequisites=inspectNonrootControlPrerequisites(input.prerequisites,{controlVerification:input.controlVerification,sourceContext:input.sourceContext,now:at});
  const artifact=await captureNonrootControlArtifact(capture,input.controlVerification),image=artifact.image;
  same(prerequisites.record.image,image,'NonrootControlMaterialPrerequisites');
@@ -77,7 +86,10 @@ async function prepare(input,at){
  for(const object of prerequisites.objects)additions.put(object.bytes,Object.hasOwn(object.ref,'canonicalHash')?'json':'bytes','filesystem',object.ref);
  // Preserve the capture's own raw encoding under build provenance. A prior
  // source record can have equal JSON with a different byte encoding.
- const sourceBytes=Buffer.from(JSON.stringify(capture.source));additions.put(sourceBytes,'json','build',capture.actualMain.authenticatedSource);
+ additions.put(sourceBytes,'json','build',capture.actualMain.authenticatedSource);
+ // The original capsule is an ordinary byte object. Its embedded plan has
+ // priced download descriptors, not phantom evidence objects to re-encode.
+ if(capsuleRef)additions.put(c.envelopeBytes,'bytes','build',capsuleRef);
  const graphRefs={};
  for(const [key,digest]of [['rootManifest',image.rootDigest],['arm64Manifest',image.arm64Digest],['config',image.configDigest]]){
   const matches=artifact.objects.filter(row=>row.digest===digest);need(matches.length===1,'NonrootControlMaterialGraph');
@@ -109,7 +121,7 @@ async function prepare(input,at){
   resolvedLaunches.push(launch);registrations[template.taskKey]=body;
  }
  for(const task of proof.taskPlan.tasks.filter(row=>row.disposition==='update'))if(!Object.hasOwn(registrations,task.taskKey))registrations[task.taskKey]=await readNonrootEvidence(task.targetRegistration,sourceOptions);
- return {bindings,proof,parameter,data,contract,capture,completion,prerequisites,artifact,guardImports,resolvedLaunches,registrations,graphRefs,additions};
+ return {bindings,proof,parameter,data,contract,capture,completion,source,capsuleRef,prerequisites,artifact,guardImports,resolvedLaunches,registrations,graphRefs,additions};
 }
 
 /** Stable launch hashes for the actual guard-test producer. This is preparation
@@ -122,8 +134,8 @@ export async function prepareNonrootControlLaunches(input,{clock=Date.now}={}){
 /** Guard tests and scan/review references must already resolve to actual
  * producer bytes in input.archive. Nothing here creates their success records. */
 export async function assembleNonrootControlMaterial(input,{clock=Date.now,signal}={}){
- exact(input,[...keys,'guardTests','scan']);need(typeof clock==='function','NonrootControlMaterialClock');signal?.throwIfAborted();
- const p=await prepare(Object.fromEntries(keys.map(key=>[key,input[key]])),clock());
+ exact(input,[...inputKeys(input),'guardTests','scan']);need(typeof clock==='function','NonrootControlMaterialClock');signal?.throwIfAborted();
+ const p=await prepare(Object.fromEntries(inputKeys(input).map(key=>[key,input[key]])),clock());
  const options=nonrootArchiveResolvers(input.archive),guardTests=inspectNonrootRecord('JsonRef',input.guardTests),scan=inspectNonrootRecord('ControlScanEvidenceV1',input.scan);
  const tests=await readNonrootEvidence(guardTests,options);
  for(const reference of [scan.rawPages,scan.normalizedFindings,scan.artifactReview])await readNonrootEvidence(reference,options);
@@ -131,23 +143,25 @@ export async function assembleNonrootControlMaterial(input,{clock=Date.now,signa
  same(scan.image,p.artifact.image,'NonrootControlMaterialScanImage');
  const {tagRule,provenanceRule,...fixedInvocation}=p.contract.recipe.invocation;
  const main=p.capture.actualMain,image=p.artifact.image;
- const actualInvocation={...fixedInvocation,tags:[`${image.account}.dkr.ecr.${image.region}.amazonaws.com/${image.repositoryName}:mem9-${main.mainRevision.slice(0,7)}`],
+ const actualInvocation=p.contract.version===2?{version:2,kind:'native-control-composition-invocation',recipeHash:hash(p.contract.recipe),
+  planHash:p.contract.recipe.composition.planHash,copyHash:p.contract.recipe.composition.copyHash,capture:p.capsuleRef}:
+ {...fixedInvocation,tags:[`${image.account}.dkr.ecr.${image.region}.amazonaws.com/${image.repositoryName}:mem9-${main.mainRevision.slice(0,7)}`],
   provenance:{repository:main.repository,revision:main.mainRevision,runId:main.workflowRun,attempt:main.workflowAttempt,jobId:p.completion.job.id}};
  const completedMs=Math.max(p.completion.completedMs,p.prerequisites.record.completedMs,tests.completedMs,scan.observedMs);
  need(completedMs<=clock(),'NonrootControlMaterialTime');
- const build=inspectNonrootRecord('DeployedControlBuildV1',{version:1,kind:'actual-main-deployed-control-build',contractHash:hash(p.contract),actualMain:main,
-  source:{sourceEvidence:main.authenticatedSource,repository:main.repository,revision:main.mainRevision,tree:main.mainTree,checkout:p.additions.json(p.capture.source.checkout)},
+ const build=inspectProductionDeployedControlBuild({version:p.contract.version,kind:'actual-main-deployed-control-build',contractHash:hash(p.contract),actualMain:main,
+  source:{sourceEvidence:main.authenticatedSource,repository:main.repository,revision:main.mainRevision,tree:main.mainTree,checkout:p.additions.json(p.source.checkout)},
   workflow:{path:p.contract.workflow.path,workflowSha:main.workflowSha,runId:main.workflowRun,attempt:main.workflowAttempt,jobId:p.completion.job.id,jobKey:p.contract.workflow.jobKey,buildStepId:p.contract.workflow.buildStepId,jobName:p.completion.job.name,
    authenticatedRun:p.additions.json(p.completion.run),authenticatedJob:p.additions.json(p.completion.job)},
   recipe:p.contract.recipe,actualInvocation:p.additions.json(actualInvocation),buildLog:p.additions.put(input.completedCapture.buildLog,'bytes','build',p.completion.buildLog),
   image,imageGraph:p.additions.json(p.graphRefs,'image-graph'),guardSource:p.contract.guardSource,guardImports:p.guardImports,scan,guardTests,resolvedLaunches:p.resolvedLaunches,
-  startedMs:instant(p.capture.job.started_at),completedMs});
+  startedMs:instant(p.completion.job.started_at),completedMs});
  const resolvedTaskPlan=inspectNonrootRecord('ResolvedTaskPlanV1',{version:1,kind:'resolved-nonroot-task-plan',taskPlanHash:hash(p.proof.taskPlan),deployedControlBuildHash:hash(build),
   tasks:p.proof.taskPlan.tasks.filter(row=>row.disposition==='update').map(row=>({taskKey:row.taskKey,registrationBody:p.additions.json(p.registrations[row.taskKey],'task-definition')})),controlLaunches:p.resolvedLaunches});
  const resolvedRef=p.additions.json(resolvedTaskPlan),archive=p.additions.snapshot();
  const expected={descriptorHash:hash(p.data),proofHash:p.bindings.proofHash,parameterVersion:p.parameter.Version,taskPlan:p.proof.taskPlan,contract:p.contract,sourceContext:input.sourceContext,
   actualMainExpected:{repository:p.contract.repository,prNumber:p.contract.prNumber,candidateRevision:p.contract.candidate.revision,candidateTree:p.contract.candidate.tree,baseRevision:p.contract.candidate.baseRevision}};
- const verification={...nonrootArchiveResolvers(archive),expected,controlVerification:input.controlVerification,signal};
+ const verification={...nonrootArchiveResolvers(archive),expected,controlVerification:input.controlVerification,signal,metadataReads:input.metadataReads};
  // Only the existing isolated collector can mint this graph/FS-bound handle.
  const runtimeObservation=await collectNonrootControlRuntime(build,verification);signal?.throwIfAborted();
  const at=clock();need(at<nonrootAdmissionDeadline(input.context)&&at<p.data.expiresMs,'NonrootControlMaterialExpired');
@@ -156,5 +170,5 @@ export async function assembleNonrootControlMaterial(input,{clock=Date.now,signa
   proofHash:p.bindings.proofHash,actualMain:main,deployedControlBuild:build,resolvedTaskPlan:resolvedRef,checkedMs:at});
  const checked=await verifyNonrootDeploymentSource(deploymentSource,{...verification,now:at,runtimeObservation});
  return {authority:false,build,deploymentSource,resolvedTaskPlan,registrations:copyNonrootJson(checked.registrations),archiveAdditions:p.additions.additions(),checkedBuild,checked,
-  evidence:{archive,sourceContext:input.sourceContext,controlGraph:input.controlVerification.graph,controlFilesystemVerification:input.controlVerification.filesystem,runtimeObservation}};
+  evidence:{archive,sourceContext:input.sourceContext,controlGraph:input.controlVerification.graph,controlFilesystemVerification:input.controlVerification.filesystem,runtimeObservation,...(input.metadataReads?{metadataReads:input.metadataReads}:{})}};
 }

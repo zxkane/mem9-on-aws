@@ -5,6 +5,10 @@ import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {NONROOT_DEPLOYED_CONTROL_IMAGE_SLOT} from './lib/production-nonroot-provenance.mjs';
 
 function expected(f){return {owner:f.owner,...Object.fromEntries(Object.entries(NONROOT_PROOF_BINDINGS).map(([key,field])=>[key,Object.hasOwn(f.input[field],'canonicalHash')?f.input[field].canonicalHash:hash(f.input[field])]))};}
+function launchPlanReferences(f){return [
+ ['override environment',f.plan.environmentGate.overrideEnvironment],['network',f.plan.network],['log destination',f.plan.logDestination],
+ ['platform task',f.plan.carrierPlatform.rawTask],['platform definition',f.plan.carrierPlatform.rawDefinition],['health probe',f.plan.carrierPlatform.independentHealthProbe],
+];}
 describe('full nonroot proof authentication',()=>{
  it('joins the preserved root, live artifact evidence and exact task plan into a branded proof',async()=>{
   const f=await completeNonrootProofFixture(),pins=expected(f),raw=JSON.stringify(f.input),built=await buildNonrootImageTransitionProof(f.input,{expected:pins,evidence:f.evidence,now:f.now});
@@ -14,6 +18,20 @@ describe('full nonroot proof authentication',()=>{
   expect(()=>nonrootTransitionContextBindings(structuredClone(built.context))).toThrow();
   const verified=await verifyNonrootImageTransitionProof(built.proof,{proofHash:built.proofHash,expected:pins,evidence:f.evidence,now:f.now,mode:'inspection'});
   expect(nonrootTransitionContextBindings(verified).verificationMode).toBe('inspection');
+ });
+ it('consumes authority records reached through the independently pinned launch plan',async()=>{
+  const f=await completeNonrootProofFixture();
+  for(const [,ref]of launchPlanReferences(f)){
+   const row=f.a.files.find(row=>hash(row.ref)===hash(ref));expect(row).toBeDefined();row.purpose='carrier';
+  }
+  const built=await buildNonrootImageTransitionProof(f.input,{expected:expected(f),evidence:{...f.evidence,archive:f.a.archive()},now:f.now});
+  expect(nonrootTransitionContextBindings(built.context).proofHash).toBe(hash(f.input));
+ });
+ it.each(['override environment','network','log destination','platform task','platform definition','health probe'])('requires the actual launch-plan %s bytes',async name=>{
+  const f=await completeNonrootProofFixture(),ref=launchPlanReferences(f).find(([label])=>label===name)[1];
+  const row=f.a.files.find(row=>hash(row.ref)===hash(ref));expect(row).toBeDefined();
+  f.a.objects.delete(row.name);
+  await expect(buildNonrootImageTransitionProof(f.input,{expected:expected(f),evidence:{...f.evidence,archive:f.a.archive()},now:f.now})).rejects.toThrow('NonrootArchiveObjectSize');
  });
  it('records the exact typed CONTROL image replacement for all five updated tasks',async()=>{
   const f=await completeNonrootProofFixture();

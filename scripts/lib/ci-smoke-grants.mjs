@@ -1,4 +1,5 @@
 import {inspectFutureControlCapacity,isFutureControlCapacityProfile,measureFutureControlCapacity} from './production-control-capacity.mjs';
+import {inspectProductionControlComposition,inspectProductionControlCompositionFunding} from './production-control-composition.mjs';
 /** Portable R4 funding codec with the R5 fixed source reader. Pure data only: no
  * file access, network, clock reads, publication or business authorization.
  * Funding plans precede the final proof and never embed a grant/debit hash. */
@@ -9,7 +10,7 @@ import {NONROOT_REMAINING_WORK_CAPS_V2,NONROOT_REMAINING_WORK_LIMITS_HASH_V2,non
 import {CI_SMOKE_ARCHIVE_LIMITS} from './ci-smoke-private-archive.mjs';
 import * as rootAccounting from './production-nonroot-root-owner-accounting.mjs';
 import {measureFutureOwnerDelivery,futureRootScope,FUTURE_OWNER_DELIVERY_LIMITS} from './ci-smoke-owner-delivery.mjs';
-import {CI_ROOT_REQUEST_POLICY,ciRootRequestBudget} from './ci-smoke-root-request.mjs';
+import {CI_ROOT_REQUEST_POLICY,ciRootRequestBudget,inspectCiRootRequestPolicy} from './ci-smoke-root-request.mjs';
 
 const KiB=1024,MiB=1024*KiB,UNKNOWN=8*MiB,WINDOW=120*60000;
 const ROOTS=['grantSetId','grantHash','ledgerStartHash','catalogHash'];
@@ -185,8 +186,21 @@ export function createFutureSourceReader(value){
  return freeze({...r,operations,...KNOWN_PENDING_GET,unknownOvershoots:1,overshootBytes:UNKNOWN,budget:sumCalls(operations)});
 }
 function sourceSlot(row,arithmetic={counter,addCounters}){
- const addCounters=arithmetic.addCounters; exact(row,['scope','reader','localBudget']);local(row.localBudget,arithmetic);const reader=createFutureSourceReader(row.reader);
- return {scope:row.scope,reader,localBudget:row.localBudget,budget:addCounters(reader.budget,row.localBudget)};
+ const addCounters=arithmetic.addCounters;exact(row,['scope','reader','localBudget',...(Object.hasOwn(row,'composition')?['composition']:[])]);
+ local(row.localBudget,arithmetic);const reader=createFutureSourceReader(row.reader);
+ let composition,budget=addCounters(reader.budget,row.localBudget);
+ if(row.composition){
+  need(row.scope.jobKey==='build-image-transition-control'&&row.scope.route===row.scope.jobKey&&row.scope.phase==='source'&&row.scope.checkpoint===row.scope.jobKey+'/source','FutureCompositionScope');
+  exact(row.composition,['plan','funding']);const plan=inspectProductionControlComposition(row.composition.plan);
+  const funding=inspectProductionControlCompositionFunding(row.composition.funding,plan);
+  // Keep the original SOURCE reservation intact. The native main adapter
+  // additionally performs the existing protected-source guard, under another
+  // full instance of that reviewed verification ceiling, paid before COPY.
+  // This is a conservative reservation, not a measured lower bound or refund.
+  composition={plan,funding,protectedSourceLocal:row.localBudget};
+  budget=addCounters(addCounters(budget,funding.ciCharge),row.localBudget);
+ }
+ return {scope:row.scope,reader,localBudget:row.localBudget,...(composition?{composition}:{}),budget};
 }
 function sourceOwnerClaim(checkpoint,bytes){
  // Artifact supplies the request/nonce. There is no private request object GET.
@@ -207,7 +221,7 @@ function profileTemplateCheck(c){
   need(c.version===2,'FutureOwnerDeliveryVersion');const delivery=measureFutureOwnerDelivery(c.owner.delivery,c.consumers);
   for(const consumer of c.consumers){const profiles=consumer.profiles?.filter(p=>p.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT')??[];
    need(consumer.scope.kind==='source'?profiles.length===0:profiles.length===1&&profiles[0].late.checkpoint===consumer.scope.checkpoint,'FutureRootReadCoverage');
-   if(consumer.scope.kind==='target')same(consumer.rootRequest,CI_ROOT_REQUEST_POLICY,'FutureRootRequestRequired');
+   if(consumer.scope.kind==='target')inspectCiRootRequestPolicy(consumer.rootRequest,consumer.scope);
    for(const p of profiles)need(p.request.Bucket===delivery.template.storage.bucket&&delivery.template.storage.kmsKeyArn.includes(':'+p.request.ExpectedBucketOwner+':key/'),'FutureRootReadStorage');
   }
  }else need(c.consumers.every(row=>!row.profiles?.some(p=>p.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT')),'FutureRootDeliveryRequired');
@@ -215,16 +229,20 @@ function profileTemplateCheck(c){
  const targets=c.consumers.filter(row=>row.scope.kind==='target');
  if(targets.some(row=>Object.hasOwn(row,'controlCapacity')))need(targets.length===5&&targets.every(row=>Object.hasOwn(row,'controlCapacity')),'FutureControlCapacityCoverage');
  for(const row of c.consumers){
-  if(row.scope.kind==='source')sourceSlot(row,arithmetic);
+  if(row.scope.kind==='source'){
+   sourceSlot(row,arithmetic);
+   if(row.composition){need(c.version===2,'FutureCompositionVersion');if(c.source)same(row.composition.plan.input.source,c.source,'FutureCompositionSource');}
+  }
   else {exact(row,['scope','profiles','localBudget','handshake',...(c.owner.delivery?['rootRequest']:[]),...(Object.hasOwn(row,'controlCapacity')?['controlCapacity']:[])]);exact(row.handshake,['terminalResponseBytes']);inspectFutureCallProfiles(row.profiles);if(row.controlCapacity){need(c.version===2&&c.cumulativeLimitsHash===NONROOT_REMAINING_WORK_LIMITS_HASH_V2,'FutureControlCapacityRevision');measureFutureControlCapacity(row.profiles,row.controlCapacity);}local(row.localBudget,arithmetic);handshake(row.handshake.terminalResponseBytes);}
  }
  need(!Object.hasOwn(c.finalization,'controlCapacity'),'FutureFinalizationCapacityUnsupported');readSlot(c.finalization,arithmetic);
 }
 
 function profileTemplateTerms(c){
- const arithmetic=futureArithmetic(c),addCounters=arithmetic.addCounters; const consumers=c.consumers.map(row=>{if(row.scope.kind==='source')return sourceSlot(row,arithmetic);const work=readSlot({profiles:row.profiles,localBudget:row.localBudget,...(row.controlCapacity?{controlCapacity:row.controlCapacity}:{})},arithmetic),h=handshake(row.handshake.terminalResponseBytes),root=row.rootRequest?ciRootRequestBudget():zero();return {scope:row.scope,...work,localBudget:addCounters(work.localBudget,{...zero(),logicalBytes:root.logicalBytes}),handshake:h,...(row.rootRequest?{rootRequest:row.rootRequest}:{}),budget:addCounters(addCounters(work.budget,h.budget),root)};});
+ const arithmetic=futureArithmetic(c),addCounters=arithmetic.addCounters; const consumers=c.consumers.map(row=>{if(row.scope.kind==='source')return sourceSlot(row,arithmetic);const work=readSlot({profiles:row.profiles,localBudget:row.localBudget,...(row.controlCapacity?{controlCapacity:row.controlCapacity}:{})},arithmetic),h=handshake(row.handshake.terminalResponseBytes),root=row.rootRequest?ciRootRequestBudget(row.rootRequest,row.scope):zero();return {scope:row.scope,...work,localBudget:addCounters(work.localBudget,{...zero(),logicalBytes:root.logicalBytes}),handshake:h,...(row.rootRequest?{rootRequest:row.rootRequest}:{}),budget:addCounters(addCounters(work.budget,h.budget),root)};});
  const publication={...FUTURE_OWNER_PUBLICATION,budget:sumCalls(publicationCalls)},claims=c.consumers.map(row=>row.scope.kind==='source'?sourceOwnerClaim(row.scope.checkpoint,row.reader.terminalResponseBytes):ownerClaim(row.scope.checkpoint,row.handshake.terminalResponseBytes));
  let ownerBudget=addCounters(publication.budget,c.owner.localBudget);for(const claim of claims)ownerBudget=addCounters(ownerBudget,claim.budget);
+ for(const consumer of consumers)if(consumer.composition)ownerBudget=addCounters(ownerBudget,consumer.composition.funding.ownerCharge);
  const roots=c.version===2?rootTemplateTerms(c):undefined;if(roots)ownerBudget=addCounters(ownerBudget,roots.budget);
  const delivery=c.owner.delivery?measureFutureOwnerDelivery(c.owner.delivery,c.consumers):undefined;if(delivery)ownerBudget=addCounters(ownerBudget,delivery.budget);
  const owner={publication,claims,localBudget:c.owner.localBudget,...(roots?{roots}:{}),...(delivery?{delivery}:{}),budget:ownerBudget},finalization=readSlot(c.finalization,arithmetic);

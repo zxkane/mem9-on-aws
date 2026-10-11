@@ -1,4 +1,4 @@
-import {test} from 'node:test';
+import {test} from 'vitest';
 import assert from 'node:assert/strict';
 import {compileOriginalIssuersBudget,originalIssuerSlot,inspectOriginalIssuerPlan,verifyOriginalIssuerJournal} from './lib/production-nonroot-original-issuer-accounting.mjs';
 import {hash,sha} from './lib/ci-smoke-acquisition-format.mjs';

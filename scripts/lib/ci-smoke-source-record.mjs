@@ -3,6 +3,7 @@ import {copyNonrootJson,nonrootHash as hash} from './production-nonroot-contract
 import {controlSourceEntries,readControlSourceFile} from './production-control-source.mjs';
 import {describeDataBuildInputs} from './production-data-build-inputs.mjs';
 import {CI_SMOKE_CHECKS} from './ci-smoke-evidence.mjs';
+import {CONTROL_COMPOSITION_ACTION_USES,CONTROL_COMPOSITION_ASSET_PATHS} from './production-control-composition-job.mjs';
 import {
   CI_SMOKE_JOB,CI_SMOKE_ROUTES,CI_SMOKE_GATE_ACTION_PATH,CI_SMOKE_GATE_ENTRY_PATH,CI_SMOKE_VALIDATOR_ROOTS,ciSmokeSourceClosure,
   describeCiSmokePromotionPins,verifyCiSmokeIsolationSource,
@@ -52,6 +53,8 @@ export async function createCiSmokeIsolationRecord(input){
     recipe(origin),recipe(candidate),readControlSourceFile(candidate.context,workflowPath),
   ]);
   const workflow=yaml(workflowSource.bytes),actions={},filePins={[workflowPath]:pin(workflowSource.file)};
+  const composition=workflow.jobs?.['build-image-transition-control']?.steps?.some(s=>s.id==='bootstrap'&&s.uses===CONTROL_COMPOSITION_ACTION_USES)===true;
+  const compositionAssets={};if(composition)for(const [key,path]of Object.entries(CONTROL_COMPOSITION_ASSET_PATHS))compositionAssets[key]=pin((await readControlSourceFile(candidate.context,path)).file);
   for(const path of actionPaths){
     const found=await readControlSourceFile(candidate.context,path);
     actions[path]=yaml(found.bytes);filePins[path]=pin(found.file);
@@ -63,18 +66,18 @@ export async function createCiSmokeIsolationRecord(input){
   }
   const [closure,preparationValidators]=await Promise.all([
     ciSmokeSourceClosure(candidate.context,[scriptPath]),
-    ciSmokeSourceClosure(candidate.context,CI_SMOKE_VALIDATOR_ROOTS),
+    ciSmokeSourceClosure(candidate.context,[...CI_SMOKE_VALIDATOR_ROOTS,...(composition?[CONTROL_COMPOSITION_ASSET_PATHS.entry]:[])]),
   ]);
   const job=workflow?.jobs?.[CI_SMOKE_JOB];if(!job)throw Error('CiSmokeJobBinding');
   const isolation={
-    version:1,kind:'ci-smoke-isolation',
+    version:composition?2:1,kind:'ci-smoke-isolation',
     origin:{revision:origin.revision,tree:origin.context.tree,recipeHash:hash(originRecipe)},
     candidate:{revision:candidate.revision,tree:candidate.context.tree,recipeHash:hash(candidateRecipe)},
     recipeEdits:[
       {stepName:'Smoke test mnemo-server EMF framing (non-TTY)',field:'if',before:"steps.gate.outputs.skip != 'true'",after:false},
       {stepName:'Build & push mnemo-server (arm64)',field:'id',beforeAbsent:true,after:'mnemo'},
     ],
-    workflow:{source:filePins[workflowPath],buildJob:'build-and-push-image',digestOutput:{name:'mnemo_digest',expression:'${{ steps.mnemo.outputs.digest }}'}},
+    workflow:{source:filePins[workflowPath],buildJob:'build-and-push-image',digestOutput:{name:'mnemo_digest',expression:'${{ steps.mnemo.outputs.digest }}'},...(composition?{composition:compositionAssets}:{})},
     preservedScripts,
     smoke:{jobKey:CI_SMOKE_JOB,jobHash:hash(job),script:pin(script.file),closure,databaseImage,
       platform:'linux/arm64',serverUser:'1000:1000',databaseUser:'999:999',capDrop:['ALL'],

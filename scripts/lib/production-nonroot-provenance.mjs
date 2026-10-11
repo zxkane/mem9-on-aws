@@ -9,6 +9,10 @@ import {CONTROL_ZERO_FINDINGS_POLICY_HASH,assertNonrootControlScanPolicy,verifyN
 import {posix} from 'node:path';
 import {parseDocument} from 'yaml';
 import {parse as parseSource} from '@babel/parser';
+import {inspectProductionControlBuildContract,inspectProductionDeployedControlBuild,inspectProductionControlCompositionRecipe} from './production-control-composition-recipe.mjs';
+import {describeProductionControlCompositionPreparation,verifyProductionControlCompositionAction} from './production-control-composition-preparation.mjs';
+import {completeProductionControlCompositionBuildCapture,inspectProductionControlCompositionInvocation} from './production-control-composition-capture-reader.mjs';
+import {extractProductionControlCompositionCommitment} from './production-control-composition-reader.mjs';
 
 const need=(ok,code='NonrootProvenanceInvalid')=>{if(!ok)throw Error(code);};
 const exact=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.slice().sort().join(),'NonrootProvenanceFields');
@@ -123,6 +127,7 @@ function preparationReferences(path,bytes){
 /** Source description only. The verifier separately binds job to the complete
  * authenticated workflow; a matching action name alone is never a closure. */
 export async function describeNonrootControlPreparation(context,job){
+ if(job?.steps?.some(s=>s.uses==='./.github/actions/control-composition'))return describeProductionControlCompositionPreparation(context,job);
  need(job&&Array.isArray(job.steps),'NonrootWorkflowSource');const roots=new Set();let gate=false;
  for(const step of job.steps){
   if(typeof step.uses==='string'&&step.uses.startsWith('./')){
@@ -150,13 +155,21 @@ export async function describeNonrootControlPreparation(context,job){
  * producer additionally checks its actual working directory for untracked or
  * changed build-context inputs immediately before Docker consumes it. */
 export async function verifyNonrootControlSource(value,options){
- const contract=inspectNonrootRecord('ControlBuildContractV1',value),context=options?.expected?.sourceContext;
+ const contract=inspectProductionControlBuildContract(value),context=options?.expected?.sourceContext;
  need(context,'NonrootSourceVerificationRequired');const paths=controlSourcePaths(context);
  need(context.tree===contract.candidate.tree,'NonrootBuildSourceTree');
  if(contract.artifactPolicyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH)await assertNonrootControlScanPolicy(contract,context);
  const workflow=await readControlSourceFile(context,contract.workflow.path);same(workflow.file,contract.workflow.sourceFile);
  const doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(workflow.bytes),{uniqueKeys:true});need(doc.errors.length===0,'NonrootWorkflowSource');
  const job=doc.toJS()?.jobs?.[contract.workflow.jobKey];need(job&&Array.isArray(job.steps),'NonrootWorkflowSource');same(job,await jsonBytes(contract.workflow.jobSource,options));
+ if(contract.version===2){
+  inspectProductionControlCompositionRecipe(contract.recipe);
+  const steps=job.steps.filter(s=>s.id===contract.workflow.buildStepId);need(steps.length===1,'NonrootControlBuildStep');
+  const action=await readControlSourceFile(context,contract.recipe.invocation.actionPath),yaml=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(action.bytes),{uniqueKeys:true});
+  need(yaml.errors.length===0&&yaml.warnings.length===0,'NonrootWorkflowSource');
+  verifyProductionControlCompositionAction(steps[0],yaml.toJS({maxAliasCount:0}));same(action.file,contract.recipe.invocation.actionSource);
+ }
+ else need(!job.steps.some(s=>s.uses==='./.github/actions/control-composition'),'NonrootControlRecipeVersion');
  const dockerfile=await readControlSourceFile(context,contract.recipe.dockerfilePath);same(dockerfile.file,contract.recipe.dockerfile);
  await sourceClosure(contract.recipe.context,context.tree,options,context,true);
  const ignores=await readNonrootEvidence(contract.recipe.ignoreFiles,options),ignorePaths=['.dockerignore','docker/bootstrap/Dockerfile.dockerignore'];
@@ -249,9 +262,9 @@ async function verifyControlLaunch(launch,template,build,contract,imageConfig,op
  * Provider observations and artifact reviews come through the trusted archive.
  * The result contains verified bindings, never an authorization brand. */
 export async function verifyNonrootDeployedControlBuild(value,options){
- const b=inspectNonrootRecord('DeployedControlBuildV1',value),{sourceContext,...expectedData}=options?.expected??{},expected=copyNonrootJson(expectedData),now=options?.now??Date.now();
+ const b=inspectProductionDeployedControlBuild(value),{sourceContext,...expectedData}=options?.expected??{},expected=copyNonrootJson(expectedData),now=options?.now??Date.now();
  inspectNonrootControlArtifactBinding(b,options);
- const contract=inspectNonrootRecord('ControlBuildContractV1',expected.contract);
+ const contract=inspectProductionControlBuildContract(expected.contract);need(b.version===contract.version,'NonrootControlRecipeVersion');
  need(positive(now)&&b.startedMs<=b.completedMs&&b.completedMs<=now&&b.contractHash===hash(contract),'NonrootControlBuildBinding');
  await verifyNonrootControlSource(contract,{...options,expected:{...expected,sourceContext}});
  const main=await verifyNonrootActualMain(b.actualMain,{...options,expected:expectedMain(contract,expected)});
@@ -262,22 +275,36 @@ export async function verifyNonrootDeployedControlBuild(value,options){
  for(const key of ['account','region','repositoryName'])need(b.image[key]===contract.output[key],'NonrootControlBuildImage');
  const jobSource=await jsonBytes(contract.workflow.jobSource,options);need(jobSource&&typeof jobSource.name==='string'&&Array.isArray(jobSource.steps),'NonrootControlJobSource');
  const steps=jobSource.steps.filter(s=>s.id===contract.workflow.buildStepId);need(steps.length===1,'NonrootControlBuildStep');const step=steps[0];
+ if(contract.version===1){
  need(Object.keys(step).every(k=>['name','id','if','uses','with'].includes(k))&&Object.keys(step.with??{}).every(k=>['context','file','platforms','pull','no-cache-filters','push','tags','cache-from','cache-to'].includes(k)),'NonrootControlBuildStep');
  need(step.uses==='docker/build-push-action@'+contract.recipe.invocation.buildActionSha&&step.with?.context==='.'&&step.with.file===contract.recipe.dockerfilePath&&step.with.pull===true&&step.with.platforms==='linux/arm64'&&step.with['no-cache-filters']==='runtime'&&step.with.push===true,'NonrootControlBuildStep');
  const list=v=>typeof v==='string'?v.split('\n').map(s=>s.trim()).filter(Boolean):[];
  same(list(step.with['cache-from']),contract.recipe.invocation.cacheFrom);same(list(step.with['cache-to']),contract.recipe.invocation.cacheTo);
+ }
  const run=await readNonrootEvidence(b.workflow.authenticatedRun,options),job=await readNonrootEvidence(b.workflow.authenticatedJob,options);
  need(run.id===b.workflow.runId&&run.run_attempt===b.workflow.attempt&&run.event==='push'&&run.head_sha===main.mainRevision&&run.head_branch==='main'&&run.path===b.workflow.path&&run.repository?.full_name===b.source.repository,'NonrootControlBuildRun');
  need(job.id===b.workflow.jobId&&job.run_id===b.workflow.runId&&job.run_attempt===b.workflow.attempt&&job.head_sha===main.mainRevision&&job.name===jobSource.name&&job.name===b.workflow.jobName&&job.status==='completed'&&job.conclusion==='success'&&Array.isArray(job.steps),'NonrootControlBuildJob');
  const actualSteps=job.steps.filter(s=>s.name===step.name);need(actualSteps.length===1&&actualSteps[0].status==='completed'&&actualSteps[0].conclusion==='success','NonrootControlBuildStep');
- const invoked=await readNonrootEvidence(b.actualInvocation,options),{tagRule,provenanceRule,...invocation}=contract.recipe.invocation;
+ const invoked=await readNonrootEvidence(b.actualInvocation,options);let nativeCapture;
+ if(contract.version===2){
+  inspectProductionControlCompositionInvocation(invoked,contract.recipe);
+  const bytes=await readNonrootEvidence(invoked.capture,options,false),buildLog=await readNonrootEvidence(b.buildLog,options,false);
+  const checked=completeProductionControlCompositionBuildCapture(bytes,{commitment:extractProductionControlCompositionCommitment(buildLog),contract,source,run,job,buildLog,metadataReads:options.metadataReads,now});
+  nativeCapture=checked.capture;same(nativeCapture.image,b.image);same(nativeCapture.actualMain,b.actualMain);
+  need(b.startedMs<=nativeCapture.startedMs&&nativeCapture.completedMs<=b.completedMs,'NonrootControlBuildBinding');
+ }else{
+ const {tagRule,provenanceRule,...invocation}=contract.recipe.invocation;
  exact(invoked,[...Object.keys(invocation),'tags','provenance']);for(const key of Object.keys(invocation))same(invoked[key],invocation[key]);
  same(invoked.tags,[`${b.image.account}.dkr.ecr.${b.image.region}.amazonaws.com/${b.image.repositoryName}:mem9-${main.mainRevision.slice(0,7)}`]);
  same(invoked.provenance,{repository:b.source.repository,revision:main.mainRevision,runId:b.workflow.runId,attempt:b.workflow.attempt,jobId:b.workflow.jobId});
+ }
  await sourceClosure(b.guardSource,contract.candidate.tree,options,sourceContext);
  await readNonrootEvidence(contract.workflow.sourceFile.blob,options,false);await readNonrootEvidence(contract.recipe.dockerfile.blob,options,false);
  const imageConfig=await verifyControlImage(b,options);
  const fileFacts=await verifyNonrootControlArtifactFiles(b,options);
+ if(nativeCapture){
+  need(nativeCapture.graphHash===fileFacts.graphHash&&hash(nativeCapture.filesystem)===fileFacts.filesystemHash,'NonrootControlBuildGraph');
+ }
  // Missing tar root/parent metadata is supplied only by the actual isolated
  // runtime collector, bound to these same graph/FS handles and build bytes.
  const runtimeObservation=verifyNonrootControlRuntimeObservation(options.runtimeObservation,b,options);
@@ -295,7 +322,8 @@ export async function verifyNonrootDeployedControlBuild(value,options){
  same(tests.image,b.image);need(tests.version===1&&tests.kind==='control-guard-test-evidence'&&tests.sourceRevision===main.mainRevision&&tests.sourceTree===main.mainTree&&tests.guardSourceHash===hash(b.guardSource)&&tests.contractHash===hash(contract)&&tests.testContractHash===contract.guardTestContract.canonicalHash&&positive(tests.completedMs)&&tests.completedMs>=b.startedMs&&tests.completedMs<=b.completedMs,'NonrootControlGuardTests');names(tests.launches,controlKeys);
  for(const result of tests.launches){exact(result,['taskKey','launchHash','purpose','result','applicationReached','credentialAccessBeforeGuard']);const template=contract.launchTemplates.find(t=>t.taskKey===result.taskKey);
   need(result.launchHash===hash(b.resolvedLaunches.find(l=>l.taskKey===result.taskKey))&&result.purpose===template.purpose&&result.result==='pass'&&result.applicationReached===!template.purpose.startsWith('denied')&&result.credentialAccessBeforeGuard===false,'NonrootControlGuardTests');}
- verifyNonrootControlBuildLog(await readNonrootEvidence(b.buildLog,options,false),b.image);await verifyNonrootEvidenceReferences(b,options);await verifyNonrootEvidenceReferences(contract,options);
+ if(contract.version===1)verifyNonrootControlBuildLog(await readNonrootEvidence(b.buildLog,options,false),b.image);
+ await verifyNonrootEvidenceReferences(b,options);await verifyNonrootEvidenceReferences(contract,options);
  return copyNonrootJson({...main,deployedControlBuildHash:hash(b),contractHash:hash(contract),image:b.image,registrations,controlRuntimeObservationHash:hash(runtimeObservation)});
 }
 
@@ -313,7 +341,7 @@ export async function verifyNonrootDeploymentSource(value,options){
  const record=inspectNonrootRecord('DeploymentSourceRecordV2',value),{sourceContext,...expectedData}=options?.expected??{},expected=copyNonrootJson(expectedData),now=options?.now??Date.now();
  need(hex(expected.descriptorHash)&&hex(expected.proofHash)&&positive(expected.parameterVersion),'NonrootDeploymentExpected');
  for(const key of ['descriptorHash','parameterVersion','proofHash'])need(record[key]===expected[key],'NonrootDeploymentBinding');current(record.checkedMs,now);
- const taskPlan=inspectNonrootRecord('TaskPlanV2',expected.taskPlan),contract=inspectNonrootRecord('ControlBuildContractV1',expected.contract);
+ const taskPlan=inspectNonrootRecord('TaskPlanV2',expected.taskPlan),contract=inspectProductionControlBuildContract(expected.contract);
  same(taskPlan.deployedControlBuildContract,contract);same(taskPlan.controlLaunches,contract.launchTemplates);
  const build=await verifyNonrootDeployedControlBuild(record.deployedControlBuild,{...options,expected:{...expected,sourceContext}});same(record.actualMain,record.deployedControlBuild.actualMain);
  need(record.checkedMs>=record.deployedControlBuild.completedMs,'NonrootDeploymentTime');

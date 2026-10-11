@@ -1,3 +1,4 @@
+import {beginCarrierLocalCleanup,drainCarrierLocalCounter,closeCarrierLocalCounter} from './ci-carrier-local-counter.mjs';
 import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-image-response.mjs';
 /** The CI journal spends an already-paid R9 allocation. It never creates a
  * ledger, claim, credit, refund, replacement grant or extended deadline. */
@@ -19,14 +20,18 @@ const same=(a,b,c)=>need(hash(a)===hash(b),c);
 export function openCarrierConsumer({startup,config:input,env}){
  const config=inspectCarrierWorkerConfig(input),admission=consumeCarrierStartup(startup,config),p=config.plan,t=p.template,keys=carrierObjectKeys(t);
  need(CARRIER_PROFILE_ACTIONS.scan[0]==='owner','CarrierScanActorRequired');
+ const aggregate=admission.local;
+ try{
  const root=env.RUNNER_TEMP;need(typeof root==='string'&&resolve(root)===root&&realpathSync(root)===root,'CarrierConsumerDirectory');
  const directory=join(root,'mem9-carrier-consumer-'+hash({grantHash:config.grantHash,binding:admission.binding,nonce:admission.receipt.nonce}));mkdirSync(directory,{mode:0o700});
  const path=join(directory,'journal.jsonl'),fd=openSync(path,'wx',0o600),identity=fstatSync(fd),local=zero(),used={},wire=zero(),events=[];
+ const aggregate=admission.local;
  let closed=false,held=false,current,previous=null,phase='assume',confirmed=false,assumedArn,output,outputNodes,sqlAcceptance,sqlBuilt,missing=[],available=new Set(),availabilityOffset=0,uploaded=new Set(),published=new Set(),activeUpload,preparedResult;const uploadIds=new Set();
  const baseNodes=new Map([[t.base.rootDigest,{digest:t.base.rootDigest}]]),baseDone=new Set(),baseUrls=new Set();let blobUsage={requests:0,responseBytes:0,digests:[]};
- const check=()=>{need(!closed&&!held&&Date.now()>=p.issuedMs&&Date.now()<p.deadlineMs,'CarrierConsumerHeld');const current=fstatSync(fd),named=lstatSync(path);need(current.dev===identity.dev&&current.ino===identity.ino&&named.ino===identity.ino&&named.dev===identity.dev&&current.uid===process.getuid()&&(current.mode&511)===0o600&&current.nlink===1,'CarrierConsumerJournalChanged');};
- const reserveLocal=charge=>{check();exact(charge,COUNTERS);need(charge.ecrRequests===0&&charge.httpBodyBytes===0,'CarrierConsumerLocal');for(const k of COUNTERS)need(Number.isSafeInteger(charge[k])&&charge[k]>=0&&local[k]+charge[k]<=t.fundedLocal.ci[k],'CarrierConsumerLocalLimit');for(const k of COUNTERS)local[k]+=charge[k];};
- const append=(type,data)=>{check();const e={version:1,sequence:events.length+1,planHash:hash(p),previousHash:previous,type,data},raw=Buffer.from(JSON.stringify(e)+'\n');reserveLocal({...zero(),logicalBytes:raw.length});let at=0;while(at<raw.length){const n=writeSync(fd,raw,at,raw.length-at);need(n>0,'CarrierConsumerJournalWrite');at+=n;}fsyncSync(fd);events.push(freeze(e));previous=hash(e);return e;};
+ const checkJournal=()=>{need(!closed,'CarrierConsumerHeld');const current=fstatSync(fd),named=lstatSync(path);need(current.dev===identity.dev&&current.ino===identity.ino&&named.ino===identity.ino&&named.dev===identity.dev&&current.uid===process.getuid()&&(current.mode&511)===0o600&&current.nlink===1,'CarrierConsumerJournalChanged');};
+ const check=()=>{aggregate?.checkNormal();need(!closed&&!held&&Date.now()>=p.issuedMs&&Date.now()<p.deadlineMs,'CarrierConsumerHeld');checkJournal();};
+ const reserveLocal=charge=>{if(aggregate){checkJournal();aggregate.reserveLocal(charge);Object.assign(local,aggregate.snapshot().spent);return;}check();exact(charge,COUNTERS);need(charge.ecrRequests===0&&charge.httpBodyBytes===0,'CarrierConsumerLocal');for(const k of COUNTERS)need(Number.isSafeInteger(charge[k])&&charge[k]>=0&&local[k]+charge[k]<=t.fundedLocal.ci[k],'CarrierConsumerLocalLimit');for(const k of COUNTERS)local[k]+=charge[k];};
+ const append=(type,data)=>{check();if(aggregate)reserveLocal({...zero(),logicalBytes:65536});const e={version:1,sequence:events.length+1,planHash:hash(p),previousHash:previous,type,data},raw=Buffer.from(JSON.stringify(e)+'\n');if(aggregate)need(raw.length<=16384,'CarrierConsumerRecordSize');else reserveLocal({...zero(),logicalBytes:raw.length});let at=0;while(at<raw.length){const n=writeSync(fd,raw,at,raw.length-at);need(n>0,'CarrierConsumerJournalWrite');at+=n;}fsyncSync(fd);events.push(freeze(e));previous=hash(e);return e;};
  append('start',{grantHash:config.grantHash,ledgerStartHash:config.ledgerStartHash,binding:admission.binding,startup:admission.receipt,allocation:p.budget.ci});
  const scope=(q,base=false)=>{need(q.registryId===t.scope.account&&q.repositoryName===(base?t.base.repositoryName:t.scope.repositoryName),'CarrierConsumerRepository');};
  const register=d=>{const cost=imageDescriptorDataLocalBytes(d);if(cost)reserveLocal({...zero(),logicalBytes:cost});const isManifest=manifests.has(d.mediaType),embedded=decodeImageDescriptorData(d,isManifest?'manifest':'blob');const old=baseNodes.get(d.digest);if(old?.size!==undefined)need(old.size===d.size&&old.mediaType===d.mediaType,'CarrierBaseDescriptorConflict');baseNodes.set(d.digest,{digest:d.digest,size:d.size,mediaType:d.mediaType});let bytes=0,nm=0,nb=0;for(const d of baseNodes.values()){bytes+=d.size??0;manifests.has(d.mediaType)||d.size===undefined?nm++:nb++;}need(bytes<=t.bounds.compressedBytes&&nm<=t.bounds.manifestNodes&&nb<=t.bounds.blobNodes,'CarrierBaseGraphBound');
@@ -59,12 +64,13 @@ export function openCarrierConsumer({startup,config:input,env}){
   return {caps:{requestBytes:profile.requestBytes,responseBytes:profile.responseBytes,overshootBytes:8388608}};
  };
  async function beforeRequest(purpose,action,request){
-  check();need(!current,'CarrierConsumerSerial');const q=structuredClone(request),allocated=validate(purpose,action,q),profile=t.profiles[purpose],n=(used[purpose]??0)+1;need(n<=(profile.maxRequests??profile.count),'CarrierConsumerCalls');
+  check();need(!current,'CarrierConsumerSerial');if(aggregate){const profile=t.profiles[purpose];need(profile&&CARRIER_PROFILE_ACTIONS[purpose]?.[0]==='ci','CarrierConsumerPurpose');const requestBytes=profile.requestBytes??0,responseBytes=purpose==='baseBlob'?0:profile.responseBytes;reserveLocal({...zero(),logicalBytes:8*(requestBytes+responseBytes)});}
+  const q=structuredClone(request),allocated=validate(purpose,action,q),profile=t.profiles[purpose],n=(used[purpose]??0)+1;need(n<=(profile.maxRequests??profile.count),'CarrierConsumerCalls');
   used[purpose]=n;if(allocated.blobDebit)blobUsage=allocated.blobDebit.usage;
   const b=allocated.blobDebit;
   const intent=append('request',{purpose,action,requestHash:hash(normalized(q)),caps:allocated.caps,attempt:n,...(b?{blobDebit:{descriptorSource:b.descriptorSource,descriptor:b.descriptor,requests:b.usage.requests,responseBytes:b.usage.responseBytes}}:{}),atMs:Date.now()});let charged=0,settled=false;current=intent.sequence;
   const guard=()=>{check();need(!settled&&current===intent.sequence,'CarrierConsumerReservation');};
-  const unknown=async()=>{if(settled)return;try{append('unknown',{request:intent.sequence,chargedBytes:allocated.caps.requestBytes+allocated.caps.responseBytes+allocated.caps.overshootBytes,atMs:Date.now()});}finally{held=true;settled=true;current=undefined;}};
+  const unknown=async()=>{if(settled)return;try{append('unknown',{request:intent.sequence,chargedBytes:allocated.caps.requestBytes+allocated.caps.responseBytes+allocated.caps.overshootBytes,atMs:Date.now()});}finally{held=true;aggregate?.hold();settled=true;current=undefined;}};
   return {caps:allocated.caps,finalGuard:guard,charge(n){guard();need(Number.isSafeInteger(n)&&n>=0,'CarrierConsumerCharge');charged+=n;need(charged<=allocated.caps.requestBytes+allocated.caps.responseBytes,'CarrierConsumerWireLimit');},unknown,async complete(r,responseHash){
    guard();need(/^[a-f0-9]{64}$/.test(responseHash),'CarrierConsumerResponseHash');
    if(purpose==='assume'){assumedArn=r.AssumedRoleUser?.Arn;need(typeof assumedArn==='string'&&assumedArn==='arn:aws:sts::'+t.scope.account+':assumed-role/'+t.scope.previewRoleArn.split('/').at(-1)+'/'+q.RoleSessionName,'CarrierConsumerAssumedIdentity');phase='identity';}
@@ -85,6 +91,8 @@ export function openCarrierConsumer({startup,config:input,env}){
   }};
  }
  const api={directory,admission,check,reserveLocal,beforeRequest,
+  assertLocalStage(type,cost){check();if(!aggregate)return;need(['build','sql'].includes(type)&&Number.isSafeInteger(cost)&&cost>=0,'CarrierLocalStage');if(cost+aggregate.policy.recordChargeBytes>aggregate.snapshot().normalRemaining){aggregate.hold();throw Error('CarrierLocalStageUnavailable');}aggregate.record(type,{logicalBytes:cost});Object.assign(local,aggregate.snapshot().spent);},
+  beginCleanup(){if(aggregate)beginCarrierLocalCleanup(admission.localCounter);},
   confirmGrant(grant){check();need(phase==='grant'&&!current&&!confirmed&&used.grantGet===1,'CarrierConsumerGrantOrder');const verified=verifyCarrierBeforeCopyGrant(grant,{...config,now:Date.now()});same(verified.plan,p,'CarrierConsumerGrantPlan');append('grant-verified',{grantHash:config.grantHash});confirmed=true;phase='context';},
   baseDescriptors(){check();return [...baseNodes.values()].map(d=>({...d}));},
   async bindSqlAcceptance(handle,built){check();need(phase==='base'&&!current&&!output&&!sqlAcceptance&&used.fixtureGet===1,'CarrierConsumerSqlOrder');
@@ -96,18 +104,19 @@ export function openCarrierConsumer({startup,config:input,env}){
   missing(){check();return missing.map(d=>({...d}));},
   prepareResult(){check();need(phase==='result'&&!current&&!preparedResult,'CarrierConsumerResultOrder');const {record,graph}=output;
    const claim=carrierCheckpointSelection(p,admission.binding,Object.fromEntries(['nonce','scopeHash','artifactId','artifactDigest'].map(k=>[k,admission.receipt[k]]))).claim;
-   need(sqlAcceptance,'CarrierConsumerSqlRequired');const consumerPrefix={events:[...events],lastHash:previous,local:{...local},wire:{...wire},used:{...used},blobUsage};
+   need(sqlAcceptance,'CarrierConsumerSqlRequired');if(aggregate)reserveLocal({...zero(),logicalBytes:8*t.bounds.resultBytes});const localEvidence=aggregate?.evidence();if(localEvidence)Object.assign(local,localEvidence.spent);const consumerPrefix={events:[...events],lastHash:previous,local:{...local},wire:{...wire},used:{...used},blobUsage,...(localEvidence?{ciLocal:localEvidence}:{})};
    const supplied={metadata:output.metadataRaw,buildEvidence:record,consumerPrefix,logBase64:output.log.toString('base64'),derivedMaterial:output.derivedRecord,...(sqlAcceptance?{sqlAcceptance}:{})};
    const result=makeCarrierBuildResult(p,admission.binding,claim,supplied);
    // The same owner codec must accept the complete envelope BEFORE the only
    // PutObject. An older build-only codec must hold instead of dropping the
    // actual journal or inventing a completed-job/security record.
    inspectCarrierBuildResult(result,{plan:p,binding:admission.binding,claim});
-   preparedResult=Buffer.from(JSON.stringify(result));need(preparedResult.length<=t.bounds.resultBytes,'CarrierConsumerResultSize');reserveLocal({...zero(),logicalBytes:preparedResult.length});return Buffer.from(preparedResult);
+   preparedResult=Buffer.from(JSON.stringify(result));need(preparedResult.length<=t.bounds.resultBytes,'CarrierConsumerResultSize');if(!aggregate)reserveLocal({...zero(),logicalBytes:preparedResult.length});return Buffer.from(preparedResult);
   },
-  async close(){if(closed)return;need(!current,'CarrierConsumerActive');fsyncSync(fd);closeSync(fd);closed=true;},
+  async close({cleanupConfirmed=false}={}){if(closed)return;need(!current,'CarrierConsumerActive');try{if(aggregate){await drainCarrierLocalCounter(admission.localCounter);closeCarrierLocalCounter(admission.localCounter,{complete:cleanupConfirmed&&phase==='published'&&!held});}}finally{fsyncSync(fd);closeSync(fd);closed=true;}},
   inspect(){check();return freeze({phase,local:{...local},wire:{...wire},used:{...used},blobUsage:structuredClone(blobUsage),events:[...events]});},
  };
  handles.set(api,{check});return Object.freeze(api);
+ }catch(e){if(aggregate)try{closeCarrierLocalCounter(admission.localCounter,{complete:false});}catch{}throw e;}
 }
 export function assertCarrierConsumer(value){const s=handles.get(value);need(s,'CarrierConsumerHandle');s.check();return value;}

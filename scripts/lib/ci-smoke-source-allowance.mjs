@@ -2,6 +2,7 @@
  * deployment authority, caller-selected key/policy, or capability restoration. */
 import {Agent} from 'node:https';
 import {Readable} from 'node:stream';
+import {beginProductionControlCompositionSource,productionControlCompositionSourceReceipt,activateProductionControlCompositionSource,abandonProductionControlCompositionSource} from './production-control-composition-lifetime.mjs';
 import {copyNonrootJson,parseNonrootJson,nonrootHash as hash} from './production-nonroot-contracts.mjs';
 import {inspectCiSmokeCommitment,ciSmokeArchiveLocation} from './ci-smoke-private-archive.mjs';
 import {makeCiStartupRunBinding,openCiSmokeStartup,consumeCiSmokeStartup} from './ci-smoke-startup.mjs';
@@ -98,8 +99,10 @@ async function objectTransport({location,deadlineMs,signal,now,check,allowance,r
 /** Runs in the original source action process. verifySmoke is the original
  * full decoder/verifier, not a workflow-selected module or a JSON success flag.
  * Seams substitute clocks/HTTP/GitHub artifact transport only in local tests. */
-export async function withCiSmokeSourceAllowance(input,verifySmoke,seams={}){
- exact(input,['env','scope','host','config','commitment','jobExpiresMs']);
+export async function withCiSmokeSourceAllowance(input,verifySmoke,seams={}){return withSourceAllowance(input,verifySmoke,seams,false);}
+export async function withCiSmokeCompositionSourceAllowance(input,verifySmoke,seams={}){return withSourceAllowance(input,verifySmoke,seams,true);}
+async function withSourceAllowance(input,verifySmoke,seams,composition){
+ exact(input,['env','scope','host','config','commitment','jobExpiresMs',...(composition?['compositionRoot','signal']:[])]);
  need(Object.keys(seams).every(k=>['now','sleep','artifactClient','smokeSessionTransport','allowanceSessionTransport','smokeObjectTransport','allowanceObjectTransport'].includes(k)),'CiSourceAllowanceSeam');
  const {env,host}=input,now=seams.now??Date.now,sleep=seams.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
  need(typeof verifySmoke==='function'&&typeof now==='function'&&typeof sleep==='function','CiSourceAllowanceInput');
@@ -108,7 +111,9 @@ export async function withCiSmokeSourceAllowance(input,verifySmoke,seams={}){
  need(host?.env===env&&typeof host.run==='function'&&typeof host.api==='function'&&typeof host.checkout==='function','CiSourceAllowanceHost');
  const firstLocation=ciSmokeArchiveLocation(input.config,commitment),originalConfigHash=hash(input.config),location=sourceAllowanceLocation({config,scope,roleArn:firstLocation.roleArn});
  need(firstLocation.account===config.account&&firstLocation.region===config.region&&firstLocation.bucket===config.storage.bucket&&firstLocation.encryption.keyArn===config.storage.kmsKeyArn&&firstLocation.encryption.bucketKeyEnabled===true&&env.AWS_REGION===config.region,'CiSourceAllowanceReaderBinding');
- const {withCiSmokeReadSession,withCiSmokeAllowanceReadSession,buildCiSmokeAllowanceReadPolicy}=await import('./ci-smoke-session.mjs');
+ const sessions=await import('./ci-smoke-session.mjs'),{buildCiSmokeAllowanceReadPolicy}=sessions;
+ const withCiSmokeReadSession=composition?sessions.withCiSmokeCompositionReadSession:sessions.withCiSmokeReadSession;
+ const withCiSmokeAllowanceReadSession=composition?sessions.withCiSmokeCompositionAllowanceReadSession:sessions.withCiSmokeAllowanceReadSession;
  // Check the second policy's serialized size before even the first reader.
  buildCiSmokeAllowanceReadPolicy({config,scope,roleArn:firstLocation.roleArn});
  const openedMs=now(),receiptExpiresMs=Math.min(input.jobExpiresMs,config.startup.notAfter,config.target.descriptor.expiresMs),deadlineMs=Math.min(receiptExpiresMs,openedMs+840000);
@@ -117,17 +122,20 @@ export async function withCiSmokeSourceAllowance(input,verifySmoke,seams={}){
  const check=()=>{const t=now();need(positive(t)&&t>=openedMs&&t<deadlineMs&&env.MEM9_CI_ACQUISITION_CONFIG===raw&&environment()===environmentHash&&hash(input.config)===originalConfigHash,'CiSourceAllowanceExpired');};check();
  const source=await captureNonrootMainSource({git:args=>host.run('git',args),api:path=>host.api(path)},env,config.startup.source);check();
  const binding=makeCiStartupRunBinding(config.startup,source),startup=await openCiSmokeStartup({env,host,config:config.startup,scope,source},{now,sleep,...(seams.artifactClient?{artifactClient:seams.artifactClient}:{})});check();
- const pending=consumeCiSmokeStartup(startup,{bindingHash:hash(binding),scope,now:now()});check();
+ const compositionSource=composition?beginProductionControlCompositionSource(startup,{expected:{config,scope,binding,maximumExpiresMs:receiptExpiresMs,now:now()},source,env,tempRoot:input.compositionRoot,signal:input.signal}):null;
+ const pending=compositionSource?productionControlCompositionSourceReceipt(compositionSource):consumeCiSmokeStartup(startup,{bindingHash:hash(binding),scope,now:now()});check();
+ let compositionActivated=false,compositionResponse;
+ try{
  const sessionSeam=transport=>({now,assertCurrent:check,...(transport?{requestHandler:transport}:{})});
- const observed=await withCiSmokeReadSession({config:input.config,commitment,env,deadlineMs},context=>objectTransport({location:firstLocation,deadlineMs,signal:context.signal,now,check,allowance:false,responseBytes:32*MiB,transport:seams.smokeObjectTransport},(requestHandler,signal)=>verifySmoke({...context,requestHandler,signal,deadlineMs})),sessionSeam(seams.smokeSessionTransport));
+ const observed=await withCiSmokeReadSession({config:input.config,commitment,env,deadlineMs,...(composition?{signal:input.signal}:{})},context=>objectTransport({location:firstLocation,deadlineMs,signal:context.signal,now,check,allowance:false,responseBytes:32*MiB,transport:seams.smokeObjectTransport},(requestHandler,signal)=>verifySmoke({...context,requestHandler,signal,deadlineMs})),sessionSeam(seams.smokeSessionTransport));
  // The await above includes the original wrapper's physical drain and secret
  // erasure. Any failure exits here; the allowance session cannot overlap it.
  check();const allowanceDeadline=Math.min(deadlineMs,now()+HANDSHAKE.maxDurationMs);
- const allowance=await withCiSmokeAllowanceReadSession({config,scope,roleArn:firstLocation.roleArn,env,deadlineMs:allowanceDeadline},async context=>{
+ const allowance=await withCiSmokeAllowanceReadSession({config,scope,roleArn:firstLocation.roleArn,env,deadlineMs:allowanceDeadline,...(composition?{signal:input.signal}:{})},async context=>{
   return objectTransport({location,deadlineMs:allowanceDeadline,signal:context.signal,now,check,allowance:true,responseBytes:bounded.responseBytes,transport:seams.allowanceObjectTransport},async(requestHandler,signal)=>{
    const {S3Client,GetObjectCommand}=await import('@aws-sdk/client-s3');check();let client;
    try{
-    client=new S3Client({region:config.region,endpoint:`https://s3.${config.region}.amazonaws.com`,forcePathStyle:true,followRegionRedirects:false,ignoreConfiguredEndpointUrls:true,maxAttempts:1,credentials:context.credentials,requestChecksumCalculation:'WHEN_REQUIRED',responseChecksumValidation:'WHEN_REQUIRED',requestHandler});
+    client=new S3Client({region:config.region,endpoint:`https://s3.${config.region}.amazonaws.com`,forcePathStyle:true,followRegionRedirects:false,ignoreConfiguredEndpointUrls:true,maxAttempts:1,...(composition?{defaultsMode:'legacy',retryMode:'standard',useFipsEndpoint:false,useDualstackEndpoint:false,useArnRegion:false,useAccelerateEndpoint:false,disableMultiregionAccessPoints:true}:{}),credentials:context.credentials,requestChecksumCalculation:'WHEN_REQUIRED',responseChecksumValidation:'WHEN_REQUIRED',requestHandler});
     for(let attempt=0;attempt<HANDSHAKE.maxGetAttempts;attempt++){
      check();need(!signal.aborted&&now()<allowanceDeadline,'CiSourceAllowanceExpired');let response;
      try{response=await client.send(new GetObjectCommand({Bucket:location.bucket,Key:location.key,ExpectedBucketOwner:location.account}),{abortSignal:signal});}
@@ -139,11 +147,15 @@ export async function withCiSmokeSourceAllowance(input,verifySmoke,seams={}){
      need(response.$metadata?.httpStatusCode===200&&response.ServerSideEncryption==='aws:kms'&&response.SSEKMSKeyId===config.storage.kmsKeyArn&&response.BucketKeyEnabled===true&&positive(response.ContentLength)&&response.ContentLength<=bounded.responseBytes,'CiSourceAllowanceCustody');
      const chunks=[];let bytes=0;try{for await(const chunk of response.Body){check();need(now()<allowanceDeadline&&chunk instanceof Uint8Array,'CiSourceAllowanceBody');bytes+=chunk.length;need(bytes<=bounded.responseBytes,'CiSourceAllowanceBodyCap');chunks.push(Buffer.from(chunk));}}finally{response.Body?.destroy();}
      need(bytes===response.ContentLength,'CiSourceAllowanceBodyLength');const parsed=parseNonrootJson(Buffer.concat(chunks,bytes).toString('utf8'),{maxBytes:bounded.responseBytes});
-     return verifyCiSmokeSourceAllowanceResponse({response:parsed,config,binding,pending,now:now(),deadlineMs:receiptExpiresMs});
+     const verified=verifyCiSmokeSourceAllowanceResponse({response:parsed,config,binding,pending,now:now(),deadlineMs:receiptExpiresMs});
+     if(composition)compositionResponse=parsed;return verified;
     }
     throw Error('CiSourceAllowancePending');
    }finally{client?.destroy();}
   });
  },sessionSeam(seams.allowanceSessionTransport));
- check();need(now()<allowance.notAfter,'CiSourceAllowanceExpired');return Object.freeze({observed,allowance,expiresMs:Math.min(receiptExpiresMs,allowance.notAfter)});
+ check();need(now()<allowance.notAfter,'CiSourceAllowanceExpired');
+ const compositionAllocation=composition?await activateProductionControlCompositionSource(compositionSource,compositionResponse):undefined;compositionActivated=composition;
+ return Object.freeze({observed,allowance,expiresMs:Math.min(receiptExpiresMs,allowance.notAfter),...(composition?{compositionAllocation}:{})});
+ }finally{if(compositionSource&&!compositionActivated)try{abandonProductionControlCompositionSource(compositionSource);}catch{}}
 }

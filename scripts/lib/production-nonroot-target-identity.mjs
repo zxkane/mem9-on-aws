@@ -43,6 +43,12 @@ export function assembleTargetIdentity(sample,{target,launch,paths,descriptorHas
 export async function replayOwnerTargetWindow({receipt,join,proof,deploymentSource,parameter,funding,json,put}){
  exact(receipt,['version','kind','scope','proofHash','rootBindingHash','descriptorHash','parameterVersion','deploymentSourceHash','targetJoinHash','accounting']);
  need(receipt.version===1&&receipt.kind==='future-target-window-receipt'&&receipt.proofHash===hash(proof)&&receipt.rootBindingHash===hash(proof.root)&&receipt.descriptorHash===hash(JSON.parse(parameter.Value))&&receipt.parameterVersion===parameter.Version&&receipt.deploymentSourceHash===hash(deploymentSource)&&receipt.targetJoinHash===hash(join),'TargetWindowReceiptBinding');
+ // The descriptor intentionally carries only root/arm64 digests. Bind the
+ // complete target image, including its config, to the authenticated proof.
+ for(const target of [join.targetEvidence?.target,join.postAuditObservation?.target]){
+  inspectNonrootRecord('TargetBindingV1',target);
+  for(const container of target.containers)same(container.image,proof.dataOrigin.images[container.name],'TargetWindowReceiptImage');
+ }
  need(funding&&receipt.scope.checkpoint==='deploy-prod/23','TargetWindowFundingRequired');const {issuedMs,notAfter,...expected}=funding;
  const journal=receipt.accounting;verifyFutureOwnerDeliveryJournal(journal,expected);need(journal.events.at(-1).data.outcome==='complete'&&journal.plan.startedMs>=issuedMs&&journal.plan.deadlineMs<=notAfter,'TargetWindowAccountingIncomplete');same(journal.plan.scope,receipt.scope,'TargetWindowAccountingScope');
  const paths=await json(proof.artifactReverification.pathPermissions),before=join.targetEvidence,after=join.postAuditObservation,definition=await json(before.platform.rawDefinition),groups=[];

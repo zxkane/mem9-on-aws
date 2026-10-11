@@ -1,3 +1,7 @@
+import {inspectProductionControlBuildContract,inspectProductionDeployedControlBuild} from './production-control-composition-recipe.mjs';
+import {selectProductionControlCompositionFunding} from './production-control-composition-references.mjs';
+import {extractProductionControlCompositionCommitment} from './production-control-composition-reader.mjs';
+import {completeProductionControlCompositionBuildCapture,getProductionControlCompositionCaptureBytes} from './production-control-composition-capture-reader.mjs';
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
@@ -21,6 +25,7 @@ import {prepareNonrootControlLaunches,assembleNonrootControlMaterial} from './pr
 import {collectNonrootControlGuardTests,inspectNonrootControlGuardTests} from './production-nonroot-control-guard.mjs';
 import {collectNonrootControlScan} from './production-nonroot-control-scan.mjs';
 import {collectRootAudit as collectProductionRootAudit} from './production-nonroot-root-material.mjs';
+import {selectCiRootControlOriginals,isFinalCiRootScope} from './ci-smoke-root-request.mjs';
 
 const run=promisify(execFile),need=(ok,code='NonrootControlProviderInvalid')=>{if(!ok)throw Error(code);};
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -69,7 +74,8 @@ export async function loadNonrootProductionEvidence(input){
   const before=await productionArchive(collected.archive,metadataReads);before.addAll(prefix.guardEvidence.objects.map(row=>({...row,purpose:'build'})),['build']);
   const assembled=await assembleNonrootControlMaterial({...prefix.base,archive:before.snapshot(),guardTests:prefix.guardEvidence.guardTestsRef,scan},{clock,signal});check();
   const target=await collectNonrootProductionTarget({clients:budgetedReads.clients,readEcr:(operation,request)=>budgetedReads.readEcr(operation,request,{account:data.account}),context,records,parameter,source,clock});check();
-  const root=await collectRootAudit({context,records,parameter,source,phase,deploymentSource:assembled.deploymentSource,targetObservation:target,clients:budgetedReads.clients,metadataReads,signal,deadlineMs});check();
+  const controlOriginals=phase==='prereadiness'&&isFinalCiRootScope(metadataReads.rootAuditReadBinding?.().scope)?await(metadataReads.rootRequestPolicyVersion?.()===2?metadataReads.prepareRootRequestOriginals({archive:assembled.evidence.archive,deploymentSource:assembled.deploymentSource,source}):selectCiRootControlOriginals({archive:assembled.evidence.archive,deploymentSource:assembled.deploymentSource,source,chargeLocal:n=>metadataReads.reserveLocal({ecrRequests:0,httpBodyBytes:0,logicalBytes:n,uncompressedBytes:0,processedEntries:0})})):undefined;check();
+  const root=await collectRootAudit({context,records,parameter,source,phase,deploymentSource:assembled.deploymentSource,targetObservation:target,...(controlOriginals?{controlOriginals}:{}),clients:budgetedReads.clients,metadataReads,signal,deadlineMs});check();
   need(root&&Object.keys(root).sort().join()==='audit,auditRef,objects','NonrootRootAuditProducerResult');const audit=inspectNonrootRecord('OldRootAuditV2',root.audit),auditRef=inspectNonrootRecord('JsonRef',root.auditRef);
   need(hash(audit.root)===hash(proof.root)&&auditRef.canonicalHash===hash(audit)&&audit.completedMs<=clock()&&clock()-audit.completedMs<=NONROOT_LIMITS.maxRootAuditAgeMs&&clock()<audit.preauditPermit.deadlineMs,'NonrootProductionRootBinding');
   const final=await productionArchive(assembled.evidence.archive,metadataReads);final.addAll(root.objects,['root-audit','runtime-identity','task-definition','carrier','protocol','iam-boundary','lineage','availability','source']);
@@ -107,16 +113,16 @@ export async function prepareNonrootProductionControl(input){
  let download,loaded,closed=false;
  const close=async()=>{if(closed)return;let failure;for(const resource of [loaded,download])try{await resource?.close();}catch{failure=true;}if(failure)throw Object.assign(Error('ECLEANUP'),{code:'ECLEANUP',cleanupConfirmed:false});closed=true;};
  try{
-  const completedCapture=await readCompletedControlBuildCapture({clients:budgetedReads.clients,env,host,context,parameter,source,records,sourceContext:input.sourceContext});check();
+  const completedCapture=await readCompletedControlBuildCapture({clients:budgetedReads.clients,env,host,context,parameter,source,records,sourceContext:input.sourceContext,metadataReads});check();
   const bound=await metadataReads.bindControlBuild({context,records,build:completedCapture});check();
-  need(bound?.rootDigest===completedCapture.capture.outputDigest&&bound.account===contract.output.account&&bound.region===contract.output.region&&bound.repositoryName===contract.output.repositoryName,'NonrootProductionControlBuildBinding');
+  need(bound?.rootDigest===(contract.version===2?completedCapture.capture.image.rootDigest:completedCapture.capture.outputDigest)&&bound.account===contract.output.account&&bound.region===contract.output.region&&bound.repositoryName===contract.output.repositoryName,'NonrootProductionControlBuildBinding');
   const allocation=await metadataReads.allocateControlResources();check();
   download=await collectNonrootControlImage({capture:completedCapture.capture,contract,budgetedReads,metadataReads,tempRoot:allocation.tempRoot,resourceHandle:allocation.handle,signal});check();
   loaded=await loadNonrootControlImage({graph:download.graph,cacheDirectory:download.cacheDirectory,metadataReads,tempRoot:allocation.tempRoot,resourceHandle:allocation.handle,signal});check();
   const controlVerification={graph:download.graph,filesystem:download.filesystem},sourceContext=completedCapture.sourceContext;
   const image={...contract.output,rootDigest:download.binding.root.digest,arm64Digest:download.binding.arm64Digest,configDigest:download.binding.configDigest};
   const prerequisites=await collectNonrootControlPrerequisites({image,sourceClosure:contract.guardSource},{controlVerification,sourceContext,expected:{candidateTree:contract.candidate.tree},deadlineMs,signal});check();
-  const base={context,parameter,proof,archive:records.proofArchive,completedCapture,controlVerification,sourceContext,prerequisites,guardImportAudit};
+  const base={context,parameter,proof,archive:records.proofArchive,completedCapture,controlVerification,sourceContext,prerequisites,guardImportAudit,...(contract.version===2?{metadataReads}:{})};
   const prepared=await prepareNonrootControlLaunches(base);check();
   const value={contract,actualMain:completedCapture.capture.actualMain,resolvedLaunches:prepared.resolvedLaunches};
   const guardTests=await collectNonrootControlGuardTests(value,{...nonrootArchiveResolvers(prepared.archive),controlVerification,sourceContext,prerequisites,expected:{contractHash:hash(contract),actualMainHash:hash(value.actualMain),resolvedLaunchesHash:hash(prepared.resolvedLaunches)},deadlineMs,signal});check();
@@ -217,11 +223,11 @@ export async function collectNonrootProductionTarget({clients,readEcr,context,re
 
 /** The build producer and deployment consumer are different jobs. Only the
  * authenticated public commitment and private capsule cross that boundary. */
-export async function readCompletedControlBuildCapture({clients,env,host,context,parameter,source,records,sourceContext}){
+export async function readCompletedControlBuildCapture({clients,env,host,context,parameter,source,records,sourceContext,metadataReads}){
  const bindings=nonrootAuthorizationBindings(context),data=parseNonrootJson(parameter.Value);
  assertNonrootDataRelease(context,{current:data,controlSourceTree:bindings.control.sourceTree});
  need(hash(records.proof)===bindings.proofHash,'NonrootControlCaptureProof');
- const contract=inspectNonrootRecord('ControlBuildContractV1',records.proof.taskPlan.deployedControlBuildContract);
+ const contract=inspectProductionControlBuildContract(records.proof.taskPlan.deployedControlBuildContract);
  sourceContext??=await captureNonrootControlCheckout({directory:host.cwd,tree:contract.candidate.tree});
  const options={...nonrootArchiveResolvers(records.proofArchive),expected:{sourceContext}};
  const rawJobSource=await readNonrootEvidence(contract.workflow.jobSource,options,false),jobSource=parseNonrootJson(Buffer.from(rawJobSource).toString('utf8'));
@@ -230,6 +236,21 @@ export async function readCompletedControlBuildCapture({clients,env,host,context
  const jobs=list.jobs.filter(job=>job.name===jobSource.name);need(jobs.length===1,'NonrootControlCaptureJob');
  const job=jobs[0];need(job.status==='completed'&&job.conclusion==='success'&&job.run_id===source.run.id&&job.run_attempt===source.run.attempt&&job.head_sha===source.checkout.sha,'NonrootControlCaptureJob');
  const log=await host.readLog(job.id);need(typeof log==='string'&&Buffer.byteLength(log)<=8388608,'NonrootControlCaptureLog');
+ if(contract.version===2){
+  // The original authenticated proof owns this accounting record. A public
+  // log may identify a capture, but cannot select its original grant or key.
+  const recordRef=records.proof.artifactReverification.readAccounting,record=await readNonrootEvidence(recordRef,options);
+  const selected=selectProductionControlCompositionFunding({record,recordRef,contract}),commitment=extractProductionControlCompositionCommitment(Buffer.from(log));
+  need(commitment.grantSetId===selected.grantSetId&&commitment.planHash===selected.plan.planHash&&commitment.runId===source.run.id&&commitment.runAttempt===source.run.attempt&&commitment.mainRevision===source.checkout.sha&&commitment.mainTree===source.checkout.tree&&commitment.jobId===job.id,'NonrootControlCaptureCommitment');
+  const envelopeBytes=await getProductionControlCompositionCaptureBytes({client:clients?.s3,bucket:env.MEM9_DECISION_ARTIFACT_BUCKET||'mem9-audit-'+data.account,
+   kmsKeyArn:env.MEM9_CI_EVIDENCE_KMS_KEY_ARN,account:data.account,commitment,expectedGrantSetId:selected.grantSetId,deadlineMs:Math.min(nonrootAdmissionDeadline(context),Date.now()+60000)});
+  // Preserve the original three API observations and two full log reads.
+  const run=await host.api('actions/runs/'+source.run.id+'/attempts/'+source.run.attempt),completedJob=await host.api('actions/jobs/'+job.id);
+  const completedLog=await host.readLog(job.id);need(typeof completedLog==='string'&&Buffer.byteLength(completedLog)<=16777216,'NonrootControlCaptureLog');
+  const buildLog=Buffer.from(completedLog),completed=completeProductionControlCompositionBuildCapture(envelopeBytes,{commitment,contract,source,run,job:completedJob,buildLog,metadataReads});
+  need(completed.plan.planHash===selected.plan.planHash,'NonrootControlCapturePlan');
+  return {...completed,buildLog,contract,sourceContext};
+ }
  const published=log.split('\n').map(line=>line.replace(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z\s+/,''))
   .filter(line=>line.startsWith('MEM9_CONTROL_BUILD_COMMITMENT '));
  need(published.length===1,'NonrootControlCaptureCommitment');
@@ -272,7 +293,7 @@ export async function captureNonrootControlCheckout({directory,tree}){
  * supplies its own credential-free environment, no network and no host mounts.
  * These live handles stay in this process for the final provenance verifier. */
 export async function collectOwnedNonrootControlEvidence({cacheDirectory,inventory,budget,metadataReads,deadlineMs,archive,build:input,contract:rawContract,repositoryDirectory,sourceContext,now=Date.now()}){
- const build=inspectNonrootRecord('DeployedControlBuildV1',input),contract=inspectNonrootRecord('ControlBuildContractV1',rawContract);
+ const build=inspectProductionDeployedControlBuild(input),contract=inspectProductionControlBuildContract(rawContract);
  const resolvers=nonrootArchiveResolvers(archive),imageGraph=await readNonrootEvidence(build.imageGraph,resolvers);
  const raw=await readNonrootEvidence(imageGraph.rootManifest,resolvers,false),root=parseNonrootJson(Buffer.from(raw).toString('utf8'));
  const binding={account:build.image.account,region:build.image.region,repositoryName:build.image.repositoryName,
@@ -281,11 +302,11 @@ export async function collectOwnedNonrootControlEvidence({cacheDirectory,invento
  const cached=await verifyOwnedNonrootControlCache({directory:cacheDirectory,binding,inventory,...(budget?{budget}:{metadataReads,deadlineMs})});
  try{
   const actualMainExpected={repository:contract.repository,prNumber:contract.prNumber,candidateRevision:contract.candidate.revision,candidateTree:contract.candidate.tree,baseRevision:contract.candidate.baseRevision};
-  const options={...resolvers,now,expected:{contract,sourceContext,actualMainExpected},controlVerification:{graph:cached.graph,filesystem:cached.filesystem}};
+  const options={...resolvers,now,expected:{contract,sourceContext,actualMainExpected},controlVerification:{graph:cached.graph,filesystem:cached.filesystem},metadataReads};
   const runtimeObservation=await collectNonrootControlRuntime(build,options);
   const checked=await verifyNonrootDeployedControlBuild(build,{...options,now:Date.now(),runtimeObservation});
   return Object.freeze({archive,sourceContext,controlGraph:cached.graph,controlFilesystemVerification:cached.filesystem,runtimeObservation,
    controlCache:{directory:cacheDirectory,inventory:structuredClone(inventory)},
-   checked,usage:cached.usage,close:cached.close});
+   checked,usage:cached.usage,close:cached.close,...(contract.version===2?{metadataReads}:{})});
  }catch(error){await cached.close();throw error;}
 }

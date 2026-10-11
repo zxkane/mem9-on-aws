@@ -6,6 +6,7 @@ import {createControlSourceContext,readControlSourceFile,controlSourcePaths,cont
 import {describeDataBuildInputs} from './production-data-build-inputs.mjs';
 import {CI_SMOKE_POLICY as policy} from './ci-smoke-policy.mjs';
 import {ciSmokeJobDefinition,controlBuildCaptureSteps} from './ci-smoke-job.mjs';
+import {buildNativeControlCompositionSourceJob,controlCompositionActionDefinition,CONTROL_COMPOSITION_ASSET_PATHS} from './production-control-composition-job.mjs';
 import {CI_SMOKE_CHECKS,inspectCiSmokeRecord,inspectCiSmokeResult,validateCiSmokeEvidence} from './ci-smoke-evidence.mjs';
 
 const need=(ok,code='CiSmokeSourceInvalid')=>{if(!ok)throw Error(code);};
@@ -218,7 +219,8 @@ export function buildCiSmokeImageJob(workflow){
  need(!Object.hasOwn(job.outputs,'mnemo_digest'));job.outputs.mnemo_digest='${{ steps.mnemo.outputs.digest }}';return job;
 }
 
-export function buildCiSmokeSourceJobs(workflow){
+export function buildCiSmokeSourceJobs(workflow,{controlComposition=false}={}){
+ need(typeof controlComposition==='boolean','CiSmokeSourceJobFormat');
  const result={};
  for(const[name,digest]of Object.entries(policy.sourceJobs)){
   const job=copy(workflow.jobs?.[name]);need(hash(job)===digest,'CiSmokeControlSourceJobChanged');
@@ -233,7 +235,7 @@ export function buildCiSmokeSourceJobs(workflow){
    need(!Object.hasOwn(job.outputs,'control_capture'),'CiSmokeControlOutputChanged');job.outputs.control_capture='${{ steps.publish_control_capture.outputs.commitment }}';
   }
   job.steps.push({name:'Remove owned CI smoke source evidence',if:'always()',run:'node scripts/verify-ci-smoke-isolation.mjs cleanup-source'});
-  result[name]=job;
+  result[name]=controlComposition&&name==='build-image-transition-control'?buildNativeControlCompositionSourceJob(job):job;
  }
  return result;
 }
@@ -366,9 +368,55 @@ export async function ciSmokeSourceClosure(context,roots){
  return [...seen.values()].sort((a,b)=>Buffer.compare(Buffer.from(a.path),Buffer.from(b.path)));
 }
 
+export async function verifyCiSmokeCompositionToolchain(context,assets){
+ const toolchain=parseNonrootJson(text(assets.toolchain.bytes)),output=toolchain.output;
+ exact(toolchain,['version','kind','nodeMajor','bundler','packageLockHash','inputs','output']);
+ exact(output,['path','sha256','bytesLength']);
+ exact(toolchain.bundler,['name','version','integrity','builderSourceHash']);
+ need(toolchain.version===1&&toolchain.kind==='control-composition-ci-toolchain'&&toolchain.nodeMajor===24&&
+  output?.path===CONTROL_COMPOSITION_ASSET_PATHS.bundle&&output.sha256===assets.bundle.file.sha256&&output.bytesLength===assets.bundle.file.bytes,'CiSmokeCompositionToolchain');
+ const lockSource=await readControlSourceFile(context,'package-lock.json');
+ need(toolchain.packageLockHash===lockSource.file.sha256,'CiSmokeCompositionToolchainLock');
+ const lock=parseNonrootJson(text(lockSource.bytes)),bundler=toolchain.bundler;
+ need(lock.lockfileVersion===3&&lock.packages&&bundler.name==='rolldown'&&
+  typeof bundler.version==='string'&&bundler.version.length>0&&typeof bundler.integrity==='string'&&bundler.integrity.length>0&&
+  lock.packages['node_modules/rolldown']?.version===bundler.version&&lock.packages['node_modules/rolldown']?.integrity===bundler.integrity,'CiSmokeCompositionToolchainLock');
+ const builder=await readControlSourceFile(context,'scripts/build-control-composition-action.mjs');
+ need(builder.file.sha256===bundler.builderSourceHash,'CiSmokeCompositionToolchainBuilder');
+ need(Array.isArray(toolchain.inputs)&&toolchain.inputs.length>0&&toolchain.inputs.length<=20000,'CiSmokeCompositionToolchainInputs');
+ let previous='';const sourcePaths=new Set();
+ for(const input of toolchain.inputs){
+  const path=input.path,external=typeof path==='string'&&path.startsWith('node_modules/');
+  exact(input,['path','sha256','bytesLength',...(external?['packagePin']:[])]);
+  need(typeof path==='string'&&path.length<=4096&&/^[A-Za-z0-9_@./-]+$/.test(path)&&!path.startsWith('/')&&
+   path.split('/').every(part=>part&&part!=='.'&&part!=='..')&&path>previous&&
+   /^[a-f0-9]{64}$/.test(input.sha256)&&Number.isSafeInteger(input.bytesLength)&&input.bytesLength>=0,'CiSmokeCompositionToolchainInputs');
+  previous=path;
+  if(external){
+   const key=Object.keys(lock.packages).filter(key=>key.startsWith('node_modules/')&&path.startsWith(key+'/')).sort((a,b)=>b.length-a.length)[0];
+   need(key&&!path.slice(key.length+1).split('/').includes('node_modules'),'CiSmokeCompositionToolchainPackage');
+   const name=key.split('node_modules/').at(-1);
+   exact(input.packagePin,['name','version','integrity']);
+   const pin=input.packagePin,locked=lock.packages[key];
+   need(pin.name===name&&typeof pin.version==='string'&&pin.version.length>0&&typeof pin.integrity==='string'&&pin.integrity.length>0&&
+    locked?.version===pin.version&&locked?.integrity===pin.integrity,'CiSmokeCompositionToolchainPackage');
+  }else{
+   const source=await readControlSourceFile(context,path);
+   need(source.file.sha256===input.sha256&&source.file.bytes===input.bytesLength,'CiSmokeCompositionToolchainSource');
+   sourcePaths.add(path);
+  }
+ }
+ need(sourcePaths.has(CONTROL_COMPOSITION_ASSET_PATHS.entry),'CiSmokeCompositionToolchainEntry');
+ // This verifies the committed manifest's source and lock bindings. The
+ // separately required reproducible --check build verifies bundle generation;
+ // a manifest cannot itself authenticate untracked package file contents.
+ return toolchain;
+}
+
 export async function verifyCiSmokeIsolationSource(isolation,{originContext,candidateContext,baselineContext,originRecipe,candidateRecipe}){
  exact(isolation,['version','kind','origin','candidate','recipeEdits','workflow','preservedScripts','smoke','promotion']);
- need(isolation.version===1&&isolation.kind==='ci-smoke-isolation','CiSmokeIsolationKind');
+ need([1,2].includes(isolation.version)&&isolation.kind==='ci-smoke-isolation','CiSmokeIsolationKind');
+ const composition=isolation.version===2;
  for(const [record,context]of [[isolation.origin,originContext],[isolation.candidate,candidateContext]]){
   exact(record,['revision','tree','recipeHash']);need(/^[a-f0-9]{40}$/.test(record.revision)&&record.tree===context?.tree,'CiSmokeTreeBinding');
  }
@@ -380,7 +428,7 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
  same(await sourceRecipe(candidateContext),candidateRecipe,'CiSmokeCandidateRecipeSource');
  verifyIsolatedDataRecipe(originRecipe,candidateRecipe,{originHash:isolation.origin.recipeHash,candidateHash:isolation.candidate.recipeHash});
  same(isolation.recipeEdits,[{stepName:legacySmoke,field:'if',before:originalCondition,after:false},{stepName:buildName,field:'id',beforeAbsent:true,after:'mnemo'}],'CiSmokeRecipeEditShape');
- exact(isolation.workflow,['source','buildJob','digestOutput']);need(isolation.workflow.buildJob==='build-and-push-image'&&isolation.workflow.source.path===workflowPath);
+ exact(isolation.workflow,['source','buildJob','digestOutput',...(composition?['composition']:[])]);need(isolation.workflow.buildJob==='build-and-push-image'&&isolation.workflow.source.path===workflowPath);
  same(isolation.workflow.digestOutput,{name:'mnemo_digest',expression:'${{ steps.mnemo.outputs.digest }}'});
  const candidate=parseYaml((await file(candidateContext,workflowPath,isolation.workflow.source)).bytes),baseline=parseYaml((await file(baselineContext,workflowPath)).bytes);
  const actions={},candidateActions={},filePins={[workflowPath]:isolation.workflow.source};for(const path of [actionPath,'.github/actions/runtime-cleanup/action.yml','.github/actions/runtime-recovery/action.yml']){
@@ -390,7 +438,17 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
  candidateActions[CI_SMOKE_GATE_ACTION_PATH]=parseYaml(gate.bytes);filePins[CI_SMOKE_GATE_ACTION_PATH]=pin(gate.file);filePins[CI_SMOKE_GATE_ENTRY_PATH]=pin(entry.file);
  const routes=verifyCiSmokePromotionRoutes({workflow:baseline,actions},{jobs:Object.fromEntries(CI_SMOKE_ROUTES.map(k=>[k,candidate.jobs[k]])),actions:candidateActions});
  const sourceJobs=Object.keys(policy.sourceJobs);
- if(sourceJobs.some(name=>Object.hasOwn(candidate.jobs,name)))same(Object.fromEntries(sourceJobs.map(name=>[name,candidate.jobs[name]])),buildCiSmokeSourceJobs(baseline),'CiSmokeControlSourceJobs');
+ if(composition)need(sourceJobs.every(name=>Object.hasOwn(candidate.jobs,name)),'CiSmokeControlSourceJobs');
+ if(sourceJobs.some(name=>Object.hasOwn(candidate.jobs,name)))same(Object.fromEntries(sourceJobs.map(name=>[name,candidate.jobs[name]])),buildCiSmokeSourceJobs(baseline,{controlComposition:composition}),'CiSmokeControlSourceJobs');
+ if(composition){
+  exact(isolation.workflow.composition,Object.keys(CONTROL_COMPOSITION_ASSET_PATHS));
+  const assets={};for(const [key,path]of Object.entries(CONTROL_COMPOSITION_ASSET_PATHS)){
+   need(isolation.workflow.composition[key].path===path,'CiSmokeCompositionAssetPath');
+   assets[key]=await file(candidateContext,path,isolation.workflow.composition[key]);
+  }
+  same(parseYaml(assets.action.bytes),controlCompositionActionDefinition(),'CiSmokeCompositionAction');
+  await verifyCiSmokeCompositionToolchain(candidateContext,assets);
+ }
  for(const row of policy.rows.filter(r=>r.rule.kind==='safe-recovery'))for(const source of row.rule.entryFiles)await file(candidateContext,source.path,source);
  const oldBuild=buildCiSmokeImageJob(baseline),newBuild=candidate.jobs['build-and-push-image'];same(newBuild,oldBuild,'CiSmokeBuildJobChanged');
  need(Array.isArray(isolation.preservedScripts)&&isolation.preservedScripts.length===2);
@@ -413,7 +471,7 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
  const p=isolation.promotion;exact(p,['requiredJobs','routes','preparationValidators','resultKind','sourceRule','retainedRule','failureRule']);
  same(p.requiredJobs,CI_SMOKE_ROUTES);need(p.routes.length===4&&p.resultKind==='ci-smoke-isolation-result'&&p.sourceRule==='actual-candidate-build-smoke-required'&&p.retainedRule==='original-target-evidence-also-required'&&p.failureRule==='hold-on-missing-skipped-failed-mismatch');
  same(p.routes,describeCiSmokePromotionPins(candidate,candidateActions,filePins),'CiSmokeRoutePinCoverage');
- const validators=await ciSmokeSourceClosure(candidateContext,CI_SMOKE_VALIDATOR_ROOTS);
+ const validators=await ciSmokeSourceClosure(candidateContext,[...CI_SMOKE_VALIDATOR_ROOTS,...(composition?[CONTROL_COMPOSITION_ASSET_PATHS.entry]:[])]);
  same(validators,p.preparationValidators,'CiSmokeValidatorClosure');
  return Object.freeze({kind:'verified-ci-smoke-source',isolationHash:hash(isolation),sourceRevision:isolation.candidate.revision,sourceTree:isolation.candidate.tree});
 }

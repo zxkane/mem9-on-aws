@@ -3,6 +3,7 @@ import {normalizeImageDigestResponse,imageResponseFromSdk} from './production-im
 /** CFG2 funded TARGET acquisition. No funding, new clock, session issuance,
  * arbitrary endpoint, or business authority is created by these records. */
 import {Agent} from 'node:https';
+import {createHash} from 'node:crypto';
 import {Readable} from 'node:stream';
 import {mkdir,lstat,realpath,readdir} from 'node:fs/promises';
 import {readFileSync,lstatSync,openSync,writeSync,fsyncSync,closeSync,constants} from 'node:fs';
@@ -16,12 +17,16 @@ import {inspectFutureAcquisitionConfig,futureAcquisitionScope} from './ci-smoke-
 import {FUTURE_HANDSHAKE_POLICY as HANDSHAKE} from './ci-smoke-grants.mjs';
 import {verifyFutureAllowance} from './ci-smoke-future-allowance.mjs';
 import {submitCiRootRequest} from './ci-smoke-root-request-io.mjs';
-import {verifyCiRootExchange,CI_ROOT_REQUEST_POLICY} from './ci-smoke-root-request.mjs';
+import {verifyCiRootExchange,CI_ROOT_REQUEST_POLICY,selectCiRootControlOriginals} from './ci-smoke-root-request.mjs';
+import {verifyProspectiveCiRootRequestPolicy,verifyCiRootCostCheckpoints,CI_ROOT_COST_MODEL,CI_ROOT_LOCAL_JOURNAL_MAX_ROWS} from './ci-smoke-root-request-cost.mjs';
+import {createCiRootReplaySnapshot} from './ci-smoke-root-replay.mjs';
 import {captureNonrootMainSource} from './production-nonroot-source-reader.mjs';
 import {makeCiStartupRunBinding,openCiSmokeStartup,consumeCiSmokeStartup} from './ci-smoke-startup.mjs';
 import {smokePrivateRead,smokePrivateWrite} from './ci-smoke-host.mjs';
 import {PRODUCTION_DATA_RELEASE_PARAMETER as parameterName} from './production-data-issuance.mjs';
 import {inspectControlBuildCommitment,controlBuildArchiveKey} from './production-control-capture-archive.mjs';
+import {extractProductionControlCompositionCommitment,inspectProductionControlCompositionCommitment} from './production-control-composition-reader.mjs';
+import {completeProductionControlCompositionBuildCapture,productionControlCompositionCaptureKey} from './production-control-composition-capture-reader.mjs';
 import {nonrootAuthorizationBindings,assertNonrootDataRelease} from './production-nonroot-proof.mjs';
 import {nonrootArchiveResolvers} from './production-nonroot-archive.mjs';
 import {captureNonrootControlBuildAction,completeNonrootControlBuildAction} from './production-nonroot-control-build.mjs';
@@ -48,12 +53,12 @@ function descriptor(response,config){
  return Object.fromEntries(['Name','Type','ARN','Version','Value'].map(k=>[k,p[k]]));
 }
 function localJournal(path,starting,budget){
- const fd=openSync(path,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);let used={...counter(starting)},size=0,closed=false,count=0;
- return {get used(){return {...used};},charge(value){need(!closed,'CiFutureLocalClosed');counter(value);need(value.ecrRequests===0&&value.httpBodyBytes===0,'CiFutureLocalNetwork');const next={};for(const k of COUNTERS){next[k]=used[k]+value[k];need(integer(next[k])&&next[k]<=budget[k],'CiFutureLocalBudget');}
-  const bytes=Buffer.from(JSON.stringify(value)+'\n');need(size+bytes.length<=MAX&&count<200000,'CiFutureLocalJournalLimit');let at=0;while(at<bytes.length)at+=writeSync(fd,bytes,at,bytes.length-at);size+=bytes.length;count++;used=next;return {...used};
+ const fd=openSync(path,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600),digest=createHash('sha256');let used={...counter(starting)},size=0,closed=false,count=0;
+ return {get used(){return {...used};},checkpoint(){need(!closed,'CiFutureLocalClosed');fsyncSync(fd);return {sequence:count,prefixHash:digest.copy().digest('hex')};},charge(value){need(!closed,'CiFutureLocalClosed');counter(value);need(value.ecrRequests===0&&value.httpBodyBytes===0,'CiFutureLocalNetwork');const next={};for(const k of COUNTERS){next[k]=used[k]+value[k];need(integer(next[k])&&next[k]<=budget[k],'CiFutureLocalBudget');}
+  const bytes=Buffer.from(JSON.stringify(value)+'\n');need(size+bytes.length<=MAX&&count<CI_ROOT_LOCAL_JOURNAL_MAX_ROWS,'CiFutureLocalJournalLimit');let at=0;while(at<bytes.length)at+=writeSync(fd,bytes,at,bytes.length-at);digest.update(bytes);size+=bytes.length;count++;used=next;return {...used};
  },finish(){need(!closed,'CiFutureLocalClosed');fsyncSync(fd);closeSync(fd);closed=true;return {path,sha256:sha(readFileSync(path))};},close(){if(!closed){try{fsyncSync(fd);}finally{closeSync(fd);closed=true;}}}};
 }
-function replayLocal(ref,start,budget){immutable(ref);let used={...counter(start)};const raw=readFileSync(ref.path,'utf8');need(raw===''||raw.endsWith('\n'),'CiFutureLocalJournal');const lines=raw?raw.slice(0,-1).split('\n'):[];need(lines.length<=200000,'CiFutureLocalJournal');for(const line of lines){const c=parse(line);counter(c);need(c.ecrRequests===0&&c.httpBodyBytes===0,'CiFutureLocalNetwork');for(const k of COUNTERS){used[k]+=c[k];need(integer(used[k])&&used[k]<=budget[k],'CiFutureLocalBudget');}}return used;}
+function replayLocal(ref,start,budget,findCharge){immutable(ref);let used={...counter(start)};const raw=readFileSync(ref.path,'utf8');need(raw===''||raw.endsWith('\n'),'CiFutureLocalJournal');const lines=raw?raw.slice(0,-1).split('\n'):[],matches=[],digest=createHash('sha256');need(lines.length<=CI_ROOT_LOCAL_JOURNAL_MAX_ROWS,'CiFutureLocalJournal');for(const [i,line] of lines.entries()){const c=parse(line);counter(c);need(c.ecrRequests===0&&c.httpBodyBytes===0,'CiFutureLocalNetwork');digest.update(line+'\n');if(findCharge&&hash(c)===hash(findCharge))matches.push({sequence:i+1,prefixHash:digest.copy().digest('hex')});for(const k of COUNTERS){used[k]+=c[k];need(integer(used[k])&&used[k]<=budget[k],'CiFutureLocalBudget');}}return findCharge?{used,matches}:used;}
 
 /** A fixed native S3 Put/Get exchange. Unknown Put/GET is terminal. A fully
  * received bounded 403/404 is pending, never proof that the object is absent. */
@@ -128,6 +133,7 @@ function manifest(response,expected,chargeLocal){
  const {raw}=normalizeImageDigestResponse(imageResponseFromSdk(response),{registryId:expected.account,repositoryName:expected.repositoryName,imageDigest:expected.digest},chargeLocal);return {document:parse(raw.toString()),bytes:raw.length};
 }
 function profileMachine(profiles,config,control,chargeLocal=()=>{},capacity){
+ const controlDigest=control?.kind==='native-control-composition-commitment'?control.rootDigest:control?.outputDigest;
  const counts=profiles.map(()=>0),responses=new Map(),manifests=new Map(),blobs=new Map();let root,arm,buildBinding;const capacityNodes=new Map(),finishedManifests=new Set();
  if(capacity)inspectFutureControlCapacity(capacity);
  const capacityNode=d=>{if(!capacity)return;const old=capacityNodes.get(d.digest);need(!old||old.size===d.size&&old.mediaType===d.mediaType,'CiFutureControlDescriptor');capacityNodes.set(d.digest,d);verifyFutureControlGraphCapacity([...capacityNodes.values()],capacity);};
@@ -140,19 +146,19 @@ function profileMachine(profiles,config,control,chargeLocal=()=>{},capacity){
   if(p.kind==='CURRENT_TASKS_FROM_SCOPED_LIST'){need(from?.action==='ListTasks','CiFutureProfileDependency');return {tasks:from.value.taskArns,max:p.late.maxItems};}
   if(p.kind==='DEFINITION_FROM_VALIDATED_TASK_OR_SERVICE'){need(from,'CiFutureProfileDependency');const rows=p.late.source==='task'?from.value.tasks:from.value.services;need(Array.isArray(rows),'CiFutureProfileDependency');return [...new Set(rows.map(r=>r.taskDefinitionArn??r.taskDefinition))].map(taskDefinition=>({...p.request,taskDefinition}));}
   need(p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD'&&control,'CiFutureControlBinding');const a=p.late.artifact;let values;
-  if(a==='private-capsule')values=[controlBuildArchiveKey('prod',control)];else{
+  if(a==='private-capsule')values=[control.kind==='native-control-composition-commitment'?productionControlCompositionCaptureKey(control.grantSetId):controlBuildArchiveKey('prod',control)];else{
    need(buildBinding,'CiFutureControlBuildRequired');
-   if(a==='root')values=[control.outputDigest];else if(a==='arm64'){need(root,'CiFutureControlRoot');values=[root];}
-   else if(a==='manifest')values=[...manifests.keys()].filter(d=>d!==control.outputDigest);
+   if(a==='root')values=[controlDigest];else if(a==='arm64'){need(root,'CiFutureControlRoot');values=[root];}
+   else if(a==='manifest')values=[...manifests.keys()].filter(d=>d!==controlDigest);
    else {need(root,'CiFutureControlRoot');values=[...blobs.values()].filter(row=>row.kind===(a==='config'?'config':'layer')).map(row=>row.descriptor.digest);}
   }
   if(p.late.field==='layerDigests')return {field:'layerDigests',values,max:100};
   return values.map(v=>({...p.request,[p.late.field]:p.late.field==='imageIds'?[{imageDigest:v}]:p.late.field==='imageId'?{imageDigest:v}:p.late.field==='layerDigests'?[v]:v}));
  }
- return {counts,responses,bind(value){need(!buildBinding,'CiFutureControlAlreadyBound');need(value.rootDigest===control?.outputDigest&&digest(value.configDigest),'CiFutureControlBinding');buildBinding=value;},select(action,request){
+ return {counts,responses,bind(value){need(!buildBinding,'CiFutureControlAlreadyBound');need(value.rootDigest===controlDigest&&digest(value.configDigest),'CiFutureControlBinding');buildBinding=value;},select(action,request){
   for(let i=0;i<profiles.length;i++){const p=profiles[i];if(p.action!==action||counts[i]>=p.count)continue;let choices;try{choices=requestFor(p);}catch{continue;}
    let match;if(Array.isArray(choices))match=choices.some(q=>hash(q)===hash(request));else{const field=choices.field??'tasks',items=request[field],other=Object.fromEntries(Object.entries(request).filter(([k])=>k!==field));match=Array.isArray(items)&&items.length>0&&items.length<=choices.max&&new Set(items).size===items.length&&items.every(t=>(choices.values??choices.tasks).includes(t))&&hash(other)===hash(p.request);}
-   if(match){if(capacity&&isFutureControlCapacityProfile(p)&&['S3BlobGet','GetDownloadUrlForLayer'].includes(action)){need(finishedManifests.has(control.outputDigest)&&[...manifests.keys()].every(d=>finishedManifests.has(d)),'CiFutureControlMetadataIncomplete');const d=blobs.get(request.layerDigest)?.descriptor;need(d&&(action==='GetDownloadUrlForLayer'||d.size<=p.responseBytes),'CiFutureControlBlobCapacity');}return {index:i,profile:p};}
+   if(match){if(capacity&&isFutureControlCapacityProfile(p)&&['S3BlobGet','GetDownloadUrlForLayer'].includes(action)){need(finishedManifests.has(controlDigest)&&[...manifests.keys()].every(d=>finishedManifests.has(d)),'CiFutureControlMetadataIncomplete');const d=blobs.get(request.layerDigest)?.descriptor;need(d&&(action==='GetDownloadUrlForLayer'||d.size<=p.responseBytes),'CiFutureControlBlobCapacity');}return {index:i,profile:p};}
   }throw Error('CiFutureProfileRequest');
  },complete(index,request,value){const p=profiles[index];counts[index]++;responses.set(p.id,{action:p.action,value});
   if(p.action==='S3BlobGet'&&p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD'){const d=blobs.get(request.layerDigest)?.descriptor;need(d&&d.size===value.size,'CiFutureBlobSize');}
@@ -161,23 +167,37 @@ function profileMachine(profiles,config,control,chargeLocal=()=>{},capacity){
    need(m.schemaVersion===2,'CiFutureControlManifest');capacityNode({digest:wanted,size:decoded.bytes,mediaType:m.mediaType});finishedManifests.add(wanted);const announced=manifests.get(wanted);if(announced)need(announced.size===decoded.bytes&&announced.mediaType===m.mediaType,'CiFutureControlManifest');
    if([IMAGE_MEDIA.index,IMAGE_MEDIA.dockerIndex].includes(m.mediaType)){
     need(Array.isArray(m.manifests)&&m.manifests.length<=128,'CiFutureControlRoot');
-    if(wanted===control.outputDigest){const rows=m.manifests.filter(r=>r.platform?.os==='linux'&&r.platform.architecture==='arm64');need(rows.length===1,'CiFutureControlRoot');root=rows[0].digest;}
-    for(const d of m.manifests){validateImageDescriptor(d,'manifest');capacityNode(d);need(d.digest!==control.outputDigest&&d.digest!==wanted,'CiFutureControlCycle');const old=manifests.get(d.digest);if(old)need(old.size===d.size&&old.mediaType===d.mediaType,'CiFutureControlDescriptor');else manifests.set(d.digest,d);}
+    if(wanted===controlDigest){const rows=m.manifests.filter(r=>r.platform?.os==='linux'&&r.platform.architecture==='arm64');need(rows.length===1,'CiFutureControlRoot');root=rows[0].digest;}
+    for(const d of m.manifests){validateImageDescriptor(d,'manifest');capacityNode(d);need(d.digest!==controlDigest&&d.digest!==wanted,'CiFutureControlCycle');const old=manifests.get(d.digest);if(old)need(old.size===d.size&&old.mediaType===d.mediaType,'CiFutureControlDescriptor');else manifests.set(d.digest,d);}
     need(manifests.size<=128,'CiFutureControlGraphLimit');
    }else{
     need([IMAGE_MEDIA.manifest,IMAGE_MEDIA.dockerManifest].includes(m.mediaType)&&Array.isArray(m.layers)&&m.layers.length<=2048,'CiFutureControlManifest');validateImageDescriptor(m.config,'blob');
     if(wanted===root){need(m.config.digest===buildBinding.configDigest,'CiFutureControlBuildConfig');arm={config:m.config,layers:m.layers};}
-    if(m.subject){validateImageDescriptor(m.subject,'manifest');need(manifests.has(m.subject.digest)||m.subject.digest===control.outputDigest,'CiFutureControlSubject');}
+    if(m.subject){validateImageDescriptor(m.subject,'manifest');need(manifests.has(m.subject.digest)||m.subject.digest===controlDigest,'CiFutureControlSubject');}
     for(const [kind,items]of [['config',[m.config]],['layer',m.layers]])for(const d of items){validateImageDescriptor(d,'blob');capacityNode(d);const old=blobs.get(d.digest);if(old)need(old.descriptor.size===d.size&&old.descriptor.mediaType===d.mediaType,'CiFutureControlDescriptor');else blobs.set(d.digest,{kind,descriptor:d});}need(blobs.size<=2048,'CiFutureControlGraphLimit');
    }
   }
  }};
 }
-async function controlCommitment(host,binding,check){
+function fundedComposition(funded){
+ const rows=funded.consumers.filter(c=>c.composition);need(rows.length<=1,'CiFutureCompositionCoverage');
+ if(!rows.length)return null;
+ const c=rows[0];need(c.scope.kind==='source'&&c.scope.jobKey==='build-image-transition-control','CiFutureCompositionScope');
+ return c.composition.plan;
+}
+function compositionCommitment(value,binding,funded,jobId){
+ const c=inspectProductionControlCompositionCommitment(value),plan=fundedComposition(funded);need(plan,'CiFutureCompositionRequired');
+ need(c.grantSetId===funded.grantSetId&&c.planHash===plan.planHash&&c.runId===binding.source.runId&&c.runAttempt===binding.source.runAttempt&&c.mainRevision===binding.source.mainRevision&&c.mainTree===binding.source.mainTree&&(jobId===undefined||c.jobId===jobId),'CiFutureControlCommitment');return c;
+}
+async function controlCommitment(host,binding,check,funded){
  check();const workflow=parseDocument(await host.run('git',['show','HEAD:.github/workflows/infra-ci.yml'])).toJS(),job=workflow.jobs?.['build-image-transition-control'];need(typeof job?.name==='string','CiFutureControlJob');
  const list=await host.api(`actions/runs/${binding.source.runId}/attempts/${binding.source.runAttempt}/jobs?per_page=100`);need(list.total_count===list.jobs?.length&&list.total_count<=100,'CiFutureControlJobs');const jobs=list.jobs.filter(j=>j.name===job.name);need(jobs.length===1,'CiFutureControlJob');const j=jobs[0];
  need(j.status==='completed'&&j.conclusion==='success'&&j.run_id===binding.source.runId&&j.run_attempt===binding.source.runAttempt&&j.head_sha===binding.source.mainRevision,'CiFutureControlJob');
- const log=await host.readLog(j.id);need(typeof log==='string'&&Buffer.byteLength(log)<=8388608,'CiFutureControlLog');const rows=log.split('\n').map(l=>l.replace(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z\s+/,'' )).filter(l=>l.startsWith('MEM9_CONTROL_BUILD_COMMITMENT '));need(rows.length===1,'CiFutureControlCommitment');const c=inspectControlBuildCommitment(parse(rows[0].slice('MEM9_CONTROL_BUILD_COMMITMENT '.length)));
+ const log=await host.readLog(j.id);need(typeof log==='string'&&Buffer.byteLength(log)<=8388608,'CiFutureControlLog');
+ const native=fundedComposition(funded),step=job.steps?.filter(s=>s.id==='bootstrap');
+ if(native){need(step?.length===1&&step[0].uses==='./.github/actions/control-composition','CiFutureCompositionJob');const c=compositionCommitment(extractProductionControlCompositionCommitment(Buffer.from(log)),binding,funded,j.id);check();return c;}
+ need(!step?.some(s=>s.uses==='./.github/actions/control-composition'),'CiFutureCompositionRequired');
+ const rows=log.split('\n').map(l=>l.replace(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z\s+/,'' )).filter(l=>l.startsWith('MEM9_CONTROL_BUILD_COMMITMENT '));need(rows.length===1,'CiFutureControlCommitment');const c=inspectControlBuildCommitment(parse(rows[0].slice('MEM9_CONTROL_BUILD_COMMITMENT '.length)));
  need(c.runId===binding.source.runId&&c.runAttempt===binding.source.runAttempt&&c.sourceRevision===binding.source.mainRevision&&c.sourceTree===binding.source.mainTree&&c.buildJobId===j.id,'CiFutureControlCommitment');check();return c;
 }
 function bundleCheck(bundle,config,scope,sourceRef,openedMs,now){
@@ -187,7 +207,7 @@ function bundleCheck(bundle,config,scope,sourceRef,openedMs,now){
 }
 
 export async function openFutureCiSmokeAcquisition(input,seams={}){
- exact(input,['env','scope','sourceReceipt','host']);need(Object.keys(seams).every(k=>['now','sleep','artifactClient','requestHandler','controlResourceDocker'].includes(k)),'CiFutureSeam');const {env,host,sourceReceipt}=input,now=seams.now??Date.now,sleep=seams.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
+ exact(input,['env','scope','sourceReceipt','host']);need(Object.keys(seams).every(k=>['now','sleep','artifactClient','requestHandler','controlResourceDocker','rootGithubRequest'].includes(k)),'CiFutureSeam');const {env,host,sourceReceipt}=input,now=seams.now??Date.now,sleep=seams.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
  need(typeof now==='function'&&typeof sleep==='function'&&host?.env===env&&typeof host.checkout==='function'&&typeof host.run==='function'&&typeof host.api==='function','CiFutureHost');
  const raw=env.MEM9_CI_ACQUISITION_CONFIG;need(typeof raw==='string'&&Buffer.byteLength(raw)<=65536,'CiFutureConfigRequired');const config=inspectFutureAcquisitionConfig(parse(raw));exact(input.scope,['route','phase','checkpoint']);const scope={kind:'target',jobKey:env.GITHUB_JOB,...input.scope},selected=futureAcquisitionScope(config,scope),openedMs=now();currentSource(env,sourceReceipt,config,scope,openedMs);
  const sourceRef={path:env.MEM9_CI_SMOKE_SOURCE_RECEIPT,sha256:env.MEM9_CI_SMOKE_SOURCE_RECEIPT_HASH};need(sourceRef.path===join(env.RUNNER_TEMP,'mem9-ci-smoke-source','receipt.json'),'CiFutureSourcePath');same(await read(sourceRef),sourceReceipt,'CiFutureSource');same(await host.checkout(),sourceReceipt.checkout,'CiFutureCheckout');
@@ -205,20 +225,64 @@ export async function openFutureCiSmokeAcquisition(input,seams={}){
   const exchange=await rendezvous({env,selected,request,check,expiresMs,now,sleep,saveRecord,requestHandler:seams.requestHandler});handshakeRefs=exchange.records;const response=parse(exchange.raw);
   accepted=verifyFutureAllowance(response,{config,scope,startupReceipt,binding,requestHash,maximumExpiresMs:expiresMs,now:now()});allowanceRef=await saveRecord('allowance',exchange.raw);
   need(!accepted.consumer.reader&&Array.isArray(accepted.consumer.profiles),'CiFutureTargetGrant');
-  if(accepted.consumer.profiles.some(p=>p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD')){control=await controlCommitment(host,binding,check);controlRef=await saveRecord('control',control);}
+  if(accepted.consumer.profiles.some(p=>p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD')){control=await controlCommitment(host,binding,check,accepted.funded);controlRef=await saveRecord('control',control);}
   usage=localJournal(join(dir,prefix+'-local.ndjson'),zero(),accepted.consumer.localBudget);
   if(postApply)usage.charge({...zero(),logicalBytes:NONROOT_POSTAPPLY_LIMITS.readerLocalBytes});
  }catch(e){await hold();throw e;}
- const paid=accepted.consumer,machine=profileMachine(paid.profiles,config,control,n=>usage.charge({ecrRequests:0,logicalBytes:n,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0}),paid.controlCapacity),controlWire=paid.controlCapacity?createFutureControlWireMeter(paid.controlCapacity):null,current=()=>{check();need(!held&&!closed&&now()<accepted.expiresMs,'CiFutureClosed');immutable(claimRef);immutable(requestRef);immutable(allowanceRef);};let wire=0;
+ const paid=accepted.consumer,machine=profileMachine(paid.profiles,config,control,n=>usage.charge({ecrRequests:0,logicalBytes:n,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0}),paid.controlCapacity),controlWire=paid.controlCapacity?createFutureControlWireMeter(paid.controlCapacity):null,current=()=>{check();need(!held&&!closed&&now()<accepted.expiresMs,'CiFutureClosed');immutable(claimRef);immutable(requestRef);immutable(allowanceRef);};let wire=0,rootWork=null,preparedOriginals=null;
+ const beginRootWork=()=>{
+  current();need(paid.rootRequest?.version===2&&descriptorSeen&&controlBuildRef&&resourceAllocation&&!active&&!rootStarted,'CiFutureRootRequestOrder');
+  const quote=verifyProspectiveCiRootRequestPolicy(paid.rootRequest,scope);rootStarted=true;active={root:true};
+  const debit={...zero(),logicalBytes:quote.roundedLocalBytes};usage.charge(debit);const position=usage.checkpoint();
+  rootWork={quote,debit,position,used:Object.fromEntries(Object.keys(quote.work).map(k=>[k,0])),checkpoints:[],requestHash:null};
+ };
+ const consumeRoot=(stage,n)=>{
+  need(rootWork&&!closed&&!held&&now()<accepted.expiresMs&&Object.hasOwn(rootWork.used,stage)&&integer(n),'CiFutureRootCredit');
+  need(rootWork.used[stage]+n<=rootWork.quote.work[stage],'CiFutureRootCreditExceeded');rootWork.used[stage]+=n;
+ };
+ const rootCheckpoint=(stage,isHeld=false)=>{
+  const r=rootWork;need(r&&r.checkpoints.length<CI_ROOT_COST_MODEL.checkpointCount,'CiFutureRootCheckpoint');
+  r.checkpoints.push({version:1,claimRef,scopeHash:hash(scope),catalogHash:hash(r.quote),requestHash:r.requestHash,sequence:r.checkpoints.length+1,stage,used:{...r.used},previousHash:r.checkpoints.length?hash(r.checkpoints.at(-1)):null,held:isHeld});
+ };
+ const writeRootAccounting=async isHeld=>{
+  const r=rootWork;if(!r||r.accountingAttempted)return r?.accountingRef;
+  const bytes=6*r.quote.records.accounting;
+  need(r.used.records+bytes<=r.quote.work.records,'CiFutureRootCreditExceeded');r.used.records+=bytes;
+  if(isHeld)rootCheckpoint(r.requestHash?'transport':'selection',true);else{rootCheckpoint('records');rootCheckpoint('cleanup');}
+  r.accountingAttempted=true;
+  r.accountingRef=await saveRecord('root-local-accounting',{version:1,claimRef,scopeHash:hash(scope),catalogHash:hash(r.quote),debitSequence:r.position.sequence,journalPrefixHash:r.position.prefixHash,debit:r.debit,checkpoints:r.checkpoints});return r.accountingRef;
+ };
  return Object.freeze({authority:false,...(paid.controlCapacity?{controlCapacity:paid.controlCapacity}:{}),authorizationSeed:Object.freeze({kind:'production-data-release',descriptor:config.target.descriptor,descriptorHash:config.startup.descriptorHash,proofHash:config.startup.proofHash,parameterVersion:config.target.parameterVersion}),
   rootAuditReadBinding(){current();need(paid.profiles.filter(p=>p.kind==='OWNER_ROOT_ARTIFACT_FROM_FUNDED_CHECKPOINT'&&p.late.checkpoint===scope.checkpoint).length===1,'CiFutureRootReadNotFunded');return Object.freeze({scope,grantSetId:config.startup.grantSetId,storage:config.storage,ownerRoot:config.ownerRoot,proofHash:config.startup.proofHash,descriptorHash:config.startup.descriptorHash,parameterVersion:config.target.parameterVersion,runId:source.run.id,runAttempt:source.run.attempt,...(scope.checkpoint==='deploy-prod/23'?{targetFunding:{grantSetId:accepted.funded.grantSetId,grantHash:accepted.funded.grantHash,planHash:accepted.funded.planHash,debitEventHash:accepted.funded.debitEventHash,controlSource:accepted.funded.source,template:accepted.funded.owner.delivery.template,slot:accepted.funded.owner.delivery.slots.find(s=>s.kind==='target-window'),issuedMs:accepted.funded.issuedMs,notAfter:Math.min(accepted.funded.notAfter,accepted.expiresMs)}}:{})});},
+  async prepareRootRequestOriginals({archive,deploymentSource,source:givenSource}){try{
+   need(scope.checkpoint==='deploy-prod/23','CiFutureRootOriginalScope');same(givenSource,source,'CiFutureRootRequestSource');beginRootWork();
+   const rows=await selectCiRootControlOriginals({archive,deploymentSource,source:givenSource,chargeLocal:n=>consumeRoot('selection',n)});current();
+   preparedOriginals={rows,deploymentHash:hash(deploymentSource),sourceHash:hash(givenSource)};rootCheckpoint('selection');return rows;
+  }catch(e){try{await writeRootAccounting(true);}finally{await hold();}throw e;}},
+  rootRequestPolicyVersion(){return paid.rootRequest?.version??null;},
   async requestRootAudit(input){try{
-   current();need(paid.rootRequest&&descriptorSeen&&controlBuildRef&&resourceAllocation&&!active&&!rootStarted,'CiFutureRootRequestOrder');rootStarted=true;active={root:true};
+   current();const prospective=paid.rootRequest?.version===2;
+   if(prospective){
+    if(scope.checkpoint==='deploy-prod/23')need(rootWork&&preparedOriginals&&hash(input.controlOriginals)===hash(preparedOriginals.rows)&&hash(input.deploymentSource)===preparedOriginals.deploymentHash&&hash(input.source)===preparedOriginals.sourceHash,'CiFutureRootOriginalBinding');
+    else beginRootWork();
+    need(active?.root&&!rootWork.submitted,'CiFutureRootRequestOrder');rootWork.submitted=true;
+   }else{need(paid.rootRequest&&descriptorSeen&&controlBuildRef&&resourceAllocation&&!active&&!rootStarted,'CiFutureRootRequestOrder');rootStarted=true;active={root:true};}
    const b=nonrootAuthorizationBindings(input.context);need(b.proofHash===config.startup.proofHash&&hash(input.records.proof)===b.proofHash&&input.phase===scope.phase,'CiFutureRootRequestProof');same(input.source,source,'CiFutureRootRequestSource');
-   const records=[],rootSave=async(name,value)=>{const bytes=value instanceof Uint8Array?value.length:Buffer.byteLength(JSON.stringify(value));usage.charge({...zero(),logicalBytes:bytes});const ref=await saveRecord(name,value);records.push({name,ref});return ref;};
-   const result=await submitCiRootRequest({parameter:input.parameter,source:input.source,deploymentSource:input.deploymentSource,targetObservation:input.targetObservation},{env,config,scope,binding,startupReceipt,check:current,chargeLocal:n=>usage.charge({...zero(),logicalBytes:n}),save:rootSave,deadlineMs:Math.min(expiresMs,accepted.expiresMs),requestHandler:seams.requestHandler,sleep});
-   wire+=result.observedWireBytes;rootExchangeRef=await saveRecord('root-exchange-complete',{version:1,...result,records});active=null;return result;
-  }catch(e){await hold();throw e;}},
+   const records=[],rootSave=async(name,value)=>{
+    if(prospective){
+     need(Buffer.byteLength(join(dir,prefix+'-'+name+'.json'))<=CI_ROOT_COST_MODEL.referencePathBytes,'CiRootReplayPathBound');
+     if(value instanceof Uint8Array)consumeRoot(name==='root-request'?'request':'transport',value.length);
+     else{const r=rootWork.quote.records,key={'root-put-intent':'putIntent','root-put-dispatch':'putDispatch','root-put-complete':'putComplete','root-request-held':'held'}[name]??(/^root-ready-[1-9][0-9]*-intent$/.test(name)?'readyIntent':/^root-ready-[1-9][0-9]*-complete$/.test(name)?'readyComplete':null);need(key,'CiFutureRootRecord');consumeRoot(key==='held'?'cleanup':'records',6*r[key]);}
+    }else{const bytes=value instanceof Uint8Array?value.length:Buffer.byteLength(JSON.stringify(value));usage.charge({...zero(),logicalBytes:bytes});}
+    const written=await saveRecord(name,value),ref=prospective?{path:name+'.json',sha256:written.sha256}:written;records.push({name,ref});if(prospective&&name==='root-request'){rootWork.requestHash=ref.sha256;rootCheckpoint('request');}return ref;
+   };
+   const result=await submitCiRootRequest({parameter:input.parameter,source:input.source,deploymentSource:input.deploymentSource,targetObservation:input.targetObservation,...(input.controlOriginals?{controlOriginals:input.controlOriginals}:{})},{env,config,scope,binding,startupReceipt,check:current,chargeLocal:n=>usage.charge({...zero(),logicalBytes:n}),...(prospective?{chargeWork:consumeRoot}:{}),save:rootSave,deadlineMs:Math.min(expiresMs,accepted.expiresMs),requestHandler:seams.requestHandler,...(seams.rootGithubRequest?{githubRequest:seams.rootGithubRequest}:{}),sleep});
+   wire+=result.observedWireBytes;let localAccountingRef;
+   if(prospective){
+    consumeRoot('records',6*rootWork.quote.records.exchange);rootCheckpoint('transport');const ref=await writeRootAccounting(false);localAccountingRef={path:'root-local-accounting.json',sha256:ref.sha256};
+   }
+   rootExchangeRef=await saveRecord('root-exchange-complete',{version:prospective?2:1,...result,records,...(prospective?{localAccountingRef}:{})});active=null;return result;
+  }catch(e){try{await writeRootAccounting(true);}finally{await hold();}throw e;}},
   async allocateControlResources(){try{current();need(descriptorSeen&&!active&&controlBuildRef&&!resourceAllocation,'CiFutureResourceOrder');active={resources:true};const built=await read(controlBuildRef);
    resourceExpected={claimRef,scope,bindingHash:hash(binding),sourceReceiptRef:sourceRef,configHash:sha(raw),run:{repository:source.repository,runId:source.run.id,runAttempt:source.run.attempt,jobKey:scope.jobKey,revision:source.checkout.sha},rootDigest:built.rootDigest,configDigest:built.configDigest};
    resourceAllocation=await allocateCiSmokeControlResources({env,expected:resourceExpected},{now,...(seams.controlResourceDocker?{docker:seams.controlResourceDocker}:{})});active=null;return resourceAllocation;
@@ -229,10 +293,18 @@ export async function openFutureCiSmokeAcquisition(input,seams={}){
   }catch(e){await hold();throw e;}},
   async bindControlBuild({context,records,build}){try{current();need(descriptorSeen&&!active&&control&&!controlBuildRef,'CiFutureControlBindOrder');active={binding:true};
    const b=nonrootAuthorizationBindings(context);need(b.proofHash===config.startup.proofHash&&hash(records.proof)===b.proofHash,'CiFutureControlProof');assertNonrootDataRelease(context,{current:config.target.descriptor,controlSourceTree:config.startup.source.candidateTree,now:now()});
-   const contract=records.proof.taskPlan.deployedControlBuildContract;same(build.contract,contract,'CiFutureControlContract');same(build.commitment,control,'CiFutureControlCommitment');same(build.capture.source,source,'CiFutureControlSource');
-   const captured=await captureNonrootControlBuildAction({...build.capture,contract},{...nonrootArchiveResolvers(records.proofArchive),expected:{sourceContext:build.sourceContext}});same(captured,build.capture,'CiFutureControlCapture');
-   need(build.completion.observedMs<=now(),'CiFutureControlCompletion');const completion=completeNonrootControlBuildAction(captured,{contract,run:build.completion.run,job:build.completion.job,buildLog:build.buildLog,now:build.completion.observedMs});same(completion,build.completion,'CiFutureControlCompletion');
-   const metadata=parse(captured.metadata),value={rootDigest:captured.outputDigest,configDigest:metadata['containerimage.config.digest'],contractHash:hash(contract),captureHash:hash(captured),completionHash:hash(completion),jobId:control.buildJobId,sourceTree:control.sourceTree};
+   const contract=records.proof.taskPlan.deployedControlBuildContract,native=fundedComposition(accepted.funded);same(build.contract,contract,'CiFutureControlContract');same(build.commitment,control,'CiFutureControlCommitment');
+   need((contract.version===2)===Boolean(native),'CiFutureControlRecipeVersion');need(build.completion.observedMs<=now(),'CiFutureControlCompletion');let captured,completion,image;
+   if(native){
+    same(build.source,source,'CiFutureControlSource');const checked=completeProductionControlCompositionBuildCapture(build.envelopeBytes,{commitment:control,contract,source,run:build.completion.run,job:build.completion.job,buildLog:build.buildLog,metadataReads:{reserveLocal:charge=>usage.charge(charge)},now:build.completion.observedMs});
+    same(checked.plan,native,'CiFutureControlPlan');captured=checked.capture;completion=checked.completion;image=captured.image;
+   }else{
+    same(build.capture.source,source,'CiFutureControlSource');captured=await captureNonrootControlBuildAction({...build.capture,contract},{...nonrootArchiveResolvers(records.proofArchive),expected:{sourceContext:build.sourceContext}});
+    completion=completeNonrootControlBuildAction(captured,{contract,run:build.completion.run,job:build.completion.job,buildLog:build.buildLog,now:build.completion.observedMs});
+    image={rootDigest:captured.outputDigest,configDigest:parse(captured.metadata)['containerimage.config.digest']};
+   }
+   same(captured,build.capture,'CiFutureControlCapture');same(completion,build.completion,'CiFutureControlCompletion');
+   const value={rootDigest:image.rootDigest,configDigest:image.configDigest,contractHash:hash(contract),captureHash:hash(captured),completionHash:hash(completion),jobId:native?control.jobId:control.buildJobId,sourceTree:native?control.mainTree:control.sourceTree};
    current();controlBuildRef=await saveRecord('control-build',value);machine.bind(value);active=null;return Object.freeze({rootDigest:value.rootDigest,repositoryName:'mem9-on-aws/bootstrap',account:config.account,region:config.region});
   }catch(e){await hold();throw e;}},
   async beforeRead(action,input){try{current();need(!active,'CiFutureConcurrentRead');active={};const request=copyNonrootJson(input);if(!identitySeen)need(action==='GetCallerIdentity','CiFutureIdentityFirst');else if(!descriptorSeen)need(action==='GetParameters'&&hash(request)===hash({Names:[parameterName],WithDecryption:true}),'CiFutureDescriptorFirst');
@@ -258,6 +330,8 @@ export async function openFutureCiSmokeAcquisition(input,seams={}){
 /** Same-job local adoption of a successful completed slot. This does not call
  * GitHub/AWS, reopen the startup capability, or add another funding counter. */
 export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,knownParameter}){
+ let rootSnapshot,rootReplayConsume,earlyLocalClaimRef,earlyLocalPrefix,earlyLocalDirectory;
+ try{
  need(env.GITHUB_JOB==='deploy-prod'&&env.STAGE==='prod','CiFutureLocalJob');const configRaw=env.MEM9_CI_ACQUISITION_CONFIG;need(typeof configRaw==='string'&&Buffer.byteLength(configRaw)<=65536,'CiFutureConfigRequired');const config=inspectFutureAcquisitionConfig(parse(configRaw)),done=await read(completionRef);
  exact(done,['version','kind','claimRef','requestRef','allowanceRef','handshakeRefs','controlRef','controlBuildRef','reads','localRef','localUsed','bundleRef','observedWireBytes','completedMs','ownerRefund',...(done.version>=2?['resourceReceiptRef']:[]),...(done.version===3?['rootExchangeRef']:[])]);need([1,2,3].includes(done.version)&&done.kind==='ci-future-acquisition-complete'&&done.ownerRefund===0,'CiFutureLocalCompletion');same(done.bundleRef,bundleRef,'CiFutureLocalBundle');
  const claim=await read(done.claimRef);exact(claim,['version','kind','scope','binding','startupReceipt','sourceReceiptRef','configHash','openedMs','expiresMs','requestHash','ownerRefund']);need(claim.version===1&&claim.kind==='ci-future-acquisition-claim'&&claim.ownerRefund===0&&claim.configHash===sha(configRaw),'CiFutureLocalClaim');
@@ -268,6 +342,7 @@ export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,
  same(request,{version:1,kind:'ci-prepaid-acquisition-request',bindingHash:hash(binding),scope,nonce:claim.startupReceipt.nonce,artifactId:claim.startupReceipt.artifactId,artifactDigest:claim.startupReceipt.artifactDigest,sourceReceiptHash:claim.sourceReceiptRef.sha256},'CiFutureLocalRequest');need(hash(request)===claim.requestHash,'CiFutureLocalRequest');
  need(lstatSync(done.allowanceRef.path).size<=selected.responseBytes,'CiFutureLocalResponseCap');
  const accepted=verifyFutureAllowance(response,{config,scope,startupReceipt:claim.startupReceipt,binding,requestHash:claim.requestHash,maximumExpiresMs:Math.min(source.expiresMs,claim.expiresMs),now:Date.now()}),paid=accepted.consumer;
+ const rootQuote=paid.rootRequest?.version===2?verifyProspectiveCiRootRequestPolicy(paid.rootRequest,scope):null;
  const parameter=Object.fromEntries(['Name','Type','ARN','Version','Value'].map(k=>[k,knownParameter?.[k]]));same(bundle.parameter,parameter,'CiFutureLocalParameter');const phase=bundleCheck(bundle,config,scope,claim.sourceReceiptRef,claim.openedMs,Date.now());
  const requiresResources=Boolean(bundle.controlCache)||paid.profiles.some(p=>p.kind==='CONTROL_ARTIFACT_FROM_AUTHENTICATED_BUILD'&&p.late.artifact!=='private-capsule');
  need(requiresResources?done.version>=2&&bundle.controlCache:done.version===1,'CiFutureResourcesRequired');need(Boolean(paid.rootRequest)===(done.version===3),'CiFutureRootReplayRequired');
@@ -285,15 +360,36 @@ export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,
   if(i===done.handshakeRefs.length-1)need(r.responseHash===done.allowanceRef.sha256&&r.responseBytes===lstatSync(done.allowanceRef.path).size,'CiFutureLocalHandshake');
   for(const [ref,suffix]of [[pair.intent,'handshake-intent-'],[pair.result,'handshake-result-']]){const name=prefix+'-'+suffix+(i+1)+'.json';need(ref.path===join(dir,name),'CiFutureLocalPath');expectedNames.add(name);refs.push(ref);}
  }
- let control=null;if(done.controlRef){control=inspectControlBuildCommitment(await read(done.controlRef));need(control.runId===binding.source.runId&&control.runAttempt===binding.source.runAttempt&&control.sourceRevision===binding.source.mainRevision&&control.sourceTree===binding.source.mainTree,'CiFutureLocalControl');need(done.controlRef.path===join(dir,prefix+'-control.json'),'CiFutureLocalPath');expectedNames.add(prefix+'-control.json');refs.push(done.controlRef);}
- const machine=profileMachine(paid.profiles,config,control,()=>{},paid.controlCapacity),controlWire=paid.controlCapacity?createFutureControlWireMeter(paid.controlCapacity):null;need(Array.isArray(done.reads)&&done.reads.length>=2&&done.reads.length<=65536,'CiFutureLocalReads');let wire=0,who=false,live=false,rootArchiveHash,rootReads=0;
+ let control=null;if(done.controlRef){
+  if(fundedComposition(accepted.funded))control=compositionCommitment(await read(done.controlRef),binding,accepted.funded);
+  else{control=inspectControlBuildCommitment(await read(done.controlRef));need(control.runId===binding.source.runId&&control.runAttempt===binding.source.runAttempt&&control.sourceRevision===binding.source.mainRevision&&control.sourceTree===binding.source.mainTree,'CiFutureLocalControl');}
+  need(done.controlRef.path===join(dir,prefix+'-control.json'),'CiFutureLocalPath');expectedNames.add(prefix+'-control.json');refs.push(done.controlRef);
+ }
+ const machine=profileMachine(paid.profiles,config,control,()=>{},paid.controlCapacity),controlWire=paid.controlCapacity?createFutureControlWireMeter(paid.controlCapacity):null;need(Array.isArray(done.reads)&&done.reads.length>=2&&done.reads.length<=65536,'CiFutureLocalReads');let wire=0,who=false,live=false,rootArchiveHash,rootReads=0,rootPaid;
  if(done.rootExchangeRef){
-  need(done.rootExchangeRef.path===join(dir,prefix+'-root-exchange-complete.json'),'CiFutureLocalPath');refs.push(done.rootExchangeRef);expectedNames.add(prefix+'-root-exchange-complete.json');
-  const exchange=await read(done.rootExchangeRef);exact(exchange,['version','archiveHash','requestRef','observedWireBytes','records']);need(exchange.version===1&&hex(exchange.archiveHash)&&Array.isArray(exchange.records)&&exchange.records.length<=4+3*CI_ROOT_REQUEST_POLICY.readyCalls,'CiFutureRootReplay');
-  const rows=[];for(const r of exchange.records){exact(r,['name','ref']);need(/^(?:root-request|root-put-(?:intent|dispatch|complete)|root-ready-[1-9][0-9]*-(?:intent|response|complete))$/.test(r.name)&&r.ref.path===join(dir,prefix+'-'+r.name+'.json'),'CiFutureRootReplayPath');
-   const bytes=await smokePrivateRead(r.ref.path,CI_ROOT_REQUEST_POLICY.requestBytes);rows.push({name:r.name,ref:r.ref,bytes});refs.push(r.ref);need(!expectedNames.has(prefix+'-'+r.name+'.json'),'CiFutureRootReplayDuplicate');expectedNames.add(prefix+'-'+r.name+'.json');
+  if(rootQuote){
+   rootPaid=replayLocal(done.localRef,zero(),paid.localBudget,{...zero(),logicalBytes:rootQuote.roundedLocalBytes});same(rootPaid.used,done.localUsed,'CiFutureLocalUsage');need(rootPaid.matches.length>0,'CiFutureRootPrepayment');
+   earlyLocalDirectory=dir;earlyLocalPrefix=prefix+'-local-replay-'+(scope.phase==='presst'?'sst':'configure');
+   earlyLocalClaimRef=await save(dir,earlyLocalPrefix+'-claim',{version:1,kind:'ci-future-local-replay',completionRef,bundleRef,scope,startingLocalUsed:rootPaid.used,expiresMs:Math.min(claim.expiresMs,source.expiresMs,config.startup.notAfter,accepted.expiresMs,phase.expiresMs),ownerRefund:0});
+   let consumed=0;
+   rootReplayConsume=n=>{need(integer(n)&&consumed+n<=rootQuote.work.replay,'CiFutureRootReplayBudget');consumed+=n;};
+   rootSnapshot=createCiRootReplaySnapshot({directory:dir,prefix,scope,consume:rootReplayConsume});
   }
-  const verified=verifyCiRootExchange(exchange,rows,{config,scope,binding,startupReceipt:claim.startupReceipt,openedMs:claim.openedMs,completedMs:done.completedMs,deadlineMs:Math.min(claim.expiresMs,accepted.expiresMs),deploymentSource:bundle.deploymentSource});
+  need(done.rootExchangeRef.path===join(dir,prefix+'-root-exchange-complete.json'),'CiFutureLocalPath');if(!rootSnapshot)refs.push(done.rootExchangeRef);expectedNames.add(prefix+'-root-exchange-complete.json');
+  const exchange=rootSnapshot?parse(rootSnapshot.read(done.rootExchangeRef)):await read(done.rootExchangeRef);exact(exchange,['version','archiveHash','requestRef','observedWireBytes','records',...(rootQuote?['localAccountingRef']:[])]);need(exchange.version===(rootQuote?2:1)&&hex(exchange.archiveHash)&&Array.isArray(exchange.records)&&exchange.records.length<=4+3*CI_ROOT_REQUEST_POLICY.readyCalls,'CiFutureRootReplay');
+  const rows=[];for(const r of exchange.records){exact(r,['name','ref']);need(/^(?:root-request|root-put-(?:intent|dispatch|complete)|root-ready-[1-9][0-9]*-(?:intent|response|complete))$/.test(r.name)&&r.ref.path===(rootQuote?r.name+'.json':join(dir,prefix+'-'+r.name+'.json')),'CiFutureRootReplayPath');
+   const physicalRef=rootQuote?{path:join(dir,prefix+'-'+r.ref.path),sha256:r.ref.sha256}:r.ref;
+   const bytes=rootSnapshot?rootSnapshot.read(physicalRef):await smokePrivateRead(r.ref.path,CI_ROOT_REQUEST_POLICY.requestBytes);rows.push({name:r.name,ref:r.ref,bytes});if(!rootSnapshot)refs.push(r.ref);need(!expectedNames.has(prefix+'-'+r.name+'.json'),'CiFutureRootReplayDuplicate');expectedNames.add(prefix+'-'+r.name+'.json');
+  }
+  if(rootQuote){
+   need(exchange.localAccountingRef.path==='root-local-accounting.json','CiFutureRootReplayPath');expectedNames.add(prefix+'-root-local-accounting.json');
+   const accounting=parse(rootSnapshot.read({path:join(dir,prefix+'-'+exchange.localAccountingRef.path),sha256:exchange.localAccountingRef.sha256}));exact(accounting,['version','claimRef','scopeHash','catalogHash','debitSequence','journalPrefixHash','debit','checkpoints']);
+   need(accounting.version===1&&rootPaid.matches.some(r=>r.sequence===accounting.debitSequence&&r.prefixHash===accounting.journalPrefixHash),'CiFutureRootPrepayment');
+   same(accounting.claimRef,done.claimRef,'CiFutureRootPrepayment');need(accounting.scopeHash===hash(scope)&&accounting.catalogHash===hash(rootQuote),'CiFutureRootPrepayment');
+   const accountingResult=verifyCiRootCostCheckpoints(accounting.checkpoints,{claimRef:done.claimRef,scopeHash:hash(scope),requestHash:exchange.requestRef.sha256,debit:accounting.debit},{checkpoint:scope.checkpoint});need(!accountingResult.held,'CiFutureRootPrepayment');
+   rootReplayConsume(rootQuote.replay.decoderLocalBytes);
+  }
+  const verified=verifyCiRootExchange(exchange,rows,{config,scope,binding,startupReceipt:claim.startupReceipt,openedMs:claim.openedMs,completedMs:done.completedMs,deadlineMs:Math.min(claim.expiresMs,accepted.expiresMs),deploymentSource:bundle.deploymentSource,...(rootQuote?{rootPolicy:paid.rootRequest}:{})});
   wire+=verified.observedWireBytes;rootArchiveHash=verified.archiveHash;
  }
  if(done.controlBuildRef){const built=await read(done.controlBuildRef),deployed=bundle.deploymentSource?.deployedControlBuild;need(deployed&&built.rootDigest===deployed.image.rootDigest&&built.configDigest===deployed.image.configDigest&&built.contractHash===deployed.contractHash&&built.jobId===deployed.workflow.jobId&&built.sourceTree===deployed.source.tree,'CiFutureLocalControlBuild');machine.bind(built);need(done.controlBuildRef.path===join(dir,prefix+'-control-build.json'),'CiFutureLocalPath');expectedNames.add(prefix+'-control-build.json');refs.push(done.controlBuildRef);}
@@ -307,14 +403,15 @@ export async function openFutureCiSmokeLocalReplay({env,completionRef,bundleRef,
   const value=project(intent.action,result.value,intent.request,config);same(value,result.value,'CiFutureLocalProjection');machine.complete(choice.index,intent.request,value);if(intent.action==='S3BlobGet')need('sha256:'+result.responseHash===intent.request.layerDigest,'CiFutureBlobHash');if(intent.action==='GetCallerIdentity')who=true;if(intent.action==='GetParameters'&&intent.request.Names.includes(parameterName))live=true;
   for(const[ref,suffix]of [[pair.intentRef,'read-'],[pair.resultRef,'result-']]){const name=prefix+'-'+suffix+(i+1)+'.json';need(ref.path===join(dir,name),'CiFutureLocalPath');expectedNames.add(name);refs.push(ref);}
  }
- need(who&&live&&wire===done.observedWireBytes&&wire<=paid.budget.httpBodyBytes&&(!paid.rootRequest||rootReads===1),'CiFutureLocalCharge');const used=replayLocal(done.localRef,zero(),paid.localBudget);same(used,done.localUsed,'CiFutureLocalUsage');
+ need(who&&live&&wire===done.observedWireBytes&&wire<=paid.budget.httpBodyBytes&&(!paid.rootRequest||rootReads===1),'CiFutureLocalCharge');const used=rootPaid?.used??replayLocal(done.localRef,zero(),paid.localBudget);same(used,done.localUsed,'CiFutureLocalUsage');
  if(bundleRef.path===join(dir,prefix+'-bundle.json'))expectedNames.add(prefix+'-bundle.json');
  const names=(await readdir(dir)).filter(n=>n.startsWith(prefix+'-')&&!n.startsWith(prefix+'-local-replay-'));need(names.length===expectedNames.size&&names.every(n=>expectedNames.has(n)),'CiFutureLocalUnsettled');
- const expiresMs=Math.min(claim.expiresMs,source.expiresMs,config.startup.notAfter,accepted.expiresMs,phase.expiresMs),identity=hash(source.current),check=()=>{need(Date.now()<expiresMs&&env.MEM9_CI_ACQUISITION_CONFIG===configRaw,'CiFutureLocalExpired');currentSource(env,source,config,scope,Date.now());need(hash(source.current)===identity,'CiFutureLocalSource');for(const ref of refs)immutable(ref);};check();
- const localPrefix=prefix+'-local-replay-'+(scope.phase==='presst'?'sst':'configure'),claimRef=await save(dir,localPrefix+'-claim',{version:1,kind:'ci-future-local-replay',completionRef,bundleRef,scope,startingLocalUsed:used,expiresMs,ownerRefund:0}),usage=localJournal(join(dir,localPrefix+'.ndjson'),used,paid.localBudget);let closed=false;
- const current=()=>{need(!closed,'CiFutureLocalClosed');check();};return Object.freeze({authority:false,expiresMs,...(paid.controlCapacity?{controlCapacity:paid.controlCapacity}:{}),reserveLocal(value){try{current();return usage.charge(value);}catch(e){closed=true;usage.close();throw e;}},async finish(){current();
+ const expiresMs=Math.min(claim.expiresMs,source.expiresMs,config.startup.notAfter,accepted.expiresMs,phase.expiresMs),identity=hash(source.current),contextCheck=()=>{need(Date.now()<expiresMs&&env.MEM9_CI_ACQUISITION_CONFIG===configRaw,'CiFutureLocalExpired');currentSource(env,source,config,scope,Date.now());need(hash(source.current)===identity,'CiFutureLocalSource');},check=()=>{contextCheck();if(rootQuote)rootReplayConsume(rootQuote.journal.rowBytes);for(const ref of refs)immutable(ref);};check();
+ const localPrefix=prefix+'-local-replay-'+(scope.phase==='presst'?'sst':'configure'),claimRef=earlyLocalClaimRef??await save(dir,localPrefix+'-claim',{version:1,kind:'ci-future-local-replay',completionRef,bundleRef,scope,startingLocalUsed:used,expiresMs,ownerRefund:0}),usage=localJournal(join(dir,localPrefix+'.ndjson'),used,paid.localBudget);let closed=false;
+ const current=()=>{need(!closed,'CiFutureLocalClosed');check();};return Object.freeze({authority:false,expiresMs,...(paid.controlCapacity?{controlCapacity:paid.controlCapacity}:{}),reserveLocal(value){try{current();return usage.charge(value);}catch(e){closed=true;usage.close();rootSnapshot?.close();throw e;}},async finish(){try{current();if(rootSnapshot){rootSnapshot.finish();contextCheck();}
   const capture=config.version===3&&scope.phase==='presst';if(capture)usage.charge({...zero(),logicalBytes:NONROOT_POSTAPPLY_LIMITS.captureLocalBytes});
   const localRef=usage.finish();closed=true;
   if(capture)await writePostApplyCaptureAllocation({env,config,binding,scope,localRef,claimRef,localBudget:paid.localBudget,localUsed:usage.used,expiresMs});
-  return {authority:false,receiptRef:await save(dir,localPrefix+'-complete',{version:1,kind:'ci-future-local-complete',claimRef,completionRef,bundleRef,localRef,localUsed:usage.used,ownerRefund:0,completedMs:Date.now()})};},async hold(){closed=true;usage.close();try{await save(dir,localPrefix+'-held',{version:1,claimRef,ownerRefund:0});}catch(e){if(e.code!=='EEXIST')throw e;}}});
+  return {authority:false,receiptRef:await save(dir,localPrefix+'-complete',{version:1,kind:'ci-future-local-complete',claimRef,completionRef,bundleRef,localRef,localUsed:usage.used,ownerRefund:0,completedMs:Date.now()})};}catch(e){closed=true;usage.close();rootSnapshot?.close();try{await save(dir,localPrefix+'-held',{version:1,claimRef,ownerRefund:0});}catch(writeError){if(writeError.code!=='EEXIST')throw writeError;}throw e;}},async hold(){closed=true;usage.close();rootSnapshot?.close();try{await save(dir,localPrefix+'-held',{version:1,claimRef,ownerRefund:0});}catch(e){if(e.code!=='EEXIST')throw e;}}});
+ }catch(e){rootSnapshot?.close();if(earlyLocalClaimRef)try{await save(earlyLocalDirectory,earlyLocalPrefix+'-held',{version:1,claimRef:earlyLocalClaimRef,ownerRefund:0});}catch(writeError){if(writeError.code!=='EEXIST')throw writeError;}throw e;}
 }

@@ -1,4 +1,4 @@
-import {test} from 'node:test';
+import {test} from 'vitest';
 import assert from 'node:assert/strict';
 import {createTargetProbe,decodeTargetProbeSample} from './lib/production-nonroot-target-probe.mjs';
 const nonce='a'.repeat(64),deadlineMs=Date.now()+35000;

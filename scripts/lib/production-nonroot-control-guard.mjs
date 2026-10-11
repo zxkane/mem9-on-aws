@@ -1,3 +1,4 @@
+import {inspectProductionControlBuildContract} from './production-control-composition-recipe.mjs';
 /** Fixed, credential-free guard rehearsal against the real CONTROL image.
  * Allowed branches must enter the ORIGINAL application and reject missing
  * configuration locally. No loader hook, replacement module, or business
@@ -31,7 +32,7 @@ async function prepare(value,options){
  const v=copyNonrootJson(value);exact(v,['contract','actualMain','resolvedLaunches']);
  const expected=copyNonrootJson(options.expected);exact(expected,['contractHash','actualMainHash','resolvedLaunchesHash']);
  same(hash(v.contract),expected.contractHash);same(hash(v.actualMain),expected.actualMainHash);same(hash(v.resolvedLaunches),expected.resolvedLaunchesHash);
- const contract=inspectNonrootRecord('ControlBuildContractV1',v.contract),main=inspectNonrootRecord('ActualMainV1',v.actualMain);
+ const contract=inspectProductionControlBuildContract(v.contract),main=inspectNonrootRecord('ActualMainV1',v.actualMain);
  const prerequisites=inspectNonrootControlPrerequisites(options.prerequisites,{controlVerification:options.controlVerification,sourceContext:options.sourceContext});
  const {graph,filesystem}=options.controlVerification,binding=controlImageGraphBinding(graph),{graphHash,...image}=binding;
  same(prerequisites.record.image,image);same(prerequisites.record.sourceClosureHash,hash(contract.guardSource));

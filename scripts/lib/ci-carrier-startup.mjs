@@ -1,3 +1,4 @@
+import {openCarrierLocalCounter,carrierLocalNativeRun,drainCarrierLocalCounter,carrierLocalHost,carrierLocalState,bindCarrierLocalStartup,consumeCarrierLocalCounter,closeCarrierLocalCounter} from './ci-carrier-local-counter.mjs';
 /** R9 carrier startup uses R7's inbox/owner-winner protocol. Artifact names
  * are never locks; only this process's verified upload can win its capability. */
 import {randomBytes} from 'node:crypto';
@@ -17,7 +18,7 @@ export function inspectCarrierWorkerConfig(value){
 }
 export function carrierGithubHost(env,cwd=env.GITHUB_WORKSPACE){
  const safe=Object.fromEntries(['PATH','HOME','GH_TOKEN','GITHUB_TOKEN','GH_HOST','GH_CONFIG_DIR','XDG_CONFIG_HOME','GITHUB_ACTIONS','GITHUB_REPOSITORY','GITHUB_SHA','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'].filter(k=>env[k]!==undefined).map(k=>[k,env[k]]));
- const h=ciSmokeHost(safe,cwd);return {...h,env}; // runtime/OIDC tokens never enter Git/gh children
+ const h=ciSmokeHost(safe,cwd);return {...h,env,runBounded:carrierLocalNativeRun(safe,cwd)}; // runtime/OIDC tokens never enter Git/gh children
 }
 async function artifactClient(env){
  for(const k of ['ACTIONS_RUNTIME_TOKEN','ACTIONS_RESULTS_URL'])need(typeof env[k]==='string'&&env[k].length>0&&env[k]===process.env[k],'CarrierArtifactRuntime');
@@ -28,6 +29,9 @@ async function artifactClient(env){
 export async function openCarrierStartup({config:input,env,host=carrierGithubHost(env)},seams={}){
  need(Object.keys(seams).every(k=>['artifactClient','now','sleep'].includes(k)),'CarrierStartupSeams');
  const config=inspectCarrierWorkerConfig(input),plan=config.plan,t=plan.template;verifyCarrierWorkerDefinition(t,env);
+ const localCounter=t.ciLocalPolicy?openCarrierLocalCounter({config,env,now:seams.now??Date.now}):undefined;
+ try{
+ if(localCounter)host=carrierLocalHost(localCounter,host);
  const now=seams.now??Date.now,sleep=seams.sleep??(ms=>new Promise(r=>setTimeout(r,ms))),openedMs=now(),deadline=Math.min(plan.deadlineMs,openedMs+90000);
  const identity=()=>hash(Object.fromEntries(['GITHUB_REPOSITORY','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB','GITHUB_SHA','GITHUB_WORKFLOW_SHA','GITHUB_WORKFLOW_REF','GITHUB_EVENT_NAME','GITHUB_REF','AWS_PREVIEW_ROLE_ARN'].map(k=>[k,env[k]??null]))),initial=identity();
  const check=()=>{need(identity()===initial&&now()>=openedMs&&now()<deadline,'CarrierStartupExpired');verifyCarrierWorkerDefinition(t,env);};check();
@@ -59,20 +63,35 @@ export async function openCarrierStartup({config:input,env,host=carrierGithubHos
  await statuses(announcement);await current();
  const artifactName='mem9-carrier-start-'+hash(carrierLedgerScope(t));need(!attempted.has(artifactName),'CarrierStartupAlreadyAttempted');attempted.add(artifactName);
  const root=env.RUNNER_TEMP;need(typeof root==='string'&&resolve(root)===root&&await realpath(root)===root&&(await lstat(root)).isDirectory(),'CarrierStartupTemporaryRoot');
- const directory=await mkdtemp(join(root,'mem9-carrier-startup-')),file=join(directory,'claim.json'),nonce=randomBytes(32).toString('hex'),scope={kind:'carrier',checkpoint:'premerge-carrier-build',jobKey:t.source.jobKey},scopeHash=hash({bindingHash,scope});let uploaded,selection;
+ const directory=await mkdtemp(join(root,'mem9-carrier-startup-')),file=join(directory,'claim.json'),nonce=randomBytes(32).toString('hex'),scope={kind:'carrier',checkpoint:'premerge-carrier-build',jobKey:t.source.jobKey},scopeHash=hash({bindingHash,scope});let uploaded,selection,uploadPending=false;
  try{
   const fd=await open(file,'wx',0o600);try{await fd.writeFile(JSON.stringify({nonce,scopeHash}));await fd.sync();}finally{await fd.close();}
-  const client=seams.artifactClient??await artifactClient(env);uploaded=await wait(()=>client.uploadArtifact(artifactName,[file],directory,{retentionDays:2,compressionLevel:0,skipArchive:false}));
+  if(localCounter)carrierLocalState(localCounter).reserveLocal({ecrRequests:0,httpBodyBytes:0,logicalBytes:8*65536,uncompressedBytes:0,processedEntries:0});
+  const client=seams.artifactClient??await artifactClient(env),upload=()=>client.uploadArtifact(artifactName,[file],directory,{retentionDays:2,compressionLevel:0,skipArchive:false});
+  uploaded=await wait(()=>{
+   if(!localCounter)return upload();
+   uploadPending=true;
+   return carrierLocalState(localCounter).capture(async()=>{try{return await upload();}finally{uploadPending=false;}});
+  });
   need(positive(uploaded?.id)&&positive(uploaded.size)&&uploaded.size<=65536&&hex(uploaded.digest),'CarrierStartupUpload');
   const a=await api('actions/artifacts/'+uploaded.id),created=Date.parse(a?.created_at),expiry=Date.parse(a?.expires_at);
   need(a?.id===uploaded.id&&a.name===artifactName&&a.size_in_bytes===uploaded.size&&a.digest==='sha256:'+uploaded.digest&&a.expired===false&&positive(created)&&created>=Math.floor(openedMs/1000)*1000&&created<=now()&&positive(expiry)&&expiry>=plan.deadlineMs,'CarrierStartupArtifact');
   need(a.workflow_run?.id===binding.runId&&a.workflow_run.head_sha===t.source.candidateRevision&&a.workflow_run.head_branch===t.source.candidateRef.slice(11),'CarrierStartupArtifactRun');
   selection=carrierCheckpointSelection(plan,binding,{nonce,scopeHash,artifactId:uploaded.id,artifactDigest:uploaded.digest});await statuses(selection.announcement,true);await current();check();
- }finally{await unlink(file).catch(e=>{if(e.code!=='ENOENT')throw e;});await rmdir(directory);}
- const handle=Object.freeze({kind:'carrier-startup-capability'});caps.set(handle,{config,source,binding,nonce,scopeHash,artifactId:uploaded.id,artifactDigest:uploaded.digest,claimHash:hash(selection.claim),identity,initial,notAfter:plan.deadlineMs,now,consumed:false});return handle;
+ }finally{
+  // A timeout stops waiting; it does not stop the SDK. Retain its input until
+  // the original counter confirms settlement. An unknown drain exits here.
+  if(localCounter&&uploadPending)await drainCarrierLocalCounter(localCounter);
+  await unlink(file).catch(e=>{if(e.code!=='ENOENT')throw e;});await rmdir(directory);
+ }
+ if(localCounter)bindCarrierLocalStartup(localCounter,{config,binding});
+ const handle=Object.freeze({kind:'carrier-startup-capability'});caps.set(handle,{config,source,binding,localCounter,nonce,scopeHash,artifactId:uploaded.id,artifactDigest:uploaded.digest,claimHash:hash(selection.claim),identity,initial,notAfter:plan.deadlineMs,now,consumed:false});return handle;
+ }catch(e){if(localCounter){await drainCarrierLocalCounter(localCounter);closeCarrierLocalCounter(localCounter,{complete:false});}throw e;}
 }
 export function consumeCarrierStartup(handle,configValue){
- const s=caps.get(handle);need(s&&!s.consumed,'CarrierStartupCapability');s.consumed=true;const config=inspectCarrierWorkerConfig(configValue);
+ const s=caps.get(handle);need(s&&!s.consumed,'CarrierStartupCapability');s.consumed=true;try{const config=inspectCarrierWorkerConfig(configValue);
  need(hash(config)===hash(s.config)&&s.identity()===s.initial&&s.now()<s.notAfter,'CarrierStartupCapabilityBinding');
- return Object.freeze({config:s.config,binding:s.binding,source:s.source,receipt:freeze({nonce:s.nonce,scopeHash:s.scopeHash,artifactId:s.artifactId,artifactDigest:s.artifactDigest,claimHash:s.claimHash,notAfter:s.notAfter})});
+ const local=s.localCounter?consumeCarrierLocalCounter(s.localCounter,{config,binding:s.binding}):undefined;
+ return Object.freeze({config:s.config,binding:s.binding,source:s.source,...(local?{localCounter:s.localCounter,local}:{}),receipt:freeze({nonce:s.nonce,scopeHash:s.scopeHash,artifactId:s.artifactId,artifactDigest:s.artifactDigest,claimHash:s.claimHash,notAfter:s.notAfter})});
+ }catch(e){if(s.localCounter)try{closeCarrierLocalCounter(s.localCounter,{complete:false});}catch{}throw e;}
 }

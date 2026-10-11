@@ -8,6 +8,7 @@ import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {CI_SMOKE_POLICY} from './lib/ci-smoke-policy.mjs';
 import {isolateDataRecipe,verifyIsolatedDataRecipe,buildCiSmokePromotionRoutes,buildCiSmokeImageJob,buildCiSmokeSourceJobs,verifyCiSmokePromotionRoutes,describeCiSmokePromotionPins,ciSmokeSourceClosure} from './lib/ci-smoke-isolation.mjs';
 import {createControlSourceContext} from './lib/production-control-source.mjs';
+import {controlCompositionActionDefinition,controlCompositionActionStep} from './lib/production-control-composition-job.mjs';
 
 const recipe=()=>({version:1,preparation:{steps:[
  {name:'Build & push mnemo-server (arm64)',uses:'docker/build-push-action@'+'a'.repeat(40)},
@@ -68,7 +69,15 @@ describe('all four promotion routes and shared composite',()=>{
  it('provides the owner acquisition configuration to every production source reader',()=>{
   const workflow=parse(readFileSync(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8'));
   for(const name of ['verify-production-image-transition','build-image-transition-control','deploy-prod','runtime-cutover-prod']){
-   const job=workflow.jobs[name];expect(job.steps.some(step=>step.id==='ci_smoke_source')).toBe(true);
+   const job=workflow.jobs[name],sourceSteps=job.steps.filter(step=>step.id==='ci_smoke_source');
+   if(name==='build-image-transition-control'){
+    expect(sourceSteps).toHaveLength(0);
+    expect(job.steps).toHaveLength(3);
+    expect(job.steps[0].name).toBe('Deployment maintenance gate');
+    expect(job.steps[1].uses).toMatch(/^actions\/checkout@[a-f0-9]{40}$/);
+    expect(job.steps[2]).toEqual(controlCompositionActionStep());
+    expect(parse(readFileSync(new URL('../.github/actions/control-composition/action.yml',import.meta.url),'utf8'))).toEqual(controlCompositionActionDefinition());
+   }else expect(sourceSteps).toHaveLength(1);
    expect(job.env.MEM9_CI_ACQUISITION_CONFIG,name).toBe('${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}');
   }
  });
@@ -77,8 +86,23 @@ describe('all four promotion routes and shared composite',()=>{
   const paths=[...Object.keys(b.actions),'.github/actions/ci-smoke-gate/action.yml'];
   const actions=Object.fromEntries(paths.map(path=>[path,parse(readFileSync(new URL('../'+path,import.meta.url),'utf8'))]));
   expect(()=>verifyCiSmokePromotionRoutes(b,{jobs:Object.fromEntries(CI_SMOKE_POLICY.routes.map(({route})=>[route,workflow.jobs[route]])),actions})).not.toThrow();
-  expect(Object.fromEntries(Object.keys(CI_SMOKE_POLICY.sourceJobs).map(name=>[name,workflow.jobs[name]]))).toEqual(buildCiSmokeSourceJobs(b.workflow));
+  expect(Object.fromEntries(Object.keys(CI_SMOKE_POLICY.sourceJobs).map(name=>[name,workflow.jobs[name]]))).toEqual(buildCiSmokeSourceJobs(b.workflow,{controlComposition:true}));
   expect(workflow.jobs['build-and-push-image']).toEqual(buildCiSmokeImageJob(b.workflow));
+ });
+ it('selects the native source job explicitly while preserving the legacy reconstruction and other jobs',()=>{
+  const b=baseline(),before=structuredClone(b.workflow),legacy=buildCiSmokeSourceJobs(b.workflow),native=buildCiSmokeSourceJobs(b.workflow,{controlComposition:true});
+  expect(legacy).toEqual(buildCiSmokeSourceJobs(b.workflow,{controlComposition:false}));
+  expect(b.workflow).toEqual(before);
+  for(const name of Object.keys(legacy)){
+   if(name!=='build-image-transition-control'){expect(native[name]).toEqual(legacy[name]);continue;}
+   const {steps,outputs,...rest}=native[name],{steps:oldSteps,outputs:oldOutputs,...oldRest}=legacy[name];
+   expect(rest).toEqual(oldRest);
+   expect(steps).toEqual([oldSteps[0],oldSteps[1],controlCompositionActionStep()]);
+   expect(outputs).toEqual({...oldOutputs,image_tag:'${{ steps.bootstrap.outputs.image_tag }}',control_capture:'${{ steps.bootstrap.outputs.commitment }}'});
+   expect(oldSteps.filter(s=>s.id==='ci_smoke_source')).toHaveLength(1);
+   expect(oldSteps.filter(s=>s.uses?.startsWith('docker/build-push-action@'))).toHaveLength(1);
+  }
+  for(const controlComposition of [null,1,'true',{}])expect(()=>buildCiSmokeSourceJobs(b.workflow,{controlComposition})).toThrow('CiSmokeSourceJobFormat');
  });
  it('rejects restoring a skipped build or mutable preview tag after reconstruction',()=>{
   const b=baseline(),candidate=buildCiSmokePromotionRoutes(b);

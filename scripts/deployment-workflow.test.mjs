@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse, parseDocument } from "yaml";
+import { controlCompositionActionStep } from "./lib/production-control-composition-job.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -185,11 +186,12 @@ function actionSetForSid(source, sid) {
 }
 
 describe("workflow integration", () => {
-  it("masks the AWS account ID in every credential configuration", () => {
+  it("covers every credential path with account masking or the scoped native action", () => {
     const workflowFiles = readdirSync(workflowsDirectory).filter((name) =>
       /\.ya?ml$/u.test(name),
     );
     const credentialJobs = [];
+    const nativeCredentialJobs = [];
     const previewCredentialSteps = [];
     const expectedPreviewCredentialSteps = [
       "Configure AWS credentials (OIDC)",
@@ -212,6 +214,13 @@ describe("workflow integration", () => {
       );
       for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
         for (const step of job.steps ?? []) {
+          if (step.uses === "./.github/actions/control-composition") {
+            nativeCredentialJobs.push(`${workflowFile}:${jobName}`);
+            expect(step).toEqual(controlCompositionActionStep());
+            expect(job.permissions["id-token"]).toBe("write");
+            expect(job.env.MEM9_CI_ACQUISITION_CONFIG).toBe("${{ secrets.MEM9_CI_PROD_ACQUISITION_CONFIG }}");
+            expect(job.steps.some(row => row.uses?.startsWith("aws-actions/configure-aws-credentials@"))).toBe(false);
+          }
           if (
             typeof step.uses !== "string" ||
             !step.uses.startsWith("aws-actions/configure-aws-credentials@")
@@ -231,7 +240,8 @@ describe("workflow integration", () => {
     }
 
     expect(previewCredentialSteps).toEqual(expectedPreviewCredentialSteps);
-    expect(credentialJobs.sort()).toEqual(
+    expect(nativeCredentialJobs).toEqual(["infra-ci.yml:build-image-transition-control"]);
+    expect([...credentialJobs, ...nativeCredentialJobs].sort()).toEqual(
       [
         "infra-ci.yml:build-and-push-image",
         "infra-ci.yml:verify-production-image-transition",
@@ -250,6 +260,16 @@ describe("workflow integration", () => {
         "runtime-recovery.yml:production",
       ].sort(),
     );
+    const nativeTransport = readFileSync(resolve(here, "lib/production-control-composition-transport.mjs"), "utf8");
+    expect(nativeTransport).toContain("ControlCompositionNoAmbientCredentials");
+    expect(nativeTransport).toContain("AssumeRoleWithWebIdentityCommand(input)");
+    expect(nativeTransport).toContain("DurationSeconds:900");
+    expect(nativeTransport).toContain("credentials.accessKeyId='';credentials.secretAccessKey='';credentials.sessionToken=''");
+    expect(nativeTransport).not.toMatch(/console\.(?:log|error|warn|info|debug)\s*\(/);
+    const entry = readFileSync(resolve(root, ".github/actions/control-composition/index.mjs"), "utf8");
+    expect(entry.match(/console\.error\([^\n]+/g)).toEqual([
+      "console.error(JSON.stringify({kind:'native-control-composition-held',code:'ControlCompositionActionFailed'}));process.exitCode=1;",
+    ]);
   });
 
   it("installs root and infra dependencies in every SST preview cleanup job", () => {
