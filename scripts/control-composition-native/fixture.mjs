@@ -41,6 +41,10 @@ export function sourceContext(files){
  return {context,map,tree:treeHash};
 }
 export async function fixture({onBuild=false,transport=false,inheritedBytes=0,packed=false,mutatePack,nativeTools=false,runtime}={}){
+ if(packed&&nativeTools){
+  const entry=await realpath(process.argv[1]),mode=(await lstat(entry)).mode&0o7777;
+  if((mode&0o22)!==0)throw new Error('ControlCompositionNativeEntryWritable: '+entry+' mode='+mode.toString(8));
+ }
  const directory=await mkdtemp(join(tmpdir(),'control-composition-test-'));await chmod(directory,0o700);
  const files={'docker/bootstrap/Dockerfile':'FROM example.invalid/base\nCOPY scripts/a.mjs /app/a.mjs\n','scripts/a.mjs':'export const value=1;\n'};
  const src=sourceContext(files),data=new Map();
