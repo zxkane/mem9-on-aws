@@ -13,6 +13,8 @@ import {inspectProductionControlBuildContract,inspectProductionDeployedControlBu
 import {describeProductionControlCompositionPreparation,verifyProductionControlCompositionAction} from './production-control-composition-preparation.mjs';
 import {completeProductionControlCompositionBuildCapture,inspectProductionControlCompositionInvocation} from './production-control-composition-capture-reader.mjs';
 import {extractProductionControlCompositionCommitment} from './production-control-composition-reader.mjs';
+import {types} from 'node:util';
+import {describeCompositionRegionLoaderWork} from './production-control-composition-region-loader.mjs';
 
 const need=(ok,code='NonrootProvenanceInvalid')=>{if(!ok)throw Error(code);};
 const exact=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.slice().sort().join(),'NonrootProvenanceFields');
@@ -126,8 +128,8 @@ function preparationReferences(path,bytes){
 
 /** Source description only. The verifier separately binds job to the complete
  * authenticated workflow; a matching action name alone is never a closure. */
-export async function describeNonrootControlPreparation(context,job){
- if(job?.steps?.some(s=>s.uses==='./.github/actions/control-composition'))return describeProductionControlCompositionPreparation(context,job);
+export async function describeNonrootControlPreparation(context,job,options){
+ if(job?.steps?.some(s=>s.uses==='./.github/actions/control-composition'))return describeProductionControlCompositionPreparation(context,job,options);
  need(job&&Array.isArray(job.steps),'NonrootWorkflowSource');const roots=new Set();let gate=false;
  for(const step of job.steps){
   if(typeof step.uses==='string'&&step.uses.startsWith('./')){
@@ -175,7 +177,7 @@ export async function verifyNonrootControlSource(value,options){
  const ignores=await readNonrootEvidence(contract.recipe.ignoreFiles,options),ignorePaths=['.dockerignore','docker/bootstrap/Dockerfile.dockerignore'];
  need(Array.isArray(ignores)&&ignores.length===2&&new Set(ignores.map(r=>r.path)).size===2,'NonrootControlIgnoreFiles');
  for(const path of ignorePaths){const row=ignores.find(r=>r.path===path);need(row,'NonrootControlIgnoreFiles');if(paths.includes(path))same(row,(await readControlSourceFile(context,path)).file);else{exact(row,['path','absent']);need(row.absent===true,'NonrootControlIgnoreFiles');}}
- const preparation=await describeNonrootControlPreparation(context,job);same(preparation,contract.recipe.preparation);
+ const preparation=await describeNonrootControlPreparation(context,job,contract.version===2?{expectedBundle:contract.recipe.invocation.bundle}:undefined);same(preparation,contract.recipe.preparation);
  const guard=await localSourceClosure(context,['docker/bootstrap/nonroot-dispatch.mjs'],{guard:true,allowedBuiltins:contract.guardImportPolicy.allowedBuiltins});same(guard,contract.guardSource);same(guard,contract.guardImportPolicy.guardSource);
  await sourceClosure(contract.recipe.preparation,context.tree,options,context);await sourceClosure(contract.guardSource,context.tree,options,context);
  return copyNonrootJson({tree:context.tree,contractHash:hash(contract),copyClosureHash:hash(contract.recipe.context),preparationHash:hash(preparation),guardSourceHash:hash(guard),ignoreFilesHash:hash(ignores)});
@@ -261,11 +263,23 @@ async function verifyControlLaunch(launch,template,build,contract,imageConfig,op
  * existing source parser owns extraction from the retained full workflow).
  * Provider observations and artifact reviews come through the trusted archive.
  * The result contains verified bindings, never an authorization brand. */
+/** Debit the original caller before native preparation work. This neither
+ * creates a counter nor authorizes a source-only caller from a paid marker. */
+export function reserveNonrootControlPreparation(value,metadataReads){
+ const contract=inspectProductionControlBuildContract(value);if(contract.version!==2)return;
+ const charge=describeCompositionRegionLoaderWork(contract.recipe.invocation.bundle.bytes);
+ need(typeof metadataReads?.reserveLocal==='function','NonrootControlPreparationBudget');
+ need(!types.isAsyncFunction(metadataReads.reserveLocal),'NonrootControlPreparationSynchronousBudget');
+ const result=metadataReads.reserveLocal(charge);
+ if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});throw Error('NonrootControlPreparationSynchronousBudget');}
+}
+
 export async function verifyNonrootDeployedControlBuild(value,options){
  const b=inspectProductionDeployedControlBuild(value),{sourceContext,...expectedData}=options?.expected??{},expected=copyNonrootJson(expectedData),now=options?.now??Date.now();
  inspectNonrootControlArtifactBinding(b,options);
  const contract=inspectProductionControlBuildContract(expected.contract);need(b.version===contract.version,'NonrootControlRecipeVersion');
  need(positive(now)&&b.startedMs<=b.completedMs&&b.completedMs<=now&&b.contractHash===hash(contract),'NonrootControlBuildBinding');
+ reserveNonrootControlPreparation(contract,options.metadataReads);
  await verifyNonrootControlSource(contract,{...options,expected:{...expected,sourceContext}});
  const main=await verifyNonrootActualMain(b.actualMain,{...options,expected:expectedMain(contract,expected)});
  same(b.recipe,contract.recipe);same(b.guardSource,contract.guardSource);

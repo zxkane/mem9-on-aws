@@ -21,7 +21,7 @@ export function verifyProductionControlCompositionAction(step,action){
  for(const value of Object.values(action.outputs)){exact(value,['description']);need(typeof value.description==='string'&&value.description.length>0,'ControlCompositionActionOutputs');}
  return Object.freeze({actionPath:ACTION,entryPath:ENTRY,toolchainPath:TOOLCHAIN});
 }
-export async function describeProductionControlCompositionPreparation(context,job){
+export async function describeProductionControlCompositionPreparation(context,job,{expectedBundle}={}){
  need(job&&Array.isArray(job.steps),'ControlCompositionPreparationJob');
  const local=job.steps.filter(s=>typeof s.uses==='string'&&s.uses.startsWith('./'));
  need(local.length===1,'ControlCompositionPreparationActions');
@@ -29,6 +29,8 @@ export async function describeProductionControlCompositionPreparation(context,jo
  const a=await read(ACTION),doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(a.bytes),{uniqueKeys:true});
  need(doc.errors.length===0&&doc.warnings.length===0,'ControlCompositionActionYaml');verifyProductionControlCompositionAction(local[0],doc.toJS({maxAliasCount:0}));
  const bundle=await read(ENTRY),toolchain=await read(TOOLCHAIN),lock=await read('package-lock.json'),builder=await read(PRODUCTION_CONTROL_COMPOSITION_BUNDLE_BUILDER);
+ // Reuse the existing read to bind the charged size before bundle parsing.
+ if(expectedBundle)need(hash(bundle.file)===hash(inspectNonrootRecord('SourceFileV1',expectedBundle)),'ControlCompositionPreparationBundleBinding');
  const m=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(toolchain.bytes)),p=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(lock.bytes));
  exact(m,['version','kind','nodeMajor','bundler','packageLockHash','inputs','output']);
  exact(m.bundler,['name','version','integrity','builderSourceHash']);exact(m.output,['path','sha256','bytesLength']);

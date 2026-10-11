@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {controlImageGraphBinding} from './production-image-graph.mjs';
 import {copyNonrootJson,inspectNonrootRecord,parseNonrootJson,nonrootHash as hash} from './production-nonroot-contracts.mjs';
 import {exportNonrootArchive,createNonrootEvidenceArchive,nonrootArchiveResolvers,nonrootArchiveBindings} from './production-nonroot-archive.mjs';
-import {verifyNonrootControlSource} from './production-nonroot-provenance.mjs';
+import {verifyNonrootControlSource,reserveNonrootControlPreparation} from './production-nonroot-provenance.mjs';
 import {CONTROL_ZERO_FINDINGS_POLICY as P,CONTROL_ZERO_FINDINGS_POLICY_HASH,assertNonrootControlScanPolicy,normalizeNonrootControlScanPages,verifyNonrootControlScan} from './production-nonroot-control-scan-policy.mjs';
 export {CONTROL_ZERO_FINDINGS_POLICY,CONTROL_ZERO_FINDINGS_POLICY_HASH,CONTROL_ZERO_FINDINGS_POLICY_SOURCE,verifyNonrootControlScan} from './production-nonroot-control-scan-policy.mjs';
 
@@ -24,6 +24,7 @@ export async function collectNonrootControlScan(input,{clock=Date.now,signal}={}
  const deadlineMs=Math.min(input.maximumExpiresMs,startedMs+P.maxObservationAgeMs);
  const reserve=charge=>{const result=budgetedReads.reserveLocal(charge);if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});throw Error('NonrootControlScanSynchronousBudget');}};
  const check=()=>{signal?.throwIfAborted();const at=clock();need(positive(at)&&at>=startedMs&&at<deadlineMs,'NonrootControlScanExpired');reserve(zero());};check();
+ reserveNonrootControlPreparation(contract,budgetedReads);
  await assertNonrootControlScanPolicy(contract,sourceContext);
  await verifyNonrootControlSource(contract,{...nonrootArchiveResolvers(archive),expected:{sourceContext}});check();
  // The current authenticated CONTROL profile adds only imageId. It has no
