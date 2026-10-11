@@ -2,7 +2,7 @@ import {it,expect} from 'vitest';
 import {gzipSync,zstdCompressSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
 import {readImageGraph,IMAGE_MEDIA} from './lib/production-image-graph.mjs';
-import {inspectImageFilesystem,inspectImageFilesystemEvidence,inspectImageFilesystemEntries} from './lib/production-image-filesystem.mjs';
+import {inspectImageFilesystem,inspectImageFilesystemEvidence,inspectImageFilesystemEntries,inspectImageFilesystemFile} from './lib/production-image-filesystem.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 import {graphFixture,tar} from './production-image.fixture.mjs';
 import {IMAGE_TRANSITION_LIMITS as L} from './lib/production-image-transition.mjs';
@@ -48,4 +48,32 @@ it('implicit parent directories consume the shared filesystem-entry budget',asyn
  const f=graphFixture(),graph=await readImageGraph(f.roots,{...f});
  for(let i=0;i<L.maxFsEntries-1;i++)f.budget.entry();
  await expect(inspectImageFilesystem(graph,{component:'llm-proxy',budget:f.budget})).rejects.toThrow('ImageFilesystemEntryLimit');
+});
+
+
+it('TC-CONS-IMAGE-125 pays before live entries and file metadata work without changing either result',async()=>{
+ const fs=await filesystem([tar([{path:'app/program',body:'synthetic program'}])],{requirements:[]});
+ const original=inspectImageFilesystemEntries(fs),originalHash=hash(original),file=inspectImageFilesystemFile(fs,'/app/program'),seen=[];
+ const options={beforeRead(entries,evidence){expect(Object.isFrozen(entries)).toBe(true);expect(evidence.entriesHash).toBe(originalHash);seen.push(entries);}};
+ expect(inspectImageFilesystemEntries(fs,options)).toEqual(original);
+ expect(inspectImageFilesystemFile(fs,'/app/program',options)).toEqual(file);
+ expect(seen).toHaveLength(2);expect(seen[0]).toBe(seen[1]);
+ original[0].path='changed-test-copy';expect(inspectImageFilesystemEntries(fs,options)).not.toEqual(original);
+});
+it('TC-CONS-IMAGE-125 exhausted or asynchronous payment stops the full accessor',async()=>{
+ const fs=await filesystem([tar([{path:'app/program',body:'synthetic program'}])],{requirements:[]});
+ let remaining=1;const error=Error('SyntheticProcessingBudget');
+ const options={beforeRead(){if(remaining===0)throw error;remaining--;}};
+ inspectImageFilesystemEntries(fs,options);expect(remaining).toBe(0);
+ expect(()=>inspectImageFilesystemFile(fs,'/app/program',options)).toThrow(error);expect(remaining).toBe(0);
+ expect(()=>inspectImageFilesystemEntries(fs,{beforeRead:async()=>{}})).toThrow('ImageFilesystemSynchronousPayment');
+ expect(()=>inspectImageFilesystemEntries(fs,{})).toThrow('ImageFilesystemProcessingRequired');
+});
+it('TC-CONS-IMAGE-128 payment preserves original filesystem identity and path guards',async()=>{
+ const fs=await filesystem([tar([{path:'app/program',body:'synthetic program'}])],{requirements:[]});let paid=0;
+ const options={beforeRead(){paid++;}};
+ expect(()=>inspectImageFilesystemEntries(structuredClone(fs),options)).toThrow('ImageFilesystemContextRequired');
+ expect(()=>inspectImageFilesystemFile(fs,'/../escape',options)).toThrow('ImageRuntimeFilePath');expect(paid).toBe(0);
+ expect(()=>inspectImageFilesystemFile(fs,'/missing',options)).toThrow();expect(paid).toBe(1);
+ expect(inspectImageFilesystemFile(fs,'/app/program').sha256).toBe(digest(Buffer.from('synthetic program')).slice(7));
 });

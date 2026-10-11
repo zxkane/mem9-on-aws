@@ -8,6 +8,7 @@ import {CI_SMOKE_POLICY as policy} from './ci-smoke-policy.mjs';
 import {ciSmokeJobDefinition,controlBuildCaptureSteps} from './ci-smoke-job.mjs';
 import {buildNativeControlCompositionSourceJob,controlCompositionActionDefinition,CONTROL_COMPOSITION_ASSET_PATHS} from './production-control-composition-job.mjs';
 import {CI_SMOKE_CHECKS,inspectCiSmokeRecord,inspectCiSmokeResult,validateCiSmokeEvidence} from './ci-smoke-evidence.mjs';
+import {ciSmokeCommitTree,ciSmokeProvenanceCommitApi} from './ci-smoke-commit-source.mjs';
 
 const need=(ok,code='CiSmokeSourceInvalid')=>{if(!ok)throw Error(code);};
 const same=(a,b,code)=>need(hash(a)===hash(b),code);
@@ -481,10 +482,11 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
 export async function verifyCiSmokeSourceResult(isolation,result,{provenance,readJson,readBytes,expected,now=Date.now()}){
  const r=inspectCiSmokeResult(result);need(r.isolationHash===hash(isolation)&&r.sourceTree===isolation.candidate.tree,'CiSmokeResultSource');
  const {run,buildJob,smokeJob,buildDigest,sourceRevision,sourceTree,commit,candidateCommit}=provenance;
+ const commitApi=ciSmokeProvenanceCommitApi(provenance,r.sourceRevision,isolation.candidate.revision);
  need(run.id===r.runId&&run.run_attempt===r.runAttempt&&run.path===r.workflowPath&&run.head_repository?.full_name===r.repository&&sourceRevision===r.sourceRevision&&sourceTree===r.sourceTree,'CiSmokeActualRun');
- need(commit?.sha===r.sourceRevision&&commit.commit?.tree?.sha===r.sourceTree&&Array.isArray(commit.parents)&&commit.parents.length>=1&&commit.parents.length<=2,'CiSmokeActualCommit');
+ need(commit?.sha===r.sourceRevision&&ciSmokeCommitTree(commit,commitApi)===r.sourceTree&&Array.isArray(commit.parents)&&commit.parents.length>=1&&commit.parents.length<=2,'CiSmokeActualCommit');
  need(run.event==='pull_request'?commit.parents.length===2&&commit.parents[1].sha===run.head_sha:run.event==='push'&&run.head_sha===r.sourceRevision,'CiSmokeActualSourceRelation');
- need(candidateCommit?.sha===isolation.candidate.revision&&candidateCommit.commit?.tree?.sha===r.sourceTree&&
+ need(candidateCommit?.sha===isolation.candidate.revision&&ciSmokeCommitTree(candidateCommit,commitApi)===r.sourceTree&&
   (r.sourceRevision===isolation.candidate.revision||run.event==='pull_request'&&commit.parents[1].sha===isolation.candidate.revision),'CiSmokeActualCandidateRelation');
  for(const [job,id,name]of [[buildJob,r.buildJobId,'Build & push workload images'],[smokeJob,r.smokeJobId,CI_SMOKE_JOB_NAME]]){
   need(job.id===id&&job.name===name&&job.run_id===r.runId&&job.run_attempt===r.runAttempt&&job.status==='completed'&&job.conclusion==='success','CiSmokeActualJob');
@@ -498,15 +500,17 @@ export async function verifyCiSmokeSourceResult(isolation,result,{provenance,rea
 /** Replay the exact archived source material. The containing policySources
  * hash is independently committed by the parent proof/review; a JSON `passed`
  * field or a subset of Git entries cannot create a verified source context. */
-export async function verifyArchivedCiSmoke(isolation,result,{material,resolveJson,readBytes,originRecipe,candidateRecipe,now}){
+export async function verifyArchivedCiSmoke(isolation,result,{material,resolveJson,readBytes,originRecipe,candidateRecipe,now,processing}){
+ if(processing!==undefined)need(typeof processing.source==='function'&&typeof processing.context==='function','CiSmokeProcessingRequired');
+ const pay=(kind,...args)=>{if(!processing)return;const value=processing[kind](...args);if(value&&typeof value.then==='function'){Promise.resolve(value).catch(()=>{});need(false,'CiSmokeSynchronousPayment');}need(value===undefined,'CiSmokeSynchronousPayment');};
  exact(material,['version','kind','origin','candidate','baseline','provenance','expected']);
  need(material.version===1&&material.kind==='ci-smoke-source-material','CiSmokeSourceMaterial');
  const readJson=async ref=>parseNonrootJson(text(await resolveJson(ref)));
  const context=async ref=>{
-  const source=await readJson(ref);exact(source,['tree','entries','blobs']);
+  const source=await readJson(ref);pay('context',source,ref);exact(source,['tree','entries','blobs']);
   need(source.blobs&&typeof source.blobs==='object'&&!Array.isArray(source.blobs)&&Object.keys(source.blobs).length<=20000,'CiSmokeSourceBlobs');
   for(const [oid,bytes]of Object.entries(source.blobs)){need(/^[a-f0-9]{40}$/.test(oid),'CiSmokeSourceBlobIdentity');inspectCiSmokeRecord('ByteRef',bytes);}
-  return createControlSourceContext({tree:source.tree,entries:source.entries},oid=>{need(source.blobs[oid],'CiSmokeSourceBlobMissing');return readBytes(source.blobs[oid]);});
+  return createControlSourceContext({tree:source.tree,entries:source.entries},(oid,path)=>{need(source.blobs[oid],'CiSmokeSourceBlobMissing');pay('source',source.blobs[oid],path);return readBytes(source.blobs[oid]);});
  };
  const originContext=await context(material.origin),candidateContext=await context(material.candidate),baselineContext=await context(material.baseline);
  const source=await verifyCiSmokeIsolationSource(isolation,{originContext,candidateContext,baselineContext,originRecipe,candidateRecipe});

@@ -8,10 +8,10 @@ import {NONROOT_REMAINING_WORK_CAPS_V2,NONROOT_REMAINING_WORK_LIMITS_HASH_V2} fr
 
 const zero=()=>({ecrRequests:0,logicalBytes:0,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0}),sha=b=>createHash('sha256').update(b).digest('hex');
 const revision={version:2,limitsHash:NONROOT_REMAINING_WORK_LIMITS_HASH_V2,envelopeHash:hash('complete envelope'),historyHeadHash:hash('immutable history')};
-function fixture({budgetVersion=2,startingLogicalBytes=0}={}){
+function fixture({budgetVersion=2,startingLogicalBytes=0,localAllocationBytes}={}){
  const scope={copyOwner:'a'.repeat(32),account:'123456789012',region:'us-east-1',runtimeNonce:'b'.repeat(32),authorizationId:'c'.repeat(32),bucket:'example-finalization',kmsKeyArn:'arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',lockKey:'runtime-publication-locks/prod/witness.json',parameterProtection:{KeyId:'alias/aws/ssm',Tier:'Standard',DataType:'text'},sourceRevision:'d'.repeat(40),sourceTree:'e'.repeat(40),rootBindingHash:hash('root'),priorParameter:{version:1,valueHash:sha('prior protected value')}};
  const issuer={source:{provider:'instance-metadata',hash:hash('authenticated original source')},scope:{account:scope.account,personalAccount:'2'.repeat(12),region:scope.region,owner:scope.authorizationId,runtimeNonce:scope.runtimeNonce,anchorOwner:'f'.repeat(32),bucket:scope.bucket,ssmKeyArn:'arn:aws:kms:us-east-1:123456789012:key/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',s3KeyArn:scope.kmsKeyArn,parameterProtection:scope.parameterProtection}};
- const budget=budgetVersion===2?describeNonrootFinalizationBudget(scope,issuer):describeNonrootFinalizationBudget(scope,issuer,{version:budgetVersion}),ledgerBinding={owner:scope.copyOwner,executionId:'f'.repeat(32),planHash:hash('COPY config'),publicationHash:hash('COPY publication')};
+ const budget=budgetVersion===2?describeNonrootFinalizationBudget(scope,issuer):describeNonrootFinalizationBudget(scope,issuer,{version:budgetVersion,...(budgetVersion===4?{localAllocationBytes}:{})}),ledgerBinding={owner:scope.copyOwner,executionId:'f'.repeat(32),planHash:hash('COPY config'),publicationHash:hash('COPY publication')};
  const copyReceipt={version:2,owner:scope.copyOwner,planHash:ledgerBinding.planHash,publicationHash:ledgerBinding.publicationHash,destinationReadback:{reads:[{repositoryName:'example',digest:'sha256:'+hash('blob'),size:1,mediaType:'application/octet-stream'}]}};
  const starting={...zero(),logicalBytes:startingLogicalBytes};
  const reserve={...budget.charge,logicalBytes:budget.charge.logicalBytes+1,uncompressedBytes:3,processedEntries:3},copyCheckpoint={binding:ledgerBinding,startingCounters:{...starting},counters:{...starting},remainingReservation:reserve,eventCount:1,lastEventHash:hash('COPY sealed'),active:0,sealed:true,budgetRevision:revision};
@@ -77,6 +77,38 @@ test('v3 respects the exact global LOCAL boundary without borrowing or refunds',
  assert.equal(verifyNonrootCacheReadAccounting(at.record,at.options).counters.logicalBytes,limit);
  const over=fixture({budgetVersion:3,startingLogicalBytes:limit-2147483648});
  assert.throws(()=>verifyNonrootCacheReadAccounting(over.record,over.options));
+});
+test('explicit v4 changes only the prospective LOCAL amount and preserves the original replay',()=>{
+ const localAllocationBytes=3*1073741824,old=fixture({budgetVersion:3}),next=fixture({budgetVersion:4,localAllocationBytes}),expected=structuredClone(old.budget);
+ Object.assign(expected,{version:4,localAllocationBytes});expected.limits.localBytes=localAllocationBytes;
+ expected.charge.logicalBytes=localAllocationBytes;expected.additionalAfterCopy.logicalBytes=localAllocationBytes;
+ assert.deepEqual(next.budget,expected);assert.deepEqual(inspectNonrootFinalizationBudget(next.budget),next.budget);
+ const replay=verifyNonrootCacheReadAccounting(next.record,next.options);
+ assert.equal(replay.counters.logicalBytes,localAllocationBytes+1);assert.deepEqual(replay.remainingReservation,zero());
+});
+test('v4 requires a complete bounded amount and cannot override an older allocation',()=>{
+ const f=fixture(),cap=NONROOT_REMAINING_WORK_CAPS_V2.logicalBytes;
+ for(const localAllocationBytes of [undefined,null,NaN,'3221225472',2147483648,cap+1,2147483648.5]){
+  assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version:4,localAllocationBytes}));
+ }
+ for(const version of [2,3])assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version,localAllocationBytes:3*1073741824}));
+ const changed=structuredClone(fixture({budgetVersion:4,localAllocationBytes:3*1073741824}).budget);changed.localAllocationBytes++;
+ assert.throws(()=>inspectNonrootFinalizationBudget(changed));
+});
+test('independent expectations reject replacing v3 or selecting a different v4 amount',()=>{
+ const old=fixture({budgetVersion:3}),next=fixture({budgetVersion:4,localAllocationBytes:3*1073741824}),other=fixture({budgetVersion:4,localAllocationBytes:4*1073741824});
+ for(const original of [old,next])assert.throws(()=>verifyNonrootCacheReadAccounting(other.record,{...other.options,expectedFinalization:original.options.expectedFinalization}),/FinalizationIndependentBinding/);
+ assert.throws(()=>verifyNonrootFinalizationPlan(next.plan,old.expected),/FinalizationIndependentBinding/);
+});
+test('v4 preserves the global boundary and rejects duplicate prepayment',()=>{
+ const localAllocationBytes=3*1073741824,cap=NONROOT_REMAINING_WORK_CAPS_V2.logicalBytes;
+ const at=fixture({budgetVersion:4,localAllocationBytes,startingLogicalBytes:cap-localAllocationBytes-1});
+ assert.equal(verifyNonrootCacheReadAccounting(at.record,at.options).counters.logicalBytes,cap);
+ const over=fixture({budgetVersion:4,localAllocationBytes,startingLogicalBytes:cap-localAllocationBytes});
+ assert.throws(()=>verifyNonrootCacheReadAccounting(over.record,over.options));
+ const f=fixture({budgetVersion:4,localAllocationBytes}),copy=structuredClone(f.record),event=copy.events.at(-2);
+ copy.events.splice(-1,0,{...structuredClone(event),sequence:event.sequence+1,previousHash:hash(event)});
+ assert.throws(()=>verifyNonrootCacheReadAccounting(copy,f.options),/NonrootFinalizationPrepaymentOnce/);
 });
 test('v3 duplicate and post-seal payments remain invalid',()=>{
  const f=fixture({budgetVersion:3}),copy=structuredClone(f.record),event=copy.events.at(-2);

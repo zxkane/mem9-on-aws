@@ -1,3 +1,4 @@
+import {descriptorOperations,descriptorGuard,descriptorCheck,descriptorResume,descriptorBufferFrom,descriptorBufferString,descriptorSplit,descriptorPathFilter,descriptorPathFind,descriptorJoin} from './production-nonroot-descriptor-processing.mjs';
 import {createHash} from 'node:crypto';
 import {inspectProductionControlCompositionPackDescriptors,isProductionControlCompositionPackDescriptor} from './production-control-composition-references.mjs';
 import {inflateRawSync} from 'node:zlib';
@@ -56,26 +57,26 @@ function rawDefinition(value){
 
 /** Historical behavior evidence only. Its synthetic CI identity cannot become
  * a current grant, claim, completed build or production old-image provenance. */
-function inspectHistoricalHostSqlBehavior(value,{origin,sourceClosure,minifiedHash,material,observedMs}){
+function inspectHistoricalHostSqlBehavior(value,{origin,sourceClosure,minifiedHash,material,observedMs,descriptorWork}){const {hash,sha,same,copyNonrootJson,inspectNonrootRecord,parseNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,value,origin,sourceClosure,material);
  exact(value,['record','objects']);const r=value.record;
  need(r.version===2&&r.kind==='carrier-original-closure-tests'&&Array.isArray(value.objects)&&value.objects.length<=64,'NonrootHostSqlRecord');
  const objects=new Map();let total=0;
  for(const row of value.objects){
   exact(row,['ref','bytesBase64']);inspectNonrootRecord('ByteRef',row.ref);
   need(row.ref.bytesLength<=2097152&&typeof row.bytesBase64==='string'&&row.bytesBase64.length===4*Math.ceil(row.ref.bytesLength/3),'NonrootHostSqlBytes');
-  const raw=Buffer.from(row.bytesBase64,'base64');need(raw.toString('base64')===row.bytesBase64&&raw.length===row.ref.bytesLength&&sha(raw)===row.ref.sha256&&!objects.has(hash(row.ref)),'NonrootHostSqlBytes');
+  const raw=descriptorBufferFrom(descriptorWork,row.bytesBase64,'base64');need(descriptorBufferString(descriptorWork,raw,'base64')===row.bytesBase64&&raw.length===row.ref.bytesLength&&sha(raw)===row.ref.sha256&&!objects.has(hash(row.ref)),'NonrootHostSqlBytes');
   total+=raw.length;need(total<=8388608,'NonrootHostSqlBytes');objects.set(hash(row.ref),raw);
  }
  const used=new Set(),read=ref=>{const key=hash(ref),raw=objects.get(key);need(raw,'NonrootHostSqlMissingObject');used.add(key);return raw;};
- const original=read(r.originalManifest),test=read(r.testManifest),ca=read(r.fixtureCa),manifest=parseNonrootJson(original.toString());
- need(sha(original)===r.originalManifestHash&&sha(test)===r.testManifestHash&&deriveCarrierSqlTestManifest(original,ca).equals(test),'NonrootHostSqlOverlay');
+ const original=read(r.originalManifest),test=read(r.testManifest),ca=read(r.fixtureCa),manifest=parseNonrootJson(descriptorBufferString(descriptorWork,original));
+ need(sha(original)===r.originalManifestHash&&sha(test)===r.testManifestHash&&deriveCarrierSqlTestManifest(original,ca,{descriptorWork}).equals(test),'NonrootHostSqlOverlay');
  need(manifest.legacyCodeHash===origin.codeHash&&manifest.expandedSourceHash===origin.sourceHash&&manifest.minifiedSourceHash===minifiedHash&&manifest.dependencyHash===sourceClosure.dependencyHash&&manifest.operatorInventoryHash===material.runtimeSource.operatorInventoryHash,'NonrootHostSqlProgram');
  const pins=[{path:'/carrier/legacy-audit.mjs',sha256:origin.codeHash},...sourceClosure.files.map(f=>({path:'/bootstrap/operator/'+f.path,sha256:f.sha256,bytes:f.bytes}))];
  need(Array.isArray(material.members)&&material.members.length<=20000,'NonrootHostSqlMaterial');
  for(const pin of pins){
-  const rows=manifest.files.filter(f=>f.path===pin.path);need(rows.length===1&&rows[0].type==='file'&&rows[0].sha256===pin.sha256&&(pin.bytes===undefined||rows[0].bytes===pin.bytes),'NonrootHostSqlModule');
-  const members=material.members.filter(f=>f.path==='rootfs'+pin.path);need(members.length===1&&typeof members[0].bytesBase64==='string'&&members[0].bytesBase64.length<=4*Math.ceil(2097152/3),'NonrootHostSqlMaterial');
-  const raw=Buffer.from(members[0].bytesBase64,'base64');need(raw.toString('base64')===members[0].bytesBase64&&sha(raw)===pin.sha256&&(pin.bytes===undefined||raw.length===pin.bytes),'NonrootHostSqlMaterial');
+  const rows=descriptorPathFilter(descriptorWork,manifest.files,pin.path);need(rows.length===1&&rows[0].type==='file'&&rows[0].sha256===pin.sha256&&(pin.bytes===undefined||rows[0].bytes===pin.bytes),'NonrootHostSqlModule');
+  const members=descriptorPathFilter(descriptorWork,material.members,'rootfs'+pin.path);need(members.length===1&&typeof members[0].bytesBase64==='string'&&members[0].bytesBase64.length<=4*Math.ceil(2097152/3),'NonrootHostSqlMaterial');
+  const raw=descriptorBufferFrom(descriptorWork,members[0].bytesBase64,'base64');need(descriptorBufferString(descriptorWork,raw,'base64')===members[0].bytesBase64&&sha(raw)===pin.sha256&&(pin.bytes===undefined||raw.length===pin.bytes),'NonrootHostSqlMaterial');
  }
  same(r.cases.map(c=>c.name),CARRIER_SQL_CASES,'NonrootHostSqlCases');
  need(positive(r.startedMs)&&positive(r.completedMs)&&r.completedMs>=r.startedMs&&r.completedMs<r.deadlineMs&&r.completedMs<=observedMs,'NonrootHostSqlClock');
@@ -84,14 +85,14 @@ function inspectHistoricalHostSqlBehavior(value,{origin,sourceClosure,minifiedHa
   same(c.image,r.image,'NonrootHostSqlImage');need(hex(c.containerId)&&!ids.has(c.containerId),'NonrootHostSqlContainer');ids.add(c.containerId);
   need(c.startedMs>=last&&c.completedMs>=c.startedMs&&c.completedMs<=r.completedMs,'NonrootHostSqlClock');last=c.completedMs;
   need(c.state?.Running===false&&c.state.Pid===0&&c.state.Status==='exited'&&c.state.OOMKilled===false&&c.state.ExitCode===c.exitCode&&c.exitCode===(index===0?0:1)&&c.cleanup?.removed===true&&c.cleanup.absenceStatus===1,'NonrootHostSqlCompletion');
-  const inputBytes=read(c.inputBytes),input=parseNonrootJson(inputBytes.toString()),stdout=read(c.stdout).toString(),stderr=read(c.stderr).toString(),tls=c.name==='untrusted-fixture-ca';
+  const inputBytes=read(c.inputBytes),input=parseNonrootJson(descriptorBufferString(descriptorWork,inputBytes)),stdout=descriptorBufferString(descriptorWork,read(c.stdout)),stderr=descriptorBufferString(descriptorWork,read(c.stderr)),tls=c.name==='untrusted-fixture-ca';
   need(input.dependencyHash===manifest.dependencyHash&&input.deployed?.sourceTree===sourceClosure.sourceTree,'NonrootHostSqlOriginalModules');
   same(input.deployed,{revision:material.oldSource.revision,sourceTree:material.oldSource.tree},'NonrootHostSqlOriginalModules');
   need(c.manifestHash===(tls?r.originalManifestHash:r.testManifestHash)&&Array.isArray(c.mounts)&&c.mounts.length===(tls?0:2),'NonrootHostSqlMounts');
   if(!tls)for(const [j,m]of c.mounts.entries()){const raw=j===0?ca:test;need(m.destination===(j===0?'/bootstrap/global-bundle.pem':'/carrier/manifest.json')&&m.readOnly===true&&m.source?.sha256===sha(raw)&&m.source.size===raw.length&&m.source.mode===0o444&&m.source.uid===0&&m.source.gid===0&&m.source.nlink===1,'NonrootHostSqlMounts');}
   if(index===0){
    need(stderr.trim()==='','NonrootHostSqlPositive');
-   const parsed=inspectRootCarrierOutput({stdout,exitCode:c.exitCode},{invocation:input.invocation,inputHash:sha(inputBytes),legacyCodeHash:origin.codeHash,manifestHash:r.testManifestHash,nodeSha256:manifest.runtime.nodeSha256,supplementalSha256:manifest.files.find(f=>f.path==='/carrier/supplemental-readonly.mjs')?.sha256});
+   const parsed=inspectRootCarrierOutput({stdout,exitCode:c.exitCode},{invocation:input.invocation,inputHash:sha(inputBytes),legacyCodeHash:origin.codeHash,manifestHash:r.testManifestHash,nodeSha256:manifest.runtime.nodeSha256,supplementalSha256:descriptorPathFind(descriptorWork,manifest.files,'/carrier/supplemental-readonly.mjs')?.sha256},{descriptorWork});
    need(parsed.legacyResult.rootEvidence?.kind==='paused','NonrootHostSqlPausedOnly');
    const audit=parsed.legacyResult.rootEvidence.audit,parent=input.parent?.verification;
    need(parent&&positive(audit.changedRows)&&audit.changedRows===parent.changedRows&&audit.receipts===parent.receipts&&audit.conservationHash===parent.conservationHash&&audit.parentProofHash===input.rootBinding.parentProofHash&&audit.executionEnabled===false&&audit.dispatcherEnabled===false&&audit.benchmarkRemaining===0,'NonrootHostSqlRoot');
@@ -99,8 +100,8 @@ function inspectHistoricalHostSqlBehavior(value,{origin,sourceClosure,minifiedHa
    need(!stdout.includes('"event":"supersession_root_audit"'),'NonrootHostSqlNegative');const failure=parseNonrootJson(stderr.trim());need(failure.event==='carrier_guard_rejected','NonrootHostSqlNegative');
    const guards={'root-uid':'CarrierIdentity','missing-nnp':'CarrierPrivileges','changed-input-hash':'CarrierInputHash','wrong-encoding':'CarrierInputEncoding'};
    if(guards[c.name])need(failure.stage==='guard'&&failure.code===guards[c.name]&&stdout.trim()==='','NonrootHostSqlGuardNegative');
-   else{const lines=stdout.trimEnd().split('\n');need(lines.length===1&&failure.stage==='legacy','NonrootHostSqlLegacyNegative');const before=parseNonrootJson(lines[0]);need(before.event==='carrier_process_identity'&&before.phase==='before'&&before.legacyCodeHash===origin.codeHash&&before.inputHash===sha(inputBytes)&&before.manifestHash===c.manifestHash,'NonrootHostSqlLegacyNegative');}
-   if(tls){need(failure.stage==='legacy'&&r.fixture.containerId===c.tlsFailure?.fixtureContainerId,'NonrootHostSqlTls');verifyCarrierSqlTlsRejection(read(c.tlsFailure.log).toString(),c.tlsFailure,failure);}
+   else{const lines=descriptorSplit(descriptorWork,stdout.trimEnd(),'\n');need(lines.length===1&&failure.stage==='legacy','NonrootHostSqlLegacyNegative');const before=parseNonrootJson(lines[0]);need(before.event==='carrier_process_identity'&&before.phase==='before'&&before.legacyCodeHash===origin.codeHash&&before.inputHash===sha(inputBytes)&&before.manifestHash===c.manifestHash,'NonrootHostSqlLegacyNegative');}
+   if(tls){need(failure.stage==='legacy'&&r.fixture.containerId===c.tlsFailure?.fixtureContainerId,'NonrootHostSqlTls');verifyCarrierSqlTlsRejection(descriptorBufferString(descriptorWork,read(c.tlsFailure.log)),c.tlsFailure,failure,{descriptorWork});}
   }
  }
  need(used.size===objects.size&&r.cleanup?.fixtureStopped===true&&r.cleanup.networkRemoved===true&&r.cleanup.imageReleased===true,'NonrootHostSqlCleanup');
@@ -108,14 +109,14 @@ function inspectHistoricalHostSqlBehavior(value,{origin,sourceClosure,minifiedHa
 
 /** Pure data inspection shared by archive assembly and verification. Callers
  * authenticate the current grant first; this returns no authority or handle. */
-export function inspectReviewedHostSqlDescriptor(input){
+export function inspectReviewedHostSqlDescriptor(input,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,inspectNonrootRecord,parseNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,input.origin,input.template);
  exact(input,['origin','template','documents','blobs','observedMs']);
- const origin=inspectNonrootRecord('ReviewedHostOriginV2',input.origin),template=inspectCarrierBeforeCopyTemplate(input.template),documents=input.documents;
+ const origin=inspectNonrootRecord('ReviewedHostOriginV2',input.origin),template=inspectCarrierBeforeCopyTemplate(input.template,{descriptorWork}),documents=input.documents;
  need(template.anchors.hostEvidenceHash===hash(origin)&&template.anchors.hostCodeHash===origin.codeHash&&template.anchors.hostSourceHash===origin.sourceHash&&positive(input.observedMs),'NonrootHostSqlAnchor');
  exact(documents,['review','approved','source','derivation','local','capture','material']);let bytes=0;
  const json=(name,ref)=>{
   inspectNonrootRecord('JsonRef',ref);const raw=documents[name];need(raw instanceof Uint8Array&&raw.byteLength===ref.bytesLength&&raw.byteLength<=L.maxProofBytes,'NonrootHostSqlDocument');
-  bytes+=raw.byteLength;need(bytes<=33554432,'NonrootHostSqlByteLimit');const value=parseNonrootJson(Buffer.from(raw).toString());
+  bytes+=raw.byteLength;need(bytes<=33554432,'NonrootHostSqlByteLimit');const value=parseNonrootJson(descriptorBufferString(descriptorWork,descriptorBufferFrom(descriptorWork,raw)));
   need(sha(raw)===ref.bytesHash&&hash(value)===ref.canonicalHash,'NonrootHostSqlDocument');return value;
  };
  const review=json('review',origin.deltaReview),source=json('source',origin.sourceFiles),derivation=json('derivation',origin.derivation);
@@ -138,61 +139,65 @@ export function inspectReviewedHostSqlDescriptor(input){
  for(const row of input.blobs){exact(row,['ref','bytes']);inspectNonrootRecord('ByteRef',row.ref);need(row.bytes instanceof Uint8Array&&row.bytes.byteLength===row.ref.bytesLength&&sha(row.bytes)===row.ref.sha256&&!blobs.has(hash(row.ref)),'NonrootHostSqlBlob');bytes+=row.bytes.byteLength;need(bytes<=33554432,'NonrootHostSqlByteLimit');blobs.set(hash(row.ref),row.bytes);}
  const required=new Set([...source.modules.map(row=>row.content),...approved.evidence].map(ref=>{inspectNonrootRecord('ByteRef',ref);return hash(ref);}));
  need(required.size===blobs.size&&[...required].every(key=>blobs.has(key)),'NonrootHostSqlBlob');
- const plan=inspectCarrierFundingPlan(capture.plan);carrierRunAnnouncement(plan,capture.binding);
+ const plan=inspectCarrierFundingPlan(capture.plan,{descriptorWork});carrierRunAnnouncement(plan,capture.binding,{descriptorWork});
  need(plan.template.anchors.hostCodeHash===origin.codeHash&&plan.template.anchors.hostSourceHash===origin.sourceHash,'NonrootHostSqlPlan');
- same(capture.sqlFixture,plan.template.sqlFixture,'NonrootHostSqlPackage');carrierSqlFixtureComponentBudget(capture.sqlFixture,{putResponseBytes:plan.template.profiles.fixturePut.responseBytes});
+ same(capture.sqlFixture,plan.template.sqlFixture,'NonrootHostSqlPackage');carrierSqlFixtureComponentBudget(capture.sqlFixture,{putResponseBytes:plan.template.profiles.fixturePut.responseBytes,descriptorWork});
  same(capture.sqlFixture.oldSource,material.oldSource,'NonrootHostSqlPackage');
  const r=capture.acceptance.record,p=r.fixture.package;
  need(r.templateHash===plan.templateHash&&r.contextHash===plan.context.sha256&&r.grantHash===capture.binding.grantHash&&r.bindingHash===hash(capture.binding)&&r.sourceTree===plan.template.source.candidateTree&&r.sourceRevision===plan.template.source.candidateRevision&&r.deadlineMs===plan.deadlineMs&&r.startedMs>=plan.issuedMs,'NonrootHostSqlPlan');
  exact(p,['archive','rootDigest','arm64Digest','configDigest','attestationDigest','uncompressedBytes','processedEntries']);same(p.archive,capture.sqlFixture.archive,'NonrootHostSqlPackage');
  for(const key of ['rootDigest','arm64Digest','configDigest','attestationDigest','uncompressedBytes'])need(p[key]===capture.sqlFixture[key],'NonrootHostSqlPackage');
  need(positive(p.processedEntries)&&p.processedEntries<=capture.sqlFixture.processedEntries&&r.fixture.imageDigest===p.rootDigest,'NonrootHostSqlPackage');
- inspectHistoricalHostSqlBehavior(capture.acceptance,{origin,sourceClosure,minifiedHash:runtime.minifiedSourceHash,material,observedMs:input.observedMs});
+ inspectHistoricalHostSqlBehavior(capture.acceptance,{origin,sourceClosure,minifiedHash:runtime.minifiedSourceHash,material,observedMs:input.observedMs,descriptorWork});
  return copyNonrootJson({captureRef:local.capture,descriptor:capture.sqlFixture.archive});
 }
 
-function readers(archive){
+function readers(archive,processing){
  const resolvers=nonrootArchiveResolvers(archive),seen=new Set(),sqlDescriptors=new Map();let compositionDescriptors=[];
- const json=async(ref,type)=>{const raw=await resolvers.resolveJson(ref),value=parseNonrootJson(raw.toString('utf8'));return type?inspectNonrootRecord(type,value):value;};
+ const json=async(ref,type)=>{const raw=await resolvers.resolveJson(ref);descriptorCheck(processing?.descriptor);const value=parseNonrootJson(raw.toString('utf8'));return type?inspectNonrootRecord(type,value):value;};
  const bytes=ref=>resolvers.resolveBytes(ref);
  // Register fixed download-descriptor locations only after the original grant,
  // build result and SQL evidence are verified. Every other byte reference
  // still requires its actual archived contents, including identical hashes.
  const carrierSqlDescriptor=async(ref,record,proof)=>{
+  if(processing!==undefined&&!processing.descriptor)throw Error('DescriptorOriginalProcessing');const descriptorWork=processing?.descriptor;descriptorCheck(descriptorWork);const {hash,sha,same,inspectNonrootRecord}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);
+  try{
   if(record.version!==3||!record.combinedCopy?.payments)return;
   inspectNonrootRecord('JsonRef',ref);need(hash(record)===ref.canonicalHash,'NonrootSqlFixtureDocument');
-  const grant=record.combinedCopy.payments.carrierGrant,template=inspectCarrierBeforeCopyTemplate(grant.plan.template);
-  carrierSqlFixtureComponentBudget(template.sqlFixture,{putResponseBytes:template.profiles.fixturePut.responseBytes});
+  const grant=record.combinedCopy.payments.carrierGrant,template=inspectCarrierBeforeCopyTemplate(grant.plan.template,{descriptorWork});
+  carrierSqlFixtureComponentBudget(template.sqlFixture,{putResponseBytes:template.profiles.fixturePut.responseBytes,descriptorWork});
   const descriptor=hash(template.sqlFixture.archive);
   sqlDescriptors.set(hash(ref),{descriptor,paths:[['combinedCopy','payments','carrierGrant','plan','template','sqlFixture','archive']]});
   const build=proof.taskPlan.carrierBuild;
   if(build.kind!=='premerge-audit-carrier')return;
-  const security=await json(build.artifactSecurity),result=await json(security.buildResult),start=result.consumerPrefix?.events?.[0]?.data;
+  const security=descriptorResume(descriptorWork,(await json(build.artifactSecurity))),result=descriptorResume(descriptorWork,(await json(security.buildResult))),start=result.consumerPrefix?.events?.[0]?.data;
   need(start?.binding&&start?.startup&&start.binding.grantHash===hash(grant),'NonrootSqlFixtureGrant');
-  const binding=start.binding,claim=carrierCheckpointSelection(grant.plan,binding,Object.fromEntries(['nonce','scopeHash','artifactId','artifactDigest'].map(k=>[k,start.startup[k]]))).claim;
-  inspectCarrierBuildResult(result,{plan:grant.plan,binding,claim});same(result.image,build.image,'NonrootSqlFixtureImage');
-  const manifest=result.derivedMaterial.files.find(row=>row.path==='rootfs/carrier/manifest.json');need(manifest,'NonrootSqlFixtureManifest');
-  const originalManifest=Buffer.from(manifest.bytesBase64,'base64');
-  need(originalManifest.toString('base64')===manifest.bytesBase64&&sha(originalManifest)===manifest.sha256,'NonrootSqlFixtureManifest');
+  const binding=start.binding,claim=carrierCheckpointSelection(grant.plan,binding,Object.fromEntries(['nonce','scopeHash','artifactId','artifactDigest'].map(k=>[k,start.startup[k]])),{descriptorWork}).claim;
+  inspectCarrierBuildResult(result,{plan:grant.plan,binding,claim,descriptorWork});same(result.image,build.image,'NonrootSqlFixtureImage');
+  const manifest=descriptorPathFind(descriptorWork,result.derivedMaterial.files,'rootfs/carrier/manifest.json');need(manifest,'NonrootSqlFixtureManifest');
+  const originalManifest=descriptorBufferFrom(descriptorWork,manifest.bytesBase64,'base64');
+  need(descriptorBufferString(descriptorWork,originalManifest,'base64')===manifest.bytesBase64&&sha(originalManifest)===manifest.sha256,'NonrootSqlFixtureManifest');
   const old=build.legacyClosureProof.imageOrigin.source;
-  const acceptance=inspectCarrierSqlAcceptance(result.sqlAcceptance,{plan:grant.plan,binding,claim,image:build.image,oldSource:{revision:old.revision,tree:old.tree},originalManifest,now:proof.observedMs});
+  const acceptance=inspectCarrierSqlAcceptance(result.sqlAcceptance,{plan:grant.plan,binding,claim,image:build.image,oldSource:{revision:old.revision,tree:old.tree},originalManifest,now:proof.observedMs,descriptorWork});
   const execution=build.legacyClosureProof.logicalInvocation.executionTest;
-  same(execution,build.syntheticTests,'NonrootSqlFixtureExecutionRef');same(await json(execution),acceptance.record,'NonrootSqlFixtureExecution');
+  same(execution,build.syntheticTests,'NonrootSqlFixtureExecutionRef');same(descriptorResume(descriptorWork,(await json(execution))),acceptance.record,'NonrootSqlFixtureExecution');
   sqlDescriptors.set(hash(execution),{descriptor,paths:[['fixture','package','archive']]});
   sqlDescriptors.set(hash(security.buildResult),{descriptor,paths:[['sqlAcceptance','record','fixture','package','archive']]});
   const origin=build.legacyClosureProof.hostOrigin;
   if(origin.version===2){
-   const documents={},readDocument=async(name,reference)=>{const raw=await resolvers.resolveJson(reference);documents[name]=raw;return parseNonrootJson(raw.toString());};
-   const review=await readDocument('review',origin.deltaReview),source=await readDocument('source',origin.sourceFiles);
-   await readDocument('derivation',origin.derivation);
-   const approved=await readDocument('approved',review.reviewEvidence);
-   const local=await readDocument('local',review.localSqlEvidence);
-   await readDocument('capture',local.capture);await readDocument('material',local.material);
-   const references=[...new Map([...source.modules.map(row=>row.content),...approved.evidence].map(reference=>[hash(reference),reference])).values()];
-   const blobs=await Promise.all(references.map(async reference=>({ref:reference,bytes:await bytes(reference)})));
-   const historical=inspectReviewedHostSqlDescriptor({origin,template,documents,blobs,observedMs:proof.observedMs});
+   const documents={},readDocument=async(name,reference)=>{const raw=descriptorResume(descriptorWork,(await resolvers.resolveJson(reference)));documents[name]=raw;return parseNonrootJson(raw.toString());};
+   const review=descriptorResume(descriptorWork,(await readDocument('review',origin.deltaReview))),source=descriptorResume(descriptorWork,(await readDocument('source',origin.sourceFiles)));
+   descriptorResume(descriptorWork,(await readDocument('derivation',origin.derivation)));
+   const approved=descriptorResume(descriptorWork,(await readDocument('approved',review.reviewEvidence)));
+   const local=descriptorResume(descriptorWork,(await readDocument('local',review.localSqlEvidence)));
+   descriptorResume(descriptorWork,(await readDocument('capture',local.capture)));descriptorResume(descriptorWork,(await readDocument('material',local.material)));
+   descriptorGuard(descriptorWork,source.modules,approved.evidence);const references=[...new Map([...source.modules.map(row=>row.content),...approved.evidence].map(reference=>[hash(reference),reference])).values()];
+   const values=descriptorResume(descriptorWork,(await descriptorJoin(descriptorWork,references,bytes)));const blobs=references.map((ref,i)=>({ref,bytes:values[i]}));
+   const historical=inspectReviewedHostSqlDescriptor({origin,template,documents,blobs,observedMs:proof.observedMs},{descriptorWork});
    sqlDescriptors.set(hash(historical.captureRef),{descriptor:hash(historical.descriptor),paths:[['sqlFixture','archive'],['plan','template','sqlFixture','archive'],['acceptance','record','fixture','package','archive']]});
   }
+ 
+  }catch(error){descriptorWork?.fail();throw error;}
  };
  const closure=async(value,document=null,path=[])=>{
   if(!value||typeof value!=='object')return;
@@ -215,7 +220,7 @@ function readers(archive){
  return {...resolvers,json,bytes,closure,carrierSqlDescriptor,compositionPackDescriptors,copyRecord:ref=>resolveNonrootArchiveRawJson(archive,ref.sha256)};
 }
 
-async function sourceInputs(proof,r,now){
+async function sourceInputs(proof,r,now,processing){
  const source=await r.json(proof.deploymentControl.sourceEvidence),origin=await r.json(proof.dataOrigin.sourceEvidence),commit=await r.json(proof.dataOrigin.buildCommit);
  const c=proof.deploymentControl,d=proof.dataOrigin;
  need(source.controlRevision===c.revision&&source.controlTree===c.tree&&source.baseRevision===c.baseRevision&&typeof source.repository==='string'&&/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(source.repository)&&positive(source.prNumber),'NonrootControlSource');
@@ -246,7 +251,7 @@ async function sourceInputs(proof,r,now){
   const isolation=await r.json(p.ciSmokeIsolation),result=await r.json(p.ciSmokeResult);
   need(isolation.origin?.revision===d.revision&&isolation.origin.tree===d.tree&&isolation.candidate?.revision===c.revision&&isolation.candidate.tree===c.tree,'NonrootCiSmokeSourceBinding');
   need(policySourceMap.ciSmoke,'NonrootCiSmokeSourceMaterialRequired');
-  await verifyArchivedCiSmoke(isolation,result,{material:await r.json(policySourceMap.ciSmoke),resolveJson:r.resolveJson,readBytes:r.bytes,originRecipe:recipes[0],candidateRecipe:recipes[1],now});
+  await verifyArchivedCiSmoke(isolation,result,{material:await r.json(policySourceMap.ciSmoke),resolveJson:r.resolveJson,readBytes:r.bytes,originRecipe:recipes[0],candidateRecipe:recipes[1],now,...(processing?{processing:processing.ci}:{})});
  }
  const inputs=p.dataInputs;exact(inputs,['version','recipe','controlRecipe','protectedInputs','controlProtectedInputs']);need(inputs.version===1);same(inputs.recipe,recipes[0]);same(inputs.controlRecipe,recipes[1]);same(inputs.protectedInputs,inputs.controlProtectedInputs);
  for(const item of inputs.protectedInputs){exact(item,['path','sha256']);for(const closure of [p.dataClosure,p.controlClosure]){const file=closure.files.find(f=>f.path===item.path);need(file&&file.sha256===item.sha256,'NonrootProtectedFileChanged');}}
@@ -267,7 +272,7 @@ function pathRecord(entries,path){
  throw Error('NonrootImagePathCycle');
 }
 
-async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expectedFunding,remainingWorkEnvelope,expectedFinalization,expectedFenceAcquisition){
+async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expectedFunding,remainingWorkEnvelope,expectedFinalization,expectedFenceAcquisition,processing){
  const v=proof.artifactReverification,receipt=await r.json(v.graph),images=imagePairs(proof.dataOrigin.images),cached=v.version===2;
  const expectedScope={account:proof.root.account,region:proof.root.region,images};
  if(cached)inspectNonrootDigestOnlyCopy(receipt,expectedScope);else validateImageCopyEvidence(receipt,expectedScope);
@@ -305,7 +310,7 @@ async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expected
  for(const name of COMPONENTS){
   const image=proof.dataOrigin.images[name],e=fs.evidence[name];
   need(e.component===name&&e.graphHash===receipt.summary.inventoryHash&&e.rootDigest===image.rootDigest&&e.arm64Digest===image.arm64Digest,'NonrootFilesystemBinding');
-  if(!archiveBinding){const handle=cached?cacheMaterial.filesystem[name]:evidence.filesystemVerification[name];need(imageFilesystemVerificationKind(handle)==='live-filesystem-evidence','NonrootLiveArtifactRequired');same(inspectImageFilesystemEvidence(handle),e);const actual=new Map(inspectImageFilesystemEntries(handle).map(p=>[p.path,p]));for(const path of paths[name]){need(actual.has(path.path),'NonrootImagePathMissing');same(actual.get(path.path),path,'NonrootImagePathChanged');}}
+  if(!archiveBinding){const handle=cached?cacheMaterial.filesystem[name]:evidence.filesystemVerification[name];need(imageFilesystemVerificationKind(handle)==='live-filesystem-evidence','NonrootLiveArtifactRequired');same(inspectImageFilesystemEvidence(handle),e);const actual=new Map(inspectImageFilesystemEntries(handle,processing?.filesystem).map(p=>[p.path,p]));for(const path of paths[name]){need(actual.has(path.path),'NonrootImagePathMissing');same(actual.get(path.path),path,'NonrootImagePathChanged');}}
   need(Array.isArray(paths[name])&&paths[name].length>0&&new Set(paths[name].map(p=>p.path)).size===paths[name].length,'NonrootImagePaths');
   const primitive=inspectNonrootRecord('PrimitiveEvidenceV1',primitives[name]);same(primitive.image,image);need(primitive.invokedPath===(name==='mnemo-server'?'/bin/setpriv':'/usr/bin/setpriv'),'NonrootPrimitivePath');
   const actual=pathRecord(paths[name],primitive.invokedPath);need(actual.resolvedPath===primitive.resolvedPath&&actual.row.type==='file'&&actual.row.mode===493&&actual.row.uid===0&&actual.row.gid===0&&actual.row.content.sha256===primitive.fileSha256,'NonrootPrimitiveBytes');same(actual.links,await r.json(primitive.symlinkChain));
@@ -322,7 +327,7 @@ async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expected
  const checked=await verifyImageTransitionArtifactSecurity({images,artifacts:security.artifacts,dataOrigin:{revision:proof.dataOrigin.revision},scans:security.scans,policy:security.policy,vendors:security.vendors,buildEvidence:security.buildEvidence,graph:receipt.summary,filesystem:fs.filesystem},{predecessor,now:at});
  need(fs.filesystem.path==='/lib/apk/db/installed'&&fs.filesystem.databaseHash===sha(fs.filesystem.databaseText)&&fs.filesystem.graphHash===receipt.graphHash&&fs.filesystem.imageDigest===images['mnemo-server'].arm64Digest,'NonrootPackageDatabase');
  if(!archiveBinding){
-  if(cached){const file=inspectImageFilesystemFile(cacheMaterial.filesystem['mnemo-server'],fs.filesystem.path);need(file.sha256===fs.filesystem.databaseHash,'NonrootCachePackageBytes');}
+  if(cached){const file=inspectImageFilesystemFile(cacheMaterial.filesystem['mnemo-server'],fs.filesystem.path,processing?.filesystem);need(file.sha256===fs.filesystem.databaseHash,'NonrootCachePackageBytes');}
   else same(imageFilesystemProof(evidence.filesystemVerification['mnemo-server'],evidence.graphVerification,{path:'/lib/apk/db/installed'}),fs.filesystem);
  }
  need(fs.evidence['mnemo-server'].packages.some(p=>p.name==='zlib'&&p.version===security.policy.fixed.targetVersion&&p.databaseSha256===fs.filesystem.databaseHash),'NonrootPackageVersion');
@@ -395,12 +400,15 @@ async function taskPlan(proof,r,artifact,source){
  return {targets,before,metadata,projectionHash:hash(targetProjection)};
 }
 
-async function derive(value,{expected,evidence,now,mode='admission',existing=false}){
+async function derive(value,{expected,evidence,now,mode='admission',existing=false,processing}){
+ if(processing!==undefined)need(typeof processing.header==='function'&&typeof processing.archive==='function'&&typeof processing.filesystem?.beforeRead==='function'&&typeof processing.ci?.source==='function'&&typeof processing.ci?.context==='function','NonrootProofProcessingRequired');
+ if(processing){const paid=processing.header();if(paid&&typeof paid.then==='function'){Promise.resolve(paid).catch(()=>{});need(false,'NonrootProofSynchronousPayment');}need(paid===undefined,'NonrootProofSynchronousPayment');}
+ if(processing){need(processing.descriptor,'NonrootProofProcessingRequired');descriptorCheck(processing.descriptor);}
  const proof=inspectNonrootRecord('NonrootImageProofV2',value),pins=copyNonrootJson(expected);exact(pins,['owner',...Object.keys(NONROOT_PROOF_BINDINGS)]);need(hex(pins.owner,32)&&positive(now)&&['admission','inspection'].includes(mode));
  for(const [key,field]of Object.entries(NONROOT_PROOF_BINDINGS)){need(hex(pins[key]));const actual=Object.hasOwn(proof[field],'canonicalHash')?proof[field].canonicalHash:hash(proof[field]);need(pins[key]===actual,'NonrootIndependentBinding');}
- need(proof.observedMs<=now,'NonrootProofFuture');const archive=forkNonrootArchive(evidence?.archive),custody=nonrootArchiveBindings(archive);need(custody.owner===pins.owner&&proof.predeploymentAudit.preauditPermit.owner===pins.owner,'NonrootArchiveOwner');
+ need(proof.observedMs<=now,'NonrootProofFuture');const archive=forkNonrootArchive(evidence?.archive,processing?{beforeRead:processing.archive,assertCurrent:processing.descriptor.check}:{}),custody=nonrootArchiveBindings(archive);need(custody.owner===pins.owner&&proof.predeploymentAudit.preauditPermit.owner===pins.owner,'NonrootArchiveOwner');
  const published=custody.kind==='published-archive';need(existing||!published,'NonrootInitialLiveEvidenceRequired');const at=mode==='inspection'||published?proof.observedMs:now;if(mode==='admission'&&!published)time(proof.observedMs,now);
- const r=readers(archive),parameter=inspectParameter(await r.json(proof.predecessorParameter),proof.root),predecessor=inspectDataRelease(parameter.Value,{stage:'prod',account:proof.root.account,region:proof.root.region,controlSourceTree:parseNonrootJson(parameter.Value).controlSourceTree}).data;
+ const r=readers(archive,processing),parameter=inspectParameter(await r.json(proof.predecessorParameter),proof.root),predecessor=inspectDataRelease(parameter.Value,{stage:'prod',account:proof.root.account,region:proof.root.region,controlSourceTree:parseNonrootJson(parameter.Value).controlSourceTree}).data;
  need(predecessor.version===1&&predecessor.expiresMs<=proof.observedMs,'NonrootPredecessorActive');
  const legacy=await r.json(proof.legacyBootstrapProof);exact(legacy,['version','kind','proof','expectedBootstrap']);need(legacy.version===1&&legacy.kind==='verified-legacy-bootstrap-inputs');verifyCanaryMaterialTransition(legacy.proof,{proofHash:hash(legacy.proof),expectedBootstrap:legacy.expectedBootstrap});
  const parent=legacy.proof.parent,serving=parseNonrootJson(legacy.proof.currentText);same(serving.dataRelease.data,predecessor,'NonrootPredecessorChanged');need(serving.dataRelease.parameterVersion===parameter.Version,'NonrootPredecessorVersion');verifyLegacyCanaryMaterial(serving);
@@ -408,9 +416,9 @@ async function derive(value,{expected,evidence,now,mode='admission',existing=fal
  for(const [field,actual]of Object.entries({parentProofHash:hash(parent),generation:parent.generation,validationId:parent.validationId,targetsHash:hash([...parent.targets].sort()),originalBackendBindingHash:parent.backendBindingHash,originalReleaseHash:parent.releaseHash,receipts:parent.receipts,receiptSetHash:parent.replayResultHash,spent:parent.changedRows,conservationHash:parent.conservationHash}))need(proof.root[field]===actual,'NonrootOriginalRootChanged');
  for(const field of ['stage','account','region','runtimeNonce','schemaDigest','operatorDigest'])need(proof.root[field]===predecessor[field],'NonrootOriginalRootChanged');
  const certificate=await r.json(proof.predeploymentAudit.oldCertificate);need(certificate.version===2,'NonrootLegacyRootCertificate');inspectCanaryCompatibility(certificate,parent,{generation:parent.generation,targets:parent.targets,workerImage:certificate.current.release.workerImage,sourceTag:certificate.current.release.sourceTag,acceptance:{sourceTree:certificate.current.release.sourceTree,coordinatorDigest:certificate.current.release.coordinatorDigest},dataRelease:{hash:certificate.dataReleaseHash}},{operation_nonce:proof.root.runtimeNonce,identity:{schemaDigest:proof.root.schemaDigest,operatorDigest:proof.root.operatorDigest,clusterArn:serving.network.cluster}});
- const source=await sourceInputs(proof,r,at);
+ const source=await sourceInputs(proof,r,at,processing);
  const expectedFunding={source:{repository:source.source.repository,prNumber:source.source.prNumber,candidateRevision:proof.deploymentControl.revision,candidateTree:proof.deploymentControl.tree,baseRevision:proof.deploymentControl.baseRevision},predecessorParameterHash:hash(parameter),rootBindingHash:hash(proof.root),authorizationId:pins.owner,nextParameterVersion:parameter.Version+1};
- const artifact=await artifacts(proof,evidence,r,predecessor,at,published?custody.binding:null,expectedFunding,source.remainingWorkEnvelope,source.expectedFinalization,source.expectedFenceAcquisition);
+ const artifact=await artifacts(proof,evidence,r,predecessor,at,published?custody.binding:null,expectedFunding,source.remainingWorkEnvelope,source.expectedFinalization,source.expectedFenceAcquisition,processing);
  need(sha(source.buildLog)===artifact.security.buildEvidence.logHash&&source.buildLog.toString('utf8')===artifact.security.buildEvidence.logText,'NonrootBuildLogChanged');
  const terminal=await r.json(proof.historicalCopy.recoveryTerminal);need(terminal.owner===proof.historicalCopy.owner&&terminal.completed===true&&terminal.cleanupComplete===true&&terminal.hold===false,'NonrootCopyNotCompleted');
  const historical=await r.json(proof.historicalCopy.completedGraph),scope={account:proof.root.account,region:proof.root.region,images:imagePairs(proof.dataOrigin.images)};
@@ -578,3 +586,5 @@ export function assertNonrootTaskDefinitionReadback(context,taskKey,value){
  const attributes=rows=>{need(Array.isArray(rows));const values=rows.map(v=>typeof v==='string'?v:v.name);need(values.every(v=>typeof v==='string')&&new Set(values).size===values.length);return values.slice().sort();};
  same(attributes(raw.requiresAttributes),attributes(expected.requiresAttributes),'NonrootRegistrationAttributes');same(attributes(raw.compatibilities),attributes(expected.compatibilities),'NonrootRegistrationCompatibilities');return raw.taskDefinitionArn;
 }
+
+const DESCRIPTOR_BASE_OPERATIONS={hash,sha,same,copyNonrootJson,inspectNonrootRecord,parseNonrootJson,JSON};

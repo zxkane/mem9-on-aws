@@ -127,7 +127,21 @@ async function packageDatabase(content,layers,diffIds,readBlob,budget,requiremen
 
 /** No filesystem or credential APIs are used. readBlob comes only from the
  * verified cache. A private caller must isolate this parser from credentials. */
-export async function inspectImageFilesystem(graph,{component,requirements=[],budget}={}){
+// Numeric-only original-caller prepayment keeps mutable entries private.
+// Charge each container and field before traversal, including repeated aliases.
+async function freezeWithOriginalPayment(value,beforeFreeze){
+ if(!value||typeof value!=='object')return;
+ const current=await beforeFreeze(256);
+ need(typeof current==='function'&&current()===undefined,'ImageFilesystemSynchronousPayment');
+ for(const key in value){
+  const fieldCurrent=await beforeFreeze(256+8*key.length);
+  need(typeof fieldCurrent==='function'&&fieldCurrent()===undefined,'ImageFilesystemSynchronousPayment');
+  if(Object.hasOwn(value,key)){await freezeWithOriginalPayment(value[key],beforeFreeze);fieldCurrent();}
+ }
+ current();Object.freeze(value);return current;
+}
+export async function inspectImageFilesystem(graph,{component,requirements=[],budget,beforeRead,beforeFreeze}={}){
+ if(beforeRead!==undefined||beforeFreeze!==undefined)need(typeof beforeRead==='function'&&typeof beforeFreeze==='function','ImageFilesystemProcessingRequired');
  const state=imageGraphState(graph);budget??=state.budget;need(budget===state.budget,'ImageFilesystemBudget');assertImageBudget(budget);const image=state.images.get(component);need(image,'ImageFilesystemComponent');
  need(Array.isArray(requirements)&&requirements.length<=32&&new Set(requirements.map(r=>r.path+'\0'+r.name)).size===requirements.length,'ImagePackageRequirements');
  for(const r of requirements)need(r&&Object.keys(r).sort().join()===['path','manager','name','version'].sort().join()&&r.manager==='apk'&&typeof r.path==='string'&&r.path.startsWith('/')&&typeof r.name==='string'&&/^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name)&&typeof r.version==='string'&&/^[^\s\0]{1,512}$/.test(r.version),'ImagePackageRequirements');
@@ -139,8 +153,11 @@ export async function inspectImageFilesystem(graph,{component,requirements=[],bu
  const groups=new Map();for(const r of requirements){const path=normalize(r.path,{link:true}),name=resolved(nodes,path,{missing:false}),node=nodes.get(name);need(node&&['file','hardlink'].includes(node.type),'ImagePackageDatabaseMissing');const key=node.content.layer+':'+node.content.offset;if(!groups.has(key))groups.set(key,{content:node.content,requirements:[]});groups.get(key).requirements.push(r);}
  const packages=[],databases=[];for(const group of groups.values()){const db=await packageDatabase(group.content,image.layers,image.diffIds,readBlob,budget,group.requirements);packages.push(...db.packages);databases.push(db);}
  const entries=[...nodes].sort(([a],[b])=>a.localeCompare(b)).map(([path,node])=>({path,...node}));
+ // Optional original-caller processing hook; immutable data cannot replace
+ // graph/FS authority, and completion is awaited before the full entries hash.
+ if(beforeRead!==undefined){const frozenCurrent=await freezeWithOriginalPayment(entries,beforeFreeze);frozenCurrent();const assertCurrent=await beforeRead(entries);need(typeof assertCurrent==='function','ImageFilesystemProcessingPayment');need(assertCurrent()===undefined,'ImageFilesystemSynchronousPayment');}
  const evidence=freeze({version:1,graphHash:graph.graphHash,limitsHash:IMAGE_TRANSITION_LIMITS_HASH,component,rootDigest:state.roots.find(r=>r.component===component).root.digest,arm64Digest:image.manifest.digest,entriesHash:hash(entries),entryCount:entries.length,requirementsHash:hash(requirements),packages});
- const context=Object.freeze({evidence});verified.set(context,{evidence,databases,uncompressedBytes:pass.bytes,processedEntries:pass.entries,entries:freeze(entries),side:state.side,graph,requirements:structuredClone(requirements)});return context;
+ const context=Object.freeze({evidence});verified.set(context,{evidence,databases,uncompressedBytes:pass.bytes,processedEntries:pass.entries,entries:beforeRead===undefined?freeze(entries):entries,side:state.side,graph,requirements:structuredClone(requirements)});return context;
 }
 /** A new copy requires this exact live source graph, not destination or archive
  * evidence with the same public hashes. The caller supplies policy-bound pins. */
@@ -171,15 +188,24 @@ export function inspectImageFilesystemEvidence(context){need(verified.has(contex
 /** Read-only metadata from the actual verified virtual filesystem. This does
  * not create authority or expose a host filesystem path. Archive reconstruction
  * cannot claim a new live extraction through this accessor. */
-export function inspectImageFilesystemEntries(context){
+function prepayFilesystemRead(state,options){
+ if(options===undefined)return;
+ need(options&&Object.keys(options).length===1&&typeof options.beforeRead==='function','ImageFilesystemProcessingRequired');
+ const value=options.beforeRead(state.entries,state.evidence);
+ if(value&&typeof value.then==='function'){Promise.resolve(value).catch(()=>{});need(false,'ImageFilesystemSynchronousPayment');}
+ need(value===undefined,'ImageFilesystemSynchronousPayment');
+}
+export function inspectImageFilesystemEntries(context,options){
  const state=verified.get(context);need(state&&state.kind!=='archived-filesystem-evidence'&&state.entries,'ImageFilesystemContextRequired');
+ prepayFilesystemRead(state,options);
  need(hash(state.entries)===state.evidence.entriesHash,'ImageFilesystemEntriesChanged');return structuredClone(state.entries);
 }
 /** File facts come from the verified final overlay and actual layer bytes.
  * No host path is opened and no archived JSON object creates this handle. */
-export function inspectImageFilesystemFile(context,path){
+export function inspectImageFilesystemFile(context,path,options){
  const state=verified.get(context);need(state&&state.kind!=='archived-filesystem-evidence'&&state.entries,'ImageFilesystemContextRequired');
  need(typeof path==='string'&&path.startsWith('/')&&path!=='/'&&posix.normalize(path)===path&&!path.endsWith('/'),'ImageRuntimeFilePath');
+ prepayFilesystemRead(state,options);
  const nodes=new Map(state.entries.map(({path,...node})=>[path,node])),links=[];
  const effectiveId=(node,key)=>{
   const raw=node.pax?.[key];if(raw===undefined)return node[key];

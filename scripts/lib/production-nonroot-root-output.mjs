@@ -1,9 +1,10 @@
+import {descriptorOperations,descriptorGuard,descriptorBufferByteLength,descriptorSplit} from './production-nonroot-descriptor-processing.mjs';
 /** Original four-event carrier output validator, shared by owner and CI. */
 import {need,exact,sha,hex} from './ci-smoke-acquisition-format.mjs';
-export function inspectRootCarrierOutput({stdout,exitCode},expected){
+export function inspectRootCarrierOutput({stdout,exitCode},expected,{descriptorWork}={}){const {sha,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,{stdout,exitCode},expected);
  exact(expected,['invocation','inputHash','legacyCodeHash','manifestHash','nodeSha256','supplementalSha256']);
- need(typeof stdout==='string'&&Buffer.byteLength(stdout)<=2097152&&exitCode===0,'CarrierObservedExit');
- const lines=stdout.trimEnd().split('\n');need(lines.length===4,'CarrierOutputCount');
+ need(typeof stdout==='string'&&descriptorBufferByteLength(descriptorWork,stdout)<=2097152&&exitCode===0,'CarrierObservedExit');
+ const lines=descriptorSplit(descriptorWork,stdout.trimEnd(),'\n');need(lines.length===4,'CarrierOutputCount');
  const [before,result,supplemental,after]=lines.map(line=>JSON.parse(line));
  for(const row of [before,after]){
   need(row.event==='carrier_process_identity'&&row.invocation===expected.invocation&&row.inputHash===expected.inputHash&&row.legacyCodeHash===expected.legacyCodeHash&&row.manifestHash===expected.manifestHash,'CarrierOutputBinding');
@@ -18,3 +19,5 @@ export function inspectRootCarrierOutput({stdout,exitCode},expected){
  need(supplemental.legacyOutputSha256===sha(lines[1])&&supplemental.startedMs>=result.observedMs&&supplemental.databaseObservedMs>=supplemental.startedMs&&supplemental.completedMs>=supplemental.databaseObservedMs&&supplemental.completedMs<=after.observedMs,'CarrierOutputSupplement');
  return {authority:false,before,legacyResult:result,supplemental,after,stdoutSha256:sha(stdout)};
 }
+
+const DESCRIPTOR_BASE_OPERATIONS={sha,JSON};

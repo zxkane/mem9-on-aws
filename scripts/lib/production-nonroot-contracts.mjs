@@ -180,6 +180,26 @@ define('CaBindingV1',{name:literal('NODE_EXTRA_CA_CERTS'),value:oneOf('/app/glob
 define('EnvironmentGateV1',{version:literal(1),kind:literal('prelaunch-environment-gate'),image:IMG,...hashes('registrationBodyHash overrideHash forbiddenNamesHash'),...refs('imageEnvironment taskEnvironment secretNamesAndReferences overrideEnvironment loaderFileEvidence'),caBindings:array(ref('CaBindingV1'),0,1),checkedMs:MS,result:literal('pass')});
 schemas.HealthLaunchV1=union(object({kind:literal('absent')}),object({kind:literal('fixed-health-nnp'),before:ARGV,after:ARGV,originalShell:ref('PresenceArgv'),primitiveEvidence:JSON_REF}));
 define('FixedDataLaunchV1',{version:literal(1),kind:literal('fixed-data-nnp-launch'),taskKey:oneOf('backend','planner','executor'),containerName:S,image:IMG,originalEntryPoint:ARGV,originalCommand:ARGV,prefix:ARGV,targetEntryPoint:ARGV,targetCommand:ARGV,workingDirectory:ref('PresenceString'),pathEvidence:JSON_REF,primitiveEvidence:JSON_REF,healthLaunch:ref('HealthLaunchV1')});
+// Prospective observation data only. An expired window never revives a payer
+// and does not revoke the separately validated normal hardened application.
+define('DataObservationPlanV1',{
+ version:literal(1),kind:literal('bounded-data-observation'),owner:N,operation:N,launchNonce:N,sourceTree:G,
+ role:oneOf('mnemo-server','llm-proxy','qwen3-embed','planner','executor'),image:IMG,
+ startedMs:MS,latestArmMs:MS,observationEndMs:MS,deadlineMs:MS,
+ armingLimitMs:integer(1,30000),cleanupReserveMs:P,
+ episodes:array(object({index:Z,offsetMs:Z,durationMs:P,sampleEveryMs:P}),1,1000),
+ limits:object({readBytes:literal(268435456),rawBytes:literal(1048576),initialProcesses:literal(128),finalProcesses:literal(128),combinedIdentities:literal(256)}),
+},v=>{
+ need(v.startedMs<=v.latestArmMs&&v.latestArmMs<v.observationEndMs&&v.observationEndMs<v.deadlineMs);
+ need(Number.isSafeInteger(v.observationEndMs+v.cleanupReserveMs)&&v.observationEndMs+v.cleanupReserveMs<=v.deadlineMs);
+ let previous=v.startedMs,total=0;
+ for(const [index,e]of v.episodes.entries()){
+  const start=v.startedMs+e.offsetMs,end=start+e.durationMs;
+  need(e.index===index&&Number.isSafeInteger(start)&&Number.isSafeInteger(end)&&start>=previous&&end<=v.observationEndMs&&e.sampleEveryMs<=e.durationMs);
+  if(index===0)need(Number.isSafeInteger(v.latestArmMs+v.armingLimitMs)&&v.latestArmMs+v.armingLimitMs<=start);
+  previous=end;total+=Math.ceil(e.durationMs/e.sampleEveryMs)+1;need(Number.isSafeInteger(total));
+ }
+});
 const purposes=['bootstrap-runtime-verify','consolidation-control','consolidation-promote','denied-provision','denied-transition','bootstrap-runtime-bootstrap','bootstrap-admin-probe','bootstrap-admin-probe-cleanup','preview-fixture-setup','preview-fixture-pause','preview-fixture-verify-planned','preview-fixture-verify-executed','preview-fixture-verify-repeated','post-runtime-fixture','canary-fixture','bootstrap-schema-seed'];
 define('ControlLaunchTemplateV1',{version:literal(1),kind:literal('guard-first-control-launch'),taskKey:KEY,containerName:S,purpose:oneOf(...purposes),entryPoint:ARGV,command:array(S,0,0),dispatcherPath:literal('/bootstrap/nonroot-dispatch.mjs'),dispatcherSha256:H,guardClosure:JSON_REF,originalModule:ref('PresenceString'),originalModuleSha256:ref('PresenceString'),originalArgv:ARGV,permittedOperations:array(S,0,64),primitiveContract:JSON_REF,buildContractKey:literal('deployed-bootstrap')},
  v=>equal(v.entryPoint,['/bin/setpriv','--no-new-privs','--',CONTROL_NODE,v.dispatcherPath,v.purpose]));

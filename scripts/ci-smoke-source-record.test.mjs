@@ -1,3 +1,5 @@
+import {ciSmokeEvidenceFixture} from './ci-smoke-evidence.fixture.mjs';
+import {verifyArchivedCiSmoke} from './lib/ci-smoke-isolation.mjs';
 import {describe,it,expect,beforeAll,afterAll} from 'vitest';
 import {execFileSync} from 'node:child_process';
 import {mkdtempSync,readFileSync,lstatSync,rmSync} from 'node:fs';
@@ -23,7 +25,7 @@ const git=(args,input)=>execFileSync('git',['-c','core.hooksPath=/dev/null',...a
 
 // These are real Git objects in an isolated temporary repository. A supplied
 // tree label or mocked source-verifier success is never used by the tests.
-function snapshot(files){
+function snapshot(files,parents=[]){
   git(['read-tree','--empty']);
   const index=[];
   for(const [path,bytes]of files){
@@ -33,7 +35,7 @@ function snapshot(files){
   }
   git(['update-index','--index-info'],index.join(''));
   const tree=git(['write-tree']).toString().trim();
-  const revision=git(['-c','user.name=Fixture','-c','user.email=user@example.com','commit-tree',tree,'-m','Synthetic smoke source fixture']).toString().trim();
+  const revision=git(['-c','user.name=Fixture','-c','user.email=user@example.com','commit-tree',tree,...parents.flatMap(parent=>['-p',parent.revision]),'-m','Synthetic smoke source fixture']).toString().trim();
   const entries=git(['ls-tree','-rz',tree]).toString().split('\0').filter(Boolean).map(row=>{
     const match=/^(\d+) (\w+) ([a-f0-9]{40})\t(.+)$/.exec(row);
     return {mode:match[1],type:match[2],oid:match[3],path:match[4]};
@@ -88,7 +90,7 @@ beforeAll(()=>{
   workflow.jobs['build-and-push-image']=buildCiSmokeImageJob(workflow);
   files.set(workflowPath,Buffer.from(stringify(workflow)));
   files.set('.github/actions/runtime-cutover/action.yml',Buffer.from(stringify(promoted.actions['.github/actions/runtime-cutover/action.yml'])));
-  candidateFiles=files;candidate=snapshot(files);
+  candidateFiles=files;candidate=snapshot(files,[origin]);
 },30000);
 afterAll(()=>{if(directory)rmSync(directory,{recursive:true,force:true});});
 
@@ -163,4 +165,57 @@ describe('Git-backed CI smoke source record producer',()=>{
     const selected=variant(files=>{const p='.github/actions/ci-smoke-gate/index.mjs';files.set(p,Buffer.concat([files.get(p),Buffer.from('\nawait import(process.env.UNREVIEWED_MODULE);\n')]));});
     await expect(createCiSmokeIsolationRecord(input(selected))).rejects.toThrow('CiSmokeDynamicImport');
   },30000);
+});
+
+
+// Full Git membership and the existing fourteen-check raw fixture are replayed
+// by the real validators. These synthetic observations do not run a provider.
+describe('archived CI processing callbacks',()=>{
+ let replay;
+ beforeAll(async()=>{
+  const source=await createCiSmokeIsolationRecord(input()),f=ciSmokeEvidenceFixture({sourceTree:candidate.context.tree,sourceRevision:candidate.revision,isolationHash:hash(source.isolation),nativeStop:true});
+  const sourceBodies=new Map(),documents=new Map();
+  const archiveContext=selected=>{
+   if(documents.has(selected.context.tree))return documents.get(selected.context.tree);
+   const entries=controlSourceEntries(selected.context),blobs={};
+   for(const entry of entries){const raw=blobBytes.get(entry.oid),ref={sha256:sha(raw),bytesLength:raw.length};blobs[entry.oid]=ref;sourceBodies.set(ref.sha256,raw);}
+   const ref=f.json({tree:selected.context.tree,entries,blobs});documents.set(selected.context.tree,ref);return ref;
+  };
+  const identity=f.expected.identity,job=(value,name)=>({id:value.id,run_id:value.runId,run_attempt:value.runAttempt,head_sha:candidate.revision,name,status:'completed',conclusion:'success',started_at:new Date(value.startedMs).toISOString(),completed_at:new Date(value.completedMs).toISOString()});
+  const buildJob={...job(f.expected.buildJob,'Build & push workload images'),steps:[{name:'Build & push mnemo-server (arm64)',status:'completed',conclusion:'success'}]},smokeJob=job(f.expected.smokeJob,'Mnemo nonroot smoke');
+  const commit={sha:candidate.revision,commit:{tree:{sha:candidate.context.tree}},parents:[{sha:origin.revision}]};
+  const provenance={run:{id:identity.runId,run_attempt:identity.runAttempt,path:identity.workflowPath,event:'push',head_sha:candidate.revision,head_repository:{full_name:identity.repository}},buildJob,smokeJob,commit,candidateCommit:commit,sourceRevision:candidate.revision,sourceTree:candidate.context.tree,buildDigest:identity.outputDigest};
+  const material={version:1,kind:'ci-smoke-source-material',origin:archiveContext(origin),candidate:archiveContext(candidate),baseline:archiveContext(baseline),provenance:f.json(provenance),expected:f.json(f.expected)};
+  const options={material,originRecipe:source.originRecipe,candidateRecipe:source.candidateRecipe,resolveJson:async ref=>f.objects.get(ref.bytesHash),readBytes:async ref=>sourceBodies.get(ref.sha256)??f.objects.get(ref.sha256),now:f.options().now};
+  replay={f,source,options,sourceBodies};
+ },30000);
+ it('TC-CONS-IMAGE-127 independently pays each complete source replay and preserves all fourteen checks',async()=>{
+  const {f,source,options}=replay,pending=[],paid={context:0,source:0};let sourceReads=0;
+  const processing={context(value,ref){expect(ref.bytesLength).toBeGreaterThan(0);expect(value.entries.length).toBeGreaterThan(0);paid.context++;},source(ref,path){expect(path).not.toBe('');paid.source++;pending.push(ref.sha256);}};
+  const readBytes=async ref=>{if(pending.length){expect(pending.shift()).toBe(ref.sha256);sourceReads++;}return options.readBytes(ref);};
+  const legacy=await verifyArchivedCiSmoke(source.isolation,f.result,options),first=await verifyArchivedCiSmoke(source.isolation,f.result,{...options,processing,readBytes}),once={...paid};
+  expect(first).toEqual(legacy);expect(Object.keys(f.result.checks)).toHaveLength(14);expect(paid.context).toBe(3);expect(paid.source).toBeGreaterThan(0);expect(sourceReads).toBe(paid.source);expect(pending).toEqual([]);
+  expect(await verifyArchivedCiSmoke(source.isolation,f.result,{...options,processing,readBytes})).toEqual(first);
+  expect(paid.context).toBe(2*once.context);expect(paid.source).toBe(2*once.source);expect(sourceReads).toBe(paid.source);
+ },30000);
+ it.each(['context','source'])('TC-CONS-IMAGE-127 stops a failed %s payment before its covered work',async phase=>{
+  const {f,source,options}=replay,error=Error('SyntheticProcessingBudget');let sourceReads=0,contexts=0;
+  const processing={context(){contexts++;if(phase==='context')throw error;},source(){throw error;}};
+  let material=options.material;
+  if(phase==='context')material={...material,origin:f.json({...f.get(material.origin),tree:'0'.repeat(40)})};
+  await expect(verifyArchivedCiSmoke(source.isolation,f.result,{...options,material,processing,readBytes:async ref=>{sourceReads++;return options.readBytes(ref);}})).rejects.toBe(error);
+  expect(sourceReads).toBe(0);expect(contexts).toBe(phase==='context'?1:3);
+ });
+ it('TC-CONS-IMAGE-128 hooks cannot approve changed source bytes or invalid smoke evidence',async()=>{
+  const {f,source,options}=replay;let sourcePayments=0;
+  const processing={context(){},source(){sourcePayments++;}};
+  await expect(verifyArchivedCiSmoke(source.isolation,f.result,{...options,processing,readBytes:async()=>Buffer.from('changed synthetic source')})).rejects.toThrow('ControlSourceUnverified');expect(sourcePayments).toBeGreaterThan(0);
+  const result=structuredClone(f.result),check=f.get(result.checks['tls-required']);check.payload.tlsEnabled=false;result.checks['tls-required']=f.json(check);
+  await expect(verifyArchivedCiSmoke(source.isolation,result,{...options,processing})).rejects.toThrow('CiSmokeLiteral');
+  await expect(verifyArchivedCiSmoke(source.isolation,f.result,{...options,processing:{context:async()=>{},source(){}}})).rejects.toThrow('CiSmokeSynchronousPayment');
+ },30000);
+ it('TC-CONS-IMAGE-128 optional fixture identities preserve the original default evidence bytes',()=>{
+  const original=ciSmokeEvidenceFixture(),explicit=ciSmokeEvidenceFixture({sourceRevision:'a'.repeat(40),isolationHash:(92).toString(16).padStart(64,'0')});
+  expect(explicit.result).toEqual(original.result);expect(explicit.expected).toEqual(original.expected);expect([...explicit.objects]).toEqual([...original.objects]);
+ });
 });

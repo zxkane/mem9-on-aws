@@ -8,7 +8,7 @@
     "integrity": "sha512-/5apOkwWxtACcQtZ5WlrAsKS4JwXVThQPJZ3RqIruRY9UG9M8e0VlXN068xum/JRKA4aIUoJ13ghe/kGCvidiQ==",
     "builderSourceHash": "70855e83b317c951d5792d013c887e15824bd3644ff6fd96f552c4e51c11e73a"
   },
-  "packageLockHash": "5e440bbd9eb1dc80b8e7ebdabf0b7736344e6e742d65ae8f6c5916267e6b1bd4",
+  "packageLockHash": "547889667a18ff31b875957af2a2ba6189a2a67bb50b58f5b70c3cf8fc984648",
   "inputs": [
     {
       "path": ".github/actions/ci-carrier-before-copy/index.mjs",
@@ -15541,9 +15541,19 @@
       "bytesLength": 812
     },
     {
+      "path": "scripts/lib/ci-carrier-artifact-raw.mjs",
+      "sha256": "bb22af0e91fcc5bbfd66f8430aed71d68dde326444c28b5b04f2b84a93f7b1b0",
+      "bytesLength": 7292
+    },
+    {
+      "path": "scripts/lib/ci-carrier-artifact.mjs",
+      "sha256": "f285d9f2094c806bb876fc45291bae2c9d498102cbc568bfa257e280bcbb7ef7",
+      "bytesLength": 2967
+    },
+    {
       "path": "scripts/lib/ci-carrier-before-copy.mjs",
-      "sha256": "eb8e2428b6d4996b7bbd7dc407263162015d14a9e94c8cac087d9d7e07e5c4cb",
-      "bytesLength": 30838
+      "sha256": "3d42811d4f3af394b93827ff6b9528d3c0288f3a709554893f1f7a011533b9c9",
+      "bytesLength": 33984
     },
     {
       "path": "scripts/lib/ci-carrier-consumer.mjs",
@@ -15557,8 +15567,8 @@
     },
     {
       "path": "scripts/lib/ci-carrier-derived-format.mjs",
-      "sha256": "033cfb7796e8d6af541032594bb285c1ec2786057f94f2051dbd7512b35052ad",
-      "bytesLength": 11011
+      "sha256": "b517b1f535fe8046e71d9b42a4d13eda5ccb6816c92eef83c1245ef24a712e25",
+      "bytesLength": 12089
     },
     {
       "path": "scripts/lib/ci-carrier-derived.mjs",
@@ -15566,19 +15576,44 @@
       "bytesLength": 10382
     },
     {
+      "path": "scripts/lib/ci-carrier-github-raw.mjs",
+      "sha256": "370305c97f72e60d6f553028b602b47a3e1465bb616ccdd73d470eb50f841911",
+      "bytesLength": 4125
+    },
+    {
+      "path": "scripts/lib/ci-carrier-http-account.mjs",
+      "sha256": "98babd877d3e671f556e76995050f3c0f0d917485e2088e83af81fe6b76a96ca",
+      "bytesLength": 4580
+    },
+    {
+      "path": "scripts/lib/ci-carrier-http-policy.mjs",
+      "sha256": "7263877838d800c79bd7ed82434c430707e33938b4a5b4523ddaf18d457a17ea",
+      "bytesLength": 7014
+    },
+    {
+      "path": "scripts/lib/ci-carrier-http-transport.mjs",
+      "sha256": "b105fdde31369e15a1ece9ce37cb2aae629929e8214edc5a030633a66d6622ab",
+      "bytesLength": 5777
+    },
+    {
       "path": "scripts/lib/ci-carrier-local-counter.mjs",
-      "sha256": "e31c3d6d567312abef994388f1e7a5239b0cb9810c1b86bb32cd7025ec3c2338",
-      "bytesLength": 11903
+      "sha256": "679618598dec867f4b0946b8860ed7af85e8bae5989edafd3c81c2db187f1e33",
+      "bytesLength": 12730
     },
     {
       "path": "scripts/lib/ci-carrier-local-policy.mjs",
-      "sha256": "d21e6ebc5fbbbf8a7bed3eef695dca2ed73da4e2d898ab9ec6c435caa60f4d32",
-      "bytesLength": 3117
+      "sha256": "40ae18749cfdd53a1ca34a4ef593d505c98bd7fe8032c629e45e400b806bbcd4",
+      "bytesLength": 3982
+    },
+    {
+      "path": "scripts/lib/ci-carrier-native-http.mjs",
+      "sha256": "2ea6b8f29f6653f49cd1d172811474206e972d881c7c6d9e1b5919fe1432d733",
+      "bytesLength": 1933
     },
     {
       "path": "scripts/lib/ci-carrier-result.mjs",
-      "sha256": "7bc477100c5d450328711dd3dc1d7c307538c6ef032d545aa0a38646c1752a0f",
-      "bytesLength": 12298
+      "sha256": "baeec30808bf3d7df4dbe5509973b239a1e329a4371a089d5169dbae04d10479",
+      "bytesLength": 13289
     },
     {
       "path": "scripts/lib/ci-carrier-source-policy.mjs",
@@ -15592,8 +15627,8 @@
     },
     {
       "path": "scripts/lib/ci-carrier-sql-acceptance-format.mjs",
-      "sha256": "a2cae80a408aca52be94c21ac644c78568c574998f0ee13b54076d5998525eca",
-      "bytesLength": 15206
+      "sha256": "b2bea7a4b53f6bf4718ca5c22c3f2ad9ab5bb23413202f2dfa454c5295050dec",
+      "bytesLength": 17268
     },
     {
       "path": "scripts/lib/ci-carrier-sql-acceptance.mjs",
@@ -15627,8 +15662,8 @@
     },
     {
       "path": "scripts/lib/ci-carrier-startup.mjs",
-      "sha256": "ef7b7fd2fcb57c3d53332f6b7c5fbf4c5f47c22bc9a135fcf69e2c5f5b2f2e5a",
-      "bytesLength": 10650
+      "sha256": "80c7501f0b099af1e2cb56b8242e9bb0a2a0252d99518d63201c71a959752637",
+      "bytesLength": 11209
     },
     {
       "path": "scripts/lib/ci-carrier-transport.mjs",
@@ -15752,8 +15787,8 @@
     },
     {
       "path": "scripts/lib/production-image-filesystem.mjs",
-      "sha256": "5583b0b3062da3a473ac24e676f65778729a6f323bf00dbb8a7dc078a7d46588",
-      "bytesLength": 26684
+      "sha256": "8bea6cdaaaef6bf3755c90053ca17943b5c2030bd0d28ecf22eb945562f19e9e",
+      "bytesLength": 28664
     },
     {
       "path": "scripts/lib/production-image-graph.mjs",
@@ -15792,8 +15827,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-contracts.mjs",
-      "sha256": "fba0f5b2e063144b2d290851a55ed7197c218daeb8b1447a2994b5ecbd813e80",
-      "bytesLength": 52275
+      "sha256": "bb6efef1bd1051baa34bd32d65403a11158177a33012cfdb06c44f87b7ee4d6c",
+      "bytesLength": 53765
     },
     {
       "path": "scripts/lib/production-nonroot-control-cache.mjs",
@@ -15814,6 +15849,11 @@
       "path": "scripts/lib/production-nonroot-control-prerequisites.mjs",
       "sha256": "f15c468755f93e455d3c34552bebf7ede31ccb0b6e15df3eabb13b2c9ee70d16",
       "bytesLength": 39710
+    },
+    {
+      "path": "scripts/lib/production-nonroot-descriptor-processing.mjs",
+      "sha256": "2220874e73b8156c9f8082b8ce7eebe677db6a5e5cedb411ecc8f958311f6e12",
+      "bytesLength": 11391
     },
     {
       "path": "scripts/lib/production-nonroot-launch.mjs",
@@ -15898,7 +15938,7 @@
   ],
   "output": {
     "path": ".github/actions/ci-carrier-before-copy/dist/index.mjs",
-    "sha256": "fde2f4188fd4a0eda924569177befca10466957fef02db6dfa97d3c50a33c46e",
-    "bytesLength": 6197362
+    "sha256": "43ecea1e80354f42cd7e6d4d85adbd411a1d283f3ea00698cfe33b7e054723c9",
+    "bytesLength": 6254181
   }
 }

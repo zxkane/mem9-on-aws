@@ -1,3 +1,4 @@
+import {createCarrierHttpAccount} from './ci-carrier-http-account.mjs';
 /** One original local counter spans startup and the consumer. Durable claims
  * survive failure; neither serialized counters nor another run can resume it. */
 import {mkdirSync,openSync,writeSync,fsyncSync,closeSync,lstatSync,fstatSync,realpathSync} from 'node:fs';
@@ -29,11 +30,12 @@ export function openCarrierLocalCounter({config,env,now=Date.now}){
  const path=join(directory,'journal.jsonl'),fd=openSync(path,'wx',0o600),stat=fstatSync(fd),spent=zero(),records=[];
  const cleanupReserved=carrierCleanupReservation(plan.template);need(cleanupReserved<policy.logicalBytes,'CarrierLocalCleanup');
  const abort=new AbortController(),pending=new Set();
+ let httpAccount;
  let held=false,closed=false,cleanup=false,cleanupUsed=0,binding,transferred=false,previous=null,recordBytes=0,clock=now(),draining=false,cleanupUnknown=false,drainPromise;
- const checkLocal=()=>{
+ const checkLocal=(retainedRecord=false)=>{
   need(!closed&&identity(env)===initial,'CarrierLocalBinding');const at=now();need(Number.isSafeInteger(at)&&at>=clock&&at>=plan.issuedMs&&at<plan.deadlineMs,'CarrierLocalDeadline');clock=at;
   const named=lstatSync(path),open=fstatSync(fd);need(named.dev===stat.dev&&named.ino===stat.ino&&open.ino===stat.ino&&named.nlink===1&&(named.mode&511)===0o600,'CarrierLocalJournal');
-  if(!cleanup)need(!held&&at<plan.deadlineMs-policy.cleanupMs,'CarrierLocalHeld');
+  if(!cleanup&&!retainedRecord)need(!held&&at<plan.deadlineMs-policy.cleanupMs,'CarrierLocalHeld');
  };
  const reserveLocal=charge=>{
   checkLocal();need(Object.keys(charge).sort().join()===COUNTERS.slice().sort().join()&&charge.ecrRequests===0&&charge.httpBodyBytes===0,'CarrierLocalCharge');
@@ -42,19 +44,21 @@ export function openCarrierLocalCounter({config,env,now=Date.now}){
   for(const k of COUNTERS)if(!Number.isSafeInteger(charge[k])||charge[k]<0||spent[k]+charge[k]>plan.template.fundedLocal.ci[k]){held=true;throw Error('CarrierLocalLimit');}
   for(const k of COUNTERS)spent[k]+=charge[k];if(cleanup)cleanupUsed+=charge.logicalBytes;
  };
- const record=(type,data)=>{
-  need(records.length<policy.maxRecords,'CarrierLocalRecords');reserveLocal({...zero(),logicalBytes:policy.recordChargeBytes});
+ const writeRecord=(type,data,prepaid=false)=>{
+  need(records.length<policy.maxRecords,'CarrierLocalRecords');if(prepaid)checkLocal(true);else reserveLocal({...zero(),logicalBytes:policy.recordChargeBytes});
   const row={sequence:records.length+1,planHash,previousHash:previous,type,data,spent:{...spent}},raw=Buffer.from(JSON.stringify(row)+'\n');need(raw.length<=policy.recordBytes,'CarrierLocalRecordSize');
   let at=0;while(at<raw.length){const n=writeSync(fd,raw,at,raw.length-at);need(n>0,'CarrierLocalJournal');at+=n;}fsyncSync(fd);records.push(row);recordBytes+=raw.length;previous=hash(row);
  };
+ const record=(type,data)=>writeRecord(type,data);
+ const reserveHttpRecords=()=>{reserveLocal({...zero(),logicalBytes:2*policy.recordChargeBytes});let remaining=2;return(type,data)=>{need(remaining>0&&data?.http,'CarrierHttpRecord');remaining--;writeRecord(type,data,true);};};
  const unknownCleanup=()=>{
   if(!cleanupUnknown){cleanupUnknown=true;held=true;cleanup=true;try{record('cleanup',{status:'unknown',pending:pending.size});}catch{}}
   return Object.assign(Error('CarrierLocalCleanupUnknown'),{code:'ECLEANUP',cleanupStatus:'unknown',cleanupConfirmed:false,counterClosed:false,ownershipRetained:true,operationDirectory:directory});
  };
- const handle=Object.freeze({kind:'carrier-original-local-counter'}),state={directory,plan,policy,configHash,env,checkLocal,reserveLocal,record,
+ const handle=Object.freeze({kind:'carrier-original-local-counter'}),state={get http(){return httpAccount;},directory,plan,policy,configHash,env,checkLocal,reserveLocal,record,
   checkNormal(){need(!cleanup,'CarrierLocalHeld');checkLocal();},
   snapshot:()=>({spent:{...spent},normalRemaining:Math.max(0,policy.logicalBytes-cleanupReserved-spent.logicalBytes),cleanupReserved,cleanupUsed,recordBytes,held,closed,pending:pending.size,cleanupUnknown}),
-  evidence(){reserveLocal({...zero(),logicalBytes:4*recordBytes});record('checkpoint',{});return {version:1,kind:'carrier-local-evidence',planHash,grantHash:config.grantHash,policyHash:hash(policy),cleanupReserved,cleanupUsed,spent:{...spent},records:structuredClone(records),lastHash:previous};},
+  evidence(){reserveLocal({...zero(),logicalBytes:4*recordBytes});record('checkpoint',{});return {version:1,kind:'carrier-local-evidence',planHash,grantHash:config.grantHash,policyHash:hash(policy),cleanupReserved,cleanupUsed,spent:{...spent},records:structuredClone(records),lastHash:previous,...(httpAccount?{http:httpAccount.evidence()}: {})};},
   bind(value){checkLocal();need(!binding&&hash(value.config)===configHash&&value.binding.grantHash===config.grantHash&&value.binding.templateHash===plan.templateHash&&value.binding.runId===Number(env.GITHUB_RUN_ID)&&value.binding.runAttempt===Number(env.GITHUB_RUN_ATTEMPT),'CarrierLocalBinding');record('startup',value.binding);binding=hash(value.binding);},
   consume(value){checkLocal();need(!transferred,'CarrierLocalTransfer');need(binding===hash(value.binding)&&hash(value.config)===configHash,'CarrierLocalBinding');record('transfer',value.binding);transferred=true;return state;},
   cleanup(){need(!closed&&!cleanup,'CarrierLocalCleanup');cleanup=true;abort.abort();record('cleanup',{});},
@@ -72,6 +76,7 @@ export function openCarrierLocalCounter({config,env,now=Date.now}){
   close({complete=false}={}){if(closed)return;if(pending.size||cleanupUnknown)throw unknownCleanup();try{if(!cleanup)cleanup=true;record('closed',{complete:Boolean(complete)});}finally{closed=true;fsyncSync(fd);closeSync(fd);}},
   hold(){held=true;},
  };
+ if(plan.template.httpPolicy)httpAccount=createCarrierHttpAccount({template:plan.template,actor:'ci',binding:{planHash,grantHash:config.grantHash},check:()=>state.checkNormal(),local:n=>reserveLocal({...zero(),logicalBytes:n}),reserveRecords:reserveHttpRecords,hold:()=>state.hold()});
  Object.freeze(state);states.set(handle,state);
  try{
   record('claim',{grantHash:config.grantHash,runId:Number(env.GITHUB_RUN_ID),runAttempt:Number(env.GITHUB_RUN_ATTEMPT)});

@@ -1,3 +1,5 @@
+import {descriptorOperations,descriptorGuard} from './production-nonroot-descriptor-processing.mjs';
+import {inspectCarrierHttpPolicy,carrierHttpAdditionalBudget} from './ci-carrier-http-policy.mjs';
 import {inspectCarrierLocalPolicy} from './ci-carrier-local-policy.mjs';
 /** R9 artifact-only copy-phase format. No file/network access or business
  * authority. Static templates never contain their descendants' commitments. */
@@ -29,7 +31,7 @@ const originalSqlFixture=Object.freeze({
 });
 const derivedProfiles=[CARRIER_SQL_DERIVED_FIXTURE,CARRIER_SQL_NOJIT_FIXTURE];
 export function carrierSqlDerivedProfile(rootDigest){return derivedProfiles.find(p=>p.rootDigest===rootDigest);}
-export function assertCarrierSqlDatabasePin(f){
+export function assertCarrierSqlDatabasePin(f,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,f);
  const derived=carrierSqlDerivedProfile(f?.rootDigest);need(f?.rootDigest===CARRIER_SQL_DATABASE_ROOT||derived,'CarrierPgFixedImage');
  if(derived)for(const key of ['archive','arm64Digest','configDigest','attestationDigest','uncompressedBytes','processedEntries'])need(hash(f[key])===hash(derived[key]),'CarrierPgDerivedPin');
 }
@@ -51,7 +53,7 @@ const fixed={
  complete:['ci','CompleteLayerUpload'],manifestPut:['ci','PutImage'],scan:['owner','DescribeImageScanFindings'],resultPut:['ci','PutObject'],
 };
 export const CARRIER_PROFILE_ACTIONS=copyNonrootJson(fixed);
-export function carrierOwnerSourceProfiles(source){
+export function carrierOwnerSourceProfiles(source,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,source);
  const {provider}=inspectOriginalIssuerSource(source),count=provider==='instance-metadata'?1:0;
  return Object.fromEntries(['ownerPublisherSource','ownerSource'].flatMap(prefix=>[['Token',4096],['Credentials',65536]].map(([suffix,responseBytes])=>[prefix+suffix,{count,requestBytes:0,responseBytes}])));
 }
@@ -81,10 +83,11 @@ function sqlFixture(f){
  need(f.version===1&&f.kind==='carrier-sql-fixture'&&hex(f.archive.sha256)&&pos(f.archive.bytesLength)&&f.archive.bytesLength<=268435456&&['rootDigest','arm64Digest','configDigest','attestationDigest'].every(k=>digest(f[k]))&&pos(f.uncompressedBytes)&&f.uncompressedBytes<=1073741824&&pos(f.processedEntries)&&f.processedEntries<=100000&&Object.values(f.oldSource).every(v=>hex(v,40)),'CarrierSqlFixtureContract');
  return f;
 }
-export function inspectCarrierBeforeCopyTemplate(value){
- const t=copyNonrootJson(value);exact(t,['version','kind','purpose','owner','executionId','slotNonce','source','scope','anchors','base','recipe','bounds','profiles','preFundingPreparation','fundedLocal','ownerGithubActorId','sqlFixture',...(Object.hasOwn(t,'ownerSource')?['ownerSource']:[]),...(Object.hasOwn(t,'cumulativeLimitsHash')?['cumulativeLimitsHash']:[]),...(Object.hasOwn(t,'ciLocalPolicy')?['ciLocalPolicy']:[])]);
+export function inspectCarrierBeforeCopyTemplate(value,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,value);
+ const t=copyNonrootJson(value);exact(t,['version','kind','purpose','owner','executionId','slotNonce','source','scope','anchors','base','recipe','bounds','profiles','preFundingPreparation','fundedLocal','ownerGithubActorId','sqlFixture',...(Object.hasOwn(t,'ownerSource')?['ownerSource']:[]),...(Object.hasOwn(t,'cumulativeLimitsHash')?['cumulativeLimitsHash']:[]),...(Object.hasOwn(t,'ciLocalPolicy')?['ciLocalPolicy']:[]),...(Object.hasOwn(t,'httpPolicy')?['httpPolicy']:[])]);
  need(t.version===1&&t.kind==='carrier-before-copy-template'&&t.purpose==='premerge-carrier-build'&&hex(t.owner,32)&&hex(t.executionId,32)&&hex(t.slotNonce,32)&&pos(t.ownerGithubActorId),'CarrierTemplate');
- if(Object.hasOwn(t,'ciLocalPolicy')){const policy=inspectCarrierLocalPolicy(t.ciLocalPolicy);need(t.fundedLocal.ci.logicalBytes===policy.logicalBytes&&t.cumulativeLimitsHash===NONROOT_REMAINING_WORK_LIMITS_HASH_V2,'CarrierLocalPolicyBinding');}
+ if(Object.hasOwn(t,'httpPolicy')){inspectCarrierHttpPolicy(t.httpPolicy);need(t.ciLocalPolicy&&t.cumulativeLimitsHash===NONROOT_REMAINING_WORK_LIMITS_HASH_V2,'CarrierHttpOriginalPolicy');}
+ if(Object.hasOwn(t,'ciLocalPolicy')){const policy=inspectCarrierLocalPolicy(t.ciLocalPolicy,{descriptorWork});need(t.fundedLocal.ci.logicalBytes===policy.logicalBytes&&t.cumulativeLimitsHash===NONROOT_REMAINING_WORK_LIMITS_HASH_V2,'CarrierLocalPolicyBinding');}
  const s=t.source;exact(s,['repository','prNumber','candidateRevision','candidateTree','baseRevision','candidateRef','workflowPath','workflowSha','jobKey','jobName','jobDefinitionHash','roleDefinitionHash']);
  need(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s.repository)&&pos(s.prNumber)&&['candidateRevision','candidateTree','baseRevision','workflowSha'].every(k=>hex(s[k],40))&&s.workflowSha===s.candidateRevision,'CarrierSource');
  need(/^refs\/heads\/[A-Za-z0-9_./-]+$/.test(s.candidateRef)&&!s.candidateRef.includes('..')&&/^\.github\/workflows\/[a-z0-9-]+\.ya?ml$/.test(s.workflowPath)&&/^[a-z][a-z0-9-]{0,63}$/.test(s.jobKey)&&text(s.jobName),'CarrierSource');
@@ -101,7 +104,7 @@ export function inspectCarrierBeforeCopyTemplate(value){
  exact(t.bounds,['contextBytes','contextFiles','grantBytes','resultBytes','manifestNodes','blobNodes','compressedBytes','uncompressedBytes','processedEntries','scanPages']);
  need(Object.values(t.bounds).every(pos)&&t.bounds.contextBytes<=1073741824&&t.bounds.contextFiles<=20000&&t.bounds.grantBytes<=33554432&&t.bounds.resultBytes<=33554432&&t.bounds.manifestNodes<=4096&&t.bounds.blobNodes<=4096&&t.bounds.compressedBytes<=4294967296&&t.bounds.uncompressedBytes<=34359738368&&t.bounds.processedEntries<=1000000&&t.bounds.scanPages<=100,'CarrierBounds');
  const keys=Object.keys(fixed).filter(k=>t.ownerSource||!sourceProfiles.has(k));exact(t.profiles,keys);for(const k of keys)profile(t.profiles[k],k);
- if(t.ownerSource){const expected=carrierOwnerSourceProfiles(t.ownerSource);for(const [k,v]of Object.entries(expected))same(t.profiles[k],v);need(t.fundedLocal?.owner?.logicalBytes>=2*ORIGINAL_ISSUER_LIMITS.localBytes,'CarrierIssuerLocalCoverage');}
+ if(t.ownerSource){const expected=carrierOwnerSourceProfiles(t.ownerSource,{descriptorWork});for(const [k,v]of Object.entries(expected))same(t.profiles[k],v);need(t.fundedLocal?.owner?.logicalBytes>=2*ORIGINAL_ISSUER_LIMITS.localBytes,'CarrierIssuerLocalCoverage');}
  const f=sqlFixture(t.sqlFixture);
  need(t.profiles.fixturePut.requestBytes===f.archive.bytesLength&&t.profiles.fixturePut.responseBytes>=16384&&t.profiles.fixtureGet.requestBytes===0&&t.profiles.fixtureGet.responseBytes===f.archive.bytesLength,'CarrierSqlFixtureBudget');
  for(const k of ['baseBlob','ownerBlob'])need(t.profiles[k].aggregateResponseBytes===t.bounds.compressedBytes&&t.profiles[k].maxRequests>=t.bounds.blobNodes,'CarrierBlobCoverage');
@@ -114,10 +117,11 @@ export function inspectCarrierBeforeCopyTemplate(value){
  for(const k of ['runPut','runConfirm','claimPut'])need((k==='runConfirm'?t.profiles[k].responseBytes:t.profiles[k].requestBytes)>=16384,'CarrierBindingBudget');
  const arithmetic=templateArithmetic(t);local(t.preFundingPreparation,arithmetic.counter);exact(t.fundedLocal,['owner','ci']);local(t.fundedLocal.owner,arithmetic.counter);local(t.fundedLocal.ci,arithmetic.counter);return t;
 }
-export function carrierObjectKeys(value){const t=inspectCarrierBeforeCopyTemplate(value),root=t.scope.prefix+'/'+t.executionId+'/'+t.slotNonce;return Object.freeze({context:root+'/context.bin',grant:root+'/grant.json',run:root+'/run.json',claim:root+'/claim.json',result:root+'/result.json',fixture:root+'/fixture.oci.tar'});}
-export function measureCarrierBeforeCopyBudget(value){
- const t=inspectCarrierBeforeCopyTemplate(value),lanes={owner:{...zero()},ci:{...zero()}},{addCounters}=templateArithmetic(t);
+export function carrierObjectKeys(value,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,value);const t=inspectCarrierBeforeCopyTemplate(value,{descriptorWork}),root=t.scope.prefix+'/'+t.executionId+'/'+t.slotNonce;return Object.freeze({context:root+'/context.bin',grant:root+'/grant.json',run:root+'/run.json',claim:root+'/claim.json',result:root+'/result.json',fixture:root+'/fixture.oci.tar'});}
+export function measureCarrierBeforeCopyBudget(value,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,value);
+ const t=inspectCarrierBeforeCopyTemplate(value,{descriptorWork}),lanes={owner:{...zero()},ci:{...zero()}},{addCounters}=templateArithmetic(t);
  for(const [purpose,p]of Object.entries(t.profiles)){const [actor,action]=fixed[purpose],bytes=p.kind==='carrier-blob-aggregate'?p.aggregateResponseBytes:p.count*(p.requestBytes+p.responseBytes);need(Number.isSafeInteger(bytes),'CarrierBudgetOverflow');lanes[actor]=addCounters(lanes[actor],{...zero(),ecrRequests:ecr.has(action)?p.count:0,logicalBytes:bytes,httpBodyBytes:bytes});}
+ if(t.httpPolicy){const extra=carrierHttpAdditionalBudget(t,{descriptorWork});for(const actor of ['owner','ci'])lanes[actor]=addCounters(lanes[actor],extra[actor]);}
  // Each actor is serial and permanently holds after its first uncertain call.
  for(const actor of ['owner','ci'])lanes[actor]=addCounters(addCounters(lanes[actor],{...zero(),httpBodyBytes:8388608}),t.fundedLocal[actor]);
  return copyNonrootJson({preFundingPreparation:t.preFundingPreparation,fundedRemaining:{owner:lanes.owner,ci:lanes.ci,total:addCounters(lanes.owner,lanes.ci)}});
@@ -136,10 +140,10 @@ export function carrierSqlPackageReadBounds(f){
 /** Subset of the same original payment, never a second allocation. The local
  * bound covers package handling/import; the existing SQL cases/seeder and
  * carrier build still need their own complete obligations in fundedLocal. */
-export function carrierSqlFixtureComponentBudget(value,options){
+export function carrierSqlFixtureComponentBudget(value,options){const descriptorWork=options?.descriptorWork;if(options&&Object.hasOwn(options,'descriptorWork')){const {descriptorWork:ignored,...plain}=options;options=plain;}const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,value);
  const f=sqlFixture(copyNonrootJson(value));exact(options,['putResponseBytes']);
  const {putResponseBytes}=options;need(pos(putResponseBytes)&&putResponseBytes>=16384&&putResponseBytes<=1073741824,'CarrierSqlPutResponseBytes');
- assertCarrierSqlDatabasePin(f);
+ assertCarrierSqlDatabasePin(f,{descriptorWork});
  // The fixed attestation digest binds the reviewed derivation and provenance.
  // Caller-supplied sizes/JSON cannot select a cheaper package.
  const pin=carrierSqlDerivedProfile(f.rootDigest)??originalSqlFixture;
@@ -158,17 +162,17 @@ export function carrierSqlFixtureBudget(value){
  const t=inspectCarrierBeforeCopyTemplate(value);
  return carrierSqlFixtureComponentBudget(t.sqlFixture,{putResponseBytes:t.profiles.fixturePut.responseBytes});
 }
-export function inspectCarrierFundingPlan(value){
+export function inspectCarrierFundingPlan(value,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,value);
  const p=copyNonrootJson(value);exact(p,['version','kind','purpose','template','templateHash','configHash','ledgerStartHash','ledgerBinding','context','issuedMs','deadlineMs','budget',...(p.version===2?['budgetRevision','compiledCeiling']:[])]);
- need([1,2].includes(p.version)&&p.kind==='carrier-before-copy-funding-plan'&&p.purpose==='premerge-carrier-build','CarrierFundingKind');const t=inspectCarrierBeforeCopyTemplate(p.template);
+ need([1,2].includes(p.version)&&p.kind==='carrier-before-copy-funding-plan'&&p.purpose==='premerge-carrier-build','CarrierFundingKind');const t=inspectCarrierBeforeCopyTemplate(p.template,{descriptorWork});
  need(p.version===templateArithmetic(t).version,'CarrierFundingVersion');
  if(p.version===2){nonrootAccountingPolicy(p.budgetRevision,p.budgetRevision,p.compiledCeiling);need(p.budgetRevision.limitsHash===t.cumulativeLimitsHash,'CarrierCumulativeLimits');}
  need(p.templateHash===hash(t)&&hex(p.configHash)&&hex(p.ledgerStartHash)&&pos(p.issuedMs)&&pos(p.deadlineMs)&&p.issuedMs<p.deadlineMs,'CarrierFunding');
  exact(p.ledgerBinding,['owner','executionId','planHash','publicationHash']);need(p.ledgerBinding.owner===t.owner&&p.ledgerBinding.executionId===t.executionId&&p.ledgerBinding.planHash===p.configHash&&hex(p.ledgerBinding.publicationHash),'CarrierLedgerBinding');
- exact(p.context,['key','manifestHash','sha256','bytesLength']);need(p.context.key===carrierObjectKeys(t).context&&hex(p.context.manifestHash)&&hex(p.context.sha256)&&pos(p.context.bytesLength)&&p.context.bytesLength<=t.bounds.contextBytes,'CarrierContext');
- same(p.budget,measureCarrierBeforeCopyBudget(t).fundedRemaining);return p;
+ exact(p.context,['key','manifestHash','sha256','bytesLength']);need(p.context.key===carrierObjectKeys(t,{descriptorWork}).context&&hex(p.context.manifestHash)&&hex(p.context.sha256)&&pos(p.context.bytesLength)&&p.context.bytesLength<=t.bounds.contextBytes,'CarrierContext');
+ same(p.budget,measureCarrierBeforeCopyBudget(t,{descriptorWork}).fundedRemaining);return p;
 }
-export function carrierLedgerScope(template){const t=inspectCarrierBeforeCopyTemplate(template);return Object.freeze({version:1,kind:'carrier-before-copy-slot',owner:t.owner,executionId:t.executionId,slotNonce:t.slotNonce});}
+export function carrierLedgerScope(template,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,template);const t=inspectCarrierBeforeCopyTemplate(template,{descriptorWork});return Object.freeze({version:1,kind:'carrier-before-copy-slot',owner:t.owner,executionId:t.executionId,slotNonce:t.slotNonce});}
 export function carrierAccountingExpectation(plan,expected={}){
  const arithmetic=acquisitionAccounting({budgetRevision:plan.budgetRevision,expectedBudgetRevision:expected.budgetRevision,compiledCeiling:expected.compiledCeiling});
  need(plan.version===arithmetic.version,'CarrierFundingVersion');
@@ -199,14 +203,14 @@ export function carrierRunBinding(planValue,grantHash,{run,commit,pullRequest,jo
  need(job?.run_id===run.id&&job.run_attempt===run.run_attempt&&job.head_sha===s.candidateRevision&&job.name===s.jobName&&job.status==='in_progress'&&pos(job.id),'CarrierActualJob');
  return copyNonrootJson({version:1,kind:'carrier-actual-run-binding',templateHash:p.templateHash,grantHash,contextHash:p.context.sha256,source:s,runId:run.id,runAttempt:run.run_attempt,jobId:job.id,deadlineMs:p.deadlineMs});
 }
-function boundRun(p,b){exact(b,['version','kind','templateHash','grantHash','contextHash','source','runId','runAttempt','jobId','deadlineMs']);need(b.version===1&&b.kind==='carrier-actual-run-binding'&&b.templateHash===p.templateHash&&hex(b.grantHash)&&b.contextHash===p.context.sha256&&b.deadlineMs===p.deadlineMs&&[b.runId,b.runAttempt,b.jobId].every(pos),'CarrierRunBinding');same(b.source,p.template.source);}
-export function carrierRunAnnouncement(planValue,binding){const p=inspectCarrierFundingPlan(planValue);boundRun(p,binding);return {path:'statuses/'+binding.source.candidateRevision,payload:{state:'success',context:'mem9/carrier-run/'+hash(carrierLedgerScope(p.template)),description:'binding:'+hash(binding),target_url:'https://github.com/'+binding.source.repository+'/actions/runs/'+binding.runId}};}
-export function carrierCheckpointSelection(planValue,binding,upload){
- const p=inspectCarrierFundingPlan(planValue);boundRun(p,binding);exact(upload,['nonce','scopeHash','artifactId','artifactDigest']);
+function boundRun(p,b,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,p,b);exact(b,['version','kind','templateHash','grantHash','contextHash','source','runId','runAttempt','jobId','deadlineMs']);need(b.version===1&&b.kind==='carrier-actual-run-binding'&&b.templateHash===p.templateHash&&hex(b.grantHash)&&b.contextHash===p.context.sha256&&b.deadlineMs===p.deadlineMs&&[b.runId,b.runAttempt,b.jobId].every(pos),'CarrierRunBinding');same(b.source,p.template.source);}
+export function carrierRunAnnouncement(planValue,binding,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,planValue,binding);const p=inspectCarrierFundingPlan(planValue,{descriptorWork});boundRun(p,binding,{descriptorWork});return {path:'statuses/'+binding.source.candidateRevision,payload:{state:'success',context:'mem9/carrier-run/'+hash(carrierLedgerScope(p.template,{descriptorWork})),description:'binding:'+hash(binding),target_url:'https://github.com/'+binding.source.repository+'/actions/runs/'+binding.runId}};}
+export function carrierCheckpointSelection(planValue,binding,upload,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,planValue,binding,upload);
+ const p=inspectCarrierFundingPlan(planValue,{descriptorWork});boundRun(p,binding,{descriptorWork});exact(upload,['nonce','scopeHash','artifactId','artifactDigest']);
  const scope={kind:'carrier',checkpoint:'premerge-carrier-build',jobKey:p.template.source.jobKey},bindingHash=hash(binding);
  need(hex(upload.nonce)&&upload.scopeHash===hash({bindingHash,scope})&&pos(upload.artifactId)&&hex(upload.artifactDigest),'CarrierArtifact');
  const claim=copyNonrootJson({version:1,kind:'carrier-checkpoint-claim',templateHash:p.templateHash,grantHash:binding.grantHash,runBindingHash:bindingHash,scope,...upload,expiresMs:p.deadlineMs});
- return {claim,artifactName:'mem9-carrier-start-'+hash(carrierLedgerScope(p.template)),announcement:{path:'statuses/'+binding.source.candidateRevision,payload:{state:'success',context:'mem9/carrier-claim/'+hash(carrierLedgerScope(p.template)),description:'winner:'+hash(claim),target_url:'https://github.com/'+binding.source.repository+'/actions/runs/'+binding.runId}}};
+ return {claim,artifactName:'mem9-carrier-start-'+hash(carrierLedgerScope(p.template,{descriptorWork})),announcement:{path:'statuses/'+binding.source.candidateRevision,payload:{state:'success',context:'mem9/carrier-claim/'+hash(carrierLedgerScope(p.template,{descriptorWork})),description:'winner:'+hash(claim),target_url:'https://github.com/'+binding.source.repository+'/actions/runs/'+binding.runId}}};
 }
 export function assertCarrierWorkerEnvironment(planValue,binding,env){
  const p=inspectCarrierFundingPlan(planValue);boundRun(p,binding);const s=p.template.source;
@@ -216,8 +220,8 @@ export function assertCarrierWorkerEnvironment(planValue,binding,env){
 /** Pure bookkeeping, not admission. The original startup consumer owns usage,
  * authenticates descriptor membership, and durably records the returned debit
  * BEFORE dispatch. Never reconstruct usage from a caller JSON success flag. */
-export function carrierBlobDebit(planValue,actor,usageValue,descriptor){
- const p=inspectCarrierFundingPlan(planValue);need(['owner','ci'].includes(actor),'CarrierBlobActor');
+export function carrierBlobDebit(planValue,actor,usageValue,descriptor,{descriptorWork}={}){const {hash,sha,same,copyNonrootJson,JSON}=descriptorOperations(descriptorWork,DESCRIPTOR_BASE_OPERATIONS);descriptorGuard(descriptorWork,planValue,usageValue,descriptor);
+ const p=inspectCarrierFundingPlan(planValue,{descriptorWork});need(['owner','ci'].includes(actor),'CarrierBlobActor');
  const profile=p.template.profiles[actor==='owner'?'ownerBlob':'baseBlob'],usage=copyNonrootJson(usageValue);
  exact(usage,['requests','responseBytes','digests']);need(Number.isSafeInteger(usage.requests)&&usage.requests>=0&&Number.isSafeInteger(usage.responseBytes)&&usage.responseBytes>=0&&Array.isArray(usage.digests)&&usage.digests.length===usage.requests&&new Set(usage.digests).size===usage.requests&&usage.digests.every(digest),'CarrierBlobUsage');
  need(digest(descriptor?.digest)&&pos(descriptor.size)&&descriptor.size<=profile.maxObjectBytes&&!usage.digests.includes(descriptor.digest),'CarrierBlobDescriptor');
@@ -225,3 +229,5 @@ export function carrierBlobDebit(planValue,actor,usageValue,descriptor){
  need(requests<=profile.maxRequests&&Number.isSafeInteger(responseBytes)&&responseBytes<=profile.aggregateResponseBytes,'CarrierBlobAggregateExceeded');
  return copyNonrootJson({usage:{requests,responseBytes,digests:[...usage.digests,descriptor.digest]},descriptorSource:profile.descriptorSource,descriptor:{digest:descriptor.digest,size:descriptor.size},caps:{requestBytes:0,responseBytes:descriptor.size,overshootBytes:8388608}});
 }
+
+const DESCRIPTOR_BASE_OPERATIONS={hash,sha,same,copyNonrootJson,JSON};

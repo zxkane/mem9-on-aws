@@ -1,3 +1,5 @@
+import {buildNonrootImageTransitionProof} from './lib/production-nonroot-proof.mjs';
+import {createDescriptorProcessing} from './lib/production-nonroot-descriptor-processing.mjs';
 import {describe,it,expect} from 'vitest';
 import {createHash} from 'node:crypto';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
@@ -98,5 +100,56 @@ describe('nonroot archive integrity without authority',()=>{
   if(defect==='extra-object')wire.objects.push({name:'unexpected',base64:'e30='});if(defect==='missing-object')wire.objects=[];
   if(defect==='alias-name')wire.objects[0].name='../source-evidence.json';if(defect==='noncanonical-base64')wire.objects[0].base64+='\n';
   expect(()=>importNonrootArchive(wire,{expectedManifestHash:hash(f.manifest)})).toThrow();
+ });
+});
+
+
+describe('original archive processing hooks',()=>{
+ const routes={
+  typed:(a,f)=>readNonrootArchiveRef(a,f.ref,{purpose:'protocol',kind:'synthetic-evidence'}),
+  json:(a,f)=>nonrootArchiveResolvers(a).resolveJson(f.ref),
+  commitment:(a,f)=>resolveNonrootArchiveCommitment(a,f.ref.canonicalHash,{purpose:'protocol'}),
+  receipt:(a,f)=>resolveNonrootArchiveRawJson(a,f.ref.bytesHash),
+ };
+ it.each(Object.keys(routes))('TC-CONS-IMAGE-126 prepays %s lookup and body without changing legacy output',async name=>{
+  const f=fixture(),events=[];let reads=0;
+  const archive=createNonrootEvidenceArchive(JSON.stringify(f.manifest),{expectedManifestHash:hash(f.manifest),readObject:async key=>{reads++;expect(events.at(-1)).toEqual({kind:'body',encoding:'json',bytesLength:f.raw.length});return f.objects.get(key);}});
+  const scope=forkNonrootArchive(archive,{beforeRead(row){expect(Object.isFrozen(row)).toBe(true);events.push(row);}});
+  const actual=await routes[name](scope,f),legacy=await routes[name](f.make(),f);
+  expect(actual).toEqual(legacy);expect(events.map(e=>e.kind)).toEqual(['lookup','body']);expect(reads).toBe(1);
+  await routes[name](scope,f);expect(reads).toBe(2);expect(events).toHaveLength(4);
+ });
+ it.each(['lookup','body'])('TC-CONS-IMAGE-126 rejects unpaid %s before fetching payload bytes',async phase=>{
+  const f=fixture(),events=[],error=Error('SyntheticProcessingBudget');let reads=0;
+  const archive=createNonrootEvidenceArchive(JSON.stringify(f.manifest),{expectedManifestHash:hash(f.manifest),readObject:async()=>{reads++;return f.raw;}});
+  const scope=forkNonrootArchive(archive,{beforeRead(row){events.push(row.kind);if(row.kind===phase)throw error;}});
+  await expect(nonrootArchiveResolvers(scope).resolveJson(f.ref)).rejects.toBe(error);expect(reads).toBe(0);
+  expect(events).toEqual(phase==='lookup'?['lookup']:['lookup','body']);
+ });
+ it('TC-CONS-IMAGE-126 carries the original callback through forks and rejects replacement or async payment',async()=>{
+  const f=fixture(),error=Error('SyntheticClosedPayer');let open=true,paid=0;
+  const beforeRead=()=>{if(!open)throw error;paid++;};const parent=forkNonrootArchive(f.make(),{beforeRead}),child=forkNonrootArchive(parent);
+  await nonrootArchiveResolvers(child).resolveJson(f.ref);expect(paid).toBe(2);
+  expect(()=>forkNonrootArchive(parent,{beforeRead(){}})).toThrow('NonrootArchiveProcessingChanged');
+  open=false;await expect(nonrootArchiveResolvers(child).resolveJson(f.ref)).rejects.toBe(error);expect(paid).toBe(2);
+  const asyncScope=forkNonrootArchive(f.make(),{beforeRead:async()=>{}});await expect(nonrootArchiveResolvers(asyncScope).resolveJson(f.ref)).rejects.toThrow('NonrootArchiveSynchronousPayment');
+ });
+ it('TC-CONS-IMAGE-128 paid archive reads retain digest, canonical, scope and consumption checks',async()=>{
+  for(const defect of ['digest','canonical']){
+   const f=fixture();if(defect==='canonical')f.ref.canonicalHash='0'.repeat(64);const scope=forkNonrootArchive(f.make(),{beforeRead(){}});
+   if(defect==='digest')f.objects.set('source-evidence.json',Buffer.from(f.raw.toString().replace('fixture','changed')));
+   await expect(nonrootArchiveResolvers(scope).resolveJson(f.ref)).rejects.toThrow(defect==='digest'?'NonrootArchiveObjectPin':'NonrootArchiveCanonicalPin');
+  }
+  const f=fixture(),scope=forkNonrootArchive(f.make(),{beforeRead(){}});
+  await expect(readNonrootArchiveRef(scope,f.ref,{purpose:'root-audit'})).rejects.toThrow('NonrootArchiveReferenceMissing');
+  expect(()=>assertNonrootArchiveConsumed(scope)).toThrow('NonrootArchiveUnreferencedAuthority');
+  await nonrootArchiveResolvers(scope).resolveJson(f.ref);expect(()=>assertNonrootArchiveConsumed(scope)).not.toThrow();
+  expect(()=>assertNonrootArchiveConsumed(forkNonrootArchive(scope))).toThrow('NonrootArchiveUnreferencedAuthority');
+ });
+ it('TC-CONS-IMAGE-128 prepays the proof header while retaining the full proof validator',async()=>{
+  let accessed=0;const error=Error('SyntheticProcessingBudget'),input={get root(){accessed++;throw Error('UnpaidProofRead');}};
+  const processing={header(){throw error;},archive(){},filesystem:{beforeRead(){}},ci:{source(){},context(){}},descriptor:createDescriptorProcessing({check(){},charge(){}})};
+  await expect(buildNonrootImageTransitionProof(input,{processing})).rejects.toBe(error);expect(accessed).toBe(0);
+  let paid=0;await expect(buildNonrootImageTransitionProof({},{processing:{...processing,header(){paid++;}}})).rejects.toThrow('NonrootContractInvalid');expect(paid).toBe(1);
  });
 });

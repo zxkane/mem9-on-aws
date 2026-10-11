@@ -5,15 +5,15 @@ import {createHash} from 'node:crypto';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {CI_SMOKE_CHECKS,CI_SMOKE_HEALTH_COMMAND,CI_SMOKE_REDACTED_VALUE,ciSmokeBindingHash} from './lib/ci-smoke-evidence.mjs';
 
-export function ciSmokeEvidenceFixture({inspectSecret=false,earlyCleanup=false,local=false,prestartInspect=false,supplementalHostConfig=false,nativeStop=false,latestLogScan=false,retryExtraLine='',sourceTree='b'.repeat(40),repository='example/control-plane'}={}){
+export function ciSmokeEvidenceFixture({inspectSecret=false,earlyCleanup=false,local=false,prestartInspect=false,supplementalHostConfig=false,nativeStop=false,latestLogScan=false,retryExtraLine='',sourceTree='b'.repeat(40),sourceRevision='a'.repeat(40),isolationHash:requestedIsolationHash,repository='example/control-plane'}={}){
  const objects=new Map(),sha=raw=>createHash('sha256').update(raw).digest('hex'),H=n=>n.toString(16).padStart(64,'0'),D=n=>'sha256:'+H(n);
  const bytes=value=>{const raw=Buffer.from(value),ref={sha256:sha(raw),bytesLength:raw.length};objects.set(ref.sha256,raw);return ref;};
  const json=value=>{const raw=Buffer.from(JSON.stringify(value)),ref={bytesHash:sha(raw),canonicalHash:hash(value),bytesLength:raw.length};objects.set(ref.bytesHash,raw);return ref;};
  const get=ref=>JSON.parse(objects.get(ref.bytesHash??ref.sha256).toString());
  const pin=(path,raw)=>{const ref=bytes(raw);return {path,gitMode:'100644',sha256:ref.sha256,bytes:ref.bytesLength};};
  const scanner=pin('scripts/ci-smoke-runner.mjs','// synthetic scanner source fixture\n'),validator=pin('scripts/validate-emf-event.mjs',readFileSync(new URL('./validate-emf-event.mjs',import.meta.url)));
- const base=1700000000000,invocationId=H(91),isolationHash=H(92),qualifiedImage='123456789012.dkr.ecr.us-east-1.amazonaws.com/mem9-on-aws/preview/mnemo-server@'+D(1);
- const identity={repository,runId:100,runAttempt:1,workflowPath:'.github/workflows/infra-ci.yml',sourceRevision:'a'.repeat(40),sourceTree,buildJobId:101,smokeJobId:102,stepId:'mnemo',outputDigest:D(1),qualifiedImage,arm64Digest:D(2),configDigest:D(3)},bindingHash=local?hash({kind:'local-smoke',invocationId,images:{server:{rootDigest:D(1),configDigest:D(3)},database:{rootDigest:D(4),configDigest:D(6)}}}):ciSmokeBindingHash(identity);
+ const base=1700000000000,invocationId=H(91),isolationHash=requestedIsolationHash??H(92),qualifiedImage='123456789012.dkr.ecr.us-east-1.amazonaws.com/mem9-on-aws/preview/mnemo-server@'+D(1);
+ const identity={repository,runId:100,runAttempt:1,workflowPath:'.github/workflows/infra-ci.yml',sourceRevision,sourceTree,buildJobId:101,smokeJobId:102,stepId:'mnemo',outputDigest:D(1),qualifiedImage,arm64Digest:D(2),configDigest:D(3)},bindingHash=local?hash({kind:'local-smoke',invocationId,images:{server:{rootDigest:D(1),configDigest:D(3)},database:{rootDigest:D(4),configDigest:D(6)}}}):ciSmokeBindingHash(identity);
  const shared={bindingHash,invocationId},records=[],catalog=[],logRecords=[],commandsByKey=new Map();let sequence=0;
  const allChecks={},containers=[],earlyRemoves=[],earlyRemoved=new Set(),networkId='synthetic-network',networkName='synthetic-internal';
  const expected={identity,isolationHash,invocationId,buildJob:{id:101,runId:100,runAttempt:1,sourceRevision:identity.sourceRevision,status:'completed',conclusion:'success',startedMs:base-2000,completedMs:base-1000},smokeJob:{id:102,runId:100,runAttempt:1,sourceRevision:identity.sourceRevision,status:'completed',conclusion:'success',startedMs:base-100,completedMs:base+10000},sourceFiles:[scanner,validator],scanner,emfValidator:validator,commandCatalog:catalog,

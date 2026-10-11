@@ -8,7 +8,7 @@
     "integrity": "sha512-/5apOkwWxtACcQtZ5WlrAsKS4JwXVThQPJZ3RqIruRY9UG9M8e0VlXN068xum/JRKA4aIUoJ13ghe/kGCvidiQ==",
     "builderSourceHash": "f4d29e0ef2cbf01a6ef16594e4dc1158ab9bc882ceb0fc1b9c2811c68e91e5c8"
   },
-  "packageLockHash": "5e440bbd9eb1dc80b8e7ebdabf0b7736344e6e742d65ae8f6c5916267e6b1bd4",
+  "packageLockHash": "547889667a18ff31b875957af2a2ba6189a2a67bb50b58f5b70c3cf8fc984648",
   "inputs": [
     {
       "path": ".github/actions/control-composition/index.mjs",
@@ -22,8 +22,8 @@
     },
     {
       "path": "docker/bootstrap/nonroot-identity.mjs",
-      "sha256": "bf2c1d78caccb15c5a9ac700a0aae1f42a46219bd8619a9943cbb581bd51fa0f",
-      "bytesLength": 7970
+      "sha256": "dc0d467b5e8106673768b1d15ccdff630d03ba9cfc4c37b859cb7c313633c40f",
+      "bytesLength": 8458
     },
     {
       "path": "docker/llm-proxy/server.mjs",
@@ -15432,8 +15432,8 @@
     },
     {
       "path": "scripts/lib/ci-carrier-before-copy.mjs",
-      "sha256": "eb8e2428b6d4996b7bbd7dc407263162015d14a9e94c8cac087d9d7e07e5c4cb",
-      "bytesLength": 30838
+      "sha256": "3d42811d4f3af394b93827ff6b9528d3c0288f3a709554893f1f7a011533b9c9",
+      "bytesLength": 33984
     },
     {
       "path": "scripts/lib/ci-carrier-context.mjs",
@@ -15442,23 +15442,28 @@
     },
     {
       "path": "scripts/lib/ci-carrier-derived-format.mjs",
-      "sha256": "033cfb7796e8d6af541032594bb285c1ec2786057f94f2051dbd7512b35052ad",
-      "bytesLength": 11011
+      "sha256": "b517b1f535fe8046e71d9b42a4d13eda5ccb6816c92eef83c1245ef24a712e25",
+      "bytesLength": 12089
+    },
+    {
+      "path": "scripts/lib/ci-carrier-http-policy.mjs",
+      "sha256": "7263877838d800c79bd7ed82434c430707e33938b4a5b4523ddaf18d457a17ea",
+      "bytesLength": 7014
     },
     {
       "path": "scripts/lib/ci-carrier-local-policy.mjs",
-      "sha256": "d21e6ebc5fbbbf8a7bed3eef695dca2ed73da4e2d898ab9ec6c435caa60f4d32",
-      "bytesLength": 3117
+      "sha256": "40ae18749cfdd53a1ca34a4ef593d505c98bd7fe8032c629e45e400b806bbcd4",
+      "bytesLength": 3982
     },
     {
       "path": "scripts/lib/ci-carrier-result.mjs",
-      "sha256": "7bc477100c5d450328711dd3dc1d7c307538c6ef032d545aa0a38646c1752a0f",
-      "bytesLength": 12298
+      "sha256": "baeec30808bf3d7df4dbe5509973b239a1e329a4371a089d5169dbae04d10479",
+      "bytesLength": 13289
     },
     {
       "path": "scripts/lib/ci-carrier-sql-acceptance-format.mjs",
-      "sha256": "a2cae80a408aca52be94c21ac644c78568c574998f0ee13b54076d5998525eca",
-      "bytesLength": 15206
+      "sha256": "b2bea7a4b53f6bf4718ca5c22c3f2ad9ab5bb23413202f2dfa454c5295050dec",
+      "bytesLength": 17268
     },
     {
       "path": "scripts/lib/ci-smoke-acquisition-format.mjs",
@@ -15469,6 +15474,11 @@
       "path": "scripts/lib/ci-smoke-acquisition.mjs",
       "sha256": "d43afe32251d8389ab50a3808be10551642b1c80addc0d417b01111f014eaaf5",
       "bytesLength": 27483
+    },
+    {
+      "path": "scripts/lib/ci-smoke-commit-source.mjs",
+      "sha256": "d05c9d14fd47d72c2f28831dff28b4f70a03231aea0e666dace5a90b1c11590f",
+      "bytesLength": 1844
     },
     {
       "path": "scripts/lib/ci-smoke-control-resources.mjs",
@@ -15497,8 +15507,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-github.mjs",
-      "sha256": "09f652a43235b112b3506ce1d7f73ce4aa78337531d494a8644e57b9d2d18f89",
-      "bytesLength": 4088
+      "sha256": "915bc2e1aa72af516e87108d910371e0105ff2ea45527a2f4c727cc44ce8705e",
+      "bytesLength": 4456
     },
     {
       "path": "scripts/lib/ci-smoke-grants.mjs",
@@ -15512,8 +15522,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-isolation.mjs",
-      "sha256": "7f519c30d39d1c2d890c10860344743e735ddf56c4ea28ef4310c2036eb3592a",
-      "bytesLength": 44238
+      "sha256": "d13f83160b0c41aa25faca80869226469ab56aa482c711f6965b8dee4d078e25",
+      "bytesLength": 44938
     },
     {
       "path": "scripts/lib/ci-smoke-job.mjs",
@@ -15997,8 +16007,8 @@
     },
     {
       "path": "scripts/lib/production-image-filesystem.mjs",
-      "sha256": "5583b0b3062da3a473ac24e676f65778729a6f323bf00dbb8a7dc078a7d46588",
-      "bytesLength": 26684
+      "sha256": "8bea6cdaaaef6bf3755c90053ca17943b5c2030bd0d28ecf22eb945562f19e9e",
+      "bytesLength": 28664
     },
     {
       "path": "scripts/lib/production-image-graph.mjs",
@@ -16037,8 +16047,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-archive.mjs",
-      "sha256": "f044ce73a2983c4f809aa13530ada0c8ecaab54d29257e2c602b1518762d9d33",
-      "bytesLength": 15128
+      "sha256": "2016308aae65716a97e47ca7c4c77141a6851ea936d5b35fb6d65104ff07567b",
+      "bytesLength": 16891
     },
     {
       "path": "scripts/lib/production-nonroot-artifact.mjs",
@@ -16072,8 +16082,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-contracts.mjs",
-      "sha256": "fba0f5b2e063144b2d290851a55ed7197c218daeb8b1447a2994b5ecbd813e80",
-      "bytesLength": 52275
+      "sha256": "bb6efef1bd1051baa34bd32d65403a11158177a33012cfdb06c44f87b7ee4d6c",
+      "bytesLength": 53765
     },
     {
       "path": "scripts/lib/production-nonroot-control-build.mjs",
@@ -16151,14 +16161,19 @@
       "bytesLength": 4536
     },
     {
+      "path": "scripts/lib/production-nonroot-descriptor-processing.mjs",
+      "sha256": "2220874e73b8156c9f8082b8ce7eebe677db6a5e5cedb411ecc8f958311f6e12",
+      "bytesLength": 11391
+    },
+    {
       "path": "scripts/lib/production-nonroot-fence-accounting.mjs",
       "sha256": "31d18954d54b6ccec1af9fb37acac91a22a5c5ab998f751c6e431c621445bc70",
       "bytesLength": 14629
     },
     {
       "path": "scripts/lib/production-nonroot-finalization-accounting.mjs",
-      "sha256": "62484facb93fe3c02576bec1d26566aec0c2853d59c38b0d73671724c33b7040",
-      "bytesLength": 7459
+      "sha256": "66d7671310c8f0309c05aab075681e57ad0188dcd0d0536712bf8228c5381d77",
+      "bytesLength": 8258
     },
     {
       "path": "scripts/lib/production-nonroot-launch.mjs",
@@ -16207,8 +16222,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-proof.mjs",
-      "sha256": "1c1a1808fbdf450c943008b6ee9bc88ebdca1471d6518d52b8d721c98d0c5f29",
-      "bytesLength": 77692
+      "sha256": "a9b949021a7b3f65aefe5b5b020722af6793d16df16ff38b19677cbca1bdd294",
+      "bytesLength": 80951
     },
     {
       "path": "scripts/lib/production-nonroot-provenance.mjs",
@@ -16222,8 +16237,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-root-output.mjs",
-      "sha256": "2bcfcaea1229ba16cf4eff5638fc1d893282c246156e4bcca56c0e50025c60d0",
-      "bytesLength": 2777
+      "sha256": "8f0727e7b5cf9b7ded8adac338dad64601fd0274b7f74a45567ae9ed0b1b7f5f",
+      "bytesLength": 3176
     },
     {
       "path": "scripts/lib/production-nonroot-root-owner-accounting.mjs",
@@ -16613,7 +16628,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "16f151f2d4f51182011e7723205cd12f19869ac4d3d972c19d6911f77ead642e",
-    "bytesLength": 6461563
+    "sha256": "00b5b467e34daee2fff7a5676fbc5c4f3a7280d05cbbe7da9e3f8e9689ca1604",
+    "bytesLength": 6490577
   }
 }

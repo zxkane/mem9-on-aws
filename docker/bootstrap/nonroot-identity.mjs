@@ -78,6 +78,12 @@ export function resolveGuardPurpose(purpose,env){
   return Object.freeze({kind:'module',module:base+'production-consolidation-operator.mjs',operation});
  }
  if(!isPreview)fail('NonrootPurpose');
+ if(purpose==='preview-observer-route-probe-v1'){
+  const wire=env.MEM9_OBSERVER_CONTROL_DELIVERY;
+  if(typeof wire!=='string'||wire.length<1||wire.length>8192||!/^[\x20-\x7e]+$/.test(wire)||
+   Object.keys(env).some(key=>key.startsWith('MEM9_')&&!['MEM9_STAGE','MEM9_OBSERVER_CONTROL_DELIVERY'].includes(key))||env.MNEMO_DSN!==undefined)fail('NonrootPurpose');
+  return Object.freeze({kind:'observer',module:base+'lib/production-nonroot-observer-route-probe.mjs',operation:purpose});
+ }
  if(purpose==='preview-namespace-benchmark'||purpose==='preview-namespace-connection-snapshot'){
   const operation=purpose==='preview-namespace-benchmark'?'benchmark':'connection-snapshot';
   const required=['MEM9_STAGE','MEM9_DB_HOST','MEM9_DB_PORT','MEM9_DB_NAME','MEM9_COGNITO_ISSUER','AWS_REGION'];

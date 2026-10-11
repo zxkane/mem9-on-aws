@@ -46,8 +46,18 @@ export function createNonrootEvidenceArchive(rawManifest,{expectedManifestHash,r
 }
 
 function options(value){need(record(value)&&Object.keys(value).every(k=>['purpose','kind'].includes(k))&&purposes.has(value.purpose)&&(value.kind===undefined||typeof value.kind==='string'&&value.kind.length>0&&value.kind.length<=256),'NonrootArchiveReadOptions');}
+// Additive accounting only: it cannot select bytes or replace any verifier.
+function beforeRead(state,value){
+ if(state.beforeRead===undefined)return;
+ const result=state.beforeRead(Object.freeze(value));
+ if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});fail('NonrootArchiveSynchronousPayment');}
+ need(result===undefined,'NonrootArchiveSynchronousPayment');
+}
 async function read(state,row,requested,rawOnly=false){
+ beforeRead(state,{kind:'body',encoding:row.encoding,bytesLength:row.ref.bytesLength});
  const returned=await state.readObject(row.name);
+ // The paid body is consumed in this resumed frame, under the same owner.
+ if(state.assertCurrent){const checked=state.assertCurrent();if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});fail('NonrootArchiveSynchronousGuard');}need(checked===undefined,'NonrootArchiveSynchronousGuard');}
  need(returned instanceof Uint8Array&&returned.length===row.ref.bytesLength&&returned.length<=(row.encoding==='json'?MAX_JSON_BYTES:MAX_BUFFERED_BYTES),'NonrootArchiveObjectSize');
  const raw=Buffer.from(returned);need(sha(raw)===(row.ref.bytesHash??row.ref.sha256),'NonrootArchiveObjectPin');
  let value;
@@ -61,12 +71,14 @@ async function read(state,row,requested,rawOnly=false){
 
 export async function readNonrootArchiveRef(archive,ref,requested){
  const state=get(archive);options(requested);const encoding=Object.hasOwn(ref??{},'canonicalHash')?'json':'bytes';reference(ref,encoding);
+ beforeRead(state,{kind:'lookup',entries:state.byName.size});
  const rows=[...state.byName.values()].filter(row=>row.encoding===encoding&&row.purpose===requested.purpose&&hash(row.ref)===hash(ref));
  need(rows.length===1,'NonrootArchiveReferenceMissing');return read(state,rows[0],requested);
 }
 
 export async function resolveNonrootArchiveCommitment(archive,canonicalHash,requested){
  const state=get(archive);options(requested);need(hex(canonicalHash),'NonrootArchiveCommitment');
+ beforeRead(state,{kind:'lookup',entries:1});
  const row=state.byCanonical.get(requested.purpose+'\0'+canonicalHash);need(row,'NonrootArchiveCommitmentMissing');return read(state,row,requested);
 }
 
@@ -83,7 +95,7 @@ export function nonrootArchiveInventory(archive){return get(archive).manifest;}
 export function nonrootArchiveResolvers(archive){
  const state=get(archive);
  const resolve=async(ref,encoding)=>{
-  reference(ref,encoding);const matches=[...state.byName.values()].filter(row=>row.encoding===encoding&&hash(row.ref)===hash(ref));
+  reference(ref,encoding);beforeRead(state,{kind:'lookup',entries:state.byName.size});const matches=[...state.byName.values()].filter(row=>row.encoding===encoding&&hash(row.ref)===hash(ref));
   need(matches.length===1,'NonrootArchiveReferenceAmbiguous');
   return read(state,matches[0],{purpose:matches[0].purpose},true);
  };
@@ -94,6 +106,7 @@ export function nonrootArchiveResolvers(archive){
  * historical filesystem path is never opened or treated as an archive key. */
 export async function resolveNonrootArchiveRawJson(archive,bytesHash){
  const state=get(archive);need(hex(bytesHash),'NonrootArchiveRawCommitment');
+ beforeRead(state,{kind:'lookup',entries:state.byName.size});
  const rows=[...state.byName.values()].filter(row=>row.encoding==='json'&&row.ref.bytesHash===bytesHash);
  need(rows.length===1,'NonrootArchiveRawCommitmentMissing');
  return read(state,rows[0],{purpose:rows[0].purpose},true);
@@ -101,7 +114,16 @@ export async function resolveNonrootArchiveRawJson(archive,bytesHash){
 
 /** Each full verifier starts a private read scope. Prior caller reads cannot
  * make an otherwise unreferenced authority object count as verified evidence. */
-export function forkNonrootArchive(archive){const s=get(archive);return context({...s,used:new Set(s.custodyNames??[])});}
+export function forkNonrootArchive(archive,options={}){
+ const s=get(archive);need(record(options)&&Object.keys(options).every(k=>['beforeRead','assertCurrent'].includes(k)),'NonrootArchiveProcessingOptions');
+ const payer=Object.hasOwn(options,'beforeRead')?options.beforeRead:s.beforeRead;
+ need(payer===undefined||typeof payer==='function','NonrootArchiveProcessingRequired');
+ need(!s.beforeRead||payer===s.beforeRead,'NonrootArchiveProcessingChanged');
+ const guard=Object.hasOwn(options,'assertCurrent')?options.assertCurrent:s.assertCurrent;
+ need(guard===undefined||typeof guard==='function','NonrootArchiveProcessingRequired');
+ need(!s.assertCurrent||guard===s.assertCurrent,'NonrootArchiveProcessingChanged');
+ return context({...s,...(payer?{beforeRead:payer}:{}),...(guard?{assertCurrent:guard}:{}),used:new Set(s.custodyNames??[])});
+}
 export function assertNonrootArchiveConsumed(archive){
  const s=get(archive);for(const row of s.byName.values())if(authorityPurposes.has(row.purpose))need(s.used.has(row.name),'NonrootArchiveUnreferencedAuthority');
 }

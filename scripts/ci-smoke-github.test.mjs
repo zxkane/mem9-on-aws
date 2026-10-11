@@ -36,3 +36,41 @@ it('requires one exact successful published digest and rejects a mutable-tag sub
  expect(extractMnemoBuildDigest(log,{event:'pull_request',revision})).toBe(digest);
  for(const value of [log.replace(' done',''),log.replace('pr-aaaaaaa','latest'),log.replace(digest,'sha256:invalid'),log+log.replace(digest,'sha256:'+'e'.repeat(64))])expect(()=>extractMnemoBuildDigest(value,{event:'pull_request',revision})).toThrow();
 });
+
+function gitDatabaseFixture(){
+ const f=fixture(),restApi=f.io.api;
+ f.commit.tree=f.commit.commit.tree;delete f.commit.commit;
+ f.candidateCommit={sha:head,tree:{sha:tree}};
+ f.io.api=async path=>{
+  if(path.startsWith('commits/'))throw Error('Unexpected REST commit request');
+  if(path.startsWith('git/commits/')){
+   f.calls.push(path);
+   if(path==='git/commits/'+revision)return f.commit;
+   if(path==='git/commits/'+head)return f.candidateCommit;
+   throw Error('Unexpected Git Database commit request');
+  }
+  return restApi(path);
+ };
+ f.input.commitApi='git-database';return f;
+}
+it('retains Git Database records and their explicit request paths without a REST wrapper',async()=>{
+ const f=gitDatabaseFixture(),before=JSON.stringify([f.commit,f.candidateCommit]),value=await captureCiSmokeGithub(f.io,f.input);
+ expect(value.commit).toBe(f.commit);expect(value.candidateCommit).toBe(f.candidateCommit);
+ expect(JSON.stringify([value.commit,value.candidateCommit])).toBe(before);
+ expect(value.commitSource).toEqual({api:'git-database',sourcePath:'git/commits/'+revision,candidatePath:'git/commits/'+head});
+ expect(f.calls).toEqual(['actions/runs/1/attempts/1','actions/runs/1/attempts/1/jobs?per_page=100','git/commits/'+revision,'git/commits/'+head]);
+ expect(value.buildDigest).toBe(digest);
+});
+it('rejects unknown commit APIs before making a request and keeps default REST output unchanged',async()=>{
+ const f=fixture();await expect(captureCiSmokeGithub(f.io,{...f.input,commitApi:'automatic'})).rejects.toThrow();expect(f.calls).toEqual([]);
+ const value=await captureCiSmokeGithub(f.io,f.input);expect(value).not.toHaveProperty('commitSource');
+});
+it.each(['rest-body','hybrid-source','hybrid-candidate','wrong-parent','wrong-candidate-tree'])('rejects Git Database %s',async defect=>{
+ const f=gitDatabaseFixture();
+ if(defect==='rest-body'){f.commit.commit={tree:f.commit.tree};delete f.commit.tree;}
+ if(defect==='hybrid-source')f.commit.commit={tree:f.commit.tree};
+ if(defect==='hybrid-candidate')f.candidateCommit.commit={tree:f.candidateCommit.tree};
+ if(defect==='wrong-parent')f.commit.parents[1].sha='f'.repeat(40);
+ if(defect==='wrong-candidate-tree')f.candidateCommit.tree.sha='f'.repeat(40);
+ await expect(captureCiSmokeGithub(f.io,f.input)).rejects.toThrow();
+});

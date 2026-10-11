@@ -86,6 +86,9 @@ RUN chmod +x /bootstrap/entrypoint.sh
 COPY docker/bootstrap/nonroot-dispatch.mjs docker/bootstrap/nonroot-files.mjs docker/bootstrap/nonroot-identity.mjs /bootstrap/
 COPY scripts/production-continuation-inspection.mjs /bootstrap/operator/scripts/
 COPY scripts/lib/production-continuation-inspection.mjs scripts/lib/production-continuation-root.mjs scripts/lib/production-continuation-publication.mjs scripts/lib/production-continuation-absence.mjs /bootstrap/operator/scripts/lib/
+COPY scripts/lib/ci-smoke-acquisition-format.mjs scripts/lib/ci-smoke-evidence.mjs scripts/lib/production-nonroot-budget-revision.mjs scripts/lib/production-nonroot-observer-control-context.mjs scripts/lib/production-nonroot-observer-delivery.mjs scripts/lib/production-nonroot-observer-route-probe.mjs scripts/lib/production-nonroot-observer-runtime-provider.mjs /bootstrap/operator/scripts/lib/
+COPY infra/gateway/namespace-auth.mjs /bootstrap/operator/infra/gateway/namespace-auth.mjs
+COPY scripts/validate-emf-event.mjs /bootstrap/operator/scripts/validate-emf-event.mjs
 COPY scripts/build-nonroot-manifest.mjs /usr/local/lib/mem9/build-nonroot-manifest.mjs
 RUN chmod -R a+rX,go-w /bootstrap \
     && node /usr/local/lib/mem9/build-nonroot-manifest.mjs
