@@ -17,6 +17,44 @@ export const OBSERVER_ROUTE_LIMITS=Object.freeze({
  responseMessages:64,tools:32,depth:32,nodes:20000,contextMs:30000,
  knownRefusalLocalBytes:131072,chunks:4096,outputBytes:65536,
 });
+// Event work touches fixed scalar records, not 4KiB source/data blocks per
+// nested guard. Wire: four 4-field permit projections (1024B), two six-entry
+// request indexes (96B), five 4-field counter descriptors (1280B), counter
+// construction/update (560B), and128 bounded scalar/bookkeeping cells at32B
+// (4096B): <=8192 logical bytes. Body: two permit projections, a six-entry
+// index, Buffer/list metadata and the same128-cell allowance also fit8192B.
+// This is a logical-work bound, not a measurement of V8 heap size. The payload
+// copies, hashes and parsing remain in the separate32*responseBytes term.
+// These bounds include the existing guard/runtime call chain, not just this
+// file. No source read, crypto verification or complete delivery walk occurs
+// in those event guards. Context/output/source work remains separately paid.
+const EVENT_WIRE_LOCAL=8192,EVENT_BODY_LOCAL=8192;
+export function describeObserverRouteEventWork(){
+ need(arguments.length===0,'ObserverRouteEventArguments');
+ const maximumEvents=OBSERVER_ROUTE_LIMITS.chunks,rejectedEvents=1;
+ return Object.freeze({authority:false,maximumWireEvents:maximumEvents,maximumBodyEvents:maximumEvents,rejectedEventsPerStream:rejectedEvents,
+  wireEventLocal:EVENT_WIRE_LOCAL,bodyEventLocal:EVENT_BODY_LOCAL,
+  logicalBytes:(maximumEvents+rejectedEvents)*(EVENT_WIRE_LOCAL+EVENT_BODY_LOCAL)});
+}
+/** Counter DATA only. The actual caller below constructs it after the native
+ * beginRequest has prepaid the complete event allowance. It grants nothing. */
+export function createObserverRouteEventCounter(responseBytes){
+ need(Number.isSafeInteger(responseBytes)&&responseBytes>0&&responseBytes<=OBSERVER_ROUTE_LIMITS.responseBytes,'ObserverRouteEventBound');
+ const work=describeObserverRouteEventWork();let wireEvents=0,bodyEvents=0,wireBytes=0,bodyBytes=0,logicalBytes=0,held=false;
+ const take=(wire,bytes)=>{
+  need(!held,'ObserverRouteEventHeld');
+  // Include the first rejected callback before its checks; the caller removes
+  // both listeners on that failure, so another event cannot consume this work.
+  logicalBytes+=wire?EVENT_WIRE_LOCAL:EVENT_BODY_LOCAL;
+  const events=wire?++wireEvents:++bodyEvents;
+  if(!Number.isSafeInteger(bytes)||bytes<0||events>OBSERVER_ROUTE_LIMITS.chunks||bytes>responseBytes-(wire?wireBytes:bodyBytes)){
+   held=true;throw Object.assign(Error(wire?'ObserverRouteWireBound':'ObserverRouteResponseBound'),{hold:true});
+  }
+  if(wire)wireBytes+=bytes;else bodyBytes+=bytes;
+ };
+ return Object.freeze({wire(bytes){take(true,bytes);},body(bytes){take(false,bytes);},
+  snapshot(){return Object.freeze({authority:false,wireEvents,bodyEvents,wireBytes,bodyBytes,logicalBytes,held,prepaidLocalUpperBound:work.logicalBytes});}});
+}
 const need=(ok,code='ObserverRouteInput')=>{if(!ok)throw Object.assign(Error(code),{code,hold:true});};
 const exact=(v,keys)=>need(v&&Object.getPrototypeOf(v)===Object.prototype&&Object.keys(v).sort().join()===keys.toSorted().join(),'ObserverRouteFields');
 const hex=(v,n=64)=>typeof v==='string'&&new RegExp('^[a-f0-9]{'+n+'}$').test(v);
@@ -147,10 +185,10 @@ export function describeObserverRouteProbeWork(value){
  const outputLocal=32*outputInputBytes+64*4096;
  const slots=OBSERVER_ROUTE_SLOTS.map(id=>{
   const r=value.allocation.slots.find(s=>s.id===id);
-  // At most4096 socket events and4096 decoded-body events. Per event:
-  // socket=8 bounded guard/charge/bookkeeping units; body=4. Include128
-  // additional units for DNS, setup, completion, parser and cleanup edges.
-  const processingLocal=8*r.requestBytes+32*r.responseBytes+4096*(12*OBSERVER_ROUTE_LIMITS.chunks+128)+16*65536+131072;
+  // Preserve both4096-event caps, the failed callback, full payload work and
+  // the original128-unit setup/DNS/completion/cleanup allowance. The entire
+  // amount is still debited by the original beginRequest before the first IO.
+  const processingLocal=8*r.requestBytes+32*r.responseBytes+describeObserverRouteEventWork().logicalBytes+4096*128+16*65536+131072;
   return {id,processingLocal,finishLocal,charge:{...observerZeroCounter(),logicalBytes:processingLocal+finishLocal,httpBodyBytes:r.requestBytes+r.responseBytes}};
  });
  return {authority:false,context:{id:'context',processingLocal:contextLocal,finishLocal,charge:{...observerZeroCounter(),logicalBytes:contextLocal+finishLocal}},
@@ -183,7 +221,14 @@ async function joinRouteIo(io,deadline){
 
 async function performRouteRequest(context,slot,{url,method,headers,body=''}){
  const permit=context.beginRequest(slot,{url,method}),limits=context.requestLimits(permit),target=new URL(url),lane=slot.startsWith('private-')?'private':'ingress';
- const io={request:null,response:null},parts=[];let timer,resolver,lookupPromise,addresses,peer,status,rawHeaders,bytes=0,chunks=0,refusal=false,primary;
+ const events=createObserverRouteEventCounter(limits.responseBytes),io={request:null,response:null},parts=[];
+ let timer,resolver,lookupPromise,addresses,peer,status,rawHeaders,bytes=0,refusal=false,primary,eventFailure,listenerFailure,wireSocket,wireListener,bodyListener;
+ const detachData=()=>{
+  // Attempt both removals even if the first fails; a cleanup failure cannot
+  // be hidden by a previously received body or a known connection refusal.
+  try{if(wireSocket&&wireListener)wireSocket.off('data',wireListener);}catch{listenerFailure=true;}
+  try{if(io.response&&bodyListener)io.response.off('data',bodyListener);}catch{listenerFailure=true;}
+ };
  context.retainIo(permit,io);
  const startedMs=context.now();
  try{
@@ -198,17 +243,18 @@ async function performRouteRequest(context,slot,{url,method,headers,body=''}){
   need(addresses.length>0&&addresses.length<=64&&new Set(addresses).size===addresses.length&&addresses.every(a=>addressAllowed(a,lane)),'ObserverRouteDns');
   const attemptedAddress=addresses[0];
   await new Promise((resolve,reject)=>{
-   let done=false,wireBytes=0,wireChunks=0;const settle=e=>{if(done)return;done=true;clearTimeout(timer);e?reject(e):resolve();};
+   let done=false;const settle=e=>{if(e){eventFailure??=e;detachData();}if(done)return;done=true;clearTimeout(timer);e?reject(e):resolve();};
    const req=(target.protocol==='https:'?https:http).request(target,{method,headers:{...headers,Connection:'close',...(method==='POST'?{'Content-Length':String(payload.length)}:{})},agent:false,family:4,autoSelectFamily:false,
     lookup(_hostname,options,callback){callback(null,options?.all?[{address:attemptedAddress,family:4}]:attemptedAddress,...(options?.all?[]:[4]));}},res=>{
     io.response=res;status=res.statusCode;peer=res.socket?.remoteAddress?.replace(/^::ffff:/,'');rawHeaders=res.headers;
     try{context.assertRequest(permit);need(addresses.includes(peer),'ObserverRoutePeer');}catch(e){settle(e);res.destroy();req.destroy();return;}
-    res.on('data',chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array&&++chunks<=OBSERVER_ROUTE_LIMITS.chunks&&bytes+chunk.length<=limits.responseBytes,'ObserverRouteResponseBound');bytes+=chunk.length;parts.push(Buffer.from(chunk));}catch(e){settle(e);res.destroy();req.destroy();}});
+    bodyListener=chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array,'ObserverRouteResponseBound');events.body(chunk.length);bytes+=chunk.length;parts.push(Buffer.from(chunk));}catch(e){settle(e);res.destroy();req.destroy();}};
+    res.on('data',bodyListener);
     res.once('end',()=>settle());res.once('aborted',()=>settle(Error('ObserverRouteAborted')));res.once('error',e=>settle(e));
    });io.request=req;
    // Socket data includes HTTP headers/chunk framing before Node exposes the
    // decoded body. TLS sockets emit decrypted HTTP bytes here.
-   req.once('socket',socket=>socket.prependListener('data',chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array&&++wireChunks<=OBSERVER_ROUTE_LIMITS.chunks&&wireBytes+chunk.length<=limits.responseBytes,'ObserverRouteWireBound');wireBytes+=chunk.length;context.chargeWire(permit,chunk.length);}catch(e){settle(e);req.destroy();io.response?.destroy();}}));
+   req.once('socket',socket=>{wireSocket=socket;wireListener=chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array,'ObserverRouteWireBound');events.wire(chunk.length);context.chargeWire(permit,chunk.length);}catch(e){settle(e);req.destroy();io.response?.destroy();}};socket.prependListener('data',wireListener);});
    req.once('error',e=>{if(done)return;try{context.assertRequest(permit);refusal=!io.response&&!req.socket?.remoteAddress&&e.code==='ECONNREFUSED'&&e.syscall==='connect'&&e.address===attemptedAddress&&e.port===Number(target.port||(target.protocol==='https:'?443:80));}catch(error){settle(error);return;}settle(e);});
    req.once('close',()=>{if(!done)settle(Error('ObserverRoutePrematureClose'));});
    timer=setTimeout(()=>{settle(Error('ObserverRouteDeadline'));req.destroy();},Math.max(1,Math.min(15000,limits.deadlineMs-Date.now())));req.end(payload);
@@ -219,6 +265,9 @@ async function performRouteRequest(context,slot,{url,method,headers,body=''}){
   await joinRouteIo(io,limits.deadlineMs);
  }catch(e){primary=e;refusal=false;}
  clearTimeout(timer);
+ detachData();
+ if(!primary&&eventFailure){primary=eventFailure;refusal=false;}
+ if(listenerFailure){primary=Error('ObserverRouteCloseUnknown');refusal=false;}
  try{
   context.assertRequest(permit); // same resumed frame, before any result work
   if(primary&&!refusal)throw primary;

@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {OBSERVER_ROUTE_SLOTS,inspectObserverRouteProtocol,observerPrivateStatusPath,observerMcpRequest,parseObserverMcpResponse,inspectObserverMcpInitialization,selectObserverStatusTool,inspectObserverJobStatus,inspectObserverMcpStatus} from './lib/production-nonroot-observer-route-probe.mjs';
+import {OBSERVER_ROUTE_SLOTS,OBSERVER_ROUTE_LIMITS,describeObserverRouteEventWork,createObserverRouteEventCounter,inspectObserverRouteProtocol,observerPrivateStatusPath,observerMcpRequest,parseObserverMcpResponse,inspectObserverMcpInitialization,selectObserverStatusTool,inspectObserverJobStatus,inspectObserverMcpStatus} from './lib/production-nonroot-observer-route-probe.mjs';
 const id='12345678-1234-1234-1234-123456789abc';
 const route=()=>({privateOrigin:'http://mnemo.mem9-pr-7.local:1024',gatewayUrl:'https://gateway.example.com/mcp',jobId:id,identityHash:'a'.repeat(64),issuer:'https://issuer.example.com/',audience:'read-client',transportIssuer:'test-transport',tokenEndpoint:'https://issuer.example.com/oauth2/token',jwksUri:'https://issuer.example.com/.well-known/jwks.json',registryHash:'b'.repeat(64)});
 const valid=()=>({...route(),privateOrigin:'http://mnemo.mem9-pr-7.local:8080'});
@@ -67,4 +67,32 @@ describe('fixed observer protocol DATA only',()=>{
   expect(()=>inspectObserverMcpStatus({...x,structuredContent:{...status(),attempts:1}},id)).toThrow();
   expect(()=>inspectObserverMcpStatus({...x,isError:true},id)).toThrow();
  });
+});
+describe('bounded event work DATA, never original payment or authority',()=>{
+ it('keeps both4096 event limits and prepays the first rejected callback too',()=>{
+  const q=describeObserverRouteEventWork();expect(q.authority).toBe(false);expect(q.maximumWireEvents).toBe(4096);expect(q.maximumBodyEvents).toBe(4096);
+  expect(q.rejectedEventsPerStream).toBe(1);expect(q.logicalBytes).toBe(4097*(q.wireEventLocal+q.bodyEventLocal));expect(()=>describeObserverRouteEventWork({chunks:1})).toThrow();
+  expect(OBSERVER_ROUTE_LIMITS).toMatchObject({chunks:4096,responseBytes:1048576,contextMs:30000,knownRefusalLocalBytes:131072,outputBytes:65536});
+ });
+ it('keeps independent wire/body accounting through4096 fragmented events',()=>{
+  const counter=createObserverRouteEventCounter(8192),q=describeObserverRouteEventWork();
+  for(let i=0;i<4096;i++){counter.wire(2);counter.body(1);}
+  const s=counter.snapshot();expect(s).toMatchObject({authority:false,wireEvents:4096,bodyEvents:4096,wireBytes:8192,bodyBytes:4096,held:false});
+  expect(s.logicalBytes).toBe(4096*(q.wireEventLocal+q.bodyEventLocal));expect(s.logicalBytes).toBeLessThan(s.prepaidLocalUpperBound);
+ });
+ for(const lane of ['wire','body'])it('rejects '+lane+' callback4097 before another copy/charge can proceed',()=>{
+  const c=createObserverRouteEventCounter(1048576),q=describeObserverRouteEventWork();for(let i=0;i<4096;i++)c[lane](1);
+  expect(()=>c[lane](1)).toThrow();const s=c.snapshot();expect(s.held).toBe(true);expect(s[lane+'Events']).toBe(4097);expect(s[lane+'Bytes']).toBe(4096);
+  expect(s.logicalBytes).toBe(4097*q[lane+'EventLocal']);expect(s.logicalBytes).toBeLessThanOrEqual(q.logicalBytes);expect(()=>c[lane](0)).toThrow();
+ });
+ it('empty callbacks still consume bounded work and cannot bypass event count',()=>{
+  const c=createObserverRouteEventCounter(1);for(let i=0;i<4096;i++)c.wire(0);expect(()=>c.wire(0)).toThrow();expect(c.snapshot().wireBytes).toBe(0);expect(c.snapshot().logicalBytes).toBeGreaterThan(0);
+ });
+ it('interleaving order cannot merge or reset separate stream budgets',()=>{
+  const a=createObserverRouteEventCounter(10),b=createObserverRouteEventCounter(10);
+  a.wire(3);a.body(4);a.wire(7);a.body(6);b.body(4);b.body(6);b.wire(3);b.wire(7);expect(a.snapshot()).toEqual(b.snapshot());
+  expect(()=>a.body(1)).toThrow();expect(a.snapshot().bodyBytes).toBe(10);
+ });
+ for(const bytes of [-1,NaN,Infinity,1.5])it('rejects invalid event byte count '+bytes,()=>{const c=createObserverRouteEventCounter(8);expect(()=>c.body(bytes)).toThrow();expect(c.snapshot().held).toBe(true);});
+ it('cannot create a counter with an unbounded response size',()=>{for(const n of [0,-1,1048577,NaN])expect(()=>createObserverRouteEventCounter(n)).toThrow();});
 });
