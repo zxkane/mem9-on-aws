@@ -1,3 +1,4 @@
+import {readReviewedRecoveryFixture} from './ci-smoke-recovery.fixture.mjs';
 import {ciSmokeEvidenceFixture} from './ci-smoke-evidence.fixture.mjs';
 import {verifyArchivedCiSmoke} from './lib/ci-smoke-isolation.mjs';
 import {describe,it,expect,beforeAll,afterAll} from 'vitest';
@@ -58,15 +59,11 @@ beforeAll(()=>{
     const path=new URL(name,repository),stat=lstatSync(path);if(!stat.isFile())continue;
     files.set(name,readFileSync(path));fileModes.set(name,stat.mode&0o111?'100755':'100644');
   }
-  // Recovery preimages remain exact. During parallel implementation a reviewed
-  // pin may still refer to HEAD's immutable bytes; never rewrite policy pins to
-  // make the fixture pass. Once reviewed pins advance, checkout bytes are used.
+  // Retained reviewed preimages are committed test DATA, never HEAD fallback
+  // or rewritten policy pins when the current implementation advances.
   const recovery=[...new Map(CI_SMOKE_POLICY.rows.filter(row=>row.rule.kind==='safe-recovery').flatMap(row=>row.rule.entryFiles).map(pin=>[pin.path,pin])).values()];
   for(const pin of recovery){
-    let bytes=readFileSync(new URL(pin.path,repository));
-    if(sha(bytes)!==pin.sha256||bytes.length!==pin.bytes)bytes=execFileSync('git',['show','HEAD:'+pin.path],{cwd:repository,maxBuffer:16*1024*1024});
-    if(sha(bytes)!==pin.sha256||bytes.length!==pin.bytes)throw Error('ReviewedRecoveryFixtureBytesMissing:'+pin.path);
-    files.set(pin.path,bytes);
+    files.set(pin.path,readReviewedRecoveryFixture(pin,files.get(pin.path)));
   }
   const workflow={jobs:{...fixed.workflow.jobs}},steps=[
     {uses:'docker/setup-qemu-action@'+'a'.repeat(40)},

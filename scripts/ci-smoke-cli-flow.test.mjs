@@ -1,3 +1,4 @@
+import {readReviewedRecoveryFixture} from './ci-smoke-recovery.fixture.mjs';
 import {describe,it,expect,beforeAll,beforeEach,afterEach,afterAll,vi} from 'vitest';
 import {execFileSync} from 'node:child_process';
 import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,lstatSync,existsSync,rmSync,readdirSync} from 'node:fs';
@@ -55,7 +56,7 @@ function sourceRepo(){
  const names=execFileSync('git',['ls-files','--cached','--others','--exclude-standard','-z'],{cwd:ROOT,maxBuffer:32*1024*1024}).toString().split('\0').filter(Boolean);
  for(const name of new Set(names)){if(name.includes('.local.')||name==='.local.json'||name==='.env')continue;const path=join(ROOT,name),stat=lstatSync(path);if(!stat.isFile())continue;files.set(name,readFileSync(path));modes.set(name,stat.mode&0o111?'100755':'100644');}
  const recovery=[...new Map(CI_SMOKE_POLICY.rows.filter(r=>r.rule.kind==='safe-recovery').flatMap(r=>r.rule.entryFiles).map(p=>[p.path,p])).values()];
- for(const pin of recovery){let bytes=files.get(pin.path);if(sha(bytes)!==pin.sha256||bytes.length!==pin.bytes)bytes=execFileSync('git',['show','HEAD:'+pin.path],{cwd:ROOT,maxBuffer:16*1024*1024});expect(sha(bytes)).toBe(pin.sha256);files.set(pin.path,bytes);}
+ for(const pin of recovery)files.set(pin.path,readReviewedRecoveryFixture(pin,files.get(pin.path)));
  workflow={jobs:{...fixed.workflow.jobs}};const steps=[{uses:'docker/setup-qemu-action@'+'a'.repeat(40)},{uses:'docker/setup-buildx-action@'+'b'.repeat(40)}];
  for(const name of ['mnemo-server','qwen3-embed','llm-proxy']){
   files.set('docker/'+name+'/Dockerfile',Buffer.from('FROM node:24-alpine AS runtime\nCOPY docker/'+name+'/fixture.mjs /app/fixture.mjs\n'));files.set('docker/'+name+'/fixture.mjs',Buffer.from('export const fixture=true;\n'));
