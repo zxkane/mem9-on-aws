@@ -456,6 +456,7 @@ afterAll(async()=>{
 
 describe("workload role coverage from the real SST graph", () => {
   it.each([
+    {label:"observer topology asynchronous graph",scheduleEnabled:false,namespaceRequired:true,runtimeReady:true,observerTopology:true},
     { label: "preview runtime preparation", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined, runtimeReady: false },
     { label: "preview runtime ready", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true },
     { label: "preview cutover preparation", scheduleEnabled: true, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true, productionMode: 'prepare' },
@@ -491,6 +492,7 @@ describe("workload role coverage from the real SST graph", () => {
         MEM9_BEDROCK_PROJECT: "proj_mock",
         MEM9_BEDROCK_PROJECT_OPENAI: "",
         MEM9_NAMESPACE_REQUIRED: namespaceRequired ? "1" : "0",
+        MEM9_PREVIEW_OBSERVER_TOPOLOGY: "observerTopology" in testCase ? JSON.stringify({owner:"a".repeat(32),operation:"b".repeat(32)}):undefined,
         MEM9_CONSOLIDATION_SCHEDULE_ENABLED: scheduleEnabled ? "1" : "0",
         SST_SECRET_MaintenanceNamespaceIds: JSON.stringify(scheduleEnabled ? maintenanceNamespaceIds : []),
         SST_SECRET_SlackWebhookUrl: "https://hooks.example.com/services/mock",
@@ -632,6 +634,25 @@ describe("workload role coverage from the real SST graph", () => {
           return outputs;
         });
         await pulumi.runtime.waitForRPCs();
+        if ("observerTopology" in testCase) {
+          const registries=recordedResources.filter(r=>r.type==='aws:servicediscovery/service:Service'&&r.name.startsWith('ObserverDiscovery'));
+          const clones=recordedResources.filter(r=>r.type==='aws:ecs/taskDefinition:TaskDefinition'&&/^Observer(Planner|Executor)Template$/.test(r.name));
+          expect(registries).toHaveLength(5);expect(clones).toHaveLength(2);
+          const metadata=oneResource('aws:ssm/parameter:Parameter','ObserverTopology');
+          const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));
+          const document=JSON.parse(String(unwrapRpcSecret(metadata.inputs.value)));
+          expect(Object.keys(document.workerTaskDefinitionArns).sort()).toEqual(['executor','planner']);
+          for(const kind of ['Planner','Executor']){
+            const normal=oneResource('aws:ecs/taskDefinition:TaskDefinition','Mem9Consolidation'+kind+'Task');
+            const clone=oneResource('aws:ecs/taskDefinition:TaskDefinition','Observer'+kind+'Template');
+            const without=(v:any)=>Object.fromEntries(Object.entries(v).filter(([k])=>!['family','tags','containerDefinitions'].includes(k)));
+            expect(without(clone.inputs)).toEqual(without(normal.inputs));
+            const normalApps=JSON.parse(String(unwrapRpcSecret(normal.inputs.containerDefinitions))),apps=JSON.parse(String(unwrapRpcSecret(clone.inputs.containerDefinitions)));
+            const expected=structuredClone(normalApps);expected[0].environment.find((e:any)=>e.name==='MEM9_BASE_URL').value=document.cases[0].privateOrigin;
+            expect(apps).toEqual(expected);expect(normalApps[0].environment.find((e:any)=>e.name==='MEM9_BASE_URL').value).not.toBe(document.cases[0].privateOrigin);
+          }
+          console.log('OBSERVER_ASYNC_GRAPH_JSON='+JSON.stringify({synthetic:true,realPulumiSstOutputs:true,authority:false,resources:[...registries,...clones,metadata]}));
+        }
         if (preview) {
           const service = oneResource('aws:ecs/service:Service', 'Mem9ServerService');
           expect(service.inputs.name).toBe('Mem9Server');

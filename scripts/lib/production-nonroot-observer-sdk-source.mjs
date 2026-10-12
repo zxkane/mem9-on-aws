@@ -2,7 +2,7 @@
 import {JsonCodec2} from '@aws-sdk/core/protocols';
 import {RunTaskCommand,RegisterTaskDefinitionCommand,CreateServiceCommand,DescribeServicesCommand,ListTasksCommand,DescribeTasksCommand,DescribeTaskDefinitionCommand,UpdateServiceCommand,StopTaskCommand,DeleteServiceCommand,DeregisterTaskDefinitionCommand,DeleteTaskDefinitionsCommand} from '@aws-sdk/client-ecs';
 import {GetParameterCommand} from '@aws-sdk/client-ssm';
-import {GetServiceCommand} from '@aws-sdk/client-servicediscovery';
+import {GetServiceCommand,ListInstancesCommand} from '@aws-sdk/client-servicediscovery';
 import {FilterLogEventsCommand} from '@aws-sdk/client-cloudwatch-logs';
 import {GetMetricStatisticsCommand} from '@aws-sdk/client-cloudwatch';
 import {GetServiceQuotaCommand} from '@aws-sdk/client-service-quotas';
@@ -11,7 +11,7 @@ const commands=new Map(Object.entries({RunTask:RunTaskCommand,RegisterTaskDefini
  CreateService:CreateServiceCommand,DescribeServices:DescribeServicesCommand,ListTasks:ListTasksCommand,
  DescribeTasks:DescribeTasksCommand,DescribeTaskDefinition:DescribeTaskDefinitionCommand,UpdateService:UpdateServiceCommand,
  StopTask:StopTaskCommand,DeleteService:DeleteServiceCommand,DeregisterTaskDefinition:DeregisterTaskDefinitionCommand,
- DeleteTaskDefinitions:DeleteTaskDefinitionsCommand,GetParameter:GetParameterCommand,GetService:GetServiceCommand,
+ DeleteTaskDefinitions:DeleteTaskDefinitionsCommand,GetParameter:GetParameterCommand,GetService:GetServiceCommand,ListInstances:ListInstancesCommand,
  FilterLogEvents:FilterLogEventsCommand,GetMetricStatistics:GetMetricStatisticsCommand,
  GetServiceQuota:GetServiceQuotaCommand}));
 

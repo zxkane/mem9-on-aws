@@ -15702,8 +15702,8 @@
     },
     {
       "path": "scripts/lib/consolidation-preview-config.mjs",
-      "sha256": "b83a6a3ec3324da27ca129da4382839baec63db6a0532eb81db1d56e0d014186",
-      "bytesLength": 2608
+      "sha256": "6280626dc3dc0d913df0ddfba8a91a3e7f4f29e066b2d62e31d059c62c1ed0c9",
+      "bytesLength": 2896
     },
     {
       "path": "scripts/lib/consolidation-preview-secrets.mjs",

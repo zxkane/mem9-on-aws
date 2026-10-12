@@ -382,6 +382,16 @@
       }
     },
     {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/commands/ListInstancesCommand.js",
+      "sha256": "e9134218760a92f50c22aa7f17261b9c74c8567b9b00b7c623f1c1cade50a0e5",
+      "bytesLength": 211,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
       "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/endpoint/EndpointParameters.js",
       "sha256": "fa99864e3159da9b9aa5f07f45a916a17457e6ecbb728df75b890acb4bcc0497",
       "bytesLength": 572,
@@ -1323,13 +1333,13 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-sdk-source.mjs",
-      "sha256": "78e3a9427c51936da7d8e94fbef5ce3a795d57e33465e32cc3ef0082c02750ef",
-      "bytesLength": 2176
+      "sha256": "484385e491e37fcadf21301be6c0b19f240c981e4ad5225f571ac8419192214f",
+      "bytesLength": 2232
     }
   ],
   "output": {
     "path": "scripts/lib/production-nonroot-observer-sdk.mjs",
-    "sha256": "7b0cc9ccd4950c0f4846f8d7ed7f1fe785d91c74aef8232bbf8e2310170aff39",
-    "bytesLength": 328445
+    "sha256": "4760fbba2accf061c21a85e4a74b195c20d9b8760e12ad9f09de2190998cac70",
+    "bytesLength": 329539
   }
 }

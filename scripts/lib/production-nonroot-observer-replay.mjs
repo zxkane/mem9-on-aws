@@ -1,3 +1,5 @@
+import {observerSessionPurposes,observerProviderPurpose} from './production-nonroot-observer-sessions.mjs';
+import {verifyObserverDiscoveryService,verifyObserverEmptyInstances,observerInstancesEmpty,verifyObserverServiceRegistry} from './production-nonroot-observer-topology.mjs';
 import {OBSERVER_RESOURCE_READS,assertObserverAccountingBinding,assertObserverWorkerDispatch} from './production-nonroot-observer-accounting.mjs';
 /** Persisted observer replay. These helpers return evaluated DATA only;
  * the full-run constructor must additionally verify source, A, DATA process
@@ -15,6 +17,7 @@ import {replayNonrootArchivedControl} from './production-nonroot-observer-contro
 import {replayNonrootArchivedData} from './production-nonroot-observer-data-replay.mjs';
 import {observerControlLogGeometry} from './production-nonroot-observer-control-logs.mjs';
 import {compileArchivedObserverSessionPolicy} from './production-nonroot-observer-session-policy.mjs';
+import {inspectObserverWorkerLayout,inspectObserverWorkerSequence} from './production-nonroot-observer-worker-job.mjs';
 
 const runStates=new WeakMap();
 
@@ -90,9 +93,13 @@ export async function replayNonrootObserverRun(input,{work,metadataReads,dataFac
    need(model.plan.runtimeRoles.includes(capture.role)&&!capturedRoles.has(capture.role),'ObserverReplayRuntimeRole');capturedRoles.add(capture.role);allRoles.add(capture.role);
    const task=modelResult.tasks.get(capture.taskArn),definition=modelResult.definitions.get(capture.definitionArn);
    need(task&&definition,'ObserverReplayRuntimeTask');
-   const replay=await replayNonrootArchivedData(raw,{reader,source,casePlan,definition,task,providers,objects,recordedMs:journal.byKind.get('observer-run-material')[0].atMs});current();
+   const replay=await replayNonrootArchivedData(raw,{reader,source,casePlan,definition,task,providers,objects,recordedMs:journal.byKind.get('observer-run-material')[0].atMs,workerRun:modelResult.workerRuns.get(capture.taskArn)});current();
    for(const pageRef of capture.pages){const page=await read(pageRef);current();allProviderIds.add(page.provider.id);}
    captures.push(replay);
+  }
+  if(plan.version===3){
+   const jobs=['planner','executor'].filter(role=>model.plan.runtimeRoles.includes(role)).map(role=>captures.find(r=>r.capture.role===role)?.workerJob);
+   need(jobs.every(Boolean),'ObserverWorkerSequenceCoverage');inspectObserverWorkerSequence(plan,model.plan,jobs);
   }
   if(material.name==='post-liveness-regression'){
    const stop=cohort.originals.get(material.name+'/fault-stop');need(stop,'ObserverReplayLiveFault');
@@ -128,7 +135,7 @@ export function verifyNonrootObserverIssuerJournal({plan,providers,paid,closed},
  reader.current();reader.paid.debit(16*4194304);
  need(paid instanceof Map&&closed instanceof Map,'ObserverReplayIssuerSourceRequired');
  const ids=[];let previousEnd=plan.startedMs,previousSequence=0;
- for(const purpose of ['read','setup','update','cleanup',...(plan.geometry.control?['launch']:[])]){
+ for(const purpose of observerSessionPurposes(plan)){
   const sourceId='issuer-source/'+purpose,opened=paid.get(sourceId),finished=closed.get(sourceId);
   need(opened&&finished&&finished.data.complete===true&&opened.sequence>previousSequence&&opened.atMs>=previousEnd&&finished.sequence>opened.sequence,'ObserverReplayIssuerSourceRequired');
   const policy=compileArchivedObserverSessionPolicy(plan,purpose),name='cc-mem9-on-aws-obs-'+purpose+'-'+plan.operation.slice(0,12);
@@ -229,6 +236,7 @@ export async function replayNonrootObserverCohort(caseMaterial,{reader,providers
  * A matching sampled timeline alone cannot authenticate task registration. */
 export async function verifyNonrootObserverCohortModel(cohort,{reader,model,plan,objects}){
  reader.current();reader.paid.debit(64*plan.geometry.materialBytes+65536);
+ reader.current();inspectObserverWorkerLayout(plan,model.plan,model.input?.observations);
  const p=cohort.evidence.plan,name=model.plan.name,prefix='arn:aws:ecs:'+plan.scope.region+':'+plan.scope.account+':';
  const used=new Set(),definitions=new Map(),arns=new Map();
  const strip=value=>Object.fromEntries(Object.entries(value).filter(([k])=>!['taskDefinitionArn','revision','status','requiresAttributes','compatibilities','registeredAt','registeredBy','deregisteredAt','deleteRequestedAt'].includes(k)));
@@ -250,7 +258,17 @@ export async function verifyNonrootObserverCohortModel(cohort,{reader,model,plan
  }
  const created=take(name+'/create','CreateService',{...model.create,taskDefinition:arns.get('baseline')}),service=created.value.service;
  need(service&&service.serviceName===model.plan.serviceName&&service.clusterArn===plan.scope.clusterArn&&service.taskDefinition===arns.get('baseline')&&service.serviceArn?.startsWith(prefix+'service/'),'ObserverReplayModelService');
- take(name+'/discovery','GetService',{Id:model.create.serviceRegistries[0].registryArn.split('/').at(-1)});
+ const discovery=take(name+'/discovery','GetService',{Id:model.create.serviceRegistries[0].registryArn.split('/').at(-1)});
+ if(plan.geometry.topology===1){
+  verifyObserverDiscoveryService(discovery.value,model.plan.discovery);
+  const empty=take(name+'/discovery-empty','ListInstances',{ServiceId:model.plan.discovery.serviceArn,MaxResults:1});verifyObserverEmptyInstances(empty.value);
+  need(discovery.original.completedMs<=empty.original.startedMs&&empty.original.completedMs<=created.original.startedMs,'ObserverDiscoveryAdmissionOrder');
+  verifyObserverServiceRegistry(service,model.plan.discovery);
+  for(const {value}of cohort.originals.values()){
+   if(value.service)verifyObserverServiceRegistry(value.service,model.plan.discovery);
+   for(const row of value.services??[])verifyObserverServiceRegistry(row,model.plan.discovery);
+  }
+ }
  let ready=false;
  for(let i=0;i<model.plan.baselinePolls;i++){
   const row=take(name+'/baseline/'+i,'DescribeServices',{cluster:plan.scope.clusterArn,services:[service.serviceArn]}),v=row.value,s=v.services?.[0];
@@ -263,7 +281,7 @@ export async function verifyNonrootObserverCohortModel(cohort,{reader,model,plan
  need(object&&object.bytesLength===targetRef.bytesLength,'ObserverReplayModelTargetObject');
  const target=await reader.json(targetRef);reader.current();same(target,model.target,'ObserverReplayModelTarget');
  same(p,observerCohortTimeline(model,{serviceArn:service.serviceArn,oldTaskArn:old[0].taskArn,oldTaskDefinitionArn:arns.get('baseline'),targetTaskDefinitionArn:arns.get('target'),targetDefinitionRef:targetRef}),'ObserverReplayModelTimeline');
- const tasks=new Map(),workerTasks=new Map();
+ const tasks=new Map(),workerTasks=new Map(),workerRuns=new Map();
  for(const lane of model.plan.runtimeRoles.filter(r=>['planner','executor'].includes(r))){
   const id=name+'/run-'+lane,template=model.runTemplates.get(lane);
   const request={...structuredClone(template),taskDefinition:arns.get(lane),group:'observer:'+plan.owner+':'+name+':'+lane,clientToken:hash({owner:plan.owner,operation:plan.operation,id}),tags:structuredClone(model.baseline.tags),propagateTags:'TASK_DEFINITION'};
@@ -276,11 +294,13 @@ export async function verifyNonrootObserverCohortModel(cohort,{reader,model,plan
   need(value.failures?.length===0&&value.tasks?.length===1,'ObserverReplayModelWorker');
   const task=value.tasks[0];need(task.taskArn?.startsWith(prefix+'task/')&&task.clusterArn===plan.scope.clusterArn&&task.taskDefinitionArn===arns.get(lane)&&task.group===request.group&&task.enableExecuteCommand===false,'ObserverReplayModelWorker');
   workerTasks.set(lane,task.taskArn);
-  let stopped=false;
+  const workerRun={request:structuredClone(request),dispatchMs:run.original.startedMs};workerRuns.set(task.taskArn,workerRun);
+  let stopped=false,previousMs=run.original.completedMs;
   for(let i=0;i<plan.geometry.control.taskPolls;i++){
    const row=take(name+'/'+lane+'-task/'+i,'DescribeTasks',{cluster:plan.scope.clusterArn,tasks:[task.taskArn]}),described=row.value.tasks;
+   if(plan.version===3){need(row.original.startedMs>=previousMs,'ObserverWorkerTaskPollOrder');previousMs=row.original.completedMs;}
    need(row.value.failures?.length===0&&described?.length===1&&described[0].taskArn===task.taskArn,'ObserverReplayModelWorkerRead');
-   if(described[0].lastStatus==='STOPPED'){need(described[0].containers.every(c=>c.exitCode===0),'ObserverReplayModelWorkerExit');stopped=true;break;}
+   if(described[0].lastStatus==='STOPPED'){need(described[0].containers.every(c=>c.exitCode===0),'ObserverReplayModelWorkerExit');stopped=true;workerRun.stopProviderId=row.original.id;break;}
   }
   need(stopped,'ObserverReplayModelWorkerStop');
  }
@@ -295,7 +315,7 @@ export async function verifyNonrootObserverCohortModel(cohort,{reader,model,plan
   if(cohort.matched.has(id)||['UpdateService','StopTask'].includes(original.action))used.add(id);
  }
  need(used.size===cohort.originals.size,'ObserverReplayModelUnconsumed');
- reader.current();return {definitions,arns,tasks,workerTasks,providerIds:[...used]};
+ reader.current();return {definitions,arns,tasks,workerTasks,workerRuns,providerIds:[...used]};
 }
 
 /** Re-evaluate original cleanup requests and their exact responses. Deletion
@@ -341,7 +361,8 @@ export async function replayNonrootObserverCleanup(cleanupRef,{reader,providers,
    if(records.has(id))take(id,'StopTask',{cluster:p.clusterArn,task,reason:'observer-cleanup:'+plan.owner});
    else need(beforeStopped.has(task),'ObserverReplayCleanupUnstoppedRun');
   }
-  take(p.name+'/delete-service','DeleteService',{cluster:p.clusterArn,service:p.serviceArn,force:true});
+  const deletion=take(p.name+'/delete-service','DeleteService',{cluster:p.clusterArn,service:p.serviceArn,force:true});
+  if(plan.geometry.topology===1&&deletion.service)verifyObserverServiceRegistry(deletion.service,c.discovery);
   let closed=false;
   for(let poll=0;poll<c.cleanupPolls;poll++){
    const prefix=p.name+'/cleanup-',service=take(prefix+'service/'+poll,'DescribeServices',{cluster:p.clusterArn,services:[p.serviceArn]});
@@ -369,7 +390,8 @@ export async function replayNonrootObserverCleanup(cleanupRef,{reader,providers,
     same(value.tasks.map(t=>t.taskArn).sort(),wanted.toSorted(),'ObserverReplayCleanupTaskCoverage');stopped&&=value.tasks.every(t=>t.lastStatus==='STOPPED');
    }
    need(described.size===arns.size,'ObserverReplayCleanupTaskCoverage');
-   if(serviceClosed&&stopped){closed=true;break;}
+   let empty=true;if(plan.geometry.topology===1){for(const row of service.services??[])verifyObserverServiceRegistry(row,c.discovery);empty=observerInstancesEmpty(take(prefix+'discovery/'+poll,'ListInstances',{ServiceId:c.discovery.serviceArn,MaxResults:1}));}
+   if(serviceClosed&&stopped&&empty){closed=true;break;}
   }
   need(closed,'ObserverReplayCleanupServicePending');
   for(const [lane,arn]of definitions){

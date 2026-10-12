@@ -286,6 +286,21 @@ function parseYaml(raw){const doc=parseDocument(text(raw),{uniqueKeys:true});nee
 const pin=file=>({path:file.path,gitMode:file.gitMode,sha256:file.sha256,bytes:file.bytes});
 async function file(context,path,expected){const result=await readControlSourceFile(context,path);assertControlSourceCurrent(context);if(expected)same(pin(result.file),expected,'CiSmokeFileChanged');return result;}
 
+// This reviewed revision forwards original proof bindings in the restore path.
+// Its owned cleanup implementation is unchanged. Keep the historical policy
+// pin and require an exact successor only at this recovery contract. Actual
+// candidate bytes remain in the authenticated source closure.
+const recoveryRevision=Object.freeze({
+ version:2,route:'deploy-prod',callPath:'deploy-prod/25',contractId:'owned-image-bundle-removal',
+ predecessor:Object.freeze({path:'scripts/lib/production-image-deployment-bundle.mjs',gitMode:'100644',sha256:'ad7ab7b53ab30429b09dd46b203f8ed6e649e61d06946220c8707183d56fa125',bytes:16132}),
+ successor:Object.freeze({path:'scripts/lib/production-image-deployment-bundle.mjs',gitMode:'100644',sha256:'661b7ebffc9d3e99f1ff56a5906eb807d8360ff2502fdd342505ba6564e25e27',bytes:16228}),
+});
+export function verifyCiSmokeRecoveryPin(row,expected,actual){
+ if(hash(actual)===hash(expected))return;
+ need(row?.route===recoveryRevision.route&&row.callPath===recoveryRevision.callPath&&row.rule?.kind==='safe-recovery'&&row.rule.contractId===recoveryRevision.contractId&&
+  hash(expected)===hash(recoveryRevision.predecessor)&&hash(actual)===hash(recoveryRevision.successor),'CiSmokeFileChanged');
+}
+
 /** Derive complete local imports, re-exports and script references. Dynamic
  * module selection cannot be silently omitted from a reviewed code closure. */
 export async function ciSmokeSourceClosure(context,roots){
@@ -480,7 +495,9 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
   same(parseYaml(assets.action.bytes),controlCompositionActionDefinition(),'CiSmokeCompositionAction');
   resume(await verifyCiSmokeCompositionToolchain(candidateContext,assets));
  }
- for(const row of policy.rows.filter(r=>r.rule.kind==='safe-recovery'))for(const source of row.rule.entryFiles)resume(await file(candidateContext,source.path,source));
+ for(const row of policy.rows.filter(r=>r.rule.kind==='safe-recovery'))for(const source of row.rule.entryFiles){
+  const actual=resume(await file(candidateContext,source.path));verifyCiSmokeRecoveryPin(row,source,pin(actual.file));
+ }
  const oldBuild=buildCiSmokeImageJob(baseline),newBuild=candidate.jobs['build-and-push-image'];same(newBuild,oldBuild,'CiSmokeBuildJobChanged');
  need(Array.isArray(isolation.preservedScripts)&&isolation.preservedScripts.length===2);
  for(const [index,path]of ['scripts/run-mnemo-emf-smoke.sh','scripts/run-mnemo-health-smoke.sh'].entries()){

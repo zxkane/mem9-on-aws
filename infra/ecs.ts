@@ -1,3 +1,4 @@
+import {observerTopologyResources,type ObserverTopology} from './observer-topology';
 /**
  * `ecs` stack — ECS Fargate cluster + service running the REAL mnemo-server.
  *
@@ -132,6 +133,7 @@ export interface RuntimeTaskDefinitionView {
 }
 
 export interface EcsOutputs {
+  observerTopology?:ObserverTopology;
   ssmPrefix: string;
   cluster: sst.aws.Cluster; // shared with bootstrap() so the one-shot task reuses it
   clusterName: Output<string>;
@@ -254,6 +256,7 @@ export function ecs(
     tags,
   });
   const serviceDnsName = $interpolate`mnemo.mem9-${$app.stage}.local`;
+  const observerTopology=observerTopologyResources(namespace);
 
   // Cold-start ordering fix: on a FRESH deploy, ECS CreateService validates its
   // serviceRegistries against Route53 and fails with "ServiceNotFound" if the
@@ -683,6 +686,7 @@ export function ecs(
     serviceName: service.nodes.service.name,
     image: mnemoImage,
     serviceDnsName,
+    observerTopology,
     taskSecurityGroupId: taskSgId,
     alertsTopicArn: observabilityOut.alertsTopicArn,
     serverTaskDefinition:service.nodes.taskDefinition as Output<RuntimeTaskDefinitionView>,

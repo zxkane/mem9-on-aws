@@ -109,6 +109,21 @@ describe('Git-backed CI smoke source record producer',()=>{
     expect(verified.kind).toBe('verified-ci-smoke-source');expect(verified.isolationHash).toBe(hash(result.isolation));
     expect(result).not.toHaveProperty('sourcePassed');
   },30000);
+  it('keeps the reviewed recovery successor in the actual candidate closure',async()=>{
+    const path='scripts/lib/production-image-deployment-bundle.mjs';
+    const actual=readFileSync(new URL('../'+path,import.meta.url));
+    expect(sha(actual)).toBe('661b7ebffc9d3e99f1ff56a5906eb807d8360ff2502fdd342505ba6564e25e27');
+    const selected=variant(files=>files.set(path,actual));
+    const result=await createCiSmokeIsolationRecord(input(selected));
+    expect(result.isolation.promotion.preparationValidators.find(row=>row.path===path)).toMatchObject({sha256:sha(actual),bytes:actual.length});
+    await expect(verifyCiSmokeIsolationSource(result.isolation,{originContext:origin.context,candidateContext:selected.context,baselineContext:baseline.context,...result})).resolves.toMatchObject({kind:'verified-ci-smoke-source'});
+  },30000);
+  it('rejects byte drift from the reviewed recovery successor',async()=>{
+    const path='scripts/lib/production-image-deployment-bundle.mjs';
+    const actual=readFileSync(new URL('../'+path,import.meta.url));
+    actual[actual.length-1]^=1;
+    await expect(createCiSmokeIsolationRecord(input(variant(files=>files.set(path,actual))))).rejects.toThrow('CiSmokeFileChanged');
+  },30000);
   it('requires authentic opaque contexts and a closed input before reading blobs',async()=>{
     for(const value of [{...input(),sourcePassed:true},{...input(),databaseImage:'pgvector/pgvector:pg17'},
       {...input(),candidate:{revision:candidate.revision,context:{...candidate.context}}},

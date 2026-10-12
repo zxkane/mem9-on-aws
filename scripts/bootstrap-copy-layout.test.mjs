@@ -1,6 +1,9 @@
 import {it,expect} from 'vitest';
-import {readFileSync} from 'node:fs';
-import {posix} from 'node:path';
+import {readFileSync,mkdtempSync,mkdirSync,copyFileSync,rmSync} from 'node:fs';
+import {posix,join,dirname} from 'node:path';
+import {tmpdir} from 'node:os';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
 import {dataCopySources} from './lib/production-data-build-inputs.mjs';
 import {FUTURE_CONTROL_CAPACITY,verifyFutureControlGraphCapacity} from './lib/production-control-capacity.mjs';
 
@@ -104,6 +107,8 @@ const expectedCopies = {
       "scripts/lib/production-nonroot-budget-revision.mjs",
       "scripts/lib/production-nonroot-observer-control-context.mjs",
       "scripts/lib/production-nonroot-observer-delivery.mjs",
+      "scripts/lib/production-nonroot-observer-topology.mjs",
+      "scripts/lib/production-nonroot-engineering-json.mjs",
       "scripts/lib/production-nonroot-observer-route-probe.mjs",
       "scripts/lib/production-nonroot-observer-runtime-provider.mjs",
       "scripts/lib/production-nonroot-observer-route-protocol.mjs",
@@ -171,3 +176,24 @@ it('detects a missing operand, wrong destination or COPY moved across npm',()=>{
   expect(()=>expect(ordered(copies(changed))).toEqual(expected)).toThrow();
  }
 });
+it('imports observer CONTROL from only the Docker COPY files and rejects either missing dependency',()=>{
+ const directory=mkdtempSync(join(tmpdir(),'bootstrap-control-copy-'));
+ const root=fileURLToPath(new URL('..',import.meta.url));
+ try{
+  for(const omitted of [null,'production-nonroot-observer-topology.mjs','production-nonroot-engineering-json.mjs']){
+   const target=join(directory,omitted??'complete');
+   for(const row of copies(source())){
+    if(!row.target.startsWith('/bootstrap/operator/scripts/')||!row.input.endsWith('.mjs')||posix.basename(row.input)===omitted)continue;
+    const file=join(target,row.target);mkdirSync(dirname(file),{recursive:true});copyFileSync(join(root,row.input),file);
+   }
+   const modules=['production-nonroot-observer-delivery.mjs','production-nonroot-observer-route-protocol.mjs'];
+   const urls=modules.map(name=>pathToFileURL(join(target,'/bootstrap/operator/scripts/lib/',name)).href);
+   const child=spawnSync(process.execPath,['--input-type=module','--eval',`for(const url of ${JSON.stringify(urls)}) await import(url);`],{
+    cwd:target,env:{PATH:process.env.PATH},encoding:'utf8',timeout:15000,maxBuffer:1024*1024,
+   });
+   expect(child.error).toBeUndefined();
+   if(omitted){expect(child.status).toBe(1);expect(child.stderr).toContain('ERR_MODULE_NOT_FOUND');expect(child.stderr).toContain(omitted);}
+   else expect(child.status,child.stderr).toBe(0);
+  }
+ }finally{rmSync(directory,{recursive:true,force:true});}
+},20000);

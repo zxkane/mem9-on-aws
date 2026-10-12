@@ -1,4 +1,7 @@
+import {observerSessionPurposes,observerProviderPurpose,observerCleanupPurpose} from './production-nonroot-observer-sessions.mjs';
+import {inspectObserverTopologyPlan} from './production-nonroot-observer-topology.mjs';
 import {OBSERVER_ACCOUNTING_V3,OBSERVER_ACCOUNTING_LOCAL,OBSERVER_RESOURCE_READS,OBSERVER_RESOURCE_READ_LOCAL,observerAccountingJournalRecords,observerCaseVersion,inspectObserverAccounting,observerBackendAdmissionId,observerBackendAdmissionWork,observerVerificationCaptures} from './production-nonroot-observer-accounting.mjs';
+import {OBSERVER_WORKER_BIND_LOCAL,observerNeedsWorkerJob,observerWorkerJobLocal} from './production-nonroot-observer-worker-job.mjs';
 /** Portable original observer plan and quote arithmetic. Every identity,
  * pathname and generated catalog arrives as authenticated caller DATA. This
  * module does not read paths, load source, create owners or dispatch providers.
@@ -170,14 +173,15 @@ function limits(g){
  need(g.rawPageBytes<=33554432&&g.logPolls<=1024&&g.logPages<=100&&g.logEvents<=1000000&&g.maxMessageBytes<=1048576&&g.captures<=1000,'ObserverLogGeometry');
  return g;
 }
-function quoteObserverLogPages(input){
+function quoteObserverLogPages(input,workerJob=false){
+ need(typeof workerJob==='boolean','ObserverWorkerJobSelector');
  const g=limits(input),pages=g.logPolls*g.logPages,bytes=pages*g.rawPageBytes;
  // Page UTF8/duplicate-key parse/canonical walk, secret screening, event and
  // provenance hashing, original/normalized frame copies, decoder scan and
  // base64/hash work. Finish owns every full 1MiB capture allocation/hash,
  // 514 retained parts and worst-case capture ordering comparisons.
  const maxGuardCalls=3*pages+4,guardLocal=maxGuardCalls*16384;
- const logicalBytes=guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
+ const logicalBytes=(workerJob?observerWorkerJobLocal(g):0)+guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
  need(Number.isSafeInteger(logicalBytes),'ObserverLogQuoteOverflow');
  return {logicalBytes,pages,rawBytes:bytes,captures:g.captures,maxGuardCalls,guardLocal};
 }
@@ -320,8 +324,8 @@ function inspectObserverPlan(p){
   for(const arn of p.scope[name])need(typeof arn==='string'&&arn.startsWith('arn:aws:'+service+':')&&arn.includes(':'+p.scope.account+':')&&!/[?*]/.test(arn),'ObserverScope');
  }
  need(typeof p.scope.rootParameterArn==='string'&&p.scope.rootParameterArn.startsWith('arn:aws:ssm:'+p.scope.region+':'+p.scope.account+':parameter/')&&!/[?*]/.test(p.scope.rootParameterArn),'ObserverRootScope');
- exact(p.geometry,['sourcePassLocal','sourcePreparation','roles','cache','prerequisiteReplay','materialBytes','materialRecords','rawPageBytes','listPages','taskLimit','logPages','logPolls','logEvents','maxMessageBytes','issuerSourceBytes','contextSourceBytes',...(p.version===3?['admission','admissionCleanup']:[]),...(p.geometry.control?['control']:[])]);
- const g=p.geometry;if(p.version===3){counter(g.admission);counter(g.admissionCleanup);need(g.admission.logicalBytes>0&&g.admissionCleanup.logicalBytes>0,'ObserverResourceAdmissionQuote');}for(const k of ['sourcePassLocal','materialBytes','materialRecords','rawPageBytes','listPages','taskLimit','logPages','logPolls','logEvents','maxMessageBytes','issuerSourceBytes','contextSourceBytes'])positive(g[k]);
+ exact(p.geometry,['sourcePassLocal','sourcePreparation','roles','cache','prerequisiteReplay','materialBytes','materialRecords','rawPageBytes','listPages','taskLimit','logPages','logPolls','logEvents','maxMessageBytes','issuerSourceBytes','contextSourceBytes',...(p.geometry.topology===undefined?[]:['topology']),...(p.version===3?['admission','admissionCleanup']:[]),...(p.geometry.control?['control']:[])]);
+ const g=p.geometry;if(g.topology!==undefined)inspectObserverTopologyPlan(p);if(p.version===3){counter(g.admission);counter(g.admissionCleanup);need(g.admission.logicalBytes>0&&g.admissionCleanup.logicalBytes>0,'ObserverResourceAdmissionQuote');}for(const k of ['sourcePassLocal','materialBytes','materialRecords','rawPageBytes','listPages','taskLimit','logPages','logPolls','logEvents','maxMessageBytes','issuerSourceBytes','contextSourceBytes'])positive(g[k]);
  need(g.rawPageBytes<=33554432&&g.listPages<=100&&g.taskLimit<=10000&&g.logPages<=100&&g.logPolls<=1024&&g.logEvents<=1000000&&g.maxMessageBytes<=1048576,'ObserverWireBounds');
  counter(g.sourcePreparation);counter(g.cache);counter(g.prerequisiteReplay);
  if(g.control){
@@ -339,13 +343,14 @@ function inspectObserverPlan(p){
  for(const r of g.roles){
   const backend=['llm-proxy','qwen3-embed','mnemo-server'].includes(r.role),scoped=observerCaseVersion(p);
   const numeric=['inputBytes','compiledBytes','expandedBytes','compressedBytes','bootstrapBytes','files','fileBytes','episodes','snapshots','polls',...(p.version===3&&backend?[]:['executions']),...(scoped?['filesystemLookupLocal','targetContainerBytes']:[])];
-  exact(r,['role',...numeric,...(scoped?['caseName','planHash','compiledHash']:[]),...(p.version===3?['executionScope']:[])]);
+  exact(r,['role',...numeric,...(scoped?['caseName','planHash','compiledHash']:[]),...(p.version===3?['executionScope']:[]),...(p.version===3&&!backend?['completionLogTimes']:[])]);
+  if(p.version===3&&!backend)need(Array.isArray(r.completionLogTimes)&&r.completionLogTimes.length===g.logPolls&&r.completionLogTimes.every((t,i)=>integer(t,p.startedMs,p.deadlineMs-p.cleanupReserveMs)&&(!i||t>r.completionLogTimes[i-1])),'ObserverWorkerLogSchedule');
   for(const k of numeric)positive(r[k]);need(r.files<=256&&r.episodes<=1000&&(p.version===3&&backend||r.executions<=10000),'ObserverRoleGeometry');
   if(scoped)need(OBSERVER_CASES.includes(r.caseName)&&h(r.planHash)&&h(r.compiledHash),'ObserverCaseGeometryBinding');
   if(p.version===3)need(r.executionScope===(backend?'autonomous-service':'single-explicit-worker'),'ObserverRoleExecutionScope');
  }
  need(Array.isArray(p.cases)&&p.cases.length===5&&OBSERVER_CASES.every(name=>p.cases.some(c=>c.name===name)),'ObserverFiveCases');
- for(const c of p.cases){exact(c,['name','serviceName','family','startedMs','deadlineMs','sampleTimes','runtimeRoles','baselinePolls','cleanupPolls',...(g.control?['stage']:[]),...(observerCaseVersion(p)?['logPollTimes','definitionBytes']:[])]);
+ for(const c of p.cases){exact(c,['name','serviceName','family','startedMs','deadlineMs','sampleTimes','runtimeRoles','baselinePolls','cleanupPolls',...(g.control?['stage']:[]),...(g.topology===1?['discovery']:[]),...(observerCaseVersion(p)?['logPollTimes','definitionBytes']:[])]);
   if(g.control)need(/^pr-[1-9][0-9]*$/.test(c.stage),'ObserverCohortStage');
   need(c.serviceName==='mem9-observe-'+p.owner.slice(0,12)+'-'+(g.control?c.stage+'-':'')+c.name&&c.family===c.serviceName&&integer(c.startedMs,p.startedMs,p.deadlineMs-p.cleanupReserveMs)&&integer(c.deadlineMs,c.startedMs+1,p.deadlineMs-p.cleanupReserveMs),'ObserverCohortScope');
   need(Array.isArray(c.sampleTimes)&&c.sampleTimes.length>=2&&c.sampleTimes.length<=1024&&c.sampleTimes.every((t,i)=>integer(t,c.startedMs,c.deadlineMs)&&(!i||t>c.sampleTimes[i-1])),'ObserverSamples');
@@ -415,7 +420,7 @@ function buildObserverOperation(input,snapshot){
   const framingLocal=16*frames+r.episodes*1048576*(r.role==='mnemo-server'?514:3);
   const busyboxGuard=r.role==='mnemo-server'?r.episodes*514*100*(4097+4096+256):0;
   if(p.version===3&&r.executionScope==='autonomous-service'){const work=observerBackendAdmissionWork(p,p.cases.find(c=>c.name===r.caseName));addRow(observerBackendAdmissionId(r),local(work.logicalBytes),{role:r.role,caseName:r.caseName,planHash:r.planHash,accounting:'host-observed-task-attribution'});}
-  else for(let i=0;i<r.executions;i++)addRow(observerLaunchId(p,r,i),local(loaderLocal+gateLocal+rawLocal+procCopies+polling+framingLocal+busyboxGuard),{role:r.role,...(observerCaseVersion(p)?{caseName:r.caseName,planHash:r.planHash}: {})});
+  else for(let i=0;i<r.executions;i++)addRow(observerLaunchId(p,r,i),local(loaderLocal+gateLocal+rawLocal+procCopies+polling+framingLocal+busyboxGuard+(observerNeedsWorkerJob(p,r.role)?OBSERVER_WORKER_BIND_LOCAL:0)),{role:r.role,...(observerCaseVersion(p)?{caseName:r.caseName,planHash:r.planHash}: {})});
  }
  const sourcePass=g.sourcePassLocal;
  const call=(id,action,{cleanup=false,requestBytes=16384,responseBytes=g.rawPageBytes}={})=>{
@@ -423,9 +428,9 @@ function buildObserverOperation(input,snapshot){
   const resourceReadLocal=p.version===3&&Object.hasOwn(OBSERVER_RESOURCE_READS,id)?OBSERVER_RESOURCE_READ_LOCAL:0;
   addRow(id,{...zero(),httpBodyBytes:requestBytes+responseBytes,logicalBytes:sourcePass+8*requestBytes+32*responseBytes+serdeLocal+(action==='Route'?OBSERVER_KNOWN_FAILURE_LOCAL:0)+resourceReadLocal},{action,requestBytes,responseBytes,cleanup,...(serdeLocal?{serdeLocal}:{}),...(action==='Route'?{knownFailureLocal:OBSERVER_KNOWN_FAILURE_LOCAL}:{}),...(resourceReadLocal?{resourceReadLocal}:{})});
  };
- for(const purpose of ['read','setup','update','cleanup',...(g.control?['launch']:[])]){
-  addRow('issuer-source/'+purpose,local(16*g.issuerSourceBytes+65536));
-  for(const [index,action]of ['GetCallerIdentity','AssumeRole','GetCallerIdentity'].entries())call('issuer/'+purpose+'/'+index,action,{cleanup:purpose==='cleanup',requestBytes:65536,responseBytes:262144});
+ for(const purpose of observerSessionPurposes(p)){
+  addRow('issuer-source/'+purpose,local(16*g.issuerSourceBytes+65536),p.version===3&&observerCleanupPurpose(purpose)?{cleanup:true}:{});
+  for(const [index,action]of ['GetCallerIdentity','AssumeRole','GetCallerIdentity'].entries())call('issuer/'+purpose+'/'+index,action,{cleanup:observerCleanupPurpose(purpose),requestBytes:65536,responseBytes:262144});
  }
  if(p.version===3)for(const [id,action]of Object.entries(OBSERVER_RESOURCE_READS))call(id,action,{requestBytes:16384,responseBytes:262144});
  let logReplayLocal=0;
@@ -435,6 +440,7 @@ function buildObserverOperation(input,snapshot){
   call(key+'/register-baseline','RegisterTaskDefinition',registration('baseline'));
   call(key+'/register-target','RegisterTaskDefinition',observerCaseVersion(p)?{requestBytes:c.definitionBytes.baseline+4096+['llm-proxy','qwen3-embed','mnemo-server'].reduce((n,role)=>n+observerCaseGeometry(p,key,role).targetContainerBytes,0)}:{});call(key+'/create','CreateService');
   for(let i=0;i<c.baselinePolls;i++)call(key+'/baseline/'+i,'DescribeServices');
+  if(g.topology===1)call(key+'/discovery-empty','ListInstances');
   call(key+'/baseline-definition','DescribeTaskDefinition');call(key+'/target-definition','DescribeTaskDefinition');call(key+'/discovery','GetService');call(key+'/update','UpdateService');
   if(g.control){
    call(key+'/register-control','RegisterTaskDefinition',registration('control'));call(key+'/control-definition','DescribeTaskDefinition');
@@ -463,16 +469,17 @@ function buildObserverOperation(input,snapshot){
   if(key==='post-liveness-regression')call(key+'/fault-stop','StopTask');
   for(const role of c.runtimeRoles){
    const captures=observerCaseGeometry(p,c.name,role).episodes;
-   const pageWork=quoteObserverLogPages({...Object.fromEntries(['rawPageBytes','logPolls','logPages','logEvents','maxMessageBytes'].map(k=>[k,g[k]])),captures});
+   const workerJob=observerNeedsWorkerJob(p,role),pageWork=quoteObserverLogPages({...Object.fromEntries(['rawPageBytes','logPolls','logPages','logEvents','maxMessageBytes'].map(k=>[k,g[k]])),captures},workerJob),bindingLocal=workerJob?OBSERVER_WORKER_BIND_LOCAL:0;
    // Acquisition and independent proof replay each pay the complete parser
    // and decoder; provider raw-copy work is separate from both.
-   addRow(key+'/log-work/'+role,local(pageWork.logicalBytes+8*pageWork.rawBytes));
-   logReplayLocal+=pageWork.logicalBytes;
+   addRow(key+'/log-work/'+role,local(pageWork.logicalBytes+bindingLocal+8*pageWork.rawBytes));
+   logReplayLocal+=pageWork.logicalBytes+bindingLocal;
    for(let poll=0;poll<g.logPolls;poll++)for(let page=0;page<g.logPages;page++)call(key+'/log/'+role+'/'+poll+'/'+page,'FilterLogEvents');
   }
   call(key+'/delete-service','DeleteService',{cleanup:true});
   for(let i=0;i<c.cleanupPolls;i++){
    call(key+'/cleanup-service/'+i,'DescribeServices',{cleanup:true});
+   if(g.topology===1)call(key+'/cleanup-discovery/'+i,'ListInstances',{cleanup:true});
    for(const status of ['RUNNING','STOPPED'])for(let j=0;j<g.listPages;j++)call(key+'/cleanup-list/'+i+'/'+status+'/'+j,'ListTasks',{cleanup:true});
    for(let j=0;j<Math.ceil(g.taskLimit/100);j++)call(key+'/cleanup-tasks/'+i+'/'+j,'DescribeTasks',{cleanup:true});
   }

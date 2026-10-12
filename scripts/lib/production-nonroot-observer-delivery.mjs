@@ -1,3 +1,4 @@
+import {observerDiscoveryOrigin,inspectObserverDiscovery,inspectObserverTopologyPlan,verifyObserverDiscoveryService,verifyObserverEmptyInstances,verifyObserverServiceRegistry} from './production-nonroot-observer-topology.mjs';
 /** Closed, nonsecret CONTROL delivery DATA. These inspectors cannot create
  * host funding, a guarded invocation, a task identity or a completion handle. */
 import {createHash} from 'node:crypto';
@@ -40,8 +41,9 @@ const hex=(v,n=64)=>typeof v==='string'&&new RegExp('^[a-f0-9]{'+n+'}$').test(v)
 const positive=(v,max=Number.MAX_SAFE_INTEGER)=>Number.isSafeInteger(v)&&v>0&&v<=max;
 const cases=['successful-handover','prefix-start-failure','sidecar-readiness-failure','post-liveness-regression','nonterminal-timeout'];
 export function inspectObserverControlDelivery(v){
- observerExact(v,['version','kind','owner','operation','stage','caseName','sampleIndex','captureId','sourceTree','manifestSha256','inputHash','account','region','clusterArn','taskDefinitionArn','taskDefinitionHash','taskRoleArn','containerName','controlImage','startedMs','deadlineMs','allocation','route','credentialBindings','registry']);
- observerNeed(v.version===1&&v.kind==='fixed-observer-control-delivery'&&hex(v.owner,32)&&hex(v.operation,32)&&hex(v.captureId,32)&&hex(v.sourceTree,40)&&hex(v.manifestSha256)&&hex(v.inputHash)&&hex(v.taskDefinitionHash),'DeliveryBinding');
+ const isolated=v&&!types.isProxy(v)&&Object.getOwnPropertyDescriptor(v,'version')?.value===2;
+ observerExact(v,['version','kind','owner','operation','stage','caseName','sampleIndex','captureId','sourceTree','manifestSha256','inputHash','account','region','clusterArn','taskDefinitionArn','taskDefinitionHash','taskRoleArn','containerName','controlImage','startedMs','deadlineMs','allocation','route','credentialBindings','registry',...(isolated?['discovery']:[])]);
+ observerNeed((v.version===1||isolated)&&v.kind==='fixed-observer-control-delivery'&&hex(v.owner,32)&&hex(v.operation,32)&&hex(v.captureId,32)&&hex(v.sourceTree,40)&&hex(v.manifestSha256)&&hex(v.inputHash)&&hex(v.taskDefinitionHash),'DeliveryBinding');
  observerNeed(/^pr-[1-9][0-9]*$/.test(v.stage)&&cases.includes(v.caseName)&&Number.isSafeInteger(v.sampleIndex)&&v.sampleIndex>=0&&v.sampleIndex<=1024,'DeliveryScope');
  observerNeed(/^\d{12}$/.test(v.account)&&/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(v.region),'DeliveryAccount');
  const arn='arn:aws:ecs:'+v.region+':'+v.account+':';
@@ -51,7 +53,7 @@ export function inspectObserverControlDelivery(v){
  observerNeed(positive(v.startedMs)&&positive(v.deadlineMs)&&v.deadlineMs>v.startedMs&&v.deadlineMs-v.startedMs<=7200000,'DeliveryClock');
  observerExact(v.route,['privateOrigin','gatewayUrl','jobId','identityHash','issuer','audience','transportIssuer','tokenEndpoint','jwksUri','registryHash']);
  const r=v.route,u=new URL(r.privateOrigin);
- observerNeed(u.origin===r.privateOrigin&&u.protocol==='http:'&&u.port==='8080'&&u.hostname==='mnemo.mem9-'+v.stage+'.local'&&!u.username&&!u.password,'DeliveryPrivateRoute');
+ observerNeed(u.origin===r.privateOrigin&&u.protocol==='http:'&&u.port==='8080'&&u.origin===(isolated?observerDiscoveryOrigin(v.discovery,v):'http://mnemo.mem9-'+v.stage+'.local:8080')&&!u.username&&!u.password,'DeliveryPrivateRoute');
  for(const name of ['gatewayUrl','issuer','tokenEndpoint','jwksUri']){const u=new URL(r[name]);observerNeed(u.protocol==='https:'&&!u.username&&!u.password&&!u.hash&&!u.search&&(!u.port||u.port==='443')&&u.hostname.includes('.')&&!/^(?:localhost|127\.|169\.254\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(u.hostname),'DeliveryHttpsRoute');}
  observerNeed(new URL(r.gatewayUrl).pathname==='/mcp'&&r.jwksUri===r.issuer.replace(/\/$/,'')+'/.well-known/jwks.json','DeliveryProtocol');
  observerNeed(/^[a-f0-9-]{16,64}$/.test(r.jobId)&&hex(r.identityHash)&&hex(r.registryHash)&&(r.audience===null||typeof r.audience==='string'&&r.audience.length<=1024)&&typeof r.transportIssuer==='string'&&r.transportIssuer.length>0&&r.transportIssuer.length<=1024,'DeliveryRouteIdentity');

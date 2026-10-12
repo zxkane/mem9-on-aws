@@ -1,3 +1,4 @@
+import {observerDiscoveryOrigin} from './production-nonroot-observer-topology.mjs';
 /** Pure route protocol and processing DATA shared by native IO and replay. */
 import {createHash} from 'node:crypto';
 import {isIP} from 'node:net';
@@ -62,11 +63,11 @@ const jobId=v=>boundedText(v,64)&&/^[a-f0-9-]{16,64}$/.test(v);
 
 /** Closed nonsecret protocol projection. Endpoint ownership and source/task
  * binding still come from the original runtime provider, never from this DATA. */
-export function inspectObserverRouteProtocol(value,stage){
+export function inspectObserverRouteProtocol(value,stage,delivery){
  exact(value,['privateOrigin','gatewayUrl','jobId','identityHash','issuer','audience','transportIssuer','tokenEndpoint','jwksUri','registryHash']);
  need(/^pr-[1-9][0-9]*$/.test(stage??'')&&jobId(value.jobId));
  const privateUrl=new URL(value.privateOrigin);
- need(value.privateOrigin===privateUrl.origin&&privateUrl.protocol==='http:'&&privateUrl.hostname===`mnemo.mem9-${stage}.local`&&privateUrl.port==='8080'&&!privateUrl.username&&!privateUrl.password,'ObserverPrivateOrigin');
+ need(value.privateOrigin===privateUrl.origin&&privateUrl.protocol==='http:'&&privateUrl.origin===(delivery?.version===2?observerDiscoveryOrigin(delivery.discovery,delivery):`http://mnemo.mem9-${stage}.local:8080`)&&privateUrl.port==='8080'&&!privateUrl.username&&!privateUrl.password,'ObserverPrivateOrigin');
  const https=value=>{
   need(boundedText(value,2048),'ObserverRouteUrl');const u=new URL(value);
   need(u.protocol==='https:'&&!u.username&&!u.password&&!u.search&&!u.hash&&(!u.port||u.port==='443')&&!isIP(u.hostname)&&u.hostname.includes('.')&&!u.hostname.endsWith('.')&&!u.hostname.endsWith('.local')&&!u.hostname.endsWith('.localhost')&&u.hostname!=='localhost','ObserverRouteUrl');return u;
@@ -167,7 +168,7 @@ export function inspectObserverMcpStatus(value,id){
 export const observerRouteBytesHash=hash;
 
 export function inspectObserverRouteProbeInput(value){
- inspectObserverControlDelivery(value);inspectObserverRouteProtocol(value.route,value.stage);
+ inspectObserverControlDelivery(value);inspectObserverRouteProtocol(value.route,value.stage,value);
  for(const id of OBSERVER_ROUTE_SLOTS){const row=value.allocation.slots.find(s=>s.id===id);need(row&&row.kind==='http'&&row.requestBytes>0&&row.requestBytes<=OBSERVER_ROUTE_LIMITS.requestBytes&&row.responseBytes<=OBSERVER_ROUTE_LIMITS.responseBytes,'ObserverRouteSlot');}
  return value;
 }

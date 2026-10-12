@@ -3412,7 +3412,7 @@ var BlockedException = class BlockedException extends ECSServiceException {
 //#endregion
 //#region node_modules/@aws-sdk/client-ecs/dist-es/schemas/schemas_0.js
 init_schema();
-const _A$2 = "Attachment";
+const _A$3 = "Attachment";
 const _AC = "AdvancedConfiguration";
 const _AD = "AttachmentDetails";
 const _ADE$3 = "AccessDeniedException";
@@ -4270,7 +4270,7 @@ var AdvancedConfiguration$ = [
 var Attachment$ = [
 	3,
 	n0$5,
-	_A$2,
+	_A$3,
 	0,
 	[
 		_i,
@@ -8944,7 +8944,7 @@ const _IR = "InvalidRole";
 const _IRAE = "InvalidResultAttributeException";
 const _IRI = "InvalidResourceId";
 const _IRT = "InvalidResourceType";
-const _IS = "InvalidSchedule";
+const _IS$1 = "InvalidSchedule";
 const _ISE$1 = "InternalServerError";
 const _ISLEE = "ItemSizeLimitExceededException";
 const _IT = "InvalidTag";
@@ -9952,7 +9952,7 @@ n0_registry$4.registerError(InvalidRole$, InvalidRole);
 var InvalidSchedule$ = [
 	-3,
 	n0$4,
-	_IS,
+	_IS$1,
 	{
 		[_aQE$1]: [`InvalidSchedule`, 400],
 		[_e$4]: _c$4
@@ -11113,6 +11113,7 @@ var ServiceAttributesLimitExceededException = class ServiceAttributesLimitExceed
 //#endregion
 //#region node_modules/@aws-sdk/client-servicediscovery/dist-es/schemas/schemas_0.js
 init_schema();
+const _A$2 = "Attributes";
 const _Ar = "Arn";
 const _CBA = "CreatedByAccount";
 const _CD = "CreateDate";
@@ -11135,11 +11136,19 @@ const _I = "Id";
 const _IC = "InstanceCount";
 const _II = "InvalidInput";
 const _INF = "InstanceNotFound";
+const _IS = "InstanceSummary";
+const _ISL = "InstanceSummaryList";
+const _In = "Instances";
+const _LI = "ListInstances";
+const _LIR = "ListInstancesRequest";
+const _LIRi = "ListInstancesResponse";
 const _M$2 = "Message";
+const _MR = "MaxResults";
 const _N$1 = "Name";
 const _NAE = "NamespaceAlreadyExists";
 const _NI = "NamespaceId";
 const _NNF = "NamespaceNotFound";
+const _NT = "NextToken";
 const _ONF = "OperationNotFound";
 const _RIU = "ResourceInUse";
 const _RLE = "RequestLimitExceeded";
@@ -11162,6 +11171,7 @@ const _c$3 = "client";
 const _e$3 = "error";
 const _hE$3 = "httpError";
 const _s$3 = "smithy.ts.sdk.synthetic.com.amazonaws.servicediscovery";
+const _xN = "xmlName";
 const n0$3 = "com.amazonaws.servicediscovery";
 const _s_registry$3 = TypeRegistry.for(_s$3);
 var ServiceDiscoveryServiceException$ = [
@@ -11440,6 +11450,55 @@ var HealthCheckCustomConfig$ = [
 	[_FT],
 	[1]
 ];
+var InstanceSummary$ = [
+	3,
+	n0$3,
+	_IS,
+	0,
+	[
+		_I,
+		_A$2,
+		_CBA
+	],
+	[
+		0,
+		128,
+		0
+	]
+];
+var ListInstancesRequest$ = [
+	3,
+	n0$3,
+	_LIR,
+	0,
+	[
+		_SI,
+		_NT,
+		_MR
+	],
+	[
+		0,
+		0,
+		1
+	],
+	1
+];
+var ListInstancesResponse$ = [
+	3,
+	n0$3,
+	_LIRi,
+	0,
+	[
+		_RO,
+		_In,
+		_NT
+	],
+	[
+		0,
+		[() => InstanceSummaryList, 0],
+		0
+	]
+];
 var Service$ = [
 	3,
 	n0$3,
@@ -11485,6 +11544,13 @@ var DnsRecordList = [
 	0,
 	() => DnsRecord$
 ];
+var InstanceSummaryList = [
+	1,
+	n0$3,
+	_ISL,
+	0,
+	[() => InstanceSummary$, { [_xN]: _IS }]
+];
 var GetService$ = [
 	9,
 	n0$3,
@@ -11492,6 +11558,14 @@ var GetService$ = [
 	0,
 	() => GetServiceRequest$,
 	() => GetServiceResponse$
+];
+var ListInstances$ = [
+	9,
+	n0$3,
+	_LI,
+	0,
+	() => ListInstancesRequest$,
+	() => ListInstancesResponse$
 ];
 //#endregion
 //#region node_modules/@aws-sdk/client-servicediscovery/dist-es/commandBuilder.js
@@ -11503,6 +11577,9 @@ const _mw0$3 = /* @__PURE__ */ __name((Command, cs, config, o) => [], "_mw0");
 //#endregion
 //#region node_modules/@aws-sdk/client-servicediscovery/dist-es/commands/GetServiceCommand.js
 var GetServiceCommand = class extends command$3(_ep0$3, _mw0$3, "GetService", GetService$) {};
+//#endregion
+//#region node_modules/@aws-sdk/client-servicediscovery/dist-es/commands/ListInstancesCommand.js
+var ListInstancesCommand = class extends command$3(_ep0$3, _mw0$3, "ListInstances", ListInstances$) {};
 //#endregion
 //#region node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/endpoint/EndpointParameters.js
 const commonParams$2 = {
@@ -13628,6 +13705,7 @@ const commands = new Map(Object.entries({
 	DeleteTaskDefinitions: DeleteTaskDefinitionsCommand,
 	GetParameter: GetParameterCommand,
 	GetService: GetServiceCommand,
+	ListInstances: ListInstancesCommand,
 	FilterLogEvents: FilterLogEventsCommand,
 	GetMetricStatistics: GetMetricStatisticsCommand,
 	GetServiceQuota: GetServiceQuotaCommand

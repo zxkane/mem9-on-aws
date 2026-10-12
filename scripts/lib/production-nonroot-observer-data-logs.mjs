@@ -2,6 +2,7 @@
  * the same parser; neither END nor this result creates runtime authority.
  * The owner must prepay quoteObserverLogPages before construction/reading. */
 import {createHash} from 'node:crypto';
+import {createObserverWorkerTerminalReplay,observerWorkerJobLocal} from './production-nonroot-observer-worker-job.mjs';
 import {need,exact,hash,sha} from './production-nonroot-engineering-json.mjs';
 import {parseAcquisitionJson} from './ci-smoke-acquisition-format.mjs';
 import {createObservationFrameDecoder} from './production-nonroot-observation-frames.mjs';
@@ -14,19 +15,21 @@ function limits(g){
  need(g.rawPageBytes<=33554432&&g.logPolls<=1024&&g.logPages<=100&&g.logEvents<=1000000&&g.maxMessageBytes<=1048576&&g.captures<=1000,'ObserverLogGeometry');
  return g;
 }
-export function quoteObserverLogPages(input){
+export function quoteObserverLogPages(input,workerJob=false){
+ need(typeof workerJob==='boolean','ObserverWorkerJobSelector');
  const g=limits(input),pages=g.logPolls*g.logPages,bytes=pages*g.rawPageBytes;
  // Page UTF8/duplicate-key parse/canonical walk, secret screening, event and
  // provenance hashing, original/normalized frame copies, decoder scan and
  // base64/hash work. Finish owns every full 1MiB capture allocation/hash,
  // 514 retained parts and worst-case capture ordering comparisons.
  const maxGuardCalls=3*pages+4,guardLocal=maxGuardCalls*16384;
- const logicalBytes=guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
+ const logicalBytes=(workerJob?observerWorkerJobLocal(g):0)+guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
  need(Number.isSafeInteger(logicalBytes),'ObserverLogQuoteOverflow');
  return {logicalBytes,pages,rawBytes:bytes,captures:g.captures,maxGuardCalls,guardLocal};
 }
-export function createObserverLogPageReplay({binding,stream,group,startedMs,endMs,geometry}){
- const g=structuredClone(limits(geometry)),quote=quoteObserverLogPages(g);
+export function createObserverLogPageReplay({binding,stream,group,startedMs,endMs,geometry,worker}){
+ const g=structuredClone(limits(geometry)),quote=quoteObserverLogPages(g,!!worker);
+ const workerReplay=worker?createObserverWorkerTerminalReplay(worker):null;
  need(/^[a-f0-9]{64}$/.test(binding)&&typeof stream==='string'&&stream.length>0&&stream.length<=512&&typeof group==='string'&&group.length>0&&group.length<=512&&positive(startedMs)&&Number.isSafeInteger(endMs)&&endMs>startedMs,'ObserverLogDescriptor');
  const decoder=createObservationFrameDecoder({bindings:[binding],maxCaptures:g.captures,maxInputBytes:quote.rawBytes+2*g.logEvents});
  const events=new Map(),tokens=new Set(),nonFrameHash=createHash('sha256');
@@ -59,7 +62,7 @@ export function createObserverLogPageReplay({binding,stream,group,startedMs,endM
       need(!/[\r\n]/.test(e.message)&&b.every(x=>x>=32&&x<=126)&&b.length+2<=4096,'ObserverPartialFrame');
       framed=Buffer.concat([Buffer.from('\n'),b,Buffer.from('\n')]);
      }else{
-      need(!e.message.includes('MEM9-OBS2|'),'ObserverAmbiguousFrame');nonFrameHash.update(b);nonFrameBytes+=b.length;
+      need(!e.message.includes('MEM9-OBS2|'),'ObserverAmbiguousFrame');if(workerReplay)workerReplay.push(e);nonFrameHash.update(b);nonFrameBytes+=b.length;
       retained.push({idHash:sha(e.eventId),eventHash:key,observation:false,messageBytes:b.length,messageHash:sha(b)});continue;
      }
      decoder.push(framed);retained.push({idHash:sha(e.eventId),eventHash:key,observation:true,originalBytes:b.length,originalHash:sha(b),frameBytes:framed.length,frameHash:sha(framed),transport:framed===b?'raw-frame':'awslogs-single-line'});
@@ -72,9 +75,9 @@ export function createObserverLogPageReplay({binding,stream,group,startedMs,endM
    }catch(e){held=true;throw e;}
   },
   finish(){active();try{
-   need(poll>0&&token===undefined,'ObserverLogIncomplete');const result=decoder.finish();
+   need(poll>0&&token===undefined&&(!workerReplay||poll===g.logPolls),'ObserverLogIncomplete');const result=decoder.finish();
    need(result.captures.length===g.captures&&result.nonFrameBytes===0,'ObserverEpisodeCoverage');finished=true;
-   return {authority:false,captures:result.captures,rawPageBytes:bytes,eventCount,nonObservationBytes:nonFrameBytes,nonObservationHash:nonFrameHash.digest('hex'),observerRetirementObserved:false};
+   return {authority:false,captures:result.captures,rawPageBytes:bytes,eventCount,nonObservationBytes:nonFrameBytes,nonObservationHash:nonFrameHash.digest('hex'),observerRetirementObserved:false,...(workerReplay?{workerTerminal:workerReplay.finish()}: {})};
   }catch(e){held=true;throw e;}}
  });
 }

@@ -1,3 +1,4 @@
+import {observerDiscoveryOrigin,verifyObserverDiscoveryService,verifyObserverEmptyInstances,verifyObserverServiceRegistry} from './production-nonroot-observer-topology.mjs';
 import {observerCaseVersion} from './production-nonroot-observer-accounting.mjs';
 /** Pure reconstruction of the original five cohort definitions. The caller
  * must authenticate source contracts and the DATA facts adapter first. This
@@ -40,6 +41,15 @@ export function buildObserverCohortModels({plan,input,contracts,rehearsalRef,con
   same(create.deploymentConfiguration,{minimumHealthyPercent:100,maximumPercent:200,bakeTimeInMinutes:0,deploymentCircuitBreaker:{enable:true,rollback:true}},'ObserverBaselinePolicy');
   need(create.deploymentController?.type==='ECS'&&create.schedulingStrategy==='REPLICA'&&create.networkConfiguration?.awsvpcConfiguration?.assignPublicIp==='DISABLED','ObserverCohortIsolation');
   need(create.serviceRegistries?.length===1&&plan.scope.discoveryServiceArns.includes(create.serviceRegistries[0].registryArn),'ObserverExistingDiscoveryOnly');
+  if(plan.geometry.topology===1){
+   const origin=observerDiscoveryOrigin(c.discovery,{...plan.scope,owner:plan.owner,operation:plan.operation,stage:c.stage,caseName:c.name});
+   need(create.serviceRegistries[0].registryArn===c.discovery.serviceArn,'ObserverTopologyRegistry');
+   for(const delivery of caseInput.controlDeliveries??[])need(delivery.version===2&&hash(delivery.discovery)===hash(c.discovery)&&delivery.route.privateOrigin===origin,'ObserverTopologyControl');
+   for(const role of c.runtimeRoles.filter(r=>['planner','executor'].includes(r))){
+    const env=caseInput.workerDefinitions?.[role]?.containerDefinitions?.[0]?.environment;
+    need(Array.isArray(env)&&env.filter(e=>e.name==='MEM9_BASE_URL').length===1&&env.find(e=>e.name==='MEM9_BASE_URL').value===origin,'ObserverTopologyWorker');
+   }
+  }
   need(!create.loadBalancers?.length&&!create.volumeConfigurations?.length,'ObserverUnexpectedResource');
   create.tags=structuredClone(baseline.tags);create.propagateTags='TASK_DEFINITION';create.clientToken=hash({owner:plan.owner,operation:plan.operation,name:c.name}).slice(0,32);
   const definitions=new Map([['baseline',baseline],['target',target]]);

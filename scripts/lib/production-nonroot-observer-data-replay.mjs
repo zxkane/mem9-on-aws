@@ -8,10 +8,11 @@ import {inspectBusyboxObservationEpisode} from './production-nonroot-observation
 import {inspectArchivedNodeObserverEpisode,inspectArchivedObserverProcess as row} from './production-nonroot-observer-data-episode.mjs';
 import {createObserverLogPageReplay,quoteObserverLogPages} from './production-nonroot-observer-data-logs.mjs';
 import {decodeArchivedObserverProviderResponse} from './production-nonroot-observer-provider-codec.mjs';
+import {OBSERVER_WORKER_BIND_LOCAL,observerNeedsWorkerJob,observerLogCompletionMs,observerWorkerLogTimes,inspectObserverWorkerRequest,bindObserverWorkerTask,verifyObserverWorkerLifecycle} from './production-nonroot-observer-worker-job.mjs';
 
 const command=argv=>sha(Buffer.from(argv.join('\0')+'\0'));
 
-export async function replayNonrootArchivedData(record,{reader,source,casePlan,definition,task,providers,objects,recordedMs}){
+export async function replayNonrootArchivedData(record,{reader,source,casePlan,definition,task,providers,objects,recordedMs,workerRun}){
  reader.current();
  // Source construction validates the fixed native-cache/current-proof facts
  // adapter. Caller-supplied file maps or JSON filesystem brands are not inputs.
@@ -34,8 +35,18 @@ export async function replayNonrootArchivedData(record,{reader,source,casePlan,d
  const group=options['awslogs-group'],stream=options['awslogs-stream-prefix']+'/'+container.name+'/'+task.taskArn.split('/').at(-1);
  need(capture.stream===stream&&plan.scope.logGroupArns.includes('arn:aws:logs:'+plan.scope.region+':'+plan.scope.account+':log-group:'+group),'ObserverLogGroup');
  const geometry={...Object.fromEntries(['rawPageBytes','logPolls','logPages','logEvents','maxMessageBytes'].map(k=>[k,plan.geometry[k]])),captures:contract.plan.episodes.length};
- const quoted=quoteObserverLogPages(geometry);reader.paid.debit(quoted.logicalBytes);
- const pageReplay=createObserverLogPageReplay({binding:contract.binding,stream,group,startedMs:contract.plan.startedMs,endMs:contract.plan.observationEndMs,geometry});
+ const workerJob=observerNeedsWorkerJob(plan,capture.role),quoted=quoteObserverLogPages(geometry,workerJob);reader.paid.debit(quoted.logicalBytes+(workerJob?OBSERVER_WORKER_BIND_LOCAL:0));reader.current();
+ let worker,workerStoppedMs;const workerEpisodes=[];
+ if(workerJob){
+  need(workerRun,'ObserverWorkerOriginalRequest');
+  const id=capture.caseName+'/run-'+capture.role,original=providers.get(id);
+  need(original&&original.id===id&&original.action==='RunTask'&&original.joined===true&&original.statusCode===200&&original.requestHash===hash(workerRun.request)&&original.startedMs===workerRun.dispatchMs,'ObserverWorkerOriginalRequest');
+  const stop=providers.get(workerRun.stopProviderId);
+  need(stop&&workerRun.stopProviderId.startsWith(capture.caseName+'/'+capture.role+'-task/')&&stop.action==='DescribeTasks'&&stop.joined===true&&stop.statusCode===200&&stop.requestHash===hash({cluster:plan.scope.clusterArn,tasks:[task.taskArn]})&&stop.startedMs>=original.completedMs,'ObserverWorkerOriginalStop');workerStoppedMs=stop.completedMs;
+  const expected=inspectObserverWorkerRequest({plan,caseName:capture.caseName,role:capture.role,contract,definition,request:workerRun.request});
+  worker=bindObserverWorkerTask(expected,{task,request:workerRun.request,dispatchMs:workerRun.dispatchMs});
+ }
+ const pageReplay=createObserverLogPageReplay({binding:contract.binding,stream,group,startedMs:contract.plan.startedMs,endMs:observerLogCompletionMs(plan,contract.plan),geometry,...(worker?{worker}: {})});
  const member=ref=>{const r=objects.get(ref.bytesHash??ref.sha256);need(r&&r.bytesLength===ref.bytesLength,'ObserverArchivedDataObject');return ref;};
  const bytes=async(ref,cap=33554432)=>{const raw=await reader.readBytes(member(ref),cap);reader.current();return raw;};
  const json=async ref=>{const raw=await bytes(ref,4194304);reader.current();return parseNonrootJson(raw.toString('utf8'));};
@@ -50,6 +61,7 @@ export async function replayNonrootArchivedData(record,{reader,source,casePlan,d
   return files.get(path);
  };
  need(Array.isArray(capture.pages)&&capture.pages.length>0&&capture.pages.length<=quoted.pages,'ObserverArchivedDataPages');
+ let collectedMs=workerStoppedMs??0,previousPageMs=collectedMs;
  for(const ref of capture.pages){
   const page=await json(ref);reader.current();
   need(page.owner===plan.owner&&page.operation===plan.operation&&page.caseName===capture.caseName&&page.role===capture.role&&page.taskArn===capture.taskArn&&page.runtimeId===capture.runtimeId&&page.definitionArn===capture.definitionArn&&page.definitionHash===capture.definitionHash&&page.sourceBinding===contract.binding,'ObserverPageProvenance');
@@ -57,6 +69,7 @@ export async function replayNonrootArchivedData(record,{reader,source,casePlan,d
   const p=page.provider,id=capture.caseName+'/log/'+capture.role+'/'+page.pollIndex+'/'+page.pageIndex,bound=providers.get(id);
   need(p.fixture===false&&p.action==='FilterLogEvents'&&p.id===id&&p.requestHash===hash(page.request)&&p.responseHash===sha(raw)&&p.responseBytes===raw.length,'ObserverPageProviderBinding');
   need(bound&&bound.id===id&&bound.action===p.action&&bound.joined===true&&bound.statusCode===200&&bound.requestHash===p.requestHash&&bound.rawHash===p.responseHash&&bound.rawBytes===p.responseBytes&&bound.startedMs===p.startedMs&&bound.completedMs===p.completedMs&&bound.completedMs<=recordedMs,'ObserverArchivedDataProvider');
+  if(worker){need(bound.startedMs>=previousPageMs&&bound.startedMs>=observerWorkerLogTimes(plan,capture.caseName,capture.role)[page.pollIndex],'ObserverWorkerLogClock');previousPageMs=bound.completedMs;collectedMs=bound.completedMs;}
   await decodeArchivedObserverProviderResponse(p.action,raw,{reader,region:plan.scope.region});reader.current();
   const checked=pageReplay.push(raw,{pollIndex:page.pollIndex,pageIndex:page.pageIndex,request:page.request});
   need(hash(checked.events)===hash(page.events),'ObserverPageEventsChanged');
@@ -102,7 +115,8 @@ export async function replayNonrootArchivedData(record,{reader,source,casePlan,d
   need(hash(coverageValue)===hash({main:decoded.main.pid+':'+decoded.main.startTimeTicks,health:decoded.health?decoded.health.pid+':'+decoded.health.startTimeTicks:null,observer:decoded.observer.pid+':'+decoded.observer.startTimeTicks,initial:decoded.snapshots[0].processes.map(p=>p.pid+':'+p.startTimeTicks),final:decoded.snapshots.at(-1).processes.map(p=>p.pid+':'+p.startTimeTicks),observerRetirementObserved:false}),'ObserverArchivedDataCoverage');
   const identity={version:2,kind:'application-process-identity',phase:'preview',taskKey:['planner','executor'].includes(capture.role)?capture.role:'backend',account:plan.scope.account,region:plan.scope.region,taskArn:capture.taskArn,taskDefinitionArn:capture.definitionArn,containerName:contract.target.name,runtimeId:capture.runtimeId,image:contract.plan.image,registrationHash:capture.definitionHash,launchContractHash:hash(contract),sourceBindingHash:hash(plan.source),collectorCodeHash:contract.delivery.sourceHash,artifactBinding:{kind:'artifact-test',image:contract.plan.image,...v.input.artifactOrigin,launchTemplateHash:hash(contract)},sessionBinding:samples,startedMs:decoded.startedMs,completedMs:decoded.completedMs,application:app,trustedLaunch:trusted,managed:[],samples,coverage,result:'pass'};
   inspectNonrootRuntimeIdentity(identity,{now:recordedMs,expected:{phase:'preview',taskArn:capture.taskArn,taskDefinitionArn:capture.definitionArn,runtimeId:capture.runtimeId,image:contract.plan.image,registrationHash:capture.definitionHash,launchContractHash:hash(contract),sourceBindingHash:hash(plan.source),trustedLaunch:trusted,managed:[]}});
-  const output={identity,main:decoded.main,health:decoded.health};need(hash(output)===hash(originalOutput),'ObserverArchivedDataOutputChanged');outputs.push(output);
+  const output={identity,main:decoded.main,health:decoded.health};need(hash(output)===hash(originalOutput),'ObserverArchivedDataOutputChanged');outputs.push(output);if(worker)workerEpisodes.push({index,snapshots:decoded.snapshots,main:decoded.main});
  }
- reader.current();return immutable({authority:false,capture,outputs});
+ const job=worker?verifyObserverWorkerLifecycle(worker,replayed.workerTerminal,workerEpisodes):null;
+ reader.current();return immutable({authority:false,capture,outputs,...(job?{workerJob:{role:capture.role,dispatchMs:worker.dispatchMs,finishedMs:job.completionMs,collectedMs}}: {})});
 }
