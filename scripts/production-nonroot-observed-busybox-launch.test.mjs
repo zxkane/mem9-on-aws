@@ -46,6 +46,14 @@ function shell(source,args=[]){return spawnSync(loader,[tool,'sh','-s','--',...a
 // These tests invoke protocol/cleanup functions directly at top level. The
 // complete bootstrap's function-scope restoration is checked separately.
 function definitions(){const c=compileObservedBusyboxDataLaunch(fixture());return mapped(unpack(c).source.toString().replace(/^local [^\n]+\n/,'').split('obs_loader_head=')[0]);}
+test.runIf(!!tool&&!!loader).each([0,1])('observer wall clock regression to %s does not renew its fixed launch poll budget',seconds=>{
+ const input=fixture(),limit=Math.ceil((input.plan.deadlineMs-input.plan.startedMs)/10);
+ const r=shell(definitions()+`
+obs_launch_now(){ OBS_NOW_LOWER=${seconds*1000}; OBS_NOW_UPPER=${(seconds+1)*1000}; }
+obs_launch_check(){ printf '%s' "$obs_launch_polllimit"; return 1; }
+if obs_launch_observe; then exit 99; fi
+`);expect(r.error).toBeUndefined();expect(r.status).toBe(0);expect(r.stdout).toBe(String(limit));
+});
 test.runIf(!!tool&&!!loader)('complete original BusyBox source parses with retained shell',()=>{
  const {source}=unpack(compileObservedBusyboxDataLaunch(fixture())),r=spawnSync(loader,[tool,'sh','-n'],{input:source,env:{},encoding:'utf8',timeout:5000});expect(r.error).toBeUndefined();expect(r.status).toBe(0);expect(r.stderr).toBe('');
 });

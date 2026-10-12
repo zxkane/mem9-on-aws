@@ -162,7 +162,12 @@ export async function authenticateNonrootArchive(archive,{parameter,operation},e
 /** The wire form carries bytes, never a verifier or a restored authority flag. */
 export async function exportNonrootArchive(archive){
  const s=get(archive),objects=[];
- for(const row of s.manifest.files){const raw=await read(s,row,{purpose:row.purpose},true);objects.push({name:row.name,base64:raw.toString('base64')});}
+ for(const row of s.manifest.files){
+  const raw=await read(s,row,{purpose:row.purpose},true);
+  // Body validation and this encoder resume in different await frames.
+  if(s.assertCurrent){const checked=s.assertCurrent();if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});fail('NonrootArchiveSynchronousGuard');}need(checked===undefined,'NonrootArchiveSynchronousGuard');}
+  objects.push({name:row.name,base64:raw.toString('base64')});
+ }
  return {version:1,kind:'nonroot-evidence-bytes',manifest:s.manifestText,objects};
 }
 export function importNonrootArchive(value,{expectedManifestHash}){

@@ -81,7 +81,9 @@ obs_busybox_episode_body(){
  obs_collect_clock || return 1; [ $(((OBS_COLLECT_SECONDS+1)*1000)) -le "$start" ] || return 1
  # Every wait consumes one invocation. A backwards/frozen wall clock cannot
  # manufacture unlimited helper work from the original finite deadline.
- pollLimit=$(((OBS_COLLECT_DEADLINE_MS-OBS_COLLECT_SECONDS*1000+9)/10))
+ case "$OBS_STARTED" in ''|*[!0-9]*) return 1;; esac
+ [ "$OBS_COLLECT_DEADLINE_MS" -gt "$OBS_STARTED" ] || return 1
+ pollLimit=$(((OBS_COLLECT_DEADLINE_MS-OBS_STARTED+9)/10))
  obs_episode_snapshot || return 1
  initial=$OBS_EPISODE_SNAPSHOT; initialStarted=$OBS_SNAPSHOT_STARTED; initialCompleted=$OBS_SNAPSHOT_COMPLETED
  [ $(((initialCompleted+1)*1000)) -le "$start" ] || return 1

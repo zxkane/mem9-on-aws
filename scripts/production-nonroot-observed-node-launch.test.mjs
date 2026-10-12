@@ -158,3 +158,28 @@ test('unconfirmed channel closure cannot become expiry fallback or observed exec
 test('closure failure during expired-arm cleanup prevents normal fallback',async()=>{
  raw.mode='expired';raw.closeError=true;const r=await run();expect(raw.execs).toHaveLength(0);expect(r.error.message).toBe('DataObservationArmChannel');
 });
+test('frozen wall clock exhausts finite arming polls and still joins its owned helper',async()=>{
+ const clock=vi.spyOn(Date,'now').mockReturnValue(1000);
+ try{
+  raw.mode='expired';raw.closeDelay=3;const r=await run();
+  expect(r.error.message).toBe('DataObservationPollBound');expect(raw.execs).toHaveLength(0);
+  expect(raw.killed).toContainEqual({pid:50,signal:'SIGTERM'});expect(raw.files.has('/proc/50/stat')).toBe(false);
+  expect(raw.spawns[0].child.stdio[3].destroy).toHaveBeenCalledTimes(1);expect(vi.getTimerCount()).toBe(0);
+ }finally{clock.mockRestore();}
+});
+test('frozen clock and missing physical channel close exhaust a separate cleanup budget',async()=>{
+ const clock=vi.spyOn(Date,'now').mockReturnValue(1000);
+ try{
+  raw.neverClose=true;const r=await run();
+  expect(r.error.message).toBe('DataObservationCleanupPollBound');expect(raw.execs).toHaveLength(0);
+  expect(raw.killed).toContainEqual({pid:50,signal:'SIGTERM'});expect(vi.getTimerCount()).toBe(0);
+ }finally{clock.mockRestore();}
+});
+test('live owned helper cannot keep cleanup polling forever when the wall clock stops',async()=>{
+ const clock=vi.spyOn(Date,'now').mockReturnValue(1000);
+ try{
+  raw.mode='expired';kill.mockImplementation((pid,signal)=>{raw.killed.push({pid,signal});return true;});
+  const r=await run();expect(r.error.message).toBe('DataObservationCleanupPollBound');
+  expect(raw.files.has('/proc/50/stat')).toBe(true);expect(raw.execs).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
+ }finally{clock.mockRestore();}
+});

@@ -153,3 +153,26 @@ describe('original archive processing hooks',()=>{
   let paid=0;await expect(buildNonrootImageTransitionProof({},{processing:{...processing,header(){paid++;}}})).rejects.toThrow('NonrootContractInvalid');expect(paid).toBe(1);
  });
 });
+describe('archive export resumed owner checks',()=>{
+ it('stops before base64 encoding when the owner closes after body validation',async()=>{
+  const f=fixture(),archive=f.make(),marker=f.raw.toString('utf8'),original=Buffer.prototype.toString;
+  let closed=false,armed=true,encodedAfterClose=0;
+  const guarded=forkNonrootArchive(archive,{assertCurrent(){if(closed)throw Error('closed-test-owner');}});
+  Buffer.prototype.toString=function(encoding,...args){const value=original.call(this,encoding,...args);
+   if(encoding==='utf8'&&value===marker&&armed){armed=false;queueMicrotask(()=>{closed=true;});}
+   if(encoding==='base64'&&closed)encodedAfterClose++;return value;
+  };
+  try{await expect(exportNonrootArchive(guarded)).rejects.toThrow('closed-test-owner');expect(armed).toBe(false);expect(encodedAfterClose).toBe(0);}
+  finally{Buffer.prototype.toString=original;}
+ });
+ it('preserves every byte for a live owner and checks both resumed frames',async()=>{
+  const f=fixture(),expected=await exportNonrootArchive(f.make());let checks=0;
+  const guarded=forkNonrootArchive(f.make(),{assertCurrent(){checks++;}});
+  expect(await exportNonrootArchive(guarded)).toEqual(expected);expect(checks).toBe(2*f.manifest.files.length);
+ });
+ it('rejects an asynchronous check at the export continuation',async()=>{
+  const f=fixture();let checks=0;
+  const guarded=forkNonrootArchive(f.make(),{assertCurrent(){return ++checks===2?Promise.resolve():undefined;}});
+  await expect(exportNonrootArchive(guarded)).rejects.toThrow('NonrootArchiveSynchronousGuard');expect(checks).toBe(2);
+ });
+});

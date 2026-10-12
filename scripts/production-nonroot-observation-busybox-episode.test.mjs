@@ -67,6 +67,32 @@ test('episode source is fixed and preserves complete raw row/health capture call
  expect(()=>busyboxObservationEpisodeSource('source')).toThrow();const s=busyboxObservationEpisodeSource();expect(s).toContain('obs_collect_proc "$pid"');expect(s).toContain('obs_collect_close || return 1');expect(s).not.toContain('/environ');
 });
 const tool=process.env.MEM9_TEST_BUSYBOX,loader=process.env.MEM9_TEST_BUSYBOX_LOADER;
+test.runIf(!!tool&&!!loader)('frozen or backwards episode clock cannot increase the immutable span poll limit',()=>{
+ const source=busyboxObservationEpisodeSource()+`
+OBS_STARTED=1000
+OBS_COLLECT_DEADLINE_MS=1040
+count=0
+obs_collect_clock(){ OBS_COLLECT_SECONDS=0; }
+obs_episode_snapshot(){ OBS_EPISODE_SNAPSHOT=''; OBS_SNAPSHOT_STARTED=0; OBS_SNAPSHOT_COMPLETED=0; }
+obs_episode_parent(){ count=$((count+1)); [ "$count" -le 4 ]; }
+fake_tool(){ [ "$1" = sleep ]; }
+obs_collect_bb=fake_tool
+if obs_busybox_episode_body 0 1001 1010 1; then exit 91; fi
+printf '%s' "$count"
+`;
+ const r=spawnSync(loader,[tool,'sh','-s'],{input:source,env:{},encoding:'utf8',timeout:5000});
+ expect(r.error).toBeUndefined();expect(r.status).toBe(0);expect(r.stdout).toBe('4');
+});
+test.runIf(!!tool&&!!loader)('missing immutable episode start never borrows a new budget from the current clock',()=>{
+ const source=busyboxObservationEpisodeSource()+`
+OBS_COLLECT_DEADLINE_MS=1040
+obs_collect_clock(){ OBS_COLLECT_SECONDS=0; }
+obs_episode_snapshot(){ printf 'unexpected snapshot'; return 1; }
+if obs_busybox_episode_body 0 1001 1010 1; then exit 91; fi
+`;
+ const r=spawnSync(loader,[tool,'sh','-s'],{input:source,env:{},encoding:'utf8',timeout:5000});
+ expect(r.error).toBeUndefined();expect(r.status).toBe(0);expect(r.stdout).toBe('');
+});
 test.runIf(!!tool&&!!loader)('timed episode source parses in the retained original BusyBox shell',()=>{
  const r=spawnSync(loader,[tool,'sh','-n'],{input:busyboxObservationEpisodeSource(),env:{},encoding:'utf8',timeout:5000});expect(r.error).toBeUndefined();expect(r.status).toBe(0);expect(r.stderr).toBe('');
 });

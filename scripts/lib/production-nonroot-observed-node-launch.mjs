@@ -16,8 +16,9 @@ import {runNodeObservationCommonGate} from './production-nonroot-observation-gat
 
 // All source factories below have explicit builtin dependencies. No caller
 // callback, executable source, provider or credentials enter the compiler.
-function nodeLifecyclePrimitives(fs,net,crypto){
+function nodeLifecyclePrimitives(fs,net,crypto,pollLimit){
  const need=(v,c)=>{if(!v)throw Error(c);};
+ need(Number.isSafeInteger(pollLimit)&&pollLimit>0,'DataObservationPollInput');let polls=0,cleanupPolls=0;
  const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
  const read=(path,cap)=>{
   const fd=fs.openSync(path,fs.constants.O_RDONLY|fs.constants.O_NONBLOCK);
@@ -31,7 +32,7 @@ function nodeLifecyclePrimitives(fs,net,crypto){
   return {pid,ppid,ticks};
  };
  const absent=who=>{try{need(identity(who.pid).ticks===who.ticks,'DataObservationLifecycleReused');return false;}catch(e){if(['ENOENT','ESRCH'].includes(e.code))return true;throw e;}};
- const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
+ const pause=(cleanup=false)=>{need((cleanup?++cleanupPolls:++polls)<=pollLimit,cleanup?'DataObservationCleanupPollBound':'DataObservationPollBound');return new Promise(resolve=>setTimeout(resolve,1));};
  const send=async(text,deadline)=>{
   need(Buffer.byteLength(text)<=512&&Date.now()<deadline,'DataObservationArmExpired');
   const socket=new net.Socket({fd:3,readable:false,writable:true});
@@ -66,7 +67,7 @@ function observerEntry(primitives,gate,collect,write,spec){
   for(const episode of spec.schedule.episodes){
    const raw=await collect({planHash:spec.schedule.planHash,role:spec.plan.role,launchNonce:spec.plan.launchNonce,episodeIndex:episode.index,
     parentPid,parentStartTimeTicks,mainExecutable:'/usr/local/bin/node',mainCmdlineHashes:[spec.mainCmdlineHash],healthRequired:spec.healthHashes.length>0,healthCmdlineHashes:spec.healthHashes,
-    startMs:episode.startedMs,endMs:episode.completedMs,sampleEveryMs:episode.sampleEveryMs,deadlineMs:spec.plan.observationEndMs});
+    startMs:episode.startedMs,endMs:episode.completedMs,sampleEveryMs:episode.sampleEveryMs,deadlineMs:spec.plan.observationEndMs,pollLimit:spec.plan.observationEndMs-spec.plan.startedMs});
    const bytes=Buffer.from(JSON.stringify({...raw,launch:{observerStartTimeTicks:self.ticks,armingDeadlineMs}})),capture=hash(Buffer.from(JSON.stringify({nonce:spec.plan.launchNonce,pid:self.pid,ticks:self.ticks,episode:episode.index}))).slice(0,32);
    await write({fd:2,stdoutFd:1,binding:spec.binding,capture,bytes,deadlineMs:spec.plan.observationEndMs});
   }
@@ -141,9 +142,9 @@ function coordinatorEntry(cp,primitives,gate,spec,relaySource){
    // observer has disappeared. Missing birth evidence is unknown cleanup.
    if(child&&!exit)child.kill('SIGTERM');
    if(born&&!absent(born))process.kill(born.pid,'SIGTERM');
-   while(child&&!exit||born&&!absent(born)){need(Date.now()<spec.plan.deadlineMs,'DataObservationHelperCleanup');await pause();}
+   while(child&&!exit||born&&!absent(born)){need(Date.now()<spec.plan.deadlineMs,'DataObservationHelperCleanup');await pause(true);}
    child?.stdio[3]?.destroy();
-   while(child&&!channelClosed){need(Date.now()<spec.plan.deadlineMs,'DataObservationHelperCleanup');await pause();}
+   while(child&&!channelClosed){need(Date.now()<spec.plan.deadlineMs,'DataObservationHelperCleanup');await pause(true);}
    need(!child||born,'DataObservationCleanupUnknown');
    if(error.message==='DataObservationArmExpired'){if(problem)throw problem;await gate(spec.files);return execute();}
    throw error;
@@ -173,11 +174,11 @@ function packedNodeSource(source,argumentCount){
  return {bootstrap,binding:{sourceHash,sourceBytes:bytes.length,compressedBytes:compressed.length,
   compressedHash:sha(compressed),bootstrapHash:sha(Buffer.from(bootstrap)),bootstrapBytes:Buffer.byteLength(bootstrap),cmdlineBytes}};
 }
-function sharedSource(){return `import * as lifecycleFs from 'node:fs';
+function sharedSource(pollLimit){return `import * as lifecycleFs from 'node:fs';
 import * as lifecycleNet from 'node:net';
 import * as lifecycleCrypto from 'node:crypto';
 import * as lifecycleChild from 'node:child_process';
-const lifecycle=(${Function.prototype.toString.call(nodeLifecyclePrimitives)})(lifecycleFs,lifecycleNet,lifecycleCrypto);\n`;}
+const lifecycle=(${Function.prototype.toString.call(nodeLifecyclePrimitives)})(lifecycleFs,lifecycleNet,lifecycleCrypto,${pollLimit});\n`;}
 
 function prepareObservedNodeDataLaunch(input){
  const value=copyNonrootJson(input),need=(v,c)=>{if(!v)throw Error(c);};
@@ -195,7 +196,7 @@ function prepareObservedNodeDataLaunch(input){
  if(['llm-proxy','qwen3-embed'].includes(plan.role))need(health?.[0]==='CMD'&&health[4]==='node'&&files.some(f=>f.path==='/app/healthcheck.mjs'),'DataObservationHealthSource');
  const spec={plan,files,schedule,argv,mainCmdlineHash:sha(Buffer.from(argv.join('\0')+'\0')),healthHashes:health?[sha(Buffer.from(health.slice(4).join('\0')+'\0'))]:[]};
  spec.binding=nonrootHash({planHash:schedule.planHash,normal,files});
- const source=sharedSource()+nodeObservationCommonGateSource()+'\n'+nodeObservationCollectorSource()+'\n'+observationNodeOutputSource()+
+ const source=sharedSource(plan.deadlineMs-plan.startedMs)+nodeObservationCommonGateSource()+'\n'+nodeObservationCollectorSource()+'\n'+observationNodeOutputSource()+
   `\nconst sourceBootstrap=(${Function.prototype.toString.call(fixedPackedBootstrap)});
 const observe=(${Function.prototype.toString.call(observerEntry)});
 const relay=(${Function.prototype.toString.call(relayEntry)});
@@ -220,5 +221,5 @@ export function compileObservedNodeDataLaunch(input){return prepareObservedNodeD
 /** Same fixed coordinator as the inline source; no injected lifecycle hooks. */
 export async function runObservedNodeDataLaunch(input){
  const {spec,relay}=prepareObservedNodeDataLaunch(input);
- return coordinatorEntry(nodeChild,nodeLifecyclePrimitives(nodeFs,nodeNet,nodeCrypto),runNodeObservationCommonGate,spec,relay)();
+ return coordinatorEntry(nodeChild,nodeLifecyclePrimitives(nodeFs,nodeNet,nodeCrypto,spec.plan.deadlineMs-spec.plan.startedMs),runNodeObservationCommonGate,spec,relay)();
 }

@@ -202,7 +202,7 @@ obs_launch_coordinate(){
  if [ "$OBS_NOW_LOWER" -lt "$OBS_STARTED" ] || [ "$OBS_NOW_UPPER" -ge "$OBS_LATEST_ARM" ]; then obs_launch_normal; return $?; fi
  OBS_ARM_DEADLINE=$((OBS_NOW_LOWER+OBS_ARM_LIMIT))
  [ "$OBS_ARM_DEADLINE" -le $((OBS_LATEST_ARM+OBS_ARM_LIMIT)) ] || return 1
- obs_launch_polllimit=$(((OBS_DEADLINE-OBS_NOW_LOWER+9)/10))
+ obs_launch_polllimit=$(((OBS_DEADLINE-OBS_STARTED+9)/10))
  OBS_PARENT_PID=$$
  obs_launch_identity "$$" || return 1; OBS_PARENT_TICKS=$OBS_LAUNCH_TICKS
  # Two private anonymous FIFOs. No log stream is used as a handshake and no
@@ -279,7 +279,7 @@ obs_launch_observe(){
  local token='' result=0 ticks exe command capture
  trap obs_launch_signal TERM INT PIPE
  obs_launch_now || return 1
- obs_launch_polllimit=$(((OBS_DEADLINE-OBS_NOW_LOWER+9)/10))
+ obs_launch_polllimit=$(((OBS_DEADLINE-OBS_STARTED+9)/10))
  while :; do
   obs_launch_check "$OBS_ARM_DEADLINE" && obs_launch_parent || return 1
   obs_launch_identity "$$" || return 1

@@ -34,14 +34,14 @@ const kernel=['Uid:\t1000 1000 1000 1000','Gid:\t1000 1000 1000 1000','Groups:\t
 const row=(extra={})=>({ppid:1,ticks:100,executable:'/usr/local/bin/node',bytes:Buffer.from('synthetic resident node'),inode:40,cmdline:'node\0/app/scripts/consolidation-worker.mjs\0',status:kernel,...extra});
 const input=()=>({planHash:'a'.repeat(64),role:'planner',launchNonce:'b'.repeat(32),episodeIndex:0,parentPid:41,parentStartTimeTicks:100,
  mainExecutable:'/usr/local/bin/node',mainCmdlineHashes:[hash(Buffer.from(model.processes.get(41).cmdline))],healthRequired:false,healthCmdlineHashes:[],
- startMs:1020,endMs:1040,sampleEveryMs:10,deadlineMs:1100});
+ startMs:1020,endMs:1040,sampleEveryMs:10,deadlineMs:1100,pollLimit:100});
 let beforeSignals;
 beforeEach(()=>{
  vi.useFakeTimers();vi.setSystemTime(1000);model.processes.clear();model.fds.clear();model.opens=[];model.readBytes=0;model.hook=null;model.children='';model.reads.clear();
  model.processes.set(41,row());model.processes.set(process.pid,row({cmdline:'node\0-e\0fixed observer\0',ticks:200}));
  beforeSignals=['SIGTERM','SIGINT'].map(s=>process.listenerCount(s));
 });
-afterEach(()=>{expect(model.fds.size).toBe(0);expect(['SIGTERM','SIGINT'].map(s=>process.listenerCount(s))).toEqual(beforeSignals);vi.useRealTimers();});
+afterEach(()=>{expect(model.fds.size).toBe(0);expect(['SIGTERM','SIGINT'].map(s=>process.listenerCount(s))).toEqual(beforeSignals);vi.restoreAllMocks();vi.useRealTimers();});
 async function collect(spec=input()){
  const settled=collectNodeObservationEpisode(spec).then(value=>({value}),error=>({error}));
  await vi.runAllTimersAsync();const result=await settled;if(result.error)throw result.error;return result.value;
@@ -137,4 +137,11 @@ test('a genuinely matching final Node health row remains accepted through pollin
  setTimeout(()=>model.processes.set(42,row({cmdline:command,ticks:300})),21);
  const r=await collect({...input(),role:'llm-proxy',healthRequired:true,healthCmdlineHashes:[hash(Buffer.from(command))]});
  expect(r.health[0].atMs).toBe(1021);expect(r.health[0].process.cmdlineHash).toBe(hash(Buffer.from(command)));
+});
+test('frozen wall clock cannot create unquoted polling beyond the original limit',async()=>{
+ vi.spyOn(Date,'now').mockReturnValue(1000);const s={...input(),pollLimit:3};
+ await expect(collect(s)).rejects.toThrow('DataObservationPollBound');expect(model.readBytes).toBeLessThan(268435456);
+});
+test('missing, zero, fractional or infinite poll limit rejects before proc reads',()=>{
+ for(const pollLimit of [undefined,0,1.5,Infinity])expect(()=>collectNodeObservationEpisode({...input(),pollLimit})).toThrow();expect(model.opens).toEqual([]);
 });

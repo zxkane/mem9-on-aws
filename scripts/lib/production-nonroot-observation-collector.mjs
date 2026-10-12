@@ -8,8 +8,9 @@ import {copyNonrootJson} from './production-nonroot-contracts.mjs';
 function observationCollectorFactory(fs,crypto){
  return async function collectNodeObservationEpisode(spec){
   const need=(v,c='DataObservationCollection')=>{if(!v)throw Error(c);};
+  need(Number.isSafeInteger(spec.pollLimit)&&spec.pollLimit>0,'DataObservationPollInput');
   const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
-  const owned=new Set(),cache=new Map();let readBytes=0,cancelled=false;
+  const owned=new Set(),cache=new Map();let readBytes=0,cancelled=false,polls=0;
   const stop=()=>{cancelled=true;};process.on('SIGTERM',stop);process.on('SIGINT',stop);
   const check=()=>need(!cancelled&&Date.now()<spec.deadlineMs,'DataObservationCollectionExpired');
   const charge=n=>{readBytes+=n;need(Number.isSafeInteger(readBytes)&&readBytes<=268435456,'DataObservationCollectionBound');check();};
@@ -77,7 +78,7 @@ function observationCollectorFactory(fs,crypto){
     }catch(e){if(!['ENOENT','ESRCH'].includes(e.code))throw e;}
    }
   };
-  const wait=async at=>{while(Date.now()<at){check();parent();pollHealth();await new Promise(resolve=>setTimeout(resolve,Math.min(spec.healthRequired&&!health.length?1:10,at-Date.now())));}};
+  const wait=async at=>{while(Date.now()<at){need(++polls<=spec.pollLimit,'DataObservationPollBound');check();parent();pollHealth();await new Promise(resolve=>setTimeout(resolve,Math.min(spec.healthRequired&&!health.length?1:10,at-Date.now())));}};
   let result,main;
   try{
    check();parent();
@@ -125,10 +126,10 @@ function observationCollectorFactory(fs,crypto){
 }
 const collect=observationCollectorFactory(collectorFs,collectorCrypto);
 export function collectNodeObservationEpisode(input){
- const s=copyNonrootJson(input),keys=['planHash','role','launchNonce','episodeIndex','parentPid','parentStartTimeTicks','mainExecutable','mainCmdlineHashes','healthRequired','healthCmdlineHashes','startMs','endMs','sampleEveryMs','deadlineMs'];
+ const s=copyNonrootJson(input),keys=['planHash','role','launchNonce','episodeIndex','parentPid','parentStartTimeTicks','mainExecutable','mainCmdlineHashes','healthRequired','healthCmdlineHashes','startMs','endMs','sampleEveryMs','deadlineMs','pollLimit'];
  if(!s||Object.keys(s).length!==keys.length||!keys.every(k=>Object.hasOwn(s,k))||!/^[a-f0-9]{64}$/.test(s.planHash)||!/^[a-f0-9]{32}$/.test(s.launchNonce)||
   !['llm-proxy','qwen3-embed','planner','executor'].includes(s.role)||s.mainExecutable!=='/usr/local/bin/node'||
-  ![s.parentPid,s.parentStartTimeTicks,s.startMs,s.endMs,s.sampleEveryMs,s.deadlineMs].every(n=>Number.isSafeInteger(n)&&n>0)||
+  ![s.parentPid,s.parentStartTimeTicks,s.startMs,s.endMs,s.sampleEveryMs,s.deadlineMs,s.pollLimit].every(n=>Number.isSafeInteger(n)&&n>0)||
   !Number.isSafeInteger(s.episodeIndex)||s.episodeIndex<0||s.startMs>=s.endMs||s.endMs>=s.deadlineMs||s.sampleEveryMs>s.endMs-s.startMs||
   s.healthRequired!==!['planner','executor'].includes(s.role)||![s.mainCmdlineHashes,s.healthCmdlineHashes].every(a=>Array.isArray(a)&&a.every(h=>/^[a-f0-9]{64}$/.test(h)))||
   s.mainCmdlineHashes.length===0||s.healthRequired&&s.healthCmdlineHashes.length===0||!s.healthRequired&&s.healthCmdlineHashes.length!==0)throw Error('DataObservationCollectorInput');
