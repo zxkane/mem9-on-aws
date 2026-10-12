@@ -21,8 +21,8 @@ const manifests=new Set([IMAGE_MEDIA.index,IMAGE_MEDIA.dockerIndex,IMAGE_MEDIA.m
  * before opening it, including config/FS/file-extraction rereads. */
 export async function openOwnedNonrootControlCache({directory,binding,inventory,budget}){
  assertImageBudget(budget);binding=copyNonrootJson(binding);inventory=copyNonrootJson(inventory);
- need(typeof directory==='string'&&resolve(directory)===directory&&await realpath(directory)===directory,'NonrootControlCachePath');
- const initial=await lstat(directory);
+ need(typeof directory==='string'&&resolve(directory)===directory,'NonrootControlCachePath');const realDirectory=await realpath(directory);budget.check();need(realDirectory===directory,'NonrootControlCachePath');
+ const initial=await lstat(directory);budget.check();
  need(initial.isDirectory()&&initial.uid===process.getuid()&&(initial.mode&0o777)===0o700,'NonrootControlCacheDirectory');
  need(inventory.kind==='readonly-control-image-graph'&&inventory.roots?.length===1&&Array.isArray(inventory.nodes)&&inventory.nodes.length>0&&inventory.nodes.length<=L.maxManifestNodes+L.maxBlobNodes,'NonrootControlCacheInventory');
  const nodes=new Map();
@@ -33,32 +33,32 @@ export async function openOwnedNonrootControlCache({directory,binding,inventory,
  let closed=false,physicalCacheBytes=0,reads=0;
  const check=()=>{need(!closed,'NonrootControlCacheClosed');budget.check();};
  const directoryUnchanged=async()=>{
-  check();const current=await lstat(directory);
-  need(await realpath(directory)===directory&&unchanged(initial,current,['dev','ino','mode','uid'])&&hash((await readdir(directory)).sort())===hash(names),'NonrootControlCacheInventory');
+  check();const current=await lstat(directory);check();const real=await realpath(directory);check();const listed=await readdir(directory);check();
+  need(real===directory&&unchanged(initial,current,['dev','ino','mode','uid'])&&hash(listed.sort())===hash(names),'NonrootControlCacheInventory');
  };
- await directoryUnchanged();
+ await directoryUnchanged();check();
  async function* bytes(descriptor){
   check();const expected=nodes.get(descriptor.digest);
   need(expected&&expected.size===descriptor.size&&expected.mediaType===descriptor.mediaType,'NonrootControlCacheDescriptor');
   need(active.size<L.maxConcurrency,'NonrootControlCacheConcurrency');
   budget.cacheRead?.(descriptor.size);
-  const path=join(directory,descriptor.digest.slice(7));need(await realpath(path)===path,'NonrootControlCacheAlias');
+  const path=join(directory,descriptor.digest.slice(7)),real=await realpath(path);check();need(real===path,'NonrootControlCacheAlias');
   const fd=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);active.add(fd);
   try{
-   const before=await fd.stat();
+   check();const before=await fd.stat();check();
    need(before.isFile()&&before.uid===process.getuid()&&(before.mode&0o777)===0o600&&before.nlink===1&&before.size===descriptor.size,'NonrootControlCacheFile');
    const prior=identities.get(descriptor.digest);if(prior)need(unchanged(prior,before,fileKeys),'NonrootControlCacheChanged');else identities.set(descriptor.digest,before);
    const digest=createHash('sha256'),buffer=Buffer.alloc(65536);let size=0;reads++;
    while(true){
-    check();const {bytesRead}=await fd.read(buffer,0,buffer.length,null);if(!bytesRead)break;
+    check();const {bytesRead}=await fd.read(buffer,0,buffer.length,null);check();if(!bytesRead)break;
     size+=bytesRead;physicalCacheBytes+=bytesRead;
     need(size<=descriptor.size&&Number.isSafeInteger(physicalCacheBytes),'NonrootControlCacheSize');
     const chunk=Buffer.from(buffer.subarray(0,bytesRead));digest.update(chunk);yield chunk;
    }
-   const after=await fd.stat(),named=await lstat(path);
+   const after=await fd.stat();check();const named=await lstat(path);check();
    need(size===descriptor.size&&'sha256:'+digest.digest('hex')===descriptor.digest,'NonrootControlCacheDigest');
    need(unchanged(before,after,fileKeys)&&unchanged(before,named,fileKeys),'NonrootControlCacheChanged');
-  }finally{active.delete(fd);await fd.close();}
+  }finally{await fd.close();active.delete(fd);}
  }
  const reader=request=>{
   need(request.repositoryName===binding.repositoryName,'NonrootControlCacheRepository');return bytes(request.descriptor);
@@ -69,10 +69,15 @@ export async function openOwnedNonrootControlCache({directory,binding,inventory,
   need(size===descriptor.size&&'sha256:'+digest.digest('hex')===descriptor.digest,'NonrootControlCacheDigest');
  }};
  const before=budget.usage();
- const close=async()=>{closed=true;const pending=[...active];await Promise.all(pending.map(fd=>fd.close()));need(pending.length===0,'NonrootControlCacheActive');};
+ const close=async()=>{
+  closed=true;const pending=[...active],results=await Promise.allSettled(pending.map(fd=>fd.close()));
+  // Join every close. An active generator or failed close remains uncertain;
+  // never erase the file handle before physical closure is confirmed.
+  need(results.every(r=>r.status==='fulfilled')&&pending.length===0,'NonrootControlCacheActive');
+ };
  return Object.freeze({store,readBlob:reader,readManifest:async request=>{
-  const chunks=[];let size=0;for await(const chunk of reader(request)){size+=chunk.length;need(size<=L.maxManifestBytes,'NonrootControlCacheManifest');chunks.push(chunk);}return Buffer.concat(chunks,size);
- },check:async()=>{await directoryUnchanged();need(active.size===0,'NonrootControlCacheActive');},close,
+  const chunks=[];let size=0;for await(const chunk of reader(request)){check();size+=chunk.length;need(size<=L.maxManifestBytes,'NonrootControlCacheManifest');chunks.push(chunk);}check();return Buffer.concat(chunks,size);
+ },check:async()=>{await directoryUnchanged();check();need(active.size===0,'NonrootControlCacheActive');},close,
  usage:()=>copyNonrootJson({physicalCacheBytes,cacheReads:reads,before,after:budget.usage()})});
 }
 

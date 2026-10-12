@@ -102,7 +102,7 @@ export async function restoreImageDeploymentBundle(bundle,{parameter,expected,co
     const {collectOwnedNonrootControlEvidence}=await import('./production-nonroot-deployment-provider.mjs');
     const cache=controlCache(bundle.controlCache);
     owned=await collectOwnedNonrootControlEvidence({cacheDirectory:cache.directory,inventory:cache.inventory,metadataReads:local,
-     deadlineMs:Math.min(local.expiresMs,Date.now()+120000),archive,build:bundle.deploymentSource.deployedControlBuild,
+     deadlineMs:Math.min(local.expiresMs,Date.now()+120000),archive,proofArchive:restored.archive,taskPlan:bundle.proof.taskPlan,context:restored.context,parameter,build:bundle.deploymentSource.deployedControlBuild,
      contract:bundle.proof.taskPlan.deployedControlBuildContract,repositoryDirectory:env.GITHUB_WORKSPACE??process.cwd()});
     nonrootEvidence=owned;now=Date.now();
    }

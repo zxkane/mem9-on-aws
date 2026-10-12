@@ -81,6 +81,30 @@ describe('fixed SST loader and complete bounded source closure',()=>{
   it.each(['data:text/javascript,export default 1','file:///unreviewed.mjs','https://example.com/unreviewed.mjs','#unresolved-local-code'])('rejects unaccounted executable source %s',async specifier=>{
     await expect(ciSmokeSourceClosure(context({'entry.mjs':'import '+JSON.stringify(specifier)+';'}),['entry.mjs'])).rejects.toThrow('CiSmokeExternalCode');
   });
+  it.each([
+    ['scripts/lib/production-nonroot-observer-control-context.mjs','openObserverControlContext'],
+    ['scripts/lib/production-nonroot-observer-runtime-provider.mjs','openObserverRuntimeProvider'],
+  ])('inventories the complete %s source while recognizing its fixed image-only guard import',async(path,name)=>{
+    const source=`import './synthetic-leaf.mjs'; export async function ${name}(handle){const {requireGuardedObserverInvocation}=await import('/bootstrap/nonroot-dispatch.mjs');return requireGuardedObserverInvocation(handle);}`;
+    const files={[path]:source,'scripts/lib/synthetic-leaf.mjs':'export const value=1;'},closure=await ciSmokeSourceClosure(context(files),[path]);
+    expect(closure.map(row=>row.path)).toEqual(Object.keys(files).sort());
+    expect(closure.find(row=>row.path===path).sha256).toBe(sha(Buffer.from(source)));
+    expect(closure.some(row=>row.path.startsWith('/bootstrap/'))).toBe(false);
+  });
+  it.each(['copied-path','wrong-function','nested-function','alias','namespace','static','different-image-file','duplicate'])('does not extend the image guard exception to %s',async defect=>{
+    let path='scripts/lib/production-nonroot-observer-control-context.mjs';
+    const statement="const {requireGuardedObserverInvocation}=await import('/bootstrap/nonroot-dispatch.mjs');";
+    let source='export async function openObserverControlContext(handle){'+statement+'return requireGuardedObserverInvocation(handle);}';
+    if(defect==='copied-path')path='other.mjs';
+    if(defect==='wrong-function')source=source.replace('openObserverControlContext','other');
+    if(defect==='nested-function')source='export async function openObserverControlContext(){async function nested(){'+statement+'}}';
+    if(defect==='alias')source=source.replace('{requireGuardedObserverInvocation}','{requireGuardedObserverInvocation:other}');
+    if(defect==='namespace')source=source.replace('{requireGuardedObserverInvocation}','api');
+    if(defect==='static')source="import {requireGuardedObserverInvocation} from '/bootstrap/nonroot-dispatch.mjs';";
+    if(defect==='different-image-file')source=source.replace('nonroot-dispatch.mjs','other.mjs');
+    if(defect==='duplicate')source='export async function openObserverControlContext(){'+statement+'{'+statement+'}}';
+    await expect(ciSmokeSourceClosure(context({[path]:source}),[path])).rejects.toThrow(/CiSmokeExternalCode|CiSmokeImageGuardImport/);
+  });
   it('rejects missing fixed targets/dependencies and ambiguous extensionless files',async()=>{
     for(const path of ['sst.config.ts','infra/leaf.ts']){
       const files=regionFiles();delete files[path];await expect(ciSmokeSourceClosure(context(files),[loaderPath])).rejects.toThrow('CiSmokeClosureMissing');

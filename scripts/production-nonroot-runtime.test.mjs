@@ -14,7 +14,12 @@ describe('nonroot runtime identity and same-target audit joins',()=>{
         expect(spec).toMatch(/^\.\//);expect(spec).not.toMatch(/artifact|provenance|image-graph|image-filesystem|control-source/);await visit(new URL(spec,url));
       }
     }
-    await visit(new URL('./lib/production-nonroot-runtime.mjs',import.meta.url));expect(seen.size).toBe(2);
+    await visit(new URL('./lib/production-nonroot-runtime.mjs',import.meta.url));
+    expect([...seen].sort()).toEqual([
+      'production-nonroot-runtime.mjs',
+      'production-nonroot-contracts.mjs',
+      'production-nonroot-control-current.mjs',
+    ].map(name=>new URL('./lib/'+name,import.meta.url).href).sort());
   });
   it('accepts a complete synthetic pre/audit/post join with fresh independent health processes',async()=>{
     const f=nonrootRuntimeFixture();const result=await verifyNonrootTargetAuditJoin(f.audit,f);

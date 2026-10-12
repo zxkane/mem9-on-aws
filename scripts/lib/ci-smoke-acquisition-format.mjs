@@ -1,3 +1,4 @@
+import {NONROOT_ARCHIVE_CAPACITY_V2 as ARCHIVE_CAPACITY} from './production-nonroot-archive-capacity.mjs';
 import {inspectOriginalLocalWorkData} from './production-nonroot-local-work.mjs';
 import {createHash} from 'node:crypto';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
@@ -17,7 +18,14 @@ export const zero=()=>Object.fromEntries(COUNTERS.map(k=>[k,0]));
 export const counter=v=>{exact(v,COUNTERS);for(const k of COUNTERS)need(integer(v[k])&&v[k]<=CAPS[k],'CiAcquisitionCounter');return v;};
 export const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}return v;};
 export function parseAcquisitionJson(bytes,maxBytes=33554432){
- need(bytes instanceof Uint8Array&&bytes.byteLength>0&&bytes.byteLength<=maxBytes&&maxBytes<=33554432,'CiAcquisitionJsonSize');const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);let at=0,nodes=0;
+ need(Number.isSafeInteger(maxBytes)&&maxBytes>0&&maxBytes<=33554432,'CiAcquisitionJsonSize');return parseBoundedAcquisitionJson(bytes,maxBytes);
+}
+/** Same duplicate-key/depth/node checks for an aggregate archive document. */
+export function parseNonrootArchiveJson(bytes,maxBytes=ARCHIVE_CAPACITY.documentBytes){
+ need(Number.isSafeInteger(maxBytes)&&maxBytes>0&&maxBytes<=ARCHIVE_CAPACITY.documentBytes,'CiAcquisitionJsonSize');return parseBoundedAcquisitionJson(bytes,maxBytes);
+}
+function parseBoundedAcquisitionJson(bytes,maxBytes){
+ need(bytes instanceof Uint8Array&&bytes.byteLength>0&&bytes.byteLength<=maxBytes,'CiAcquisitionJsonSize');const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);let at=0,nodes=0;
  const ws=()=>{while(/[\x20\t\r\n]/.test(text[at]??'!'))at++;};
  const str=()=>{const start=at;need(text[at++]==='"');let escape=false;while(at<text.length){const c=text[at++];if(!escape&&c==='"')return JSON.parse(text.slice(start,at));if(escape)escape=false;else if(c==='\\')escape=true;}need(false,'CiAcquisitionJson');};
  const scan=depth=>{need(depth<=64&&++nodes<=250000,'CiAcquisitionJsonDepth');ws();const c=text[at];if(c==='{'){at++;ws();const keys=new Set();if(text[at]==='}'){at++;return;}while(true){ws();const key=str();need(!keys.has(key),'CiAcquisitionDuplicateKey');keys.add(key);ws();need(text[at++]===':');scan(depth+1);ws();if(text[at]==='}'){at++;return;}need(text[at++ ]===',');}}if(c==='['){at++;ws();if(text[at]===']'){at++;return;}while(true){scan(depth+1);ws();if(text[at]===']'){at++;return;}need(text[at++ ]===',');}}if(c==='"'){str();return;}const start=at;while(at<text.length&&!/[\x20\t\r\n,}\]]/.test(text[at]))at++;need(at>start);const v=JSON.parse(text.slice(start,at));need(typeof v!=='number'||Number.isFinite(v));};scan(0);ws();need(at===text.length,'CiAcquisitionJsonTrailing');return JSON.parse(text);

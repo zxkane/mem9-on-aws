@@ -1,3 +1,4 @@
+import {assertNonrootControlCurrent} from './production-nonroot-control-current.mjs';
 import {createHash} from 'node:crypto';
 import {
   NONROOT_LIMITS, NONROOT_LIMITS_HASH, parseNonrootJson,
@@ -19,10 +20,12 @@ const within=(value,outer)=>need(value.startedMs>=outer.startedMs&&value.complet
  * They return raw bytes, never a parsed object or a boolean approval. This
  * module checks byte/canonical commitments but does not authenticate a cloud
  * caller or manufacture a permission from self-hashed records. */
-export async function readNonrootEvidence(reference,{resolveJson,resolveBytes},json=true){
+export async function readNonrootEvidence(reference,options,json=true){
+  assertNonrootControlCurrent(options);
+  const {resolveJson,resolveBytes}=options;
   const ref=inspectNonrootRecord(json?'JsonRef':'ByteRef',reference);
   const resolver=json?resolveJson:resolveBytes;need(typeof resolver==='function','NonrootEvidenceResolverRequired');
-  const returned=await resolver(ref);need(returned instanceof Uint8Array&&returned.byteLength===ref.bytesLength&&returned.byteLength<=(json?NONROOT_LIMITS.maxProofBytes:MAX_BUFFERED_ARTIFACT_BYTES),'NonrootEvidenceBytes');
+  const returned=await resolver(ref);assertNonrootControlCurrent(options);need(returned instanceof Uint8Array&&returned.byteLength===ref.bytesLength&&returned.byteLength<=(json?NONROOT_LIMITS.maxProofBytes:MAX_BUFFERED_ARTIFACT_BYTES),'NonrootEvidenceBytes');
   const bytes=Buffer.from(returned);
   need(digest(bytes)===(json?ref.bytesHash:ref.sha256),'NonrootEvidenceHash');
   if(!json)return Buffer.from(bytes);

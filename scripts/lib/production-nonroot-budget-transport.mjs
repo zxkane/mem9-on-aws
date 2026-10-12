@@ -1,3 +1,4 @@
+import {NONROOT_ARCHIVE_CAPACITY_V2 as ARCHIVE_CAPACITY} from './production-nonroot-archive-capacity.mjs';
 /** All network reads consume the caller's prepaid acquisition. This module
  * measures original HTTP bodies; SDK objects and CLI stdout are not wire
  * measurements. It neither creates counters nor finishes the caller's slot. */
@@ -99,7 +100,7 @@ export function createNonrootBudgetedReads({region,env,metadataReads,requestHand
    for await(const chunk of acquisition.controlCapacity?boundedRawBody(stream,caps.responseBytes):stream instanceof Uint8Array?[stream]:stream){
     options.abortSignal?.throwIfAborted();need(chunk instanceof Uint8Array,'NonrootResponseBody');
     slot.reservation.charge(chunk.byteLength);size+=chunk.byteLength;
-    need(size<=caps.responseBytes&&size<=32*1024*1024,'NonrootResponseBodyLimit');chunks.push(Buffer.from(chunk));
+    need(size<=caps.responseBytes&&size<=slot.responseMaximum,'NonrootResponseBodyLimit');chunks.push(Buffer.from(chunk));
    }
    const length=response.headers?.['content-length'];
    if(length!==undefined)need(/^(?:0|[1-9][0-9]*)$/.test(String(length))&&Number(length)===size,'NonrootResponseBodyLength');
@@ -116,6 +117,13 @@ export function createNonrootBudgetedReads({region,env,metadataReads,requestHand
    slot.reservation=await acquisition.beforeRead(action,request);
    const r=slot.reservation;
    need(r&&['finalGuard','charge','complete','unknown'].every(key=>typeof r[key]==='function')&&integer(r.caps?.requestBytes)&&integer(r.caps?.responseBytes)&&r.caps.responseBytes>0,'NonrootReadReservation');
+   // Only this exact original authorization-archive request may consume the
+   // larger response allowance already admitted by the original reservation.
+   // Every other response keeps the legacy transport maximum.
+   const archive=service==='s3'&&action==='GetObject'&&Object.keys(request).sort().join()==='Bucket,ExpectedBucketOwner,Key'&&
+    typeof request.Bucket==='string'&&/^[0-9]{12}$/.test(request.ExpectedBucketOwner??'')&&
+    /^data-authorizations\/[a-f0-9]{32}\/[a-f0-9]{32}\/nonroot-proof-archive\.json$/.test(request.Key??'');
+   slot.responseMaximum=archive?Math.min(r.caps.responseBytes,ARCHIVE_CAPACITY.wireBytes):32*1024*1024;
    result=await use(request);
    need(slot.dispatched&&slot.responseHash,'NonrootTransportIncomplete');
    // The bridge checks the actual caller/descriptor response. Streaming S3

@@ -11,6 +11,21 @@ import {CI_SMOKE_ARCHIVE_LIMITS,encodeCiSmokeEnvelope,decodeCiSmokeEnvelope} fro
 import {ciSmokeEvidenceFixture} from './ci-smoke-evidence.fixture.mjs';
 import {parse} from '@babel/parser';
 import {compactControlCompositionCode} from './build-control-composition-action.mjs';
+import {rolldown} from 'rolldown';
+import {builtinModules} from 'node:module';
+
+test.each(['production-nonroot-observer-control-slots.mjs','production-nonroot-observer-control-output.mjs'])('CI DATA consumer %s bundles without the container runtime',async name=>{
+ const warnings=[],bundle=await rolldown({input:join(root,'scripts/lib',name),platform:'node',onwarn:warning=>warnings.push(warning)});
+ try{
+  const result=await bundle.generate({format:'esm',codeSplitting:false}),chunks=result.output.filter(item=>item.type==='chunk');
+  expect(warnings).toEqual([]);expect(chunks).toHaveLength(1);
+  const chunk=chunks[0],builtins=new Set(builtinModules.flatMap(name=>[name,'node:'+name.replace(/^node:/,'')]));
+  for(const id of [...chunk.imports,...chunk.dynamicImports])expect(builtins.has(id)).toBe(true);
+  const modules=Object.keys(chunk.modules);
+  expect(modules.some(id=>id.endsWith('/production-nonroot-observer-route-protocol.mjs'))).toBe(true);
+  expect(modules.some(id=>/production-nonroot-observer-(?:route-probe|runtime-provider|control-context)\.mjs$|\/bootstrap\/nonroot-dispatch\.mjs$/.test(id))).toBe(false);
+ }finally{await bundle.close();}
+});
 import {verifyCiSmokeCompositionToolchain} from './lib/ci-smoke-isolation.mjs';
 import {previewProgramSourceFixture} from './production-nonroot-preview-provider.fixture.mjs';
 
@@ -71,7 +86,7 @@ test('complete actual bundle survives the real bounded Git reader and smoke arch
   const env={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'example/control-plane',GITHUB_SHA:revision,GITHUB_RUN_ID:'77',GITHUB_RUN_ATTEMPT:'1'};
   const host={...ciSmokeHost(env,directory),api(){throw Error('UnexpectedSourceNetwork');}},objects=new Map();
   const captured=await captureSmokeTree(host,{revision,tree},{bytes(raw){const ref={sha256:sha(raw),bytesLength:raw.length};objects.set(ref.sha256,Buffer.from(raw));return ref;},get(hash){return objects.get(hash);}});
-  expect((await readControlSourceFile(captured.context,bundlePath)).bytes).toEqual(bundle);
+  expect(Buffer.compare((await readControlSourceFile(captured.context,bundlePath)).bytes,bundle)).toBe(0);
 
   // Synthetic surrounding evidence exercises transport only. The embedded
   // bundle is the complete actual artifact, not a smaller substitute.
@@ -88,6 +103,6 @@ test('complete actual bundle survives the real bounded Git reader and smoke arch
   };visit(records);
   const encoded=encodeCiSmokeEnvelope({records,objects:[...selected].map(([sha256,bytes])=>({sha256,bytes}))});
   const decoded=decodeCiSmokeEnvelope(encoded.bytes,encoded.commitment);
-  expect(decoded.readBytes(bundleRef)).toEqual(bundle);
+  expect(Buffer.compare(decoded.readBytes(bundleRef),bundle)).toBe(0);
  }finally{await rm(directory,{recursive:true,force:true});}
 },30000);

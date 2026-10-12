@@ -1,4 +1,5 @@
 import {CI_SMOKE_JOB_NAME} from './ci-smoke-isolation.mjs';
+import {assertNonrootControlCurrent} from './production-nonroot-control-current.mjs';
 import {inspectCiSmokeCommitApi,ciSmokeCommitPath,ciSmokeCommitTree,gitDatabaseCommitSource} from './ci-smoke-commit-source.mjs';
 
 const need=(v,c='CiSmokeGithubInvalid')=>{if(!v)throw Error(c);};
@@ -22,12 +23,13 @@ export function extractMnemoBuildDigest(log,{event,revision}){
 /** This collector has no AWS imports, credentials or AWS transport callback.
  * `prepare` observes its own in-progress smoke job; `consume` requires the
  * completed job and completed publishing step before private evidence access. */
-export async function captureCiSmokeGithub({api,readLog},{repository,runId,runAttempt,sourceRevision,purpose='consume',commitApi='rest'}){
+export async function captureCiSmokeGithub({api,readLog},{repository,runId,runAttempt,sourceRevision,purpose='consume',commitApi='rest',assertCurrent}){
+ const resume=value=>{assertNonrootControlCurrent({assertCurrent});return value;};resume();
  need(typeof api==='function'&&typeof readLog==='function'&&/^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/.test(repository??'')&&id(runId)&&id(runAttempt)&&git(sourceRevision)&&['prepare','consume'].includes(purpose));
  inspectCiSmokeCommitApi(commitApi);
- const run=await api('actions/runs/'+runId+'/attempts/'+runAttempt);
+ const run=resume(await api('actions/runs/'+runId+'/attempts/'+runAttempt));
  need(run.id===runId&&run.run_attempt===runAttempt&&run.path==='.github/workflows/infra-ci.yml'&&run.head_repository?.full_name===repository&&git(run.head_sha),'CiSmokeGithubRun');
- const jobs=await api('actions/runs/'+runId+'/attempts/'+runAttempt+'/jobs?per_page=100');
+ const jobs=resume(await api('actions/runs/'+runId+'/attempts/'+runAttempt+'/jobs?per_page=100'));
  need(Array.isArray(jobs.jobs)&&jobs.jobs.length<=100&&jobs.total_count===jobs.jobs.length,'CiSmokeGithubJobsIncomplete');
  const buildJob=one(jobs.jobs,'Build & push workload images'),smokeJob=one(jobs.jobs,CI_SMOKE_JOB_NAME);
  for(const job of [buildJob,smokeJob])need(id(job.id)&&job.run_id===runId&&job.run_attempt===runAttempt&&job.head_sha===run.head_sha,'CiSmokeGithubJobSource');
@@ -37,16 +39,16 @@ export async function captureCiSmokeGithub({api,readLog},{repository,runId,runAt
   need(successful(smokeJob),'CiSmokeGithubSmokeFailed');
   need(successful(one(smokeJob.steps??[],'Verify and preserve private smoke evidence'))&&successful(one(smokeJob.steps??[],'Remove owned smoke evidence')),'CiSmokeGithubPublishFailed');
  }else need(smokeJob.status==='in_progress','CiSmokeGithubSmokeNotCurrent');
- const commit=await api(ciSmokeCommitPath(sourceRevision,commitApi));
+ const commit=resume(await api(ciSmokeCommitPath(sourceRevision,commitApi)));
  need(commit.sha===sourceRevision&&git(ciSmokeCommitTree(commit,commitApi))&&Array.isArray(commit.parents)&&commit.parents.length>=1&&commit.parents.length<=2,'CiSmokeGithubCommit');
  const sourceTree=ciSmokeCommitTree(commit,commitApi);
  let candidateCommit=commit;
  if(run.event==='pull_request'){
   need(commit.parents.length===2&&commit.parents[1].sha===run.head_sha,'CiSmokeGithubMergeRelation');
-  candidateCommit=await api(ciSmokeCommitPath(run.head_sha,commitApi));
+  candidateCommit=resume(await api(ciSmokeCommitPath(run.head_sha,commitApi)));
   need(candidateCommit.sha===run.head_sha&&ciSmokeCommitTree(candidateCommit,commitApi)===sourceTree,'CiSmokeGithubCandidateTree');
  }else need(['push','workflow_dispatch'].includes(run.event)&&sourceRevision===run.head_sha,'CiSmokeGithubSourceRelation');
- const buildLog=await readLog(buildJob.id);need(typeof buildLog==='string','CiSmokeGithubLog');
+ const buildLog=resume(await readLog(buildJob.id));need(typeof buildLog==='string','CiSmokeGithubLog');
  const buildDigest=extractMnemoBuildDigest(buildLog,{event:run.event,revision:sourceRevision});
  return {run,buildJob,smokeJob,commit,candidateCommit,sourceRevision,sourceTree,buildDigest,buildLog,
   ...(commitApi==='git-database'?{commitSource:gitDatabaseCommitSource(sourceRevision,candidateCommit.sha)}:{})};

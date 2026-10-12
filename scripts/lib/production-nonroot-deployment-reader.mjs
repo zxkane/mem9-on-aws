@@ -1,3 +1,5 @@
+import {NONROOT_ARCHIVE_CAPACITY_V2 as ARCHIVE_CAPACITY} from './production-nonroot-archive-capacity.mjs';
+import {parseNonrootArchiveJson} from './ci-smoke-acquisition-format.mjs';
 import {GetObjectCommand} from '@aws-sdk/client-s3';
 import {Readable} from 'node:stream';
 import {createHash} from 'node:crypto';
@@ -13,7 +15,7 @@ export const NONROOT_AUTHORIZATION_ARCHIVE_FILES=Object.freeze(['operation.json'
 
 /** The same existing private owner prefix; no public artifact or new storage
  * authority. CONTROL observations are deliberately acquired separately. */
-export async function loadNonrootDeploymentAuthority(clients,{raw,parameter,expected,bucket,clock=Date.now}={}){
+export async function loadNonrootDeploymentAuthority(clients,{raw,parameter,expected,bucket,metadataReads,clock=Date.now}={}){
  const selected=requireActiveDataRelease(raw,expected,{now:clock()}),data=selected.data;
  if(data.version!==3||!parameter||parameter.Value!==raw)fail('NonrootProtectedParameterRequired');
  const owner=data.account,prefix=`data-authorizations/${data.runtimeNonce}/${data.authorizationId}/`,bucketName=validateDecisionArtifactBucketName(bucket??'mem9-audit-'+owner);
@@ -21,17 +23,24 @@ export async function loadNonrootDeploymentAuthority(clients,{raw,parameter,expe
  for(const name of NONROOT_AUTHORIZATION_ARCHIVE_FILES){
   const signal=AbortSignal.timeout(30000),response=await clients.s3.send(new GetObjectCommand({Bucket:bucketName,Key:prefix+name,ExpectedBucketOwner:owner}),{abortSignal:signal});
   try{
-   if(response.ServerSideEncryption!=='aws:kms'||typeof response.SSEKMSKeyId!=='string'||!response.SSEKMSKeyId.startsWith(`arn:aws:kms:${data.region}:${owner}:key/`)||!response.ETag||!(response.Body instanceof Readable)||!Number.isSafeInteger(response.ContentLength)||response.ContentLength<1||total+response.ContentLength>MAX_BYTES)fail('NonrootArchiveTransportInvalid');
+   if(response.ServerSideEncryption!=='aws:kms'||typeof response.SSEKMSKeyId!=='string'||!response.SSEKMSKeyId.startsWith(`arn:aws:kms:${data.region}:${owner}:key/`)||!response.ETag||!(response.Body instanceof Readable)||!Number.isSafeInteger(response.ContentLength)||response.ContentLength<1||response.ContentLength>(name==='nonroot-proof-archive.json'?ARCHIVE_CAPACITY.wireBytes:MAX_BYTES)||total+response.ContentLength>MAX_BYTES+ARCHIVE_CAPACITY.wireBytes)fail('NonrootArchiveTransportInvalid');
    if(response.BucketKeyEnabled!==true||archiveLocation&&archiveLocation.kmsKeyArn!==response.SSEKMSKeyId)fail('NonrootArchiveProtectionChanged');
    archiveLocation={bucket:bucketName,kmsKeyArn:response.SSEKMSKeyId};
+   let processingCheck=()=>{};
+   if(name==='nonroot-proof-archive.json'&&response.ContentLength>MAX_BYTES){
+    if(typeof metadataReads?.reserveLocal!=='function')fail('NonrootArchiveReadBudget');
+    const reserve=metadataReads.reserveLocal.bind(metadataReads),pay=n=>{const paid=reserve({ecrRequests:0,logicalBytes:n,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0});if(paid&&typeof paid.then==='function'){Promise.resolve(paid).catch(()=>{});fail('NonrootArchiveSynchronousPayment');}};
+    pay(4*response.ContentLength+4096);processingCheck=()=>pay(0);
+   }
    const chunks=[];let length=0;const abort=()=>response.Body.destroy(Error('NonrootArchiveReadExpired'));signal.addEventListener('abort',abort,{once:true});
-   try{signal.throwIfAborted();for await(const chunk of response.Body){signal.throwIfAborted();if(!(chunk instanceof Uint8Array))fail('NonrootArchiveTransportInvalid');length+=chunk.length;if(length>response.ContentLength)fail('NonrootArchiveTransportInvalid');chunks.push(Buffer.from(chunk));}}
+   try{signal.throwIfAborted();for await(const chunk of response.Body){processingCheck();signal.throwIfAborted();if(!(chunk instanceof Uint8Array))fail('NonrootArchiveTransportInvalid');length+=chunk.length;if(length>response.ContentLength)fail('NonrootArchiveTransportInvalid');chunks.push(Buffer.from(chunk));}}
    finally{signal.removeEventListener('abort',abort);}
    if(length!==response.ContentLength)fail('NonrootArchiveTransportInvalid');total+=length;
-   const bytes=Buffer.concat(chunks),text=bytes.toString('utf8');if(!Buffer.from(text).equals(bytes))fail('NonrootArchiveEncoding');
-   records[name]=parseImageTransitionJson(text);receipts[name]={key:prefix+name,rawHash:sha(bytes),bytes:length};
+   processingCheck();const bytes=Buffer.concat(chunks),text=bytes.toString('utf8');if(!Buffer.from(text).equals(bytes))fail('NonrootArchiveEncoding');
+   records[name]=name==='nonroot-proof-archive.json'?parseNonrootArchiveJson(bytes,ARCHIVE_CAPACITY.wireBytes):parseImageTransitionJson(text);receipts[name]={key:prefix+name,rawHash:sha(bytes),bytes:length};
   }finally{response.Body?.destroy?.();}
  }
+ if(records['nonroot-proof-archive.json'].version===1&&total>MAX_BYTES)fail('NonrootArchiveTransportInvalid');
  const operation=records['operation.json'],proofArchive=importNonrootArchive(records['nonroot-proof-archive.json'],{expectedManifestHash:operation?.evidenceManifest?.canonicalHash});
  const archive=await authenticateNonrootArchive(proofArchive,{parameter,operation},{expectedProofHash:data.transition.proofHash,expectedDataHash:selected.hash,expectedReviewHash:data.policyHash,expectedParameterVersion:parameter.Version,
   expectedScope:{account:data.account,region:data.region,runtimeNonce:data.runtimeNonce,authorizationId:data.authorizationId}});

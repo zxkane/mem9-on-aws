@@ -8,7 +8,7 @@
     "integrity": "sha512-/5apOkwWxtACcQtZ5WlrAsKS4JwXVThQPJZ3RqIruRY9UG9M8e0VlXN068xum/JRKA4aIUoJ13ghe/kGCvidiQ==",
     "builderSourceHash": "f4d29e0ef2cbf01a6ef16594e4dc1158ab9bc882ceb0fc1b9c2811c68e91e5c8"
   },
-  "packageLockHash": "547889667a18ff31b875957af2a2ba6189a2a67bb50b58f5b70c3cf8fc984648",
+  "packageLockHash": "e60858264abb7fa0e0f899283f895682c5720975d3360068e226a8e9f241678b",
   "inputs": [
     {
       "path": ".github/actions/control-composition/index.mjs",
@@ -15351,6 +15351,11 @@
       "bytesLength": 10815
     },
     {
+      "path": "scripts/build-observer-sdk-codec.mjs",
+      "sha256": "7ed875ccdd3edc66fa7099554c213a3c082e853809d9851b6c73f19e37d68def",
+      "bytesLength": 5919
+    },
+    {
       "path": "scripts/canary-fixture-e2e.mjs",
       "sha256": "0e3978251ccfa2bc890fa6b40f898abba285cfbab3c40bea444580e9695b1ff3",
       "bytesLength": 20045
@@ -15467,13 +15472,23 @@
     },
     {
       "path": "scripts/lib/ci-smoke-acquisition-format.mjs",
-      "sha256": "908c3d613d9fda4396cb2e6ccea5e79fbf4b5521b7e4e4ea83b1fdc7efef705d",
-      "bytesLength": 15166
+      "sha256": "dcfd41f05f860a765507c6a9f1b0fc7c287aa3e6aae0288c86958835650be38c",
+      "bytesLength": 15792
     },
     {
       "path": "scripts/lib/ci-smoke-acquisition.mjs",
-      "sha256": "d43afe32251d8389ab50a3808be10551642b1c80addc0d417b01111f014eaaf5",
-      "bytesLength": 27483
+      "sha256": "2bf88d7a504e3d0a88f47860d6a2c8e5cca571b145214128f1c94d1e19ea18d2",
+      "bytesLength": 27684
+    },
+    {
+      "path": "scripts/lib/ci-smoke-archive-replay.mjs",
+      "sha256": "840884c3c67cb377149ecdeb27bbb9e7c764d86f00ccd195ba533e34c0e51fdf",
+      "bytesLength": 6462
+    },
+    {
+      "path": "scripts/lib/ci-smoke-command-catalog.mjs",
+      "sha256": "51e7349531372e24c93a3d30035f4f717fe426f33bf21b1689d751181e1da5ea",
+      "bytesLength": 7690
     },
     {
       "path": "scripts/lib/ci-smoke-commit-source.mjs",
@@ -15492,8 +15507,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-future-acquisition.mjs",
-      "sha256": "2d68c2db9cfc99c5b15dbb8ce4958c5a566d8cd81d42f37059d3b6599b11bc4b",
-      "bytesLength": 65806
+      "sha256": "0ecc030a93181e0b91977ece1764e5c9b9ef308d24d2f63431d79e4db7ba4729",
+      "bytesLength": 66046
     },
     {
       "path": "scripts/lib/ci-smoke-future-allowance.mjs",
@@ -15507,8 +15522,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-github.mjs",
-      "sha256": "915bc2e1aa72af516e87108d910371e0105ff2ea45527a2f4c727cc44ce8705e",
-      "bytesLength": 4456
+      "sha256": "bca26830c5a8b22dc2b68ea6d80af2068bd5c32edad6826fc23e4fcde849acec",
+      "bytesLength": 4688
     },
     {
       "path": "scripts/lib/ci-smoke-grants.mjs",
@@ -15522,8 +15537,8 @@
     },
     {
       "path": "scripts/lib/ci-smoke-isolation.mjs",
-      "sha256": "6521f9dbd2e273b2dddb03cad82f7ce260ae8b71c1953c911738ae07d6e8582a",
-      "bytesLength": 46081
+      "sha256": "31b7d7c6f2df63a3066f98063c0c7e7c19116f4b957d22cac7621ceab639be8b",
+      "bytesLength": 48165
     },
     {
       "path": "scripts/lib/ci-smoke-job.mjs",
@@ -15847,8 +15862,8 @@
     },
     {
       "path": "scripts/lib/production-control-composition-preparation.mjs",
-      "sha256": "51eb543c507b2c9c566c6d890e2370d94d06da00ddd5c60ab35183895b6af408",
-      "bytesLength": 7883
+      "sha256": "8269b47ec49616c9aca5f631f6f2272bd190f38ec7ff246345dee8b4d7a59340",
+      "bytesLength": 8139
     },
     {
       "path": "scripts/lib/production-control-composition-producer.mjs",
@@ -15907,8 +15922,8 @@
     },
     {
       "path": "scripts/lib/production-control-composition-source.mjs",
-      "sha256": "190b994fbc96615ba1f3b733cc462e18ea334cc3c52ded47feb4e1e2d9dd29c1",
-      "bytesLength": 4530
+      "sha256": "fd8e415c667ecf3bc9e847f13f4b84e7bad3bf297a3ec0016da25678e2e368d6",
+      "bytesLength": 4807
     },
     {
       "path": "scripts/lib/production-control-composition-transport.mjs",
@@ -15927,8 +15942,8 @@
     },
     {
       "path": "scripts/lib/production-control-source.mjs",
-      "sha256": "07cda93dca430ebf2bf5c2125d31f1d4d49413480a98292e02a2dfc94e964190",
-      "bytesLength": 10129
+      "sha256": "1961cb60d45857017389012e818b8011a369ec8c73c84dbd566985afe168108b",
+      "bytesLength": 10475
     },
     {
       "path": "scripts/lib/production-current-capacity.mjs",
@@ -15992,8 +16007,8 @@
     },
     {
       "path": "scripts/lib/production-image-deployment-bundle.mjs",
-      "sha256": "ad7ab7b53ab30429b09dd46b203f8ed6e649e61d06946220c8707183d56fa125",
-      "bytesLength": 16132
+      "sha256": "661b7ebffc9d3e99f1ff56a5906eb807d8360ff2502fdd342505ba6564e25e27",
+      "bytesLength": 16228
     },
     {
       "path": "scripts/lib/production-image-deployment-reader.mjs",
@@ -16006,14 +16021,19 @@
       "bytesLength": 4725
     },
     {
+      "path": "scripts/lib/production-image-filesystem-resolver.mjs",
+      "sha256": "9f1982135e67426221821d1e0e0363d4b3d297e7a6ea0d75dae342504843018c",
+      "bytesLength": 3972
+    },
+    {
       "path": "scripts/lib/production-image-filesystem.mjs",
-      "sha256": "8bea6cdaaaef6bf3755c90053ca17943b5c2030bd0d28ecf22eb945562f19e9e",
-      "bytesLength": 28664
+      "sha256": "554cd7a84ade76841357e8892804c78fb633ed4ddbcedc5a5cd4508ab354623b",
+      "bytesLength": 27645
     },
     {
       "path": "scripts/lib/production-image-graph.mjs",
-      "sha256": "fe90611ef4fcea31cdf3c6e35fcf84626a73ea1d9c8344435d767b18aea8c159",
-      "bytesLength": 40688
+      "sha256": "fae091f18ba2aefce001b9b52cd7d7e5840aeea55722949e57aac734ec40dd0a",
+      "bytesLength": 43227
     },
     {
       "path": "scripts/lib/production-image-response.mjs",
@@ -16032,8 +16052,8 @@
     },
     {
       "path": "scripts/lib/production-image-transition-proof.mjs",
-      "sha256": "d796059b2302a5df27755aa7d6bb9cf24c15eeab9aad6f02ed0ddd06ae706d59",
-      "bytesLength": 43248
+      "sha256": "0ed10897e1ce1919a109cd4f410d506a5f8b3c46afdc7d552e3fa65b23552b72",
+      "bytesLength": 51970
     },
     {
       "path": "scripts/lib/production-image-transition.mjs",
@@ -16046,14 +16066,29 @@
       "bytesLength": 6504
     },
     {
+      "path": "scripts/lib/production-nonroot-acquisition-audit.mjs",
+      "sha256": "670e09cf14505efd32744e999cde155400cff2c0def251b9adb46be971b74438",
+      "bytesLength": 12590
+    },
+    {
+      "path": "scripts/lib/production-nonroot-acquisition-math.mjs",
+      "sha256": "16445de442af8822baadeea6be0c5508fdee92f17f830a3eb93ef796e6ebb862",
+      "bytesLength": 9670
+    },
+    {
+      "path": "scripts/lib/production-nonroot-archive-capacity.mjs",
+      "sha256": "44ecbfc31aa406e445cdee2772555def3fb9216fcc29e65bd67da072f541a73c",
+      "bytesLength": 1161
+    },
+    {
       "path": "scripts/lib/production-nonroot-archive.mjs",
-      "sha256": "3de4a20b3f8e52c17a497861658d1328acbce4afb64660dffa4e04a61fd4b686",
-      "bytesLength": 17211
+      "sha256": "488c4faaeb1189129f6eca880f406f0771ba7efee291d7748b344c65d4c6654c",
+      "bytesLength": 20222
     },
     {
       "path": "scripts/lib/production-nonroot-artifact.mjs",
-      "sha256": "84acadd0eaee03518390f5c5e28c611e57fbe15d9d828ef9ad5901f343f50844",
-      "bytesLength": 5222
+      "sha256": "193d9e0f69388dbffb34c0e3549990f636bf1b9687d280b4592f9e46b92f513b",
+      "bytesLength": 6544
     },
     {
       "path": "scripts/lib/production-nonroot-before-copy-accounting.mjs",
@@ -16067,8 +16102,23 @@
     },
     {
       "path": "scripts/lib/production-nonroot-budget-transport.mjs",
-      "sha256": "2af53eac61242d03a6dc20449b324b528750c9a6b9f9182a8b9844d9c40ee924",
-      "bytesLength": 18928
+      "sha256": "c54b965895a517cb542c464c28a0ad2737dd57e13739084c7695d24d19b6ab4e",
+      "bytesLength": 19692
+    },
+    {
+      "path": "scripts/lib/production-nonroot-build-log-progress.mjs",
+      "sha256": "f5d0b5a34aca9d21daac370f0fe34e511ab54642d7aba6cd65fd0bbfb85e6ec6",
+      "bytesLength": 2299
+    },
+    {
+      "path": "scripts/lib/production-nonroot-buildkit-material.mjs",
+      "sha256": "efde9d4f5cecf5eb85b253fcabce9b53364b14124aaa0b3608b1bc442557af3b",
+      "bytesLength": 20709
+    },
+    {
+      "path": "scripts/lib/production-nonroot-buildkit-replay.mjs",
+      "sha256": "5be3043f4a1c0ca6bce5593fa96d8455dd2bb440aa876897939ae97397a768fb",
+      "bytesLength": 8660
     },
     {
       "path": "scripts/lib/production-nonroot-cache.mjs",
@@ -16092,8 +16142,13 @@
     },
     {
       "path": "scripts/lib/production-nonroot-control-cache.mjs",
-      "sha256": "96636a520325bdde10ae8af7a407dd358e548cf81e4abcdb3798251a5ce87ff2",
-      "bytesLength": 6654
+      "sha256": "c6ad1bee8cd6a2a8c68d984fdecaa8f0d5d143886a4a444a799f87bb6bb0b395",
+      "bytesLength": 7117
+    },
+    {
+      "path": "scripts/lib/production-nonroot-control-current.mjs",
+      "sha256": "fef447a93055c3f63593a1351dd0a2f6e8cee31fae6d67469d0a5ec44c26ea7d",
+      "bytesLength": 2050
     },
     {
       "path": "scripts/lib/production-nonroot-control-docker-supervisor.mjs",
@@ -16102,8 +16157,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-control-docker.mjs",
-      "sha256": "82935e6ef73630b1385b55969ed296730425fb720bff2b64a9df3872412d53f8",
-      "bytesLength": 17095
+      "sha256": "84d8891e64bb59c0ca005390b846d571b42db59b96345c6b74374d3734b5619f",
+      "bytesLength": 18276
     },
     {
       "path": "scripts/lib/production-nonroot-control-download.mjs",
@@ -16112,18 +16167,18 @@
     },
     {
       "path": "scripts/lib/production-nonroot-control-guard.mjs",
-      "sha256": "07d148dd77beed19823b4a920d554a53465f92bceb788748ae6d9fb6a447f8c6",
-      "bytesLength": 18690
+      "sha256": "7d811f299f4354450e17fef3d8a80b5453876d2c1bf947f5fd8fe3079a4ec477",
+      "bytesLength": 29612
     },
     {
       "path": "scripts/lib/production-nonroot-control-material.mjs",
-      "sha256": "6e99bc2667a05ffb685527b3a62d967558e4c707e6c75d53fc69d6b9fb260550",
-      "bytesLength": 19079
+      "sha256": "90dd080ba86cbb2d4eea31d21ea67102e63e6080844238371d750ee62839478c",
+      "bytesLength": 19628
     },
     {
       "path": "scripts/lib/production-nonroot-control-prerequisites.mjs",
-      "sha256": "f15c468755f93e455d3c34552bebf7ede31ccb0b6e15df3eabb13b2c9ee70d16",
-      "bytesLength": 39710
+      "sha256": "56d50a5f0de9767055f9e064f39e48ead82b55f9c1ec20115ad82f0bd9e47cab",
+      "bytesLength": 46145
     },
     {
       "path": "scripts/lib/production-nonroot-control-reads.mjs",
@@ -16137,13 +16192,13 @@
     },
     {
       "path": "scripts/lib/production-nonroot-control-scan-policy.mjs",
-      "sha256": "a38afdffd1b75dd5675e1828cf35696be5ef037c373b036308c386adb5d47a52",
-      "bytesLength": 7807
+      "sha256": "ea055eecc988437306bd7fd40473ec4ed8675a216d415f41adad1d69a7ccc7c9",
+      "bytesLength": 9418
     },
     {
       "path": "scripts/lib/production-nonroot-control-scan.mjs",
-      "sha256": "18dc5f9b747a02a646d74d0d374f242e489ae61050bbe6c443d62b6ad454170d",
-      "bytesLength": 6270
+      "sha256": "d12828b85f188d4725ccf14e657af0b738bc52f624e6871a3afe39c6d69c3e36",
+      "bytesLength": 6663
     },
     {
       "path": "scripts/lib/production-nonroot-copy-replay.mjs",
@@ -16151,19 +16206,34 @@
       "bytesLength": 14618
     },
     {
+      "path": "scripts/lib/production-nonroot-data-facts-work.mjs",
+      "sha256": "24cab7c71dbbc32e8cdc8fab0565e0a07907d2797cecde35c9b038da0c661312",
+      "bytesLength": 2042
+    },
+    {
+      "path": "scripts/lib/production-nonroot-data-observer.mjs",
+      "sha256": "db8f4fc6678bd8ea4ef4aa24ae200f9cd62be573ff98ce5d7ba9899db5545297",
+      "bytesLength": 2354
+    },
+    {
       "path": "scripts/lib/production-nonroot-deployment-provider.mjs",
-      "sha256": "9f01241700d0f28dcf6d67d51e1342a7572839bc387350e7b86ea475c2858e41",
-      "bytesLength": 35578
+      "sha256": "073494196b43231a0ffeeaf9bf0633b6734b03c5ee74805c8e74238bdb5b26e4",
+      "bytesLength": 36973
     },
     {
       "path": "scripts/lib/production-nonroot-deployment-reader.mjs",
-      "sha256": "3ea462ddec4cab8752fddf31a72d5913771a7f7acea0b3346a1b533bdfd66718",
-      "bytesLength": 4536
+      "sha256": "54e37c6c2fb40b33af6198fd00a2de582ca131b53f12483c2b83bbfa2c74a028",
+      "bytesLength": 5669
     },
     {
       "path": "scripts/lib/production-nonroot-descriptor-processing.mjs",
       "sha256": "2220874e73b8156c9f8082b8ce7eebe677db6a5e5cedb411ecc8f958311f6e12",
       "bytesLength": 11391
+    },
+    {
+      "path": "scripts/lib/production-nonroot-engineering-json.mjs",
+      "sha256": "2fc55d652d764c204055321051b3602723c4a0e7ea4d85dd44376ecf3374cec0",
+      "bytesLength": 4027
     },
     {
       "path": "scripts/lib/production-nonroot-fence-accounting.mjs",
@@ -16172,8 +16242,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-finalization-accounting.mjs",
-      "sha256": "66d7671310c8f0309c05aab075681e57ad0188dcd0d0536712bf8228c5381d77",
-      "bytesLength": 8258
+      "sha256": "3dc47e79e1611ef2742a9b6ddaeec81aaf6d068052f8e429a66a551a3fa2b3f4",
+      "bytesLength": 10406
     },
     {
       "path": "scripts/lib/production-nonroot-launch.mjs",
@@ -16186,14 +16256,264 @@
       "bytesLength": 3399
     },
     {
+      "path": "scripts/lib/production-nonroot-observation-busybox-collector.mjs",
+      "sha256": "73d9d93e2b1f6d26ff095b5dbe612a2bcb7195af504811bd254c0452addd3c88",
+      "bytesLength": 7419
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-busybox-episode.mjs",
+      "sha256": "62e2c3f792c68adb4d9c1e8f5933132e1915f8e3ea22ed3fba67866f9deffafb",
+      "bytesLength": 15470
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-busybox-gate.mjs",
+      "sha256": "5ad9220070f2d47a66455302e7192367850d4e9e61eda4ed881f08ccddaea24f",
+      "bytesLength": 7974
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-busybox-output.mjs",
+      "sha256": "5e2f743fc1f7a3c39fe1e9fe9929045f49b5e9a3fcdd576a9a0698043dfccbbf",
+      "bytesLength": 7278
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-busybox-records.mjs",
+      "sha256": "b6e982b947b82361c93e7962303eca5913129ad8567d7b242b055005086cb9b1",
+      "bytesLength": 5851
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-collector.mjs",
+      "sha256": "c8b73f595acfc4a11cc3990e7a780bcea696bc4950b012fcf9fd8c2c02470823",
+      "bytesLength": 11989
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-frames.mjs",
+      "sha256": "6f6d6938828b2fcb712eff2fba5429690b9671fac67e76ff92c0a38ae7aa5dce",
+      "bytesLength": 8519
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-gate.mjs",
+      "sha256": "a0edd175aa53605c925918203b7c740554bbaac47fef35401afbe3790b65fb10",
+      "bytesLength": 8200
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observation-node-output.mjs",
+      "sha256": "4bd632b368e4ef893e90047721b4d97813a65b6070d46dd8b494be226c7bc6e1",
+      "bytesLength": 2626
+    },
+    {
       "path": "scripts/lib/production-nonroot-observation.mjs",
-      "sha256": "fa4cf1db3e88f2e75a1312120579114c4aaefd94a8198b83fc8474ca5a4f4425",
-      "bytesLength": 17776
+      "sha256": "7254c7956e4028d1bd0a767dd1fac0a1594db06f43cc119a22b3bd6d4f7625f9",
+      "bytesLength": 24769
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observed-busybox-launch.mjs",
+      "sha256": "2d1adf1327c2645b995cfd44c31a15d23e47748679f4a3afd4cf7e6d460fc87e",
+      "bytesLength": 20513
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observed-node-launch.mjs",
+      "sha256": "800e54192a43e2c5f5e91450cb80b9ee787c895cd36e0d53dfd201f7c14119ec",
+      "bytesLength": 16732
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-accounting.mjs",
+      "sha256": "2334a25b9661fa8644b9897c575a20de2b84f04db035e528983c717ab8865239",
+      "bytesLength": 7109
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-archive-index.mjs",
+      "sha256": "b18603aba2c85b0ec1cfa0fe5db4e7a2730c8ecc97ddfe803928854e477406ab",
+      "bytesLength": 4091
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-archive-reader.mjs",
+      "sha256": "994c7809896d5acfb392df2d8b0be3255b850a18dd78769288082cff5708357e",
+      "bytesLength": 4353
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-case-bindings.mjs",
+      "sha256": "fb9e1b396ea30d1078ec7ff542bda31bc93e235281a8070f9d198324de26dbac",
+      "bytesLength": 2193
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-cohort-model.mjs",
+      "sha256": "f1577f85ef89fd742de3601eb623a5706d4debd75293fcde550d9cfa923a5857",
+      "bytesLength": 11364
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-control-context.mjs",
+      "sha256": "2c3bca530b8ccd65080fb6627122467b9fc54975048c58fa80dd2486b12319af",
+      "bytesLength": 17401
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-control-logs.mjs",
+      "sha256": "26543bffb7b145dcfc806d78be34862b89b887fbb46cffefa56667a13126b397",
+      "bytesLength": 6293
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-control-output.mjs",
+      "sha256": "94677044c7ec4b17040184d33c53e66edb4ec354fee81541b69e70945340b4b9",
+      "bytesLength": 12493
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-control-replay.mjs",
+      "sha256": "cc0d18e1472fe88f6e6c324641f32fbe39d3b41b70798f312b82edad3d1f1324",
+      "bytesLength": 9161
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-control-slots.mjs",
+      "sha256": "90db8c94d8547916cf4d90c30f43d92369c87c1b55a8561310e37b1b961e3b69",
+      "bytesLength": 4059
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-data-episode.mjs",
+      "sha256": "a0c55256d05e96a6c628361ded1435fd8c4b19e35a9a6f199711348de66547e7",
+      "bytesLength": 5721
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-data-logs.mjs",
+      "sha256": "1d847ea1d042ea0bf3cc81adc89150f249e59b94ef105a4116690a5b99ae3b28",
+      "bytesLength": 6692
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-data-replay.mjs",
+      "sha256": "c2b3f01f5fd0c5f758b0bbc916aef59e450f059d624260d3f954bb60d5d0a765",
+      "bytesLength": 13552
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-data-source.mjs",
+      "sha256": "6e6d77b02e23af0b5eb726e4f21d2145752ee42390eab3c2128e1b7eb17d58ec",
+      "bytesLength": 11581
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-delivery.mjs",
+      "sha256": "9c925f5a8648d379e830bb3beed5f302ccb65717c72634ccc6e0d08e00990f4f",
+      "bytesLength": 14581
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-finalization-work.mjs",
+      "sha256": "d8971c274400299688932877dd221ede2ba607b2ad2c4291bb65b81b531f7918",
+      "bytesLength": 723
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-journal.mjs",
+      "sha256": "dd1c00c6745eaed41783775d01bc191d12f068a272f90e613d41c90411274ef1",
+      "bytesLength": 13098
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-json-size.mjs",
+      "sha256": "56637c42304457f40fdfd38c443cd2a47cac3ac349cb603850c597ca2c590a94",
+      "bytesLength": 1892
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-plan.mjs",
+      "sha256": "baa769978201f342c7229a3edfe0b485dd37cb5479903780941064e0a8cec0f6",
+      "bytesLength": 45600
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-prerequisites.mjs",
+      "sha256": "c76ed6bc3ae939a9ca2a48657afc04409813e5c3929b24c556a27f5c6ff2a5e1",
+      "bytesLength": 20043
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-primitive-source.mjs",
+      "sha256": "42643f2cee77210a5b5338491cdb83a9ede97907abfa0bf5aad403255085c888",
+      "bytesLength": 4284
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-primitives.mjs",
+      "sha256": "b20f8ad3a8c88932a6f0141a9ee3384750d16c23bf76c75b822b851d68328ee0",
+      "bytesLength": 9480
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-provider-codec.mjs",
+      "sha256": "bf2ce963ea5c409ed53e00f9cee61911bfe33f2843784a62c4c28907ac078cc1",
+      "bytesLength": 1481
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-replay.mjs",
+      "sha256": "86b84fdd9097ecf85343c023a72b7e11b507ec8cfac07e103091768ff3ec5518",
+      "bytesLength": 36368
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-resource-obligations.mjs",
+      "sha256": "c1ddc9fce2ba782376812ecfaeeab04126dd6f11e956d268c6b0a026d161fc49",
+      "bytesLength": 29086
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-route-attribution.mjs",
+      "sha256": "f83a5fc9fef94def507c146b813ffc06b4fb11a839b061c6c8d679dfdf54f96f",
+      "bytesLength": 6252
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-route-probe.mjs",
+      "sha256": "5a6f00674a9fdd0267ea85c6d8c00fb28382d465655c2cd3092c0b2d48c89163",
+      "bytesLength": 12852
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-route-protocol.mjs",
+      "sha256": "3de7dee91d88f8a8d78732df50340a1cfb933ad1b948222b4af42e85a447b4d9",
+      "bytesLength": 15755
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-runtime-provider.mjs",
+      "sha256": "8476b4581d655ec5ef5f0ef3361db45f74f497f511904becbafadc4afb7cd8f2",
+      "bytesLength": 24910
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-sdk-source.mjs",
+      "sha256": "78e3a9427c51936da7d8e94fbef5ce3a795d57e33465e32cc3ef0082c02750ef",
+      "bytesLength": 2176
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-sdk.mjs",
+      "sha256": "7b0cc9ccd4950c0f4846f8d7ed7f1fe785d91c74aef8232bbf8e2310170aff39",
+      "bytesLength": 328445
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-session-policy.mjs",
+      "sha256": "7caa0a9fbad9976b3a8aa7a44714a30f949799a847d0dbd458b08c37a20efac1",
+      "bytesLength": 5155
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-source-compile.mjs",
+      "sha256": "6d9e7ce4e16f13cd7d28da4a40d6570f71926da1c04464eadc07f307c696efc1",
+      "bytesLength": 4512
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-source-model.mjs",
+      "sha256": "380e51d1ee980c5f682456d075406f311119d97ef19f574e6859217f18070c62",
+      "bytesLength": 14983
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-source-originals.mjs",
+      "sha256": "52070a175f9ee7cac7eeeaf5b10855f1ad193a8e85ebf15d3bccd31f660340f8",
+      "bytesLength": 1487
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-source-syntax.mjs",
+      "sha256": "24c0b7975ec794ebd620f856a2c1fc018f599a06c45ec6030e0f18b3008532d5",
+      "bytesLength": 13147
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-timeline.mjs",
+      "sha256": "7571f8a8af7c2701b7415758dedda47063aca5587f53e58bc4b75db7b23763d6",
+      "bytesLength": 17350
     },
     {
       "path": "scripts/lib/production-nonroot-original-issuer-accounting.mjs",
       "sha256": "1195b543d79b980c52bb1668cda7a95b365b133f228db22849dc49bfb2a27bc7",
       "bytesLength": 14101
+    },
+    {
+      "path": "scripts/lib/production-nonroot-overlap-preparation.mjs",
+      "sha256": "7bc3df3ea12d5cfdc2977098089c88cebbe0475070da7e3531673c990df32426",
+      "bytesLength": 4615
+    },
+    {
+      "path": "scripts/lib/production-nonroot-path-probe.mjs",
+      "sha256": "53e7cf360fa75594769d5e3585db341f53df6310c83383fc791a8cd40b0f8efd",
+      "bytesLength": 1994
     },
     {
       "path": "scripts/lib/production-nonroot-prerequisites.mjs",
@@ -16227,13 +16547,43 @@
     },
     {
       "path": "scripts/lib/production-nonroot-proof.mjs",
-      "sha256": "a9b949021a7b3f65aefe5b5b020722af6793d16df16ff38b19677cbca1bdd294",
-      "bytesLength": 80951
+      "sha256": "beae5ec3f501aea85509a77aa22c321e73b3b22f42351ae08ccda12817127f4c",
+      "bytesLength": 97236
     },
     {
       "path": "scripts/lib/production-nonroot-provenance.mjs",
-      "sha256": "ee59d987d9d0600f87a8e6f549b1a789dee60530d1a40779c8bd6481ddc82c1d",
-      "bytesLength": 39658
+      "sha256": "9a8cbfaa883c4b454494accf59e3ad1f9b66f027b74053ad8cede736e709390c",
+      "bytesLength": 41216
+    },
+    {
+      "path": "scripts/lib/production-nonroot-rehearsal-acquisition.mjs",
+      "sha256": "d3c302faa36da344b707c271153972a9647d3b263fa21fae3c65defc9fb52f03",
+      "bytesLength": 9639
+    },
+    {
+      "path": "scripts/lib/production-nonroot-rehearsal-binding.mjs",
+      "sha256": "24256e9b293c7d2d4c754960db86a07603a7b00bfa66b0bb5428985bddb057a1",
+      "bytesLength": 2861
+    },
+    {
+      "path": "scripts/lib/production-nonroot-rehearsal-bridge.mjs",
+      "sha256": "2ff0de134779b377d087a932949fa77ab4f66890b52158c60502135fe6bbea3b",
+      "bytesLength": 17000
+    },
+    {
+      "path": "scripts/lib/production-nonroot-rehearsal-commands.mjs",
+      "sha256": "db6fe6c03ea43f46a911fd93223df4410585d47b3caa2cbe014583666e83dde1",
+      "bytesLength": 1600
+    },
+    {
+      "path": "scripts/lib/production-nonroot-rehearsal-control-replay.mjs",
+      "sha256": "c10bb1c228ff79b12fc6df73ce8291e9c6588acda21cd0ce3299a6ecbe8f6bec",
+      "bytesLength": 12255
+    },
+    {
+      "path": "scripts/lib/production-nonroot-rehearsal-join.mjs",
+      "sha256": "79c8dda22916c84decdd6395d011fc69b5f49f06099639bedce3c1d68d0bd9cf",
+      "bytesLength": 7969
     },
     {
       "path": "scripts/lib/production-nonroot-root-material.mjs",
@@ -16257,8 +16607,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-runtime.mjs",
-      "sha256": "0d254e69eb2b32dfdc9ad270a6e58f8ba8a8ec43bee750efa12696d111ea330d",
-      "bytesLength": 15424
+      "sha256": "13f0884bdb815e904e29a56fdf70e28ed0c562e839a6e3cf2f96b4fc61550b4f",
+      "bytesLength": 15612
     },
     {
       "path": "scripts/lib/production-nonroot-scan-pool.mjs",
@@ -16602,8 +16952,8 @@
     },
     {
       "path": "scripts/verify-ci-smoke-isolation.mjs",
-      "sha256": "44a2135694b726be2f13eef1e5185317bf11d90c5511eb7bb81660c943368f0c",
-      "bytesLength": 40464
+      "sha256": "be4240a0101ddd12ec69ecfbb0bd0e2cf51683f526d8822ea3363a3ea14aab0d",
+      "bytesLength": 40967
     },
     {
       "path": "scripts/verify-image-security-deployment.mjs",
@@ -16633,7 +16983,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "a31f69773e11140b178d9a9ede9ac639b3772506ceb95f8e19d36c344579049a",
-    "bytesLength": 6498678
+    "sha256": "225cbe128838faa5d76f559809ed27a40ad74b52d676dc22667645afd4e754de",
+    "bytesLength": 7391748
   }
 }

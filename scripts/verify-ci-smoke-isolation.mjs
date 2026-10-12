@@ -1,3 +1,4 @@
+import {assertNonrootControlCurrent} from './lib/production-nonroot-control-current.mjs';
 import {mkdir,readdir,unlink,rmdir,lstat,readFile,appendFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -127,16 +128,17 @@ export function imageMetadataRefs(images,store){
   return [role,{root:reference(image.rootDigest),manifest,config}];
  }));
 }
-export async function verifyImageMetadataRefs(refs,images,readBytes){
+export async function verifyImageMetadataRefs(refs,images,readBytes,options={}){
+ const resume=value=>{assertNonrootControlCurrent(options);return value;};resume();
  exact(refs,['server','database']);
  for(const role of ['server','database']){
   const r=refs[role],image=images[role];exact(r,['root','manifest','config']);
   need(r.manifest.sha256===image.arm64Digest.slice(7)&&r.config.sha256===image.configDigest.slice(7),'CiSmokeImageMetadataDigest');
-  const manifest=parse(await readBytes(r.manifest)),config=parse(await readBytes(r.config));
+  const manifest=parse(resume(await readBytes(r.manifest))),config=parse(resume(await readBytes(r.config)));
   need(manifest.schemaVersion===2&&manifest.config?.digest===image.configDigest&&config.os==='linux'&&config.architecture==='arm64','CiSmokeImageMetadataBinding');
   if(r.root!==null){
    inspectCiSmokeRecord('ByteRef',r.root);
-   need(r.root.sha256===image.rootDigest.slice(7),'CiSmokeImageMetadataDigest');const root=parse(await readBytes(r.root));
+   need(r.root.sha256===image.rootDigest.slice(7),'CiSmokeImageMetadataDigest');const root=parse(resume(await readBytes(r.root)));
    need(image.rootDigest===image.arm64Digest||root.manifests?.some(m=>m.digest===image.arm64Digest&&m.platform?.os==='linux'&&m.platform.architecture==='arm64'),'CiSmokeImageMetadataBinding');
   }
  }
@@ -205,17 +207,19 @@ async function selectSource(host,route){
  need(provenance.buildDigest===commitment.outputDigest,'CiSmokeSourceDigest');await freshCheckout(host,checkout);
  return {checkout,commitment,provenance,stage,current:ownIdentity(env),job:await currentJob(host)};
 }
-export async function verifyDecoded(decoded,provenance,now){
+export async function verifyDecoded(decoded,provenance,now,options={}){
+ assertNonrootControlCurrent(options);
  const {result,source,isolation,observations,commandBindings,commandCatalog}=decoded.records;
  assertProducerClosure(observations,isolation);
  exact(source,['version','kind','originRecipe','candidateRecipe','material','imageMetadata']);need(source.version===1&&source.kind==='ci-smoke-source-capture','CiSmokeEnvelopeSource');
- await verifyImageMetadataRefs(source.imageMetadata,observations.images,decoded.readBytes);
+ await verifyImageMetadataRefs(source.imageMetadata,observations.images,decoded.readBytes,options);assertNonrootControlCurrent(options);
  const expected=completedExpected(producedExpected(result,observations,commandBindings,commandCatalog),provenance),extra=new Objects();
  // Completion metadata is collected after the producer job ends. It is a new
  // record; the original envelope and its honest in-progress capture stay intact.
  const material={...source.material,provenance:extra.json(provenance),expected:extra.json(expected)};
  const checked=await verifyArchivedCiSmoke(isolation,result,{material,originRecipe:source.originRecipe,candidateRecipe:source.candidateRecipe,
-  resolveJson:async ref=>extra.objects.get(ref.bytesHash)??decoded.readJson(ref),readBytes:async ref=>extra.objects.get(ref.sha256)??decoded.readBytes(ref),now});
+  resolveJson:async ref=>{assertNonrootControlCurrent(options);return extra.objects.get(ref.bytesHash)??decoded.readJson(ref);},readBytes:async ref=>{assertNonrootControlCurrent(options);return extra.objects.get(ref.sha256)??decoded.readBytes(ref);},now,processing:options.processing,assertCurrent:options.assertCurrent});
+ assertNonrootControlCurrent(options);
  // These are the two original byte objects consumed above, not rebuilt JSON
  // or predicted job completion. This data remains non-authorizing; consumers
  // replay it with the immutable envelope and authenticated archive bindings.

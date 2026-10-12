@@ -11,6 +11,7 @@ import {NONROOT_FORBIDDEN_ENVIRONMENT} from './production-nonroot-launch.mjs';
 import {controlImageGraphBinding,imageGraphState,readImageJson} from './production-image-graph.mjs';
 import {inspectImageFilesystemEvidence,inspectImageFilesystemEntries,inspectImageFilesystemFile,readImageFilesystemFile,imageFilesystemVerificationKind} from './production-image-filesystem.mjs';
 import {verifyControlSourceClosure,readControlSourceFile} from './production-control-source.mjs';
+import {assertNonrootControlCurrent as current,inspectNonrootRecordedCommands} from './production-nonroot-control-current.mjs';
 
 const states=new WeakMap(),sha=b=>createHash('sha256').update(b).digest('hex');
 const sourcePath='scripts/lib/production-nonroot-control-prerequisites.mjs',sourceBytes=readFileSync(new URL(import.meta.url)),collectorCodeHash=sha(sourceBytes);
@@ -121,16 +122,17 @@ const probeCodeHash=sha(probeCode);
 // Same bounded positive process-group exit discipline as the path observer.
 // Internal host transport shared by the two fixed collectors. This function
 // creates no evidence/authority; callers must supply their code-owned argv.
-export function runNonrootControlDockerCommand(args,{directory,timeoutMs,signal}){
+export function runNonrootControlDockerCommand(args,{directory,timeoutMs,signal,assertCurrent,cleanup=false}){
+ const processing={assertCurrent};current(processing,cleanup);
  return new Promise((resolve,reject)=>{
   const child=spawn('/usr/bin/docker',['--host','unix:///var/run/docker.sock','--config',directory,...args],{cwd:directory,env:{PATH:'/usr/bin:/bin',HOME:directory,DOCKER_CONFIG:directory,LANG:'C',LC_ALL:'C'},detached:true,stdio:['ignore','pipe','pipe']});
   const out=[],err=[];let size=0,closed=false,finished=false,problem,status,timer,drainTimer;
   const alive=()=>{if(!child.pid)return false;try{process.kill(-child.pid,0);return true;}catch(e){if(e.code==='ESRCH')return false;throw e;}};
   const kill=()=>{try{if(child.pid)process.kill(-child.pid,'SIGKILL');}catch(e){if(e.code!=='ESRCH')problem=cleanupError();}};
-  const finish=()=>{if(finished)return;finished=true;clearTimeout(timer);clearTimeout(drainTimer);signal?.removeEventListener('abort',abort);if(problem)reject(problem);else resolve({status,stdout:Buffer.concat(out).toString('utf8'),stderr:Buffer.concat(err).toString('utf8')});};
+  const finish=()=>{if(finished)return;finished=true;clearTimeout(timer);clearTimeout(drainTimer);signal?.removeEventListener('abort',abort);try{current(processing,cleanup);}catch(error){problem??=error;}if(problem)reject(problem);else resolve({status,stdout:Buffer.concat(out).toString('utf8'),stderr:Buffer.concat(err).toString('utf8')});};
   const drain=until=>{if(finished)return;let exists=true;try{exists=alive();}catch{}if(closed&&!exists)return finish();if(Date.now()>=until){problem=cleanupError();return finish();}drainTimer=setTimeout(()=>drain(until),10);};
   const stop=code=>{problem??=Object.assign(Error(code),{code});kill();clearTimeout(drainTimer);drain(Date.now()+1000);};
-  const abort=()=>stop('NonrootPrerequisitesAborted'),collect=chunks=>b=>{size+=b.length;if(size>1048576)stop('NonrootPrerequisitesOutputLimit');else chunks.push(b);};
+  const abort=()=>stop('NonrootPrerequisitesAborted'),collect=chunks=>b=>{try{current(processing,cleanup);}catch(error){problem??=error;stop('NonrootPrerequisitesPayer');return;}size+=b.length;if(size>1048576)stop('NonrootPrerequisitesOutputLimit');else chunks.push(b);};
   child.stdout.on('data',collect(out));child.stderr.on('data',collect(err));
   child.on('error',()=>{closed=true;problem??=Error('NonrootPrerequisitesDockerUnavailable');if(child.pid)stop('ECLEANUP');else finish();});
   child.on('close',code=>{closed=true;status=code;try{if(alive())stop('NonrootPrerequisitesDescendant');else finish();}catch{problem=cleanupError();finish();}});
@@ -139,13 +141,14 @@ export function runNonrootControlDockerCommand(args,{directory,timeoutMs,signal}
 }
 
 async function preflight(value,options){
+ current(options);
  const input=copyNonrootJson(value);exact(input,['image','sourceClosure']);const expected=copyNonrootJson(options.expected);exact(expected,['candidateTree']);
  const {graph,filesystem}=options.controlVerification??{},binding=controlImageGraphBinding(graph),fs=inspectImageFilesystemEvidence(filesystem);
  same(input.image,((({graphHash,...image})=>image)(binding)));need(fs.component==='bootstrap'&&fs.graphHash===binding.graphHash&&imageFilesystemVerificationKind(filesystem)==='live-filesystem-evidence','NonrootPrerequisitesFilesystem');
  need(options.sourceContext?.tree===expected.candidateTree&&input.sourceClosure.tree===expected.candidateTree,'NonrootPrerequisitesSource');
- await verifyControlSourceClosure(options.sourceContext,input.sourceClosure);
+ await verifyControlSourceClosure(options.sourceContext,input.sourceClosure);current(options);
  need(input.sourceClosure.files.length>0,'NonrootPrerequisitesSource');
- const own=await readControlSourceFile(options.sourceContext,sourcePath);need(own.file.sha256===collectorCodeHash&&own.bytes.equals(sourceBytes),'NonrootPrerequisitesCollectorSource');
+ const own=await readControlSourceFile(options.sourceContext,sourcePath);current(options);need(own.file.sha256===collectorCodeHash&&own.bytes.equals(sourceBytes),'NonrootPrerequisitesCollectorSource');
  const entries=inspectImageFilesystemEntries(filesystem),nodes=new Map(entries.map(e=>[e.path,e]));
  // Resolve every intermediate symlink before declaring a loader path absent.
  // Preserve '..' until expansion; normalization alone can skip a real hop.
@@ -155,7 +158,7 @@ async function preflight(value,options){
  const file=(path,executable=false)=>{const f=inspectImageFilesystemFile(filesystem,path);need(f.uid===0&&f.gid===0&&(f.mode&0o6022)===0&&!f.privilegeAttributes.length&&(executable?f.mode===0o755:(f.mode&0o004)!==0),'NonrootPrerequisitesFilePermissions');files.set(path,f);return f;};
  file('/usr/local/bin/node',true);file('/bin/setpriv',true);file('/lib/ld-musl-aarch64.so.1');
  for(const f of input.sourceClosure.files){if(f.path.startsWith('docker/bootstrap/')){const actual=file('/bootstrap/'+f.path.slice('docker/bootstrap/'.length));need(actual.sha256===f.sha256,'NonrootPrerequisitesSourceFile');}}
- const state=imageGraphState(graph),descriptor=state.images.get('bootstrap').config,config=await readImageJson(state.store.open(descriptor),{maxBytes:8388608,budget:state.budget});
+ const state=imageGraphState(graph),descriptor=state.images.get('bootstrap').config,config=await readImageJson(state.store.open(descriptor),{maxBytes:8388608,budget:state.budget});current(options);
  need(descriptor.digest===binding.configDigest&&config.architecture==='arm64'&&config.os==='linux'&&!Object.keys(config.config?.Volumes??{}).length,'NonrootPrerequisitesImageConfig');
  const env=config.config?.Env??[],seen=new Set();let ca;
  need(Array.isArray(env)&&env.length<=32,'NonrootPrerequisitesEnvironment');
@@ -212,8 +215,9 @@ function validate(raw,p){
 }
 
 export async function collectNonrootControlPrerequisites(value,options={}){
- need(options&&typeof options==='object'&&!Array.isArray(options)&&Object.keys(options).every(key=>['controlVerification','sourceContext','expected','signal','deadlineMs','beforeDocker'].includes(key)),'NonrootPrerequisitesFields');
- return collectPrerequisites(value,options,runNonrootControlDockerCommand,tmpdir());
+ current(options);need(options&&typeof options==='object'&&!Array.isArray(options)&&Object.keys(options).every(key=>['controlVerification','sourceContext','expected','signal','deadlineMs','beforeDocker','assertCurrent','retainOriginals'].includes(key)),'NonrootPrerequisitesFields');
+ need(options.retainOriginals===undefined||options.retainOriginals===true,'NonrootPrerequisitesOriginals');
+ const result=await collectPrerequisites(value,options,runNonrootControlDockerCommand,tmpdir());current(options);return result;
 }
 /** Carrier reuses the same actual native checks without an ActualMain or
  * deployment contract. Its process driver admits only the fixed probe verbs. */
@@ -257,38 +261,41 @@ async function collectCarrierPrerequisites(value,options,cacheDirectory,prepared
 }
 export function getNonrootNativeProbeSource(){return Object.freeze({code:probeCode,sha256:probeCodeHash});}
 async function collectPrerequisites(value,options,runDocker,temporaryRoot,prepared){
+ current(options);
  const startedMs=Date.now(),deadlineMs=Math.min(options.deadlineMs??startedMs+120000,startedMs+120000);need(Number.isSafeInteger(deadlineMs)&&deadlineMs>startedMs,'NonrootPrerequisitesDeadline');
- const p=prepared??await preflight(value,options);need((await lstat('/var/run/docker.sock')).isSocket(),'NonrootPrerequisitesLocalDocker');
- const directory=await mkdtemp(join(temporaryRoot,'mem9-prerequisites-')),name='mem9-prerequisites-'+randomBytes(16).toString('hex');let id,attempted=false,sticky=false,primary,record;
+ const p=prepared??await preflight(value,options);current(options);const socket=await lstat('/var/run/docker.sock');current(options);need(socket.isSocket(),'NonrootPrerequisitesLocalDocker');
+ const directory=await mkdtemp(join(temporaryRoot,'mem9-prerequisites-')),name='mem9-prerequisites-'+randomBytes(16).toString('hex'),originalCommands=[];let id,attempted=false,sticky=false,primary,record;
  const run=async(stage,args,cleanup=false)=>{
-  if(options.beforeDocker!==undefined){need(typeof options.beforeDocker==='function');await options.beforeDocker(Object.freeze({stage,containerId:id,args:Object.freeze([...args])}));}
+  if(options.beforeDocker!==undefined){need(typeof options.beforeDocker==='function');await options.beforeDocker(Object.freeze({stage,containerId:id,args:Object.freeze([...args])}));current(options,cleanup);}
   if(!cleanup){controlImageGraphBinding(p.graph);need(Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootPrerequisitesExpired');}if(stage==='create')attempted=true;
-  try{return await runDocker(args,{directory,timeoutMs:cleanup?10000:Math.min(30000,deadlineMs-Date.now()),signal:cleanup?undefined:options.signal});}catch(e){if(e.code==='ECLEANUP')sticky=true;throw e;}
+  try{current(options,cleanup);const startedMs=Date.now(),result=await runDocker(args,{directory,timeoutMs:cleanup?10000:Math.min(30000,deadlineMs-Date.now()),signal:cleanup?undefined:options.signal,assertCurrent:options.assertCurrent,cleanup});current(options,cleanup);if(options.retainOriginals){need(originalCommands.length<8,'NonrootPrerequisitesOriginals');originalCommands.push({stage,args:[...args],cleanup,status:result.status,stdout:result.stdout,stderr:result.stderr,startedMs,completedMs:Date.now()});}return result;}catch(e){if(e.code==='ECLEANUP')sticky=true;throw e;}
  };
- const checked=async(stage,args,cleanup=false)=>{const r=await run(stage,args,cleanup);const probeFailure=stage==='start'&&/^NonrootPrerequisitesProbeRejected:[A-Za-z0-9]{1,80}\n$/.test(r.stderr)?r.stderr.trim():'NonrootPrerequisitesDockerCommand';need(r.status===0,probeFailure);return r;};
- const inspect=async(stage,args)=>parseNonrootJson((await checked(stage,args)).stdout,{maxBytes:1048576});
+ const checked=async(stage,args,cleanup=false)=>{const r=await run(stage,args,cleanup);current(options,cleanup);const probeFailure=stage==='start'&&/^NonrootPrerequisitesProbeRejected:[A-Za-z0-9]{1,80}\n$/.test(r.stderr)?r.stderr.trim():'NonrootPrerequisitesDockerCommand';need(r.status===0,probeFailure);return r;};
+ const inspect=async(stage,args)=>{const r=await checked(stage,args);current(options);return parseNonrootJson(r.stdout,{maxBytes:1048576});};
  try{
-  const root=checkImage(await inspect('inspect-root',['image','inspect',p.binding.rootDigest]),p),platform=checkImage(await inspect('inspect-platform',['image','inspect','--platform','linux/arm64',p.binding.rootDigest]),p,true);
+  current(options);const rootRaw=await inspect('inspect-root',['image','inspect',p.binding.rootDigest]);current(options);const root=checkImage(rootRaw,p);
+  const platformRaw=await inspect('inspect-platform',['image','inspect','--platform','linux/arm64',p.binding.rootDigest]);current(options);const platform=checkImage(platformRaw,p,true);
   const args=['--no-new-privs','--','/usr/local/bin/node','--input-type=module','-e',probeCode,'--',JSON.stringify(p.paths)];
   const created=await checked('create',['container','create','--pull=never','--platform=linux/arm64','--network=none','--read-only','--user=1000:1000','--cap-drop=ALL','--security-opt=no-new-privileges:true','--pids-limit=32','--memory=256m','--cpus=1','--restart=no','--no-healthcheck','--tmpfs','/tmp:rw,nosuid,nodev,exec,size=1048576,uid=1000,gid=1000,mode=0700','--label','mem9-prerequisites-probe='+name,'--name',name,'--entrypoint','/bin/setpriv',p.binding.rootDigest,...args]);
-  const candidate=created.stdout.trim();need(/^[a-f0-9]{64}$/.test(candidate),'NonrootPrerequisitesContainerId');id=candidate;
-  const container={id,name,args},before=checkContainer(await inspect('inspect-created',['container','inspect',id]),p,container,false);
-  const output=await checked('start',['container','start','--attach',id]),after=checkContainer(await inspect('inspect-exited',['container','inspect',id]),p,container,true),result=validate(output.stdout,p);
+  current(options);const candidate=created.stdout.trim();need(/^[a-f0-9]{64}$/.test(candidate),'NonrootPrerequisitesContainerId');id=candidate;
+  const container={id,name,args},beforeRaw=await inspect('inspect-created',['container','inspect',id]);current(options);const before=checkContainer(beforeRaw,p,container,false);
+  const output=await checked('start',['container','start','--attach',id]);current(options);const afterRaw=await inspect('inspect-exited',['container','inspect',id]);current(options);const after=checkContainer(afterRaw,p,container,true),result=validate(output.stdout,p);
   record={version:1,kind:'measured-control-prerequisites',image:p.input.image,sourceTree:options.expected.candidateTree,sourceClosureHash:hash(p.input.sourceClosure),collectorCodeHash,probeCodeHash,nativeProbeHash,graphHash:p.binding.graphHash,filesystemHash:hash(p.fs),startedMs,
    container:{id,name,rootInspectHash:hash(root),platformInspectHash:hash(platform),createdInspectHash:hash(before),exitedInspectHash:hash(after),exitCode:after.State.ExitCode},probe:result,probeOutput:output.stdout,probeOutputHash:sha(output.stdout)};
  }catch(e){primary=e;}
  try{
-  if(id){const removed=await checked('remove',['container','rm','--force','--volumes',id],true),absent=await run('inspect-removed',['container','inspect',id],true);need(absent.status===1&&new RegExp('(?:No such container|No such object): '+id+'(?:\\s|$)').test(absent.stderr),'ECLEANUP');if(record)record.removal={containerId:id,removeExitCode:removed.status,absenceExitCode:absent.status,absenceEvidenceHash:sha(absent.stderr)};}
-  else if(attempted)sticky=true;need(!sticky,'ECLEANUP');await rm(directory,{recursive:true,force:true});
+  if(id){const removed=await checked('remove',['container','rm','--force','--volumes',id],true);current(options,true);const absent=await run('inspect-removed',['container','inspect',id],true);current(options,true);need(absent.status===1&&new RegExp('(?:No such container|No such object): '+id+'(?:\\s|$)').test(absent.stderr),'ECLEANUP');if(record)record.removal={containerId:id,removeExitCode:removed.status,absenceExitCode:absent.status,absenceEvidenceHash:sha(absent.stderr)};}
+  else if(attempted)sticky=true;need(!sticky,'ECLEANUP');await rm(directory,{recursive:true,force:true});current(options,true);
  }catch{throw Object.assign(cleanupError(),{containerId:id,containerName:name,operationDirectory:directory});}
  if(primary){primary.cleanupConfirmed=true;throw primary;}
  let caBytes;
- try{controlImageGraphBinding(p.graph);need(Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootPrerequisitesExpired');
+ try{current(options);controlImageGraphBinding(p.graph);need(Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootPrerequisitesExpired');
   caBytes=p.ca?await readImageFilesystemFile(p.filesystem,p.ca.path,{maxBytes:1048576}):null;
+  current(options);
   need(Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootPrerequisitesExpired');
  }catch(e){e.cleanupConfirmed=true;throw e;}
  record.completedMs=Date.now();record.cleanupConfirmed=true;
- const handle=Object.freeze({kind:'control-prerequisites-context'});states.set(handle,{p,record:copyNonrootJson(record),caBytes});return handle;
+ const handle=Object.freeze({kind:'control-prerequisites-context'});states.set(handle,{p,record:copyNonrootJson(record),caBytes,...(options.retainOriginals?{originalCommands}:{})});return handle;
 }
 
 /** Return typed inputs and their exact archive bytes only from a live handle.
@@ -297,6 +304,10 @@ export function inspectNonrootControlPrerequisites(handle,{controlVerification,s
  const state=states.get(handle);need(state,'NonrootPrerequisitesContextRequired');const {p,record:r}=state;
  need(controlVerification?.graph===p.graph&&controlVerification?.filesystem===p.filesystem&&sourceContext===p.sourceContext,'NonrootPrerequisitesContextBinding');controlImageGraphBinding(p.graph);
  need(now>=r.completedMs&&now-r.completedMs<=300000,'NonrootPrerequisitesStale');
+ return describePrerequisiteRecord(state);
+}
+function describePrerequisiteRecord(state){
+ const {p,record:r}=state;
  const objects=[],json=value=>{const raw=Buffer.from(JSON.stringify(value)+'\n'),ref={bytesHash:sha(raw),canonicalHash:hash(value),bytesLength:raw.length};if(!objects.some(o=>o.ref.bytesHash===ref.bytesHash))objects.push({ref,bytes:raw});return ref;};
  const image=imageOnly(r.image),node=p.files.get('/usr/local/bin/node'),primitive=p.files.get('/bin/setpriv');
  const libraries=c=>json({files:[...new Map(c.files.map(f=>{const fact=p.files.get(f.path);return [fact.path,{path:fact.path,sha256:fact.sha256}];})).values()].sort((a,b)=>a.path.localeCompare(b.path))});
@@ -312,4 +323,45 @@ export function inspectNonrootControlPrerequisites(handle,{controlVerification,s
  const environment=copyNonrootJson({imageEnvironment:p.config.config?.Env??[],files:metadata,expectedCa:caBindings.map(c=>({path:c.value,sha256:c.file.sha256})),caBindings,loaderAbsences:loaderPaths,observedMs:r.completedMs});
  const recordRef=json(r);
  return {record:copyNonrootJson(r),recordRef,nodeRuntime,primitiveEvidence,environment,objects};
+}
+
+/** Raw successful command evidence from the same live native handle only. */
+export function inspectNonrootControlPrerequisiteOriginals(handle,options){
+ current(options);inspectNonrootControlPrerequisites(handle,options);const s=states.get(handle);
+ need(Array.isArray(s.originalCommands)&&s.originalCommands.length===8,'NonrootPrerequisitesOriginalsRequired');
+ const rows=s.originalCommands.map(r=>({...r,args:[...r.args]}));current(options);return rows;
+}
+
+const replayedPrerequisites=new WeakMap();
+/** Re-evaluate every recorded native command under current graph/FS/source.
+ * This produces a distinct archive verifier handle, never a native handle. */
+export async function replayNonrootControlPrerequisiteRecord({record,commands},options){
+ current(options);need(typeof options.assertCurrent==='function','NonrootPrerequisitesReplayPayer');
+ const r=copyNonrootJson(record);same(r.image,options.image,'NonrootPrerequisitesReplayImage');
+ const p=await preflight({image:options.image,sourceClosure:options.sourceClosure},{...options,expected:{candidateTree:options.sourceContext.tree}});current(options);
+ need(r.startedMs<=r.completedMs&&r.completedMs-r.startedMs<=120000&&r.completedMs<=options.now&&options.now-r.completedMs<=300000,'NonrootPrerequisitesStale');
+ const command=inspectNonrootRecordedCommands(commands,['inspect-root','inspect-platform','create','inspect-created','start','inspect-exited','remove','inspect-removed'],r);
+ const parse=row=>parseNonrootJson(row.stdout,{maxBytes:1048576});
+ const root=checkImage(parse(command('inspect-root',['image','inspect',p.binding.rootDigest])),p);
+ const platform=checkImage(parse(command('inspect-platform',['image','inspect','--platform','linux/arm64',p.binding.rootDigest])),p,true);
+ const {id,name}=r.container;need(/^[a-f0-9]{64}$/.test(id)&&/^mem9-prerequisites-[a-f0-9]{32}$/.test(name),'NonrootPrerequisitesContainerId');
+ const args=['--no-new-privs','--','/usr/local/bin/node','--input-type=module','-e',probeCode,'--',JSON.stringify(p.paths)];
+ const create=command('create',['container','create','--pull=never','--platform=linux/arm64','--network=none','--read-only','--user=1000:1000','--cap-drop=ALL','--security-opt=no-new-privileges:true','--pids-limit=32','--memory=256m','--cpus=1','--restart=no','--no-healthcheck','--tmpfs','/tmp:rw,nosuid,nodev,exec,size=1048576,uid=1000,gid=1000,mode=0700','--label','mem9-prerequisites-probe='+name,'--name',name,'--entrypoint','/bin/setpriv',p.binding.rootDigest,...args]);
+ need(create.stdout.trim()===id,'NonrootPrerequisitesContainerId');
+ const binding={id,name,args},before=checkContainer(parse(command('inspect-created',['container','inspect',id])),p,binding,false);
+ const output=command('start',['container','start','--attach',id]);
+ const after=checkContainer(parse(command('inspect-exited',['container','inspect',id])),p,binding,true),result=validate(output.stdout,p);
+ const removed=command('remove',['container','rm','--force','--volumes',id]);
+ const absent=command('inspect-removed',['container','inspect',id],1);
+ need(new RegExp('(?:No such container|No such object): '+id+'(?:\\s|$)').test(absent.stderr),'ECLEANUP');
+ const wanted={version:1,kind:'measured-control-prerequisites',image:p.input.image,sourceTree:options.sourceContext.tree,sourceClosureHash:hash(p.input.sourceClosure),collectorCodeHash,probeCodeHash,nativeProbeHash,graphHash:p.binding.graphHash,filesystemHash:hash(p.fs),startedMs:r.startedMs,
+  container:{id,name,rootInspectHash:hash(root),platformInspectHash:hash(platform),createdInspectHash:hash(before),exitedInspectHash:hash(after),exitCode:after.State.ExitCode},probe:result,probeOutput:output.stdout,probeOutputHash:sha(output.stdout),
+  removal:{containerId:id,removeExitCode:removed.status,absenceExitCode:absent.status,absenceEvidenceHash:sha(absent.stderr)},completedMs:r.completedMs,cleanupConfirmed:true};
+ same(r,wanted,'NonrootPrerequisitesReplayRecord');
+ const caBytes=p.ca?await readImageFilesystemFile(p.filesystem,p.ca.path,{maxBytes:1048576}):null;current(options);
+ const handle=Object.freeze({kind:'replayed-control-prerequisites'});replayedPrerequisites.set(handle,{p,record:wanted,caBytes,assertCurrent:options.assertCurrent});return handle;
+}
+export function inspectReplayedNonrootControlPrerequisites(handle,options){
+ current(options);const state=replayedPrerequisites.get(handle);need(state&&state.assertCurrent===options.assertCurrent&&state.p.graph===options.controlVerification?.graph&&state.p.filesystem===options.controlVerification?.filesystem&&state.p.sourceContext===options.sourceContext,'NonrootPrerequisitesReplayRequired');
+ const result=describePrerequisiteRecord(state);current(options);return result;
 }

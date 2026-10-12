@@ -7,6 +7,7 @@ import {copyNonrootJson,inspectNonrootRecord,parseNonrootJson,nonrootHash as has
 import {readControlSourceFile} from './production-control-source.mjs';
 import {readNonrootEvidence} from './production-nonroot-runtime.mjs';
 import {parseImageTransitionJson} from './production-image-transition-proof.mjs';
+import {assertNonrootControlCurrent as current} from './production-nonroot-control-current.mjs';
 
 export const CONTROL_ZERO_FINDINGS_POLICY=copyNonrootJson(policy);
 export const CONTROL_ZERO_FINDINGS_POLICY_HASH=hash(CONTROL_ZERO_FINDINGS_POLICY);
@@ -28,11 +29,12 @@ export function ecrScanTimestampMs(value){
  need(positive(ms)&&ms<=8640000000000000,'NonrootControlScanTimestamp');return ms;
 }
 
-export async function assertNonrootControlScanPolicy(contract,sourceContext){
+export async function assertNonrootControlScanPolicy(contract,sourceContext,options={}){
+ current(options);
  const c=inspectProductionControlBuildContract(contract);
  need(c.artifactPolicyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH&&c.output.repositoryName===P.repositoryName,'NonrootControlScanPolicy');
  need(sourceContext?.tree===c.candidate.tree,'NonrootControlScanPolicySource');
- const source=await readControlSourceFile(sourceContext,CONTROL_ZERO_FINDINGS_POLICY_SOURCE);
+ const source=await readControlSourceFile(sourceContext,CONTROL_ZERO_FINDINGS_POLICY_SOURCE);current(options);
  same(parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(source.bytes)),P,'NonrootControlScanPolicySource');
  return source.file;
 }
@@ -41,8 +43,16 @@ export async function assertNonrootControlScanPolicy(contract,sourceContext){
  * fractional seconds without widening the integer-only proof-record codec.
  * The transport separately records the hash of the original HTTP body. */
 export function normalizeNonrootControlScanPages(input,image,{observedMs,now}={}){
+ return normalizeScanPages(input,image,{observedMs,now},P.repositoryName);
+}
+/** Same findings, pagination, byte limits and freshness. Repository scope is
+ * fixed by this named A lane; no caller-selected repository policy exists. */
+export function normalizeNonrootRehearsalScanPages(input,image,{observedMs,now}={}){
+ return normalizeScanPages(input,image,{observedMs,now},'mem9-on-aws/preview/bootstrap');
+}
+function normalizeScanPages(input,image,{observedMs,now},repositoryName){
  const rawPages=copyNonrootJson(input),binding=inspectNonrootRecord('ControlImageBindingV1',image);
- need(binding.repositoryName===P.repositoryName&&positive(now)&&positive(observedMs)&&observedMs<=now&&now-observedMs<=P.maxObservationAgeMs,'NonrootControlScanObservation');
+ need(binding.repositoryName===repositoryName&&positive(now)&&positive(observedMs)&&observedMs<=now&&now-observedMs<=P.maxObservationAgeMs,'NonrootControlScanObservation');
  need(Array.isArray(rawPages)&&rawPages.length>0&&rawPages.length<=P.maxPages,'NonrootControlScanPages');
  let bytes=0,identity;const findings=[],tokens=new Set();
  for(const [index,raw]of rawPages.entries()){
@@ -71,13 +81,25 @@ export function normalizeNonrootControlScanPages(input,image,{observedMs,now}={}
 
 /** Recompute the rule from real archived pages; the review's decision string
  * or its content hash alone never establishes the zero-findings result. */
-export async function verifyNonrootControlScan(value,{image,contract,sourceContext,resolveJson,resolveBytes,now=Date.now()}={}){
- const scan=inspectNonrootRecord('ControlScanEvidenceV1',value),options={resolveJson,resolveBytes};
- await assertNonrootControlScanPolicy(contract,sourceContext);
- need(['account','region','repositoryName'].every(key=>image?.[key]===contract.output[key]),'NonrootControlScanScope');
+export async function verifyNonrootControlScan(value,options={}){
+ const result=await verifyScan(value,options,false);current(options);return result;
+}
+export async function verifyNonrootRehearsalScan(value,options){
+ need(typeof options?.assertCurrent==='function','NonrootRehearsalScanPayer');
+ const result=await verifyScan(value,options,true);current(options);return result;
+}
+async function verifyScan(value,options,rehearsal){
+ current(options);const {image,contract,sourceContext,origin,now=Date.now()}=options;
+ const scan=inspectNonrootRecord('ControlScanEvidenceV1',value);
+ await assertNonrootControlScanPolicy(contract,sourceContext,options);current(options);
+ if(rehearsal){
+  need(origin?.version===1&&origin.kind==='original-A-authenticated-custody'&&origin.authority===false,'NonrootRehearsalScanOrigin');
+  same(image,origin.selection.bootstrap);need(origin.selection.tree===contract.candidate.tree&&origin.selection.head===contract.candidate.revision,'NonrootRehearsalScanSource');
+  need(['account','region'].every(key=>image?.[key]===contract.output[key])&&image.repositoryName==='mem9-on-aws/preview/bootstrap','NonrootControlScanScope');
+ }else need(['account','region','repositoryName'].every(key=>image?.[key]===contract.output[key]),'NonrootControlScanScope');
  same(scan.image,image);need(scan.policyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH,'NonrootControlScanPolicy');
- const pages=await readNonrootEvidence(scan.rawPages,options),findings=await readNonrootEvidence(scan.normalizedFindings,options),review=await readNonrootEvidence(scan.artifactReview,options);
- const actual=normalizeNonrootControlScanPages(pages,image,{observedMs:scan.observedMs,now});same(findings,actual.findings);
+ const pages=await readNonrootEvidence(scan.rawPages,options);current(options);const findings=await readNonrootEvidence(scan.normalizedFindings,options);current(options);const review=await readNonrootEvidence(scan.artifactReview,options);current(options);
+ const actual=(rehearsal?normalizeNonrootRehearsalScanPages:normalizeNonrootControlScanPages)(pages,image,{observedMs:scan.observedMs,now});same(findings,actual.findings);
  exact(review,['version','kind','decision','image','policyHash','findingsHash','sourceTree','reviewedMs','expiresMs']);
  need(review.version===1&&review.kind==='control-artifact-policy-review'&&review.decision==='within-existing-policy'&&review.policyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH&&review.findingsHash===hash(actual.findings)&&review.sourceTree===contract.candidate.tree,'NonrootControlScanDecision');same(review.image,image);
  need(positive(review.reviewedMs)&&review.reviewedMs>=scan.observedMs&&review.reviewedMs<=now&&positive(review.expiresMs)&&review.expiresMs>now&&review.expiresMs<=Math.min(scan.observedMs+P.maxObservationAgeMs,actual.scanCompletedMs+P.maxScanAgeMs),'NonrootControlScanExpired');

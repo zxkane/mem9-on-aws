@@ -2,8 +2,8 @@
  * root-audit replacement, or caller-selected execution provider. */
 import {createHash} from 'node:crypto';
 import {copyNonrootJson,parseNonrootJson,inspectNonrootRecord,nonrootHash as hash} from './production-nonroot-contracts.mjs';
-import {nonrootAuthorizationBindings,assertNonrootDataRelease,nonrootAdmissionDeadline} from './production-nonroot-proof.mjs';
-import {createNonrootEvidenceArchive,exportNonrootArchive,nonrootArchiveResolvers} from './production-nonroot-archive.mjs';
+import {nonrootAuthorizationBindings,assertNonrootDataRelease,nonrootAdmissionDeadline,bindNonrootPreRootBridge} from './production-nonroot-proof.mjs';
+import {createNonrootEvidenceArchive,exportNonrootArchive,nonrootArchiveResolvers,nonrootArchiveCapacity,prepayNonrootArchiveExtension} from './production-nonroot-archive.mjs';
 import {readNonrootEvidence} from './production-nonroot-runtime.mjs';
 import {captureNonrootControlBuildAction,completeNonrootControlBuildAction,captureNonrootControlArtifact} from './production-nonroot-control-build.mjs';
 import {inspectControlBuildCommitment} from './production-control-capture-archive.mjs';
@@ -17,7 +17,7 @@ import {completeProductionControlCompositionBuildCapture} from './production-con
 
 const MAX=32*1024*1024;
 const keys=['context','parameter','proof','archive','completedCapture','controlVerification','sourceContext','prerequisites','guardImportAudit'];
-const inputKeys=input=>[...keys,...(Object.hasOwn(input,'metadataReads')?['metadataReads']:[])];
+const inputKeys=input=>[...keys,...(Object.hasOwn(input,'metadataReads')?['metadataReads']:[]),...(Object.hasOwn(input,'rehearsalVerification')?['rehearsalVerification']:[])];
 const need=(ok,code='NonrootControlMaterialInvalid')=>{if(!ok)throw Error(code);};
 const exact=(value,fields)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===fields.slice().sort().join(),'NonrootControlMaterialFields');
 const same=(a,b,code='NonrootControlMaterialBinding')=>need(hash(a)===hash(b),code);
@@ -25,10 +25,11 @@ const sha=raw=>createHash('sha256').update(raw).digest('hex');
 const instant=raw=>{const n=Date.parse(raw);need(typeof raw==='string'&&Number.isSafeInteger(n)&&n>0,'NonrootControlMaterialTime');return n;};
 const imageOnly=({rootDigest,arm64Digest,configDigest})=>({rootDigest,arm64Digest,configDigest});
 
-async function additionsFor(archive){
- const wire=await exportNonrootArchive(archive),manifest=structuredClone(parseNonrootJson(wire.manifest)),objects=new Map(),additions=[];
+async function additionsFor(archive,metadataReads){
+ const work=prepayNonrootArchiveExtension(archive,metadataReads),capacity=work.capacity;
+ const wire=await exportNonrootArchive(work.archive);work.check();const manifest=structuredClone(parseNonrootJson(wire.manifest)),objects=new Map(),additions=[];
  let size=0;
- for(const item of wire.objects){const raw=Buffer.from(item.base64,'base64');size+=raw.length;need(size<=MAX,'NonrootControlMaterialBytes');objects.set(item.name,raw);}
+ for(const item of wire.objects){const raw=Buffer.from(item.base64,'base64');size+=raw.length;need(size<=capacity.rawBytes,'NonrootControlMaterialBytes');objects.set(item.name,raw);}
  const put=(bytes,encoding,purpose='build',expected)=>{
   const raw=Buffer.from(bytes);need(raw.length>0&&raw.length<=MAX,'NonrootControlMaterialBytes');
   const ref=encoding==='json'?{bytesHash:sha(raw),canonicalHash:hash(parseNonrootJson(raw.toString('utf8'))),bytesLength:raw.length}:{sha256:sha(raw),bytesLength:raw.length};
@@ -36,7 +37,7 @@ async function additionsFor(archive){
   const prior=manifest.files.filter(row=>row.encoding===encoding&&hash(row.ref)===hash(ref));
   need(prior.length<=1,'NonrootControlMaterialAmbiguous');if(prior.length)return prior[0].ref;
   need(encoding!=='json'||!manifest.files.some(row=>row.encoding==='json'&&row.purpose===purpose&&row.ref.canonicalHash===ref.canonicalHash),'NonrootControlMaterialEncodingCollision');
-  size+=raw.length;need(size<=MAX&&manifest.files.length<20000,'NonrootControlMaterialBytes');
+  size+=raw.length;need(size<=capacity.rawBytes&&manifest.files.length<20000,'NonrootControlMaterialBytes');
   const name='sha256-'+sha(raw)+(encoding==='json'?'.json':'.bin');
   need(!objects.has(name),'NonrootControlMaterialCollision');
   const row={name,purpose,ref,encoding};manifest.files.push(row);objects.set(name,raw);additions.push({...row,bytes:Buffer.from(raw)});return ref;
@@ -47,8 +48,8 @@ async function additionsFor(archive){
   need(prior.length<=1,'NonrootControlMaterialAmbiguous');return prior.length?prior[0].ref:put(Buffer.from(JSON.stringify(value)),'json',purpose);
  };
  return {put,json,snapshot(){
-  const frozenManifest=copyNonrootJson(manifest),raw=JSON.stringify(frozenManifest),held=new Map([...objects].map(([key,value])=>[key,Buffer.from(value)]));
-  return createNonrootEvidenceArchive(raw,{expectedManifestHash:hash(frozenManifest),readObject:async name=>held.get(name)});
+  work.snapshot(size,manifest.files.length);const frozenManifest=copyNonrootJson(manifest),raw=JSON.stringify(frozenManifest),held=new Map([...objects].map(([key,value])=>[key,Buffer.from(value)]));
+  return createNonrootEvidenceArchive(raw,{expectedManifestHash:hash(frozenManifest),wireVersion:capacity.version,readObject:async name=>held.get(name)});
  },additions:()=>additions.map(row=>({...copyNonrootJson(Object.fromEntries(Object.entries(row).filter(([key])=>key!=='bytes'))),bytes:Buffer.from(row.bytes)}))};
 }
 
@@ -82,7 +83,7 @@ async function prepare(input,at){
  const artifact=await captureNonrootControlArtifact(capture,input.controlVerification),image=artifact.image;
  same(prerequisites.record.image,image,'NonrootControlMaterialPrerequisites');
  same(prerequisites.record.sourceClosureHash,hash(contract.guardSource),'NonrootControlMaterialPrerequisites');
- const additions=await additionsFor(input.archive);
+ const additions=await additionsFor(input.archive,input.metadataReads);
  for(const object of prerequisites.objects)additions.put(object.bytes,Object.hasOwn(object.ref,'canonicalHash')?'json':'bytes','filesystem',object.ref);
  // Preserve the capture's own raw encoding under build provenance. A prior
  // source record can have equal JSON with a different byte encoding.
@@ -168,7 +169,8 @@ export async function assembleNonrootControlMaterial(input,{clock=Date.now,signa
  const checkedBuild=await verifyNonrootDeployedControlBuild(build,{...verification,now:at,runtimeObservation});
  const deploymentSource=inspectNonrootRecord('DeploymentSourceRecordV2',{version:2,kind:'nonroot-deployment-source',descriptorHash:hash(p.data),parameterVersion:p.parameter.Version,
   proofHash:p.bindings.proofHash,actualMain:main,deployedControlBuild:build,resolvedTaskPlan:resolvedRef,checkedMs:at});
- const checked=await verifyNonrootDeploymentSource(deploymentSource,{...verification,now:at,runtimeObservation});
+ const nativeEvidence={archive,sourceContext:input.sourceContext,controlGraph:input.controlVerification.graph,controlFilesystemVerification:input.controlVerification.filesystem,runtimeObservation,...(input.metadataReads?{metadataReads:input.metadataReads}:{}),...(input.rehearsalVerification?{rehearsalVerification:input.rehearsalVerification}:{})};
+ const checked=await bindNonrootPreRootBridge(input.context,{parameter:p.parameter,deploymentSource,evidence:nativeEvidence,now:at});
  return {authority:false,build,deploymentSource,resolvedTaskPlan,registrations:copyNonrootJson(checked.registrations),archiveAdditions:p.additions.additions(),checkedBuild,checked,
-  evidence:{archive,sourceContext:input.sourceContext,controlGraph:input.controlVerification.graph,controlFilesystemVerification:input.controlVerification.filesystem,runtimeObservation,...(input.metadataReads?{metadataReads:input.metadataReads}:{})}};
+  evidence:nativeEvidence};
 }

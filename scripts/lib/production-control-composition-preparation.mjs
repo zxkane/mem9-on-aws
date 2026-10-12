@@ -2,6 +2,7 @@
  * repository input remains a Git member; dependency pins bind package-lock.
  * This branch does not alter the legacy preparation/guard import policy. */
 import {builtinModules} from 'node:module';
+import {assertNonrootControlCurrent} from './production-nonroot-control-current.mjs';
 import {parseDocument} from 'yaml';
 import {parse as parseSource} from '@babel/parser';
 import {createCompositionRegionLoaderInspection} from './production-control-composition-region-loader.mjs';
@@ -21,14 +22,15 @@ export function verifyProductionControlCompositionAction(step,action){
  for(const value of Object.values(action.outputs)){exact(value,['description']);need(typeof value.description==='string'&&value.description.length>0,'ControlCompositionActionOutputs');}
  return Object.freeze({actionPath:ACTION,entryPath:ENTRY,toolchainPath:TOOLCHAIN});
 }
-export async function describeProductionControlCompositionPreparation(context,job,{expectedBundle}={}){
+export async function describeProductionControlCompositionPreparation(context,job,{expectedBundle,assertCurrent}={}){
+ const resume=value=>{assertNonrootControlCurrent({assertCurrent});return value;};resume();
  need(job&&Array.isArray(job.steps),'ControlCompositionPreparationJob');
  const local=job.steps.filter(s=>typeof s.uses==='string'&&s.uses.startsWith('./'));
  need(local.length===1,'ControlCompositionPreparationActions');
- const files=new Map(),read=async path=>{const row=await readControlSourceFile(context,path);files.set(path,row.file);return row;};
- const a=await read(ACTION),doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(a.bytes),{uniqueKeys:true});
+ const files=new Map(),read=async path=>{const row=resume(await readControlSourceFile(context,path));files.set(path,row.file);return row;};
+ const a=resume(await read(ACTION)),doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(a.bytes),{uniqueKeys:true});
  need(doc.errors.length===0&&doc.warnings.length===0,'ControlCompositionActionYaml');verifyProductionControlCompositionAction(local[0],doc.toJS({maxAliasCount:0}));
- const bundle=await read(ENTRY),toolchain=await read(TOOLCHAIN),lock=await read('package-lock.json'),builder=await read(PRODUCTION_CONTROL_COMPOSITION_BUNDLE_BUILDER);
+ const bundle=resume(await read(ENTRY)),toolchain=resume(await read(TOOLCHAIN)),lock=resume(await read('package-lock.json')),builder=resume(await read(PRODUCTION_CONTROL_COMPOSITION_BUNDLE_BUILDER));
  // Reuse the existing read to bind the charged size before bundle parsing.
  if(expectedBundle)need(hash(bundle.file)===hash(inspectNonrootRecord('SourceFileV1',expectedBundle)),'ControlCompositionPreparationBundleBinding');
  const m=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(toolchain.bytes)),p=parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(lock.bytes));
@@ -49,14 +51,14 @@ export async function describeProductionControlCompositionPreparation(context,jo
    need(key&&pin&&!row.path.slice(key.length+1).split('/').includes('node_modules')&&row.packagePin.name===key.split('node_modules/').at(-1)&&row.packagePin.version===pin.version&&row.packagePin.integrity===pin.integrity,'ControlCompositionPackagePin');
   }else{
    need(!row.packagePin&&row.path!==ENTRY&&row.path!==TOOLCHAIN,'ControlCompositionToolchainInput');
-   const actual=await read(row.path);need(actual.file.sha256===row.sha256&&actual.bytes.length===row.bytesLength,'ControlCompositionToolchainSource');
+   const actual=resume(await read(row.path));need(actual.file.sha256===row.sha256&&actual.bytes.length===row.bytesLength,'ControlCompositionToolchainSource');
   }
  }
  // The actual entry and implementation must occur in the bundled closure;
  // a manifest containing only unrelated repository files is not coverage.
  for(const required of ['.github/actions/control-composition/index.mjs','scripts/lib/production-control-composition-main.mjs','scripts/lib/production-control-composition-controller.mjs'])
   need(seen.has(required),'ControlCompositionToolchainClosure');
- const closure=await ciSmokeSourceClosure(context,['.github/actions/control-composition/index.mjs']);
+ const closure=resume(await ciSmokeSourceClosure(context,['.github/actions/control-composition/index.mjs']));
  for(const row of closure)need(seen.has(row.path),'ControlCompositionToolchainClosure');
  const ast=parseSource(new TextDecoder('utf-8',{fatal:true}).decode(bundle.bytes),{sourceType:'module',createImportExpressions:true});
  const regionLoader=createCompositionRegionLoaderInspection(ast,{bundleBytes:bundle.bytes.length});

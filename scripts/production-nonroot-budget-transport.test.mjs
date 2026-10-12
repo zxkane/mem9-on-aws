@@ -167,3 +167,24 @@ it('reports ECLEANUP when a blob body cannot be positively drained',async()=>{
  try{await f.getUrl();await expect(f.reader.readBlob(f.request,{...f.scope,consume:async stream=>{await stream[Symbol.asyncIterator]().next();}})).rejects.toMatchObject({code:'ECLEANUP'});expect(f.events.filter(e=>e[0]==='complete')).toHaveLength(1);expect(f.events.filter(e=>e[0]==='unknown')).toHaveLength(1);}
  finally{f.close();}
 });
+
+const currentArchiveWireMiB=384;
+it.each([
+ ['funded archive','archive',128,33,true],
+ ['legacy archive allowance','archive',32,33,false],
+ ['operation response','operation',128,33,false],
+ ['unrelated capsule','capsule',128,33,false],
+ ['extra request selector','extra',128,33,false],
+ ['archive hard maximum','archive',currentArchiveWireMiB+128,currentArchiveWireMiB+1,false],
+])('preserves exact source-selected transport capacity: %s',async(_label,kind,capMiB,bodyMiB,accept)=>{
+ const MiB=1048576,archiveKey='data-authorizations/'+'a'.repeat(32)+'/'+'b'.repeat(32)+'/nonroot-proof-archive.json';
+ const key=kind==='operation'?archiveKey.replace('nonroot-proof-archive.json','operation.json'):kind==='capsule'?'decisions/synthetic/capsule.json':archiveKey;
+ const f=fixture({reply:Buffer.alloc(bodyMiB*MiB,32),limit:capMiB*MiB});let response;
+ try{
+  const command=new GetObjectCommand({Bucket:'example-finalization',Key:key,ExpectedBucketOwner:'123456789012',...(kind==='extra'?{VersionId:'synthetic'}:{})});
+  if(accept){response=await f.reader.clients.s3.send(command);let bytes=0;for await(const chunk of response.Body)bytes+=chunk.length;expect(bytes).toBe(bodyMiB*MiB);expect(f.events.filter(e=>e[0]==='complete')).toHaveLength(1);expect(f.events.some(e=>e[0]==='unknown')).toBe(false);}
+  else{await expect(f.reader.clients.s3.send(command)).rejects.toThrow('NonrootBudgetReadFailed');expect(f.events.filter(e=>e[0]==='unknown')).toHaveLength(1);expect(f.events.some(e=>e[0]==='complete')).toBe(false);}
+  expect(f.events.filter(e=>e[0]==='http')).toHaveLength(1);
+  expect(f.events.filter(e=>e[0]==='charge').reduce((n,e)=>n+e[1],0)).toBe(bodyMiB*MiB);
+ }finally{response?.Body?.destroy();f.reader.close();}
+});

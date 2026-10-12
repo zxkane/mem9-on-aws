@@ -85,25 +85,25 @@ var __require = /* #__PURE__ */ (() => createRequire(import.meta.url))();
 */
 /** Copy only inert JSON data. Never invoke getters, toJSON, or proxy traps. */
 function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
-	need$35(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
+	need$36(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
 	let bytes = 0, nodes = 0;
 	const active = /* @__PURE__ */ new Set();
 	const add = (n) => {
 		bytes += n;
-		need$35(bytes <= maxBytes);
+		need$36(bytes <= maxBytes);
 	};
 	const string = (v) => {
-		need$35(v.isWellFormed());
+		need$36(v.isWellFormed());
 		add(Buffer.byteLength(JSON.stringify(v)));
 	};
 	function copy(v, depth) {
-		need$35(depth <= NONROOT_LIMITS.maxJsonDepth && ++nodes <= 1e5);
+		need$36(depth <= NONROOT_LIMITS.maxJsonDepth && ++nodes <= 1e5);
 		if (v === null || typeof v === "boolean") {
 			add(v === null ? 4 : v ? 4 : 5);
 			return v;
 		}
 		if (typeof v === "number") {
-			need$35(Number.isSafeInteger(v) && !Object.is(v, -0));
+			need$36(Number.isSafeInteger(v) && !Object.is(v, -0));
 			add(String(v).length);
 			return v;
 		}
@@ -111,21 +111,21 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 			string(v);
 			return v;
 		}
-		need$35(v && typeof v === "object" && !types.isProxy(v) && !active.has(v));
+		need$36(v && typeof v === "object" && !types.isProxy(v) && !active.has(v));
 		const array = Array.isArray(v), proto = Object.getPrototypeOf(v);
-		need$35(array ? proto === Array.prototype : proto === Object.prototype || proto === null);
+		need$36(array ? proto === Array.prototype : proto === Object.prototype || proto === null);
 		const descriptors = Object.getOwnPropertyDescriptors(v), keys = Reflect.ownKeys(descriptors);
-		need$35(keys.every((k) => typeof k === "string"));
+		need$36(keys.every((k) => typeof k === "string"));
 		active.add(v);
 		add(2);
 		let result;
 		if (array) {
 			const length = descriptors.length?.value;
-			need$35(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1);
+			need$36(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1);
 			result = [];
 			for (let i = 0; i < length; i++) {
 				const d = descriptors[String(i)];
-				need$35(d?.enumerable && Object.hasOwn(d, "value"));
+				need$36(d?.enumerable && Object.hasOwn(d, "value"));
 				if (i) add(1);
 				result.push(copy(d.value, depth + 1));
 			}
@@ -133,7 +133,7 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 			result = {};
 			for (const [i, k] of keys.entries()) {
 				const d = descriptors[k];
-				need$35(d.enumerable && Object.hasOwn(d, "value"));
+				need$36(d.enumerable && Object.hasOwn(d, "value"));
 				if (i) add(1);
 				string(k);
 				add(1);
@@ -153,17 +153,17 @@ function copyJson(value, maxBytes = NONROOT_LIMITS.maxProofBytes) {
 /** Duplicate decoded keys must be rejected before JSON.parse loses them. */
 function parseNonrootJson(text, options = {}) {
 	const o = copyJson(options);
-	need$35(Object.keys(o).every((k) => k === "maxBytes"));
+	need$36(Object.keys(o).every((k) => k === "maxBytes"));
 	const maxBytes = o.maxBytes ?? NONROOT_LIMITS.maxProofBytes;
-	need$35(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
-	need$35(typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes);
+	need$36(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= NONROOT_LIMITS.maxProofBytes);
+	need$36(typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes);
 	let i = 0;
 	const ws = () => {
 		while (/[\x20\t\r\n]/.test(text[i] ?? "!")) i++;
 	};
 	const str = () => {
 		const start = i;
-		need$35(text[i++] === "\"");
+		need$36(text[i++] === "\"");
 		let escape = false;
 		while (i < text.length) {
 			const c = text[i++];
@@ -174,7 +174,7 @@ function parseNonrootJson(text, options = {}) {
 		fail$9();
 	};
 	function scan(depth) {
-		need$35(depth <= NONROOT_LIMITS.maxJsonDepth);
+		need$36(depth <= NONROOT_LIMITS.maxJsonDepth);
 		ws();
 		const c = text[i];
 		if (c === "{") {
@@ -188,17 +188,17 @@ function parseNonrootJson(text, options = {}) {
 			while (true) {
 				ws();
 				const key = str();
-				need$35(!keys.has(key));
+				need$36(!keys.has(key));
 				keys.add(key);
 				ws();
-				need$35(text[i++] === ":");
+				need$36(text[i++] === ":");
 				scan(depth + 1);
 				ws();
 				if (text[i] === "}") {
 					i++;
 					return;
 				}
-				need$35(text[i++] === ",");
+				need$36(text[i++] === ",");
 			}
 		}
 		if (c === "[") {
@@ -215,7 +215,7 @@ function parseNonrootJson(text, options = {}) {
 					i++;
 					return;
 				}
-				need$35(text[i++] === ",");
+				need$36(text[i++] === ",");
 			}
 		}
 		if (c === "\"") {
@@ -223,27 +223,27 @@ function parseNonrootJson(text, options = {}) {
 			return;
 		}
 		const m = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(i));
-		need$35(m);
+		need$36(m);
 		i += m[0].length;
 	}
 	try {
 		scan(0);
 		ws();
-		need$35(i === text.length);
-		return freeze$3(copyJson(JSON.parse(text), maxBytes));
+		need$36(i === text.length);
+		return freeze$4(copyJson(JSON.parse(text), maxBytes));
 	} catch {
 		fail$9();
 	}
 }
 /** Structural and intrinsic equality validation only. "pass" fields are claims. */
 function inspectNonrootRecord(type, value) {
-	need$35(typeof type === "string" && Object.hasOwn(schemas$2, type));
+	need$36(typeof type === "string" && Object.hasOwn(schemas$2, type));
 	const maxBytes = type === "DataDescriptorV3" ? NONROOT_LIMITS.maxDescriptorBytes : type === "CompatibilityCertificateV5" ? NONROOT_LIMITS.maxCertificateBytes : ["RuntimeIdentityV2", "TargetIdentityRecheckV1"].includes(type) ? NONROOT_LIMITS.maxRuntimeRecordBytes : NONROOT_LIMITS.maxProofBytes;
 	const data = typeof value === "string" ? parseNonrootJson(value, { maxBytes }) : copyJson(value, maxBytes);
 	schemas$2[type](data);
-	return freeze$3(data);
+	return freeze$4(data);
 }
-var NONROOT_TRANSITION_KIND, NONROOT_DATA_COMPONENTS, NONROOT_TASK_KEYS, CONTROL_NODE, NONROOT_LIMITS, NONROOT_HARDENING_POLICY, NONROOT_GUARD_BUILTINS, fail$9, need$35, rawHash, freeze$3, canonical$4, nonrootHash, NONROOT_LIMITS_HASH, copyNonrootJson, text$4, pattern$1, integer$3, literal$1, oneOf$1, array$2, object$3, union, schemas$2, ref, define$1, H$1, G$1, N, D$1, A, R, P$2, Z, B, S$2, MS, ARN, ROLE, TASK, TD, CLUSTER, COMPONENT, KEY, SAFE_PATH, ABS, unique, equal$1, named, time$2, image$1, ARGV, JSON_REF, BYTE_REF, IMG, CIMG, hashes$1, refs, clocks, builtinPolicy, auditNames, carrierEntry, network, tags$1, runFixed, updateTaskKeys, processFields, ignoredEntrypoint, trustedProcessFields, presence, deployedControlImageSlot, controlImageTargets, release$1, inspectNonrootTransition;
+var NONROOT_TRANSITION_KIND, NONROOT_DATA_COMPONENTS, NONROOT_TASK_KEYS, CONTROL_NODE, NONROOT_LIMITS, NONROOT_HARDENING_POLICY, NONROOT_GUARD_BUILTINS, fail$9, need$36, rawHash, freeze$4, canonical$4, nonrootHash, NONROOT_LIMITS_HASH, copyNonrootJson, text$4, pattern$1, integer$3, literal$1, oneOf$1, array$2, object$3, union, schemas$2, ref, define$1, H$1, G$1, N$1, D$1, A, R$1, P$2, Z, B, S$2, MS, ARN, ROLE, TASK, TD, CLUSTER, COMPONENT, KEY, SAFE_PATH, ABS, unique, equal$1, named, time$2, image$1, ARGV, JSON_REF, BYTE_REF, IMG, CIMG, hashes$1, refs, clocks, builtinPolicy, auditNames, carrierEntry, network, tags$1, runFixed, updateTaskKeys, processFields, ignoredEntrypoint, trustedProcessFields, presence, deployedControlImageSlot, controlImageTargets, release$1, inspectNonrootTransition;
 var init_production_nonroot_contracts = __esmMin((() => {
 	NONROOT_TRANSITION_KIND = "image-security-nonroot-upgrade";
 	NONROOT_DATA_COMPONENTS = Object.freeze([
@@ -313,13 +313,13 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	fail$9 = () => {
 		throw Error("NonrootContractInvalid");
 	};
-	need$35 = (condition) => {
+	need$36 = (condition) => {
 		if (!condition) fail$9();
 	};
 	rawHash = (value) => createHash("sha256").update(value).digest("hex");
-	freeze$3 = (value) => {
+	freeze$4 = (value) => {
 		if (value && typeof value === "object") {
-			Object.values(value).forEach(freeze$3);
+			Object.values(value).forEach(freeze$4);
 			Object.freeze(value);
 		}
 		return value;
@@ -327,22 +327,22 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	canonical$4 = (v) => Array.isArray(v) ? v.map(canonical$4) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical$4(v[k])])) : v;
 	nonrootHash = (value) => rawHash(JSON.stringify(canonical$4(copyJson(value))));
 	NONROOT_LIMITS_HASH = nonrootHash(NONROOT_LIMITS);
-	copyNonrootJson = (value) => freeze$3(copyJson(value));
-	text$4 = (max = 4096, min = 1) => (v) => need$35(typeof v === "string" && v.length >= min && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max);
+	copyNonrootJson = (value) => freeze$4(copyJson(value));
+	text$4 = (max = 4096, min = 1) => (v) => need$36(typeof v === "string" && v.length >= min && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max);
 	pattern$1 = (re) => (v) => {
 		text$4()(v);
-		need$35(re.test(v));
+		need$36(re.test(v));
 	};
-	integer$3 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$35(Number.isSafeInteger(v) && v >= min && v <= max);
-	literal$1 = (expected) => (v) => need$35(v === expected);
-	oneOf$1 = (...values) => (v) => need$35(values.includes(v));
+	integer$3 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$36(Number.isSafeInteger(v) && v >= min && v <= max);
+	literal$1 = (expected) => (v) => need$36(v === expected);
+	oneOf$1 = (...values) => (v) => need$36(values.includes(v));
 	array$2 = (item, min = 0, max = 1e3) => (v) => {
-		need$35(Array.isArray(v) && v.length >= min && v.length <= max);
+		need$36(Array.isArray(v) && v.length >= min && v.length <= max);
 		v.forEach(item);
 	};
 	object$3 = (fields, check = () => {}) => (v) => {
-		need$35(v && typeof v === "object" && !Array.isArray(v));
-		need$35(Object.keys(v).length === Object.keys(fields).length && Object.keys(fields).every((k) => Object.hasOwn(v, k)));
+		need$36(v && typeof v === "object" && !Array.isArray(v));
+		need$36(Object.keys(v).length === Object.keys(fields).length && Object.keys(fields).every((k) => Object.hasOwn(v, k)));
 		for (const [k, validator] of Object.entries(fields)) validator(v[k]);
 		check(v);
 	};
@@ -355,7 +355,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	};
 	schemas$2 = Object.create(null);
 	ref = (name) => (v) => {
-		need$35(Object.hasOwn(schemas$2, name));
+		need$36(Object.hasOwn(schemas$2, name));
 		schemas$2[name](v);
 	};
 	define$1 = (name, fields, check) => {
@@ -363,10 +363,10 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	};
 	H$1 = pattern$1(/^[a-f0-9]{64}$/);
 	G$1 = pattern$1(/^[a-f0-9]{40}$/);
-	N = pattern$1(/^[a-f0-9]{32}$/);
+	N$1 = pattern$1(/^[a-f0-9]{32}$/);
 	D$1 = pattern$1(/^sha256:[a-f0-9]{64}$/);
 	A = pattern$1(/^\d{12}$/);
-	R = pattern$1(/^[a-z]{2}(?:-[a-z]+)+-\d$/);
+	R$1 = pattern$1(/^[a-z]{2}(?:-[a-z]+)+-\d$/);
 	P$2 = integer$3(1);
 	Z = integer$3();
 	B = oneOf$1(true, false);
@@ -381,25 +381,25 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	KEY = oneOf$1(...NONROOT_TASK_KEYS);
 	SAFE_PATH = (v) => {
 		text$4(4096)(v);
-		need$35(!v.startsWith("/") && !v.split("/").some((p) => p === ".." || p === "") && !/[\r\n\\]/.test(v));
+		need$36(!v.startsWith("/") && !v.split("/").some((p) => p === ".." || p === "") && !/[\r\n\\]/.test(v));
 	};
 	ABS = (v) => {
 		text$4(4096)(v);
-		need$35(v.startsWith("/") && !v.split("/").includes("..") && !/[\r\n\\]/.test(v));
+		need$36(v.startsWith("/") && !v.split("/").includes("..") && !/[\r\n\\]/.test(v));
 	};
-	unique = (items, key = (x) => x) => need$35(new Set(items.map(key)).size === items.length);
-	equal$1 = (a, b) => need$35(nonrootHash(a) === nonrootHash(b));
+	unique = (items, key = (x) => x) => need$36(new Set(items.map(key)).size === items.length);
+	equal$1 = (a, b) => need$36(nonrootHash(a) === nonrootHash(b));
 	named = (items, names) => {
 		unique(items, (x) => x.name ?? x.containerName ?? x.taskKey);
 		equal$1(items.map((x) => x.name ?? x.containerName ?? x.taskKey).sort(), [...names].sort());
 	};
-	time$2 = (v) => need$35(v.completedMs >= v.startedMs);
+	time$2 = (v) => need$36(v.completedMs >= v.startedMs);
 	image$1 = (v) => {
-		need$35(v.rootDigest !== v.arm64Digest && v.configDigest !== v.rootDigest && v.configDigest !== v.arm64Digest);
+		need$36(v.rootDigest !== v.arm64Digest && v.configDigest !== v.rootDigest && v.configDigest !== v.arm64Digest);
 	};
 	ARGV = (v) => {
 		array$2(text$4(8192, 0), 0, 64)(v);
-		need$35(Buffer.byteLength(JSON.stringify(v)) <= 8192);
+		need$36(Buffer.byteLength(JSON.stringify(v)) <= 8192);
 	};
 	JSON_REF = ref("JsonRef");
 	BYTE_REF = ref("ByteRef");
@@ -436,7 +436,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	}, image$1);
 	define$1("ControlImageBindingV1", {
 		account: A,
-		region: R,
+		region: R$1,
 		repositoryName: oneOf$1("mem9-on-aws/bootstrap", "mem9-on-aws/preview/bootstrap"),
 		rootDigest: D$1,
 		arm64Digest: D$1,
@@ -458,7 +458,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		bytes: Z,
 		blob: BYTE_REF
 	}, (v) => {
-		need$35(v.bytes === v.blob.bytesLength && v.sha256 === v.blob.sha256);
+		need$36(v.bytes === v.blob.bytesLength && v.sha256 === v.blob.sha256);
 	});
 	define$1("SourceClosureV1", {
 		version: literal$1(1),
@@ -468,7 +468,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		closureHash: H$1
 	}, (v) => {
 		unique(v.files, (x) => x.path);
-		need$35(v.closureHash === nonrootHash(v.files));
+		need$36(v.closureHash === nonrootHash(v.files));
 	});
 	define$1("DataOriginV1", {
 		revision: G$1,
@@ -482,17 +482,17 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	define$1("RootBindingV1", {
 		stage: literal$1("prod"),
 		account: A,
-		region: R,
-		runtimeNonce: N,
+		region: R$1,
+		runtimeNonce: N$1,
 		...hashes$1("schemaDigest operatorDigest rootIdentity generation targetsHash parentProofHash originalBackendBindingHash originalReleaseHash protectedBaselineHash receiptSetHash conservationHash"),
-		validationId: N,
+		validationId: N$1,
 		plannerOid: P$2,
 		executorOid: P$2,
 		protectedRows: Z,
 		receipts: integer$3(1, 20),
 		spent: integer$3(1, 19),
 		cap: literal$1(20)
-	}, (v) => need$35(v.receipts <= v.spent));
+	}, (v) => need$36(v.receipts <= v.spent));
 	define$1("PrimitiveEvidenceV1", {
 		version: literal$1(1),
 		kind: literal$1("verified-nnp-primitive"),
@@ -556,7 +556,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		gid: literal$1(0),
 		parentPathEvidence: JSON_REF
 	}, (v) => {
-		need$35(v.value === v.resolvedPath && (v.mode & 18) === 0 && (v.mode & 3072) === 0);
+		need$36(v.value === v.resolvedPath && (v.mode & 18) === 0 && (v.mode & 3072) === 0);
 	});
 	define$1("EnvironmentGateV1", {
 		version: literal$1(1),
@@ -594,9 +594,9 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	define$1("DataObservationPlanV1", {
 		version: literal$1(1),
 		kind: literal$1("bounded-data-observation"),
-		owner: N,
-		operation: N,
-		launchNonce: N,
+		owner: N$1,
+		operation: N$1,
+		launchNonce: N$1,
 		sourceTree: G$1,
 		role: oneOf$1("mnemo-server", "llm-proxy", "qwen3-embed", "planner", "executor"),
 		image: IMG,
@@ -620,16 +620,16 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			combinedIdentities: literal$1(256)
 		})
 	}, (v) => {
-		need$35(v.startedMs <= v.latestArmMs && v.latestArmMs < v.observationEndMs && v.observationEndMs < v.deadlineMs);
-		need$35(Number.isSafeInteger(v.observationEndMs + v.cleanupReserveMs) && v.observationEndMs + v.cleanupReserveMs <= v.deadlineMs);
+		need$36(v.startedMs <= v.latestArmMs && v.latestArmMs < v.observationEndMs && v.observationEndMs < v.deadlineMs);
+		need$36(Number.isSafeInteger(v.observationEndMs + v.cleanupReserveMs) && v.observationEndMs + v.cleanupReserveMs <= v.deadlineMs);
 		let previous = v.startedMs, total = 0;
 		for (const [index, e] of v.episodes.entries()) {
 			const start = v.startedMs + e.offsetMs, end = start + e.durationMs;
-			need$35(e.index === index && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= previous && end <= v.observationEndMs && e.sampleEveryMs <= e.durationMs);
-			if (index === 0) need$35(Number.isSafeInteger(v.latestArmMs + v.armingLimitMs) && v.latestArmMs + v.armingLimitMs <= start);
+			need$36(e.index === index && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= previous && end <= v.observationEndMs && e.sampleEveryMs <= e.durationMs);
+			if (index === 0) need$36(Number.isSafeInteger(v.latestArmMs + v.armingLimitMs) && v.latestArmMs + v.armingLimitMs <= start);
 			previous = end;
 			total += Math.ceil(e.durationMs / e.sampleEveryMs) + 1;
-			need$35(Number.isSafeInteger(total));
+			need$36(Number.isSafeInteger(total));
 		}
 	});
 	define$1("ControlLaunchTemplateV1", {
@@ -697,7 +697,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		codeHash: H$1,
 		sourceHash: H$1
 	}, (v) => {
-		need$35(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256);
+		need$36(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256);
 	});
 	define$1("ReviewedHostOriginV2", {
 		version: literal$1(2),
@@ -709,7 +709,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		codeHash: H$1,
 		sourceHash: H$1
 	}, (v) => {
-		need$35(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256 && v.codeHash !== v.ancestor.codeHash);
+		need$36(v.codeHash === v.exactCode.sha256 && v.sourceHash === v.expandedSource.sha256 && v.codeHash !== v.ancestor.codeHash);
 	});
 	schemas$2.CarrierHostOrigin = union(ref("LegacyHostOriginV1"), ref("ReviewedHostOriginV2"));
 	define$1("LegacyImageOriginV1", {
@@ -761,7 +761,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		verifiedMs: MS
 	}, (v) => {
 		unique(v.files, (x) => x.destinationPath);
-		need$35(v.sourceClosureHash === v.destinationClosureHash);
+		need$36(v.sourceClosureHash === v.destinationClosureHash);
 	});
 	carrierEntry = [
 		"/bin/setpriv",
@@ -800,7 +800,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		completedMs: MS
 	}, (v) => {
 		equal$1(v.entryPoint, carrierEntry);
-		need$35(v.image.repositoryName === "mem9-on-aws/preview/bootstrap" && v.source.tree === v.build.tree);
+		need$36(v.image.repositoryName === "mem9-on-aws/preview/bootstrap" && v.source.tree === v.build.tree);
 		equal$1(v.image, v.legacyClosureProof.destinationImage);
 	});
 	network = object$3({ awsvpcConfiguration: object$3({
@@ -813,7 +813,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	}) });
 	tags$1 = array$2(object$3({
 		key: literal$1("mem9-supersession-owner"),
-		value: N
+		value: N$1
 	}), 1, 1);
 	define$1("CarrierRunOverridesV1", { containerOverrides: array$2(object$3({
 		name: literal$1("ControlMem9Bootstrap"),
@@ -827,7 +827,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		pattern$1(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/)(e[0].value);
 		H$1(e[1].value);
 		H$1(e[2].value);
-		need$35(Buffer.byteLength(JSON.stringify(v)) <= 8192);
+		need$36(Buffer.byteLength(JSON.stringify(v)) <= 8192);
 	});
 	runFixed = {
 		cluster: CLUSTER,
@@ -852,12 +852,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	define$1("CarrierRunTaskRequestV1", {
 		...runFixed,
 		taskDefinition: TD,
-		clientToken: N,
+		clientToken: N$1,
 		startedBy: S$2,
 		overrides: ref("CarrierRunOverridesV1")
 	}, (v) => {
-		need$35(v.startedBy === "root-" + v.clientToken.slice(0, 29));
-		need$35(v.cluster.split(":").slice(0, 5).join(":") === v.taskDefinition.split(":").slice(0, 5).join(":"));
+		need$36(v.startedBy === "root-" + v.clientToken.slice(0, 29));
+		need$36(v.cluster.split(":").slice(0, 5).join(":") === v.taskDefinition.split(":").slice(0, 5).join(":"));
 	});
 	define$1("CarrierRunTaskBindingV1", {
 		version: literal$1(1),
@@ -875,14 +875,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			decision: literal$1("allowed")
 		})
 	}, (v) => {
-		need$35(v.requestHash === nonrootHash(v.request) && v.authorization.requestHash === v.requestHash && v.authorization.taskDefinitionArn === v.request.taskDefinition && v.authorization.clusterArn === v.request.cluster);
+		need$36(v.requestHash === nonrootHash(v.request) && v.authorization.requestHash === v.requestHash && v.authorization.taskDefinitionArn === v.request.taskDefinition && v.authorization.clusterArn === v.request.cluster);
 	});
 	define$1("PreauditLaunchPlanV1", {
 		version: literal$1(1),
 		kind: literal$1("standalone-preaudit-launch-plan"),
-		owner: N,
+		owner: N$1,
 		account: A,
-		region: R,
+		region: R$1,
 		...hashes$1("carrierBuildHash legacyClosureProofHash guardImportsHash environmentPolicyHash"),
 		carrierImage: CIMG,
 		existingControlBinding: JSON_REF,
@@ -901,7 +901,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		carrierPlatform: ref("RuntimePlatformObservationV1")
 	}, (v) => {
 		equal$1(v.entryPoint, carrierEntry);
-		need$35(v.account === v.carrierImage.account && v.region === v.carrierImage.region && v.carrierImage.repositoryName === "mem9-on-aws/preview/bootstrap" && v.runTaskContract.tags[0].value === v.owner && v.carrierPlatform.platformVersion === v.runTaskContract.platformVersion);
+		need$36(v.account === v.carrierImage.account && v.region === v.carrierImage.region && v.carrierImage.repositoryName === "mem9-on-aws/preview/bootstrap" && v.runTaskContract.tags[0].value === v.owner && v.carrierPlatform.platformVersion === v.runTaskContract.platformVersion);
 	});
 	define$1("CarrierRegistrationReadbackV1", {
 		version: literal$1(1),
@@ -925,12 +925,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		observedMs: MS,
 		expiresMs: MS
 	}, (v) => {
-		need$35(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5);
+		need$36(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5);
 		for (const [key, digest] of [
 			["rootManifest", "rootDigest"],
 			["arm64Manifest", "arm64Digest"],
 			["config", "configDigest"]
-		]) need$35("sha256:" + v[key].sha256 === v.image[digest]);
+		]) need$36("sha256:" + v[key].sha256 === v.image[digest]);
 	});
 	define$1("CarrierPrerequisiteReviewV1", {
 		version: literal$1(1),
@@ -939,12 +939,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...hashes$1("designReviewHash carrierBuildHash sourceEvidenceHash launchPlanHash permissionsHash legacyBindingsHash"),
 		reviewedMs: MS,
 		expiresMs: MS
-	}, (v) => need$35(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
+	}, (v) => need$36(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
 	define$1("PreauditPermitV1", {
 		version: literal$1(1),
 		kind: literal$1("premerge-readonly-audit-permit"),
-		owner: N,
-		invocation: N,
+		owner: N$1,
+		invocation: N$1,
 		...hashes$1("carrierBuildHash prerequisiteReviewHash permissionsHash launchPlanHash rootBindingHash predecessorParameterHash oldCertificateHash oldAuditInputHash"),
 		registrationReadback: ref("CarrierRegistrationReadbackV1"),
 		runOverrides: ref("CarrierRunOverridesV1"),
@@ -954,16 +954,16 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		issuedMs: MS,
 		deadlineMs: MS
 	}, (v) => {
-		need$35(v.deadlineMs > v.issuedMs);
+		need$36(v.deadlineMs > v.issuedMs);
 		equal$1(v.runOverrides, v.runTask.request.overrides);
-		need$35(v.runTask.request.clientToken === v.invocation && v.runTask.request.tags[0].value === v.owner && v.runTask.launchPlanHash === v.launchPlanHash && v.runTask.authorization.permissionsDossierHash === v.permissionsHash && v.runTask.registrationReadbackHash === nonrootHash(v.registrationReadback) && v.runTask.environmentGateHash === nonrootHash(v.environmentGate) && v.runTask.carrierPresenceHash === nonrootHash(v.carrierPresence));
+		need$36(v.runTask.request.clientToken === v.invocation && v.runTask.request.tags[0].value === v.owner && v.runTask.launchPlanHash === v.launchPlanHash && v.runTask.authorization.permissionsDossierHash === v.permissionsHash && v.runTask.registrationReadbackHash === nonrootHash(v.registrationReadback) && v.runTask.environmentGateHash === nonrootHash(v.environmentGate) && v.runTask.carrierPresenceHash === nonrootHash(v.carrierPresence));
 	});
 	define$1("PermissionsDossierV1", {
 		version: literal$1(1),
 		kind: literal$1("existing-permissions-preflight"),
 		account: A,
-		applicationRegion: R,
-		iamRegion: R,
+		applicationRegion: R$1,
+		iamRegion: R$1,
 		...refs("caller actorBindings identityPolicies boundaries trustAndResourcePolicies organizationAndEndpointControls actionMatrix positiveNegativeTests analyzerScannerReview"),
 		carrierRunTaskContractHash: H$1,
 		observedMs: MS,
@@ -972,7 +972,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	define$1("HistoricalCopyV1", {
 		version: literal$1(1),
 		kind: literal$1("historical-copy-adoption"),
-		owner: N,
+		owner: N$1,
 		control: ref("SourceIdentityV1"),
 		...refs("stageConfig initialJournal recoveryDesign recoveryReviews recoverySource recoveryTerminal completedGraph destinationReadback originalVerifierClosure cumulativeBudget oldIdDenial")
 	});
@@ -1084,7 +1084,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		tagRule: literal$1("mem9-actual-main-sha7"),
 		provenanceRule: literal$1("authenticated-workflow-run-attempt")
 	}, (v) => {
-		need$35(v.actionSource.path === v.actionPath && v.bundle.path === v.entryPath && v.toolchain.path === ".github/actions/control-composition/dist/toolchain.json");
+		need$36(v.actionSource.path === v.actionPath && v.bundle.path === v.entryPath && v.toolchain.path === ".github/actions/control-composition/dist/toolchain.json");
 	});
 	define$1("ControlRecipeV2", {
 		version: literal$1(2),
@@ -1120,7 +1120,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		launchTemplates: array$2(ref("ControlLaunchTemplateV1"), 1, 10),
 		output: object$3({
 			account: A,
-			region: R,
+			region: R$1,
 			repositoryName: literal$1("mem9-on-aws/bootstrap")
 		}),
 		artifactPolicyHash: H$1,
@@ -1146,7 +1146,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		launchTemplates: array$2(ref("ControlLaunchTemplateV1"), 1, 10),
 		output: object$3({
 			account: A,
-			region: R,
+			region: R$1,
 			repositoryName: literal$1("mem9-on-aws/bootstrap")
 		}),
 		artifactPolicyHash: H$1,
@@ -1173,7 +1173,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		registrationBody: JSON_REF,
 		registrationBodyHash: H$1
 	}, (v) => {
-		need$35(v.entryPoint[3] === CONTROL_NODE);
+		need$36(v.entryPoint[3] === CONTROL_NODE);
 	});
 	define$1("ControlScanEvidenceV1", {
 		version: literal$1(1),
@@ -1201,7 +1201,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		workflowSha: G$1,
 		authenticatedSource: JSON_REF
 	}, (v) => {
-		need$35(v.mainTree === v.candidateTree && v.workflowSha === v.mainRevision && v.parents[0] === v.baseRevision && (v.parents.length === 1 || v.parents[1] === v.candidateRevision));
+		need$36(v.mainTree === v.candidateTree && v.workflowSha === v.mainRevision && v.parents[0] === v.baseRevision && (v.parents.length === 1 || v.parents[1] === v.candidateRevision));
 		unique(v.parents);
 	});
 	define$1("DeployedControlBuildV1", {
@@ -1241,12 +1241,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$35(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
+		need$36(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
 		equal$1(v.scan.image, v.image);
 		unique(v.resolvedLaunches, (x) => x.taskKey);
 		for (const l of v.resolvedLaunches) {
 			equal$1(l.image, v.image);
-			need$35(l.contractHash === v.contractHash);
+			need$36(l.contractHash === v.contractHash);
 		}
 	});
 	define$1("DeployedControlBuildV2", {
@@ -1286,12 +1286,12 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$35(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
+		need$36(v.source.revision === v.actualMain.mainRevision && v.source.tree === v.actualMain.mainTree && v.source.repository === v.actualMain.repository && v.workflow.workflowSha === v.actualMain.workflowSha && v.workflow.runId === v.actualMain.workflowRun && v.workflow.attempt === v.actualMain.workflowAttempt && v.image.repositoryName === "mem9-on-aws/bootstrap");
 		equal$1(v.scan.image, v.image);
 		unique(v.resolvedLaunches, (x) => x.taskKey);
 		for (const l of v.resolvedLaunches) {
 			equal$1(l.image, v.image);
-			need$35(l.contractHash === v.contractHash);
+			need$36(l.contractHash === v.contractHash);
 		}
 	});
 	updateTaskKeys = NONROOT_TASK_KEYS.filter((k) => k !== "fallback" && k !== "preaudit");
@@ -1396,7 +1396,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		phase: oneOf$1("preview", "preaudit", "target", "operator", "worker"),
 		taskKey: KEY,
 		account: A,
-		region: R,
+		region: R$1,
 		taskArn: TASK,
 		taskDefinitionArn: TD,
 		containerName: S$2,
@@ -1419,10 +1419,10 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			...v.trustedLaunch,
 			...v.managed
 		];
-		need$35(all.length <= 256);
+		need$36(all.length <= 256);
 		unique(all, (p) => p.pid + ":" + p.startTimeTicks);
-		need$35(v.phase === "preview" === (v.artifactBinding.kind === "artifact-test"));
-		need$35(v.taskArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":") && v.taskDefinitionArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":"));
+		need$36(v.phase === "preview" === (v.artifactBinding.kind === "artifact-test"));
+		need$36(v.taskArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":") && v.taskDefinitionArn.startsWith("arn:aws:ecs:" + v.region + ":" + v.account + ":"));
 	});
 	define$1("TargetContainerBindingV1", {
 		name: COMPONENT,
@@ -1432,7 +1432,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	});
 	define$1("TargetBindingV1", {
 		account: A,
-		region: R,
+		region: R$1,
 		clusterArn: CLUSTER,
 		serviceName: literal$1("Mem9Server"),
 		serviceDeploymentId: S$2,
@@ -1464,7 +1464,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 	}, (v) => {
 		time$2(v);
 		named(v.identity, NONROOT_DATA_COMPONENTS);
-		need$35(v.routing.targetBindingHash === nonrootHash(v.target));
+		need$36(v.routing.targetBindingHash === nonrootHash(v.target));
 	});
 	define$1("TargetIdentityRecheckV1", {
 		version: literal$1(1),
@@ -1499,7 +1499,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			"startTimeTicks",
 			"executableDigest",
 			"entrypointIdentityHash"
-		]) need$35(m.preMain[k] === m.postMain[k]);
+		]) need$36(m.preMain[k] === m.postMain[k]);
 	});
 	define$1("TargetPostAuditV1", {
 		version: literal$1(1),
@@ -1512,7 +1512,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...clocks
 	}, (v) => {
 		time$2(v);
-		need$35(v.preTargetHash === v.identityRecheck.preTargetHash && v.identityRecheck.targetBindingHash === nonrootHash(v.target) && v.routingRecheck.targetBindingHash === nonrootHash(v.target));
+		need$36(v.preTargetHash === v.identityRecheck.preTargetHash && v.identityRecheck.targetBindingHash === nonrootHash(v.target) && v.routingRecheck.targetBindingHash === nonrootHash(v.target));
 	});
 	schemas$2.AuditTargetJoinV1 = union(object$3({ kind: literal$1("not-applicable") }), object$3({
 		kind: literal$1("same-target-window"),
@@ -1535,8 +1535,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		cleanupComplete: literal$1(true)
 	}, (v) => {
 		time$2(v);
-		need$35(v.databaseObservedMs >= v.startedMs && v.databaseObservedMs <= v.completedMs);
-		need$35(v.phase === "predeployment" === (v.targetJoin.kind === "not-applicable"));
+		need$36(v.databaseObservedMs >= v.startedMs && v.databaseObservedMs <= v.completedMs);
+		need$36(v.phase === "predeployment" === (v.targetJoin.kind === "not-applicable"));
 	});
 	define$1("RuntimeReadinessV2", {
 		version: literal$1(2),
@@ -1549,7 +1549,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		result: literal$1("pass")
 	}, (v) => {
 		time$2(v);
-		need$35(v.postdeployRootAudit.phase === "postdeployment-preservation");
+		need$36(v.postdeployRootAudit.phase === "postdeployment-preservation");
 	});
 	define$1("FreshAdmissionV1", {
 		version: literal$1(1),
@@ -1563,7 +1563,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		permissionBindingsHash: H$1,
 		observedMs: MS,
 		expiresMs: MS
-	}, (v) => need$35(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5));
+	}, (v) => need$36(v.expiresMs > v.observedMs && v.expiresMs - v.observedMs <= 3e5));
 	presence = union(object$3({ present: literal$1(false) }), object$3({
 		present: literal$1(true),
 		value: () => {}
@@ -1590,11 +1590,11 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		cause: oneOf$1("fixed-user", "drop-all", "fixed-data-nnp", "fixed-health-nnp", "guarded-control", "carrier-image", "retained-data-image", "ecs-derived", "disable-root-rollback"),
 		observationHash: H$1
 	}, (v) => {
-		need$35(v.after.present);
+		need$36(v.after.present);
 		const x = v.after.value;
-		if (v.field === "user") need$35(x === "1000:1000");
+		if (v.field === "user") need$36(x === "1000:1000");
 		else if (v.field === "linuxParameters.capabilities") equal$1(x, { drop: ["ALL"] });
-		else if (v.field === "deploymentCircuitBreaker.rollback") need$35(x === false);
+		else if (v.field === "deploymentCircuitBreaker.rollback") need$36(x === false);
 		else if ([
 			"entryPoint",
 			"command",
@@ -1603,7 +1603,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		else if (v.field === "image") {
 			if (typeof x === "string") text$4()(x);
 			else {
-				need$35(v.surface === "container" && v.cause === "guarded-control" && Object.hasOwn(controlImageTargets, v.taskKey) && v.selector === controlImageTargets[v.taskKey] && v.before.present);
+				need$36(v.surface === "container" && v.cause === "guarded-control" && Object.hasOwn(controlImageTargets, v.taskKey) && v.selector === controlImageTargets[v.taskKey] && v.before.present);
 				text$4()(v.before.value);
 				deployedControlImageSlot(x);
 			}
@@ -1675,7 +1675,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		...refs("artifactSecurity policySources designReview"),
 		observedMs: MS
 	}, (v) => {
-		need$35(v.predeploymentAudit.phase === "predeployment");
+		need$36(v.predeploymentAudit.phase === "predeployment");
 		equal$1(v.root, v.predeploymentAudit.root);
 	});
 	define$1("NonrootTransitionV2", {
@@ -1689,7 +1689,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		version: literal$1(3),
 		stage: literal$1("prod"),
 		account: A,
-		region: R,
+		region: R$1,
 		controlSourceTree: G$1,
 		dataRevision: G$1,
 		dataSourceTree: G$1,
@@ -1697,14 +1697,14 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		images: object$3(Object.fromEntries(NONROOT_DATA_COMPONENTS.map((n) => [n, object$3({
 			rootDigest: D$1,
 			arm64Digest: D$1
-		}, (v) => need$35(v.rootDigest !== v.arm64Digest))]))),
+		}, (v) => need$36(v.rootDigest !== v.arm64Digest))]))),
 		...hashes$1("parentProofHash backendBindingHash generation targetsHash schemaDigest operatorDigest buildInputsHash securityEvidenceHash policyHash"),
-		runtimeNonce: N,
-		authorizationId: N,
+		runtimeNonce: N$1,
+		authorizationId: N$1,
 		issuedMs: MS,
 		expiresMs: MS,
 		transition: ref("NonrootTransitionV2")
-	}, (v) => need$35(v.dataSourceTag === "mem9-" + v.dataRevision.slice(0, 7) && v.expiresMs > v.issuedMs && v.expiresMs - v.issuedMs <= 864e5));
+	}, (v) => need$36(v.dataSourceTag === "mem9-" + v.dataRevision.slice(0, 7) && v.expiresMs > v.issuedMs && v.expiresMs - v.issuedMs <= 864e5));
 	define$1("FinalReviewV2", {
 		version: literal$1(2),
 		kind: literal$1("nonroot-deployment-policy-review"),
@@ -1713,17 +1713,17 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		controlSourceTree: G$1,
 		reviewedMs: MS,
 		expiresMs: MS
-	}, (v) => need$35(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
+	}, (v) => need$36(v.expiresMs > v.reviewedMs && v.expiresMs - v.reviewedMs <= 864e5));
 	define$1("ParameterCaptureV1", {
 		Name: literal$1("/mem9-on-aws/prod/consolidation-runtime/data-release"),
 		Type: literal$1("SecureString"),
 		ARN,
 		Version: P$2,
 		Value: text$4(4096)
-	}, (v) => need$35(v.ARN.endsWith(":parameter" + v.Name)));
+	}, (v) => need$36(v.ARN.endsWith(":parameter" + v.Name)));
 	define$1("NonrootExpectedV2", {
 		account: A,
-		region: R,
+		region: R$1,
 		controlRevision: G$1,
 		controlSourceTree: G$1,
 		...hashes$1("sourceEvidenceHash proofHash taskPlanHash carrierBuildHash permissionsHash availabilityRehearsalHash rootBindingHash oldRootAuditHash artifactReverificationHash artifactSecurityHash writerBoundaryHash lineageHash"),
@@ -1737,7 +1737,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		version: literal$1(2),
 		kind: literal$1("image-security-nonroot-transition"),
 		operation: object$3({
-			owner: N,
+			owner: N$1,
 			expected: object$3({
 				revision: G$1,
 				newValue: text$4(8192)
@@ -1754,7 +1754,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		lineage: JSON_REF,
 		evidenceManifest: JSON_REF
 	}, (v) => {
-		need$35(v.authorization.hash === nonrootHash(v.authorization.data) && v.operation.owner === v.authorization.data.authorizationId && v.authorization.data.policyHash === nonrootHash(v.authorization.review) && v.operation.prior.value === v.predecessor.Value);
+		need$36(v.authorization.hash === nonrootHash(v.authorization.data) && v.operation.owner === v.authorization.data.authorizationId && v.authorization.data.policyHash === nonrootHash(v.authorization.review) && v.operation.prior.value === v.predecessor.Value);
 	});
 	release$1 = object$3({
 		sourceTree: G$1,
@@ -1763,7 +1763,7 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		workerImage: S$2,
 		schemaDigest: H$1,
 		operatorDigest: H$1,
-		runtimeNonce: N
+		runtimeNonce: N$1
 	});
 	define$1("CompatibilityCertificateV5", {
 		version: literal$1(5),
@@ -1816,8 +1816,8 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			"schemaDigest",
 			"operatorDigest",
 			"runtimeNonce"
-		]) need$35(v.previous.release[k] === v.current.release[k]);
-		for (const k of ["network", "credentials"]) need$35(v.material[k].previous === v.material[k].current);
+		]) need$36(v.previous.release[k] === v.current.release[k]);
+		for (const k of ["network", "credentials"]) need$36(v.material[k].previous === v.material[k].current);
 		equal$1(v.images.worker, v.images["llm-proxy"]);
 	});
 	define$1("ContinuationWitnessV2", {
@@ -1839,13 +1839,13 @@ var init_production_nonroot_contracts = __esmMin((() => {
 		ref: union(JSON_REF, BYTE_REF),
 		encoding: oneOf$1("json", "bytes")
 	}, (v) => {
-		need$35(!v.name.includes("/") && !v.name.includes("\\") && ![".", ".."].includes(v.name));
-		need$35(v.encoding === "json" ? Object.hasOwn(v.ref, "canonicalHash") : Object.hasOwn(v.ref, "sha256"));
+		need$36(!v.name.includes("/") && !v.name.includes("\\") && ![".", ".."].includes(v.name));
+		need$36(v.encoding === "json" ? Object.hasOwn(v.ref, "canonicalHash") : Object.hasOwn(v.ref, "sha256"));
 	});
 	define$1("ArchiveManifestV2", {
 		version: literal$1(2),
 		kind: literal$1("nonroot-proof-archive"),
-		owner: N,
+		owner: N$1,
 		files: array$2(ref("ArchiveFileV1"), 1, 2e4)
 	}, (v) => unique(v.files, (f) => f.name));
 	Object.freeze(schemas$2);
@@ -1856,27 +1856,32 @@ var init_production_nonroot_contracts = __esmMin((() => {
 //#region scripts/lib/production-control-source.mjs
 function checkCurrent(assertCurrent) {
 	if (assertCurrent === void 0) return;
-	need$34(typeof assertCurrent === "function");
+	need$35(typeof assertCurrent === "function");
 	const result = assertCurrent();
 	if (result && typeof result.then === "function") {
 		Promise.resolve(result).catch(() => {});
 		fail$8();
 	}
-	need$34(result === void 0);
+	need$35(result === void 0);
+}
+function assertControlSourceCurrent(context) {
+	const state = contexts$3.get(context);
+	need$35(state);
+	checkCurrent(state.assertCurrent);
 }
 /** Reconstruct the full Git tree from all recursive entries. A declared tree
 * hash beside a subset of COPY files is not membership or closure evidence. */
 function createControlSourceContext(value, readBlob, { assertCurrent } = {}) {
 	checkCurrent(assertCurrent);
 	const input = copyNonrootJson(value);
-	need$34(input && Object.keys(input).sort().join() === "entries,tree");
+	need$35(input && Object.keys(input).sort().join() === "entries,tree");
 	const { tree, entries } = input;
-	need$34(/^[a-f0-9]{40}$/.test(tree ?? "") && typeof readBlob === "function");
+	need$35(/^[a-f0-9]{40}$/.test(tree ?? "") && typeof readBlob === "function");
 	const rows = copyNonrootJson(entries);
-	need$34(Array.isArray(rows) && rows.length > 0 && rows.length <= 2e4);
+	need$35(Array.isArray(rows) && rows.length > 0 && rows.length <= 2e4);
 	const root = /* @__PURE__ */ new Map(), files = /* @__PURE__ */ new Map();
 	for (const row of rows) {
-		need$34(row && Object.keys(row).sort().join() === [
+		need$35(row && Object.keys(row).sort().join() === [
 			"path",
 			"mode",
 			"type",
@@ -1891,10 +1896,10 @@ function createControlSourceContext(value, readBlob, { assertCurrent } = {}) {
 		let node = root;
 		for (const part of parts.slice(0, -1)) {
 			if (!node.has(part)) node.set(part, /* @__PURE__ */ new Map());
-			need$34(node.get(part) instanceof Map);
+			need$35(node.get(part) instanceof Map);
 			node = node.get(part);
 		}
-		need$34(!node.has(parts.at(-1)));
+		need$35(!node.has(parts.at(-1)));
 		node.set(parts.at(-1), row);
 	}
 	const treeHash = (node) => {
@@ -1902,7 +1907,7 @@ function createControlSourceContext(value, readBlob, { assertCurrent } = {}) {
 		const bytes = Buffer.concat(entries.flatMap(([name, value]) => [Buffer.from((value instanceof Map ? "40000" : value.mode) + " " + name + "\0"), Buffer.from(value instanceof Map ? treeHash(value) : value.oid, "hex")]));
 		return gitObject("tree", bytes);
 	};
-	need$34(treeHash(root) === tree);
+	need$35(treeHash(root) === tree);
 	const handle = Object.freeze({
 		kind: "verified-control-source-tree",
 		tree
@@ -1917,15 +1922,15 @@ function createControlSourceContext(value, readBlob, { assertCurrent } = {}) {
 }
 async function readControlSourceFile(context, path) {
 	const state = contexts$3.get(context);
-	need$34(state && safePath(path));
+	need$35(state && safePath(path));
 	checkCurrent(state.assertCurrent);
 	const entry = state.files.get(path);
-	need$34(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
+	need$35(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
 	const bytes = await state.readBlob(entry.oid, path);
 	checkCurrent(state.assertCurrent);
-	need$34(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
+	need$35(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
 	const raw = Buffer.from(bytes);
-	need$34(gitObject("blob", raw) === entry.oid);
+	need$35(gitObject("blob", raw) === entry.oid);
 	return {
 		file: inspectNonrootRecord("SourceFileV1", {
 			path,
@@ -1945,32 +1950,38 @@ function copySources(text) {
 	for (const raw of text.split(/\r?\n/)) {
 		const line = raw.trim();
 		if (!/^(?:COPY|ADD)\b/i.test(line)) continue;
-		need$34(line.startsWith("COPY ") && !/[\\\[\]"'$`]/.test(line));
+		need$35(line.startsWith("COPY ") && !/[\\\[\]"'$`]/.test(line));
 		const words = line.split(/\s+/).slice(1);
-		need$34(words.length >= 2 && !words.some((word) => word.startsWith("--")));
+		need$35(words.length >= 2 && !words.some((word) => word.startsWith("--")));
 		words.pop();
 		for (const source of words) {
-			need$34(/^[A-Za-z0-9_.*\/-]+$/.test(source) && !source.startsWith("/") && !source.split("/").some((part) => part === "." || part === ".."));
+			need$35(/^[A-Za-z0-9_.*\/-]+$/.test(source) && !source.startsWith("/") && !source.split("/").some((part) => part === "." || part === ".."));
 			values.push(source);
 		}
 	}
-	need$34(values.length > 0);
+	need$35(values.length > 0);
 	return [...new Set(values)].sort();
 }
 /** Exact COPY expansion against the authenticated complete tree. This is the
 * declared recipe; the build launcher separately rejects untracked matches. */
 async function describeControlCopyClosure(context) {
 	const state = contexts$3.get(context);
-	need$34(state);
-	const dockerfile = await readControlSourceFile(context, "docker/bootstrap/Dockerfile"), paths = /* @__PURE__ */ new Set();
+	need$35(state);
+	const dockerfile = await readControlSourceFile(context, "docker/bootstrap/Dockerfile");
+	assertControlSourceCurrent(context);
+	const paths = /* @__PURE__ */ new Set();
 	for (const source of copySources(new TextDecoder("utf-8", { fatal: true }).decode(dockerfile.bytes))) {
 		const pattern = new RegExp("^" + source.split("*").map(RegExp.escape).join("[^/]*") + "$");
 		const matches = [...state.files.keys()].filter((path) => source.endsWith("/") ? path.startsWith(source) : pattern.test(path));
-		need$34(matches.length > 0);
+		need$35(matches.length > 0);
 		for (const path of matches) paths.add(path);
 	}
 	const files = [];
-	for (const path of [...paths].sort()) files.push((await readControlSourceFile(context, path)).file);
+	for (const path of [...paths].sort()) {
+		const file = await readControlSourceFile(context, path);
+		assertControlSourceCurrent(context);
+		files.push(file.file);
+	}
 	return inspectNonrootRecord("SourceClosureV1", {
 		version: 1,
 		kind: "git-file-closure",
@@ -1979,28 +1990,40 @@ async function describeControlCopyClosure(context) {
 		closureHash: nonrootHash(files)
 	});
 }
-async function verifyControlSourceClosure(context, closure, { copyContext = false } = {}) {
+async function verifyControlSourceClosure(context, closure, { copyContext = false, assertCurrent } = {}) {
+	checkCurrent(assertCurrent);
+	assertControlSourceCurrent(context);
 	const state = contexts$3.get(context);
-	need$34(state);
+	need$35(state);
 	const checked = inspectNonrootRecord("SourceClosureV1", closure);
-	need$34(checked.tree === state.tree);
-	for (const file of checked.files) need$34(nonrootHash((await readControlSourceFile(context, file.path)).file) === nonrootHash(file));
-	if (copyContext) need$34(nonrootHash(await describeControlCopyClosure(context)) === nonrootHash(checked));
+	need$35(checked.tree === state.tree);
+	for (const file of checked.files) {
+		const read = await readControlSourceFile(context, file.path);
+		checkCurrent(assertCurrent);
+		assertControlSourceCurrent(context);
+		need$35(nonrootHash(read.file) === nonrootHash(file));
+	}
+	if (copyContext) {
+		const described = await describeControlCopyClosure(context);
+		checkCurrent(assertCurrent);
+		assertControlSourceCurrent(context);
+		need$35(nonrootHash(described) === nonrootHash(checked));
+	}
 	return checked;
 }
 function controlSourcePaths(context) {
 	const state = contexts$3.get(context);
-	need$34(state);
+	need$35(state);
 	return Object.freeze([...state.files.keys()].sort());
 }
-var contexts$3, fail$8, need$34, sha$9, gitObject, safePath;
+var contexts$3, fail$8, need$35, sha$9, gitObject, safePath;
 var init_production_control_source = __esmMin((() => {
 	init_production_nonroot_contracts();
 	contexts$3 = /* @__PURE__ */ new WeakMap();
 	fail$8 = () => {
 		throw Error("ControlSourceUnverified");
 	};
-	need$34 = (value) => {
+	need$35 = (value) => {
 		if (!value) fail$8();
 	};
 	sha$9 = (value) => createHash("sha256").update(value).digest("hex");
@@ -2164,6 +2187,29 @@ var init_production_image_transition = __esmMin((() => {
 		predecessorHash: t.predecessorHash,
 		limitsHash: t.limitsHash
 	});
+})), NONROOT_ARCHIVE_CAPACITY_V2, R, M$4, N, exportWireUpper;
+var init_production_nonroot_archive_capacity = __esmMin((() => {
+	Object.freeze({
+		version: 1,
+		rawBytes: 33554432,
+		wireBytes: 33554432
+	});
+	NONROOT_ARCHIVE_CAPACITY_V2 = Object.freeze({
+		version: 2,
+		rawBytes: 268435456,
+		wireBytes: 402653184,
+		documentBytes: 406851584
+	});
+	R = NONROOT_ARCHIVE_CAPACITY_V2.rawBytes;
+	M$4 = 4194304;
+	N = 2e4;
+	exportWireUpper = 27245952 + 4 * Math.ceil((R + 2 * N) / 3);
+	Object.freeze({
+		extensionPasses: 5,
+		open: 81924096 + 8 * (R + M$4) + 4 * exportWireUpper,
+		snapshot: 4 * R + 215044096 + 4096 * N,
+		reader: 4 * NONROOT_ARCHIVE_CAPACITY_V2.wireBytes + 4096
+	});
 }));
 //#endregion
 //#region scripts/lib/production-nonroot-local-work.mjs
@@ -2178,20 +2224,20 @@ function inspectOriginalLocalWorkData(d) {
 		"reserveDebit",
 		...d?.kind === "journal" ? ["targetLogicalBytes"] : []
 	]);
-	need$33(["legacy", "carrier-preparation"].includes(d.scope) && hex$12(d.scopeHash) && natural(d.ordinal) && d.ordinal > 0, "LocalWorkScope");
-	need$33(["source", "journal"].includes(d.kind) && natural(d.workBytes) && d.workBytes > 0 && d.journalBytes === 40960, "LocalWorkPrice");
-	if (d.kind === "source") need$33(d.scope === "legacy" && d.workBytes % 65536 === 0, "LocalWorkQuantum");
-	else need$33(d.workBytes === 40960 && natural(d.targetLogicalBytes), "LocalWorkJournalTarget");
+	need$34(["legacy", "carrier-preparation"].includes(d.scope) && hex$12(d.scopeHash) && natural(d.ordinal) && d.ordinal > 0, "LocalWorkScope");
+	need$34(["source", "journal"].includes(d.kind) && natural(d.workBytes) && d.workBytes > 0 && d.journalBytes === 40960, "LocalWorkPrice");
+	if (d.kind === "source") need$34(d.scope === "legacy" && d.workBytes % 65536 === 0, "LocalWorkQuantum");
+	else need$34(d.workBytes === 40960 && natural(d.targetLogicalBytes), "LocalWorkJournalTarget");
 	const n = d.workBytes + d.journalBytes;
-	need$33(natural(n), "LocalWorkPrice");
+	need$34(natural(n), "LocalWorkPrice");
 	exact$12(d.reserveDebit, keys$4);
-	for (const k of keys$4) need$33(d.reserveDebit[k] === (k === "logicalBytes" ? n : 0), "LocalWorkDebit");
+	for (const k of keys$4) need$34(d.reserveDebit[k] === (k === "logicalBytes" ? n : 0), "LocalWorkDebit");
 	return { ...d.reserveDebit };
 }
-var need$33, keys$4, natural, exact$12, hex$12;
+var need$34, keys$4, natural, exact$12, hex$12;
 var init_production_nonroot_local_work = __esmMin((() => {
 	init_production_nonroot_contracts();
-	need$33 = (v, c) => {
+	need$34 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	keys$4 = [
@@ -2202,7 +2248,7 @@ var init_production_nonroot_local_work = __esmMin((() => {
 		"processedEntries"
 	];
 	natural = (n) => Number.isSafeInteger(n) && n >= 0;
-	exact$12 = (v, k) => need$33(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.toSorted().join(), "LocalWorkFields");
+	exact$12 = (v, k) => need$34(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === k.toSorted().join(), "LocalWorkFields");
 	hex$12 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 }));
 //#endregion
@@ -2436,20 +2482,20 @@ function copyCiData(value) {
 	let bytes = 0, nodes = 0;
 	const active = /* @__PURE__ */ new Set(), add = (n) => {
 		bytes += n;
-		need$32(bytes <= CI_SMOKE_LIMITS.captureBytes, "CiSmokeJsonSize");
+		need$33(bytes <= CI_SMOKE_LIMITS.captureBytes, "CiSmokeJsonSize");
 	};
 	const string = (s) => {
-		need$32(s.isWellFormed(), "CiSmokeUtf8");
+		need$33(s.isWellFormed(), "CiSmokeUtf8");
 		add(Buffer.byteLength(JSON.stringify(s)));
 	};
 	const copy = (v, depth) => {
-		need$32(depth <= 64 && ++nodes <= 2e5, "CiSmokeJsonDepth");
+		need$33(depth <= 64 && ++nodes <= 2e5, "CiSmokeJsonDepth");
 		if (v === null || typeof v === "boolean") {
 			add(v === false ? 5 : 4);
 			return v;
 		}
 		if (typeof v === "number") {
-			need$32(Number.isSafeInteger(v) && !Object.is(v, -0), "CiSmokeInteger");
+			need$33(Number.isSafeInteger(v) && !Object.is(v, -0), "CiSmokeInteger");
 			add(String(v).length);
 			return v;
 		}
@@ -2457,21 +2503,21 @@ function copyCiData(value) {
 			string(v);
 			return v;
 		}
-		need$32(v && typeof v === "object" && !types.isProxy(v) && !active.has(v), "CiSmokeJsonData");
+		need$33(v && typeof v === "object" && !types.isProxy(v) && !active.has(v), "CiSmokeJsonData");
 		const isArray = Array.isArray(v), proto = Object.getPrototypeOf(v);
-		need$32(isArray ? proto === Array.prototype : proto === Object.prototype || proto === null, "CiSmokeJsonData");
+		need$33(isArray ? proto === Array.prototype : proto === Object.prototype || proto === null, "CiSmokeJsonData");
 		const descriptors = Object.getOwnPropertyDescriptors(v), keys = Reflect.ownKeys(descriptors);
-		need$32(keys.every((k) => typeof k === "string"), "CiSmokeJsonData");
+		need$33(keys.every((k) => typeof k === "string"), "CiSmokeJsonData");
 		active.add(v);
 		add(2);
 		let out;
 		if (isArray) {
 			const length = descriptors.length?.value;
-			need$32(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1, "CiSmokeArray");
+			need$33(Number.isSafeInteger(length) && length >= 0 && keys.length === length + 1, "CiSmokeArray");
 			out = [];
 			for (let i = 0; i < length; i++) {
 				const d = descriptors[String(i)];
-				need$32(d?.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
+				need$33(d?.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
 				if (i) add(1);
 				out.push(copy(d.value, depth + 1));
 			}
@@ -2479,7 +2525,7 @@ function copyCiData(value) {
 			out = {};
 			for (const [index, key] of keys.entries()) {
 				const d = descriptors[key];
-				need$32(d.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
+				need$33(d.enumerable && Object.hasOwn(d, "value"), "CiSmokeJsonData");
 				string(key);
 				add(index ? 2 : 1);
 				Object.defineProperty(out, key, {
@@ -2494,14 +2540,14 @@ function copyCiData(value) {
 	return copy(value, 0);
 }
 function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}) {
-	need$32(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= CI_SMOKE_LIMITS.captureBytes && typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes, "CiSmokeJsonSize");
+	need$33(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= CI_SMOKE_LIMITS.captureBytes && typeof text === "string" && text.isWellFormed() && Buffer.byteLength(text) <= maxBytes, "CiSmokeJsonSize");
 	let at = 0;
 	const ws = () => {
 		while (/[\x20\t\r\n]/.test(text[at] ?? "!")) at++;
 	};
 	const str = () => {
 		const start = at;
-		need$32(text[at++] === "\"", "CiSmokeJson");
+		need$33(text[at++] === "\"", "CiSmokeJson");
 		let escape = false;
 		while (at < text.length) {
 			const c = text[at++];
@@ -2509,10 +2555,10 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 			if (escape) escape = false;
 			else if (c === "\\") escape = true;
 		}
-		need$32(false, "CiSmokeJson");
+		need$33(false, "CiSmokeJson");
 	};
 	const scan = (depth) => {
-		need$32(depth <= 64, "CiSmokeJsonDepth");
+		need$33(depth <= 64, "CiSmokeJsonDepth");
 		ws();
 		const c = text[at];
 		if (c === "{") {
@@ -2526,17 +2572,17 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 			while (true) {
 				ws();
 				const key = str();
-				need$32(!seen.has(key), "CiSmokeDuplicateJsonKey");
+				need$33(!seen.has(key), "CiSmokeDuplicateJsonKey");
 				seen.add(key);
 				ws();
-				need$32(text[at++] === ":", "CiSmokeJson");
+				need$33(text[at++] === ":", "CiSmokeJson");
 				scan(depth + 1);
 				ws();
 				if (text[at] === "}") {
 					at++;
 					return;
 				}
-				need$32(text[at++] === ",", "CiSmokeJson");
+				need$33(text[at++] === ",", "CiSmokeJson");
 			}
 		}
 		if (c === "[") {
@@ -2553,7 +2599,7 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 					at++;
 					return;
 				}
-				need$32(text[at++] === ",", "CiSmokeJson");
+				need$33(text[at++] === ",", "CiSmokeJson");
 			}
 		}
 		if (c === "\"") {
@@ -2562,20 +2608,20 @@ function parseCiSmokeJson(text, { maxBytes = CI_SMOKE_LIMITS.captureBytes } = {}
 		}
 		const start = at;
 		while (at < text.length && !/[\x20\t\r\n,}\]]/.test(text[at])) at++;
-		need$32(at > start, "CiSmokeJson");
+		need$33(at > start, "CiSmokeJson");
 		JSON.parse(text.slice(start, at));
 	};
 	try {
 		scan(0);
 		ws();
-		need$32(at === text.length, "CiSmokeJsonTrailing");
+		need$33(at === text.length, "CiSmokeJsonTrailing");
 		return copyCiData(JSON.parse(text));
 	} catch (error) {
 		if (error instanceof SyntaxError) throw Error("CiSmokeJson");
 		throw error;
 	}
 }
-var CI_SMOKE_LIMITS, CI_SMOKE_CHECKS, CI_SMOKE_ROLES, CI_SMOKE_COMMANDS, CI_SMOKE_HEALTH_COMMAND, suffixes, need$32, hash$3, exact$11, integer$2, text$3, pattern, H, G, D, I, P$1, T$2, S$1, literal, oneOf, nullable, array, object$1, path$7, absolute, ByteRef, JsonRef, FilePin, timeFields, bindingFields, identityFields, Process, Mount, Container, Network, Log;
+var CI_SMOKE_LIMITS, CI_SMOKE_CHECKS, CI_SMOKE_ROLES, CI_SMOKE_COMMANDS, CI_SMOKE_HEALTH_COMMAND, suffixes, need$33, hash$3, exact$11, integer$2, text$3, pattern, H, G, D, I, P$1, T$2, S$1, literal, oneOf, nullable, array, object$1, path$7, absolute, ByteRef, JsonRef, FilePin, timeFields, bindingFields, identityFields, Process, Mount, Container, Network, Log;
 var init_ci_smoke_evidence = __esmMin((() => {
 	init_production_canary_verification();
 	init_validate_emf_event();
@@ -2653,16 +2699,16 @@ var init_ci_smoke_evidence = __esmMin((() => {
 		"cleanup"
 	];
 	Object.freeze(Object.fromEntries(CI_SMOKE_CHECKS.map((name, index) => [name, "ci-smoke-" + suffixes[index]])));
-	need$32 = (ok, code = "CiSmokeEvidenceInvalid") => {
+	need$33 = (ok, code = "CiSmokeEvidenceInvalid") => {
 		if (!ok) throw Error(code);
 	};
 	hash$3 = (value) => canaryEvidenceHash(copyCiData(value));
-	exact$11 = (v, fields) => need$32(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === Object.keys(fields).sort().join(), "CiSmokeFields");
-	integer$2 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$32(Number.isSafeInteger(v) && v >= min && v <= max, "CiSmokeInteger");
-	text$3 = (max = 256) => (v) => need$32(typeof v === "string" && v.length > 0 && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max, "CiSmokeString");
+	exact$11 = (v, fields) => need$33(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === Object.keys(fields).sort().join(), "CiSmokeFields");
+	integer$2 = (min = 0, max = Number.MAX_SAFE_INTEGER) => (v) => need$33(Number.isSafeInteger(v) && v >= min && v <= max, "CiSmokeInteger");
+	text$3 = (max = 256) => (v) => need$33(typeof v === "string" && v.length > 0 && v.isWellFormed() && !v.includes("\0") && Buffer.byteLength(v) <= max, "CiSmokeString");
 	pattern = (re) => (v) => {
 		text$3(4096)(v);
-		need$32(re.test(v), "CiSmokeFormat");
+		need$33(re.test(v), "CiSmokeFormat");
 	};
 	H = pattern(/^[a-f0-9]{64}$/);
 	G = pattern(/^[a-f0-9]{40}$/);
@@ -2671,14 +2717,14 @@ var init_ci_smoke_evidence = __esmMin((() => {
 	P$1 = integer$2(1);
 	T$2 = text$3();
 	S$1 = text$3(4096);
-	literal = (w) => (v) => need$32(hash$3(v) === hash$3(w), "CiSmokeLiteral");
-	oneOf = (...values) => (v) => need$32(values.includes(v), "CiSmokeEnum");
+	literal = (w) => (v) => need$33(hash$3(v) === hash$3(w), "CiSmokeLiteral");
+	oneOf = (...values) => (v) => need$33(values.includes(v), "CiSmokeEnum");
 	nullable = (inspect) => (v) => {
 		if (v !== null) inspect(v);
 	};
 	array = (inspect, min = 0, max = 1024, unique = false) => (v) => {
-		need$32(Array.isArray(v) && v.length >= min && v.length <= max, "CiSmokeArray");
-		if (unique) need$32(new Set(v.map((x) => hash$3(x))).size === v.length, "CiSmokeDuplicate");
+		need$33(Array.isArray(v) && v.length >= min && v.length <= max, "CiSmokeArray");
+		if (unique) need$33(new Set(v.map((x) => hash$3(x))).size === v.length, "CiSmokeDuplicate");
 		v.forEach(inspect);
 	};
 	object$1 = (fields) => (v) => {
@@ -2687,11 +2733,11 @@ var init_ci_smoke_evidence = __esmMin((() => {
 	};
 	path$7 = (v) => {
 		S$1(v);
-		need$32(!v.startsWith("/") && v.split("/").every((x) => x && x !== "." && x !== "..") && /^[A-Za-z0-9_./-]+$/.test(v), "CiSmokePath");
+		need$33(!v.startsWith("/") && v.split("/").every((x) => x && x !== "." && x !== "..") && /^[A-Za-z0-9_./-]+$/.test(v), "CiSmokePath");
 	};
 	absolute = (v) => {
 		S$1(v);
-		need$32(v.startsWith("/") && !v.split("/").includes("..") && !v.includes("//"), "CiSmokePath");
+		need$33(v.startsWith("/") && !v.split("/").includes("..") && !v.includes("//"), "CiSmokePath");
 	};
 	ByteRef = object$1({
 		sha256: H,
@@ -2919,21 +2965,21 @@ var init_ci_smoke_evidence = __esmMin((() => {
 * nor this helper authenticates an envelope or authorizes an operation. */
 function nonrootAccountingPolicy(revision, expectedRevision, expectedCeiling) {
 	let version = 1, caps = NONROOT_LEGACY_ACCOUNTING_CAPS, budgetRevision;
-	if (revision === void 0) need$31(expectedRevision === void 0 && expectedCeiling === void 0, "NonrootBudgetRevisionMissing");
+	if (revision === void 0) need$32(expectedRevision === void 0 && expectedCeiling === void 0, "NonrootBudgetRevisionMissing");
 	else {
 		exact$10(revision, revisionFields);
 		exact$10(expectedRevision, revisionFields);
-		need$31(revision.version === 2 && revision.limitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2 && hex$11(revision.envelopeHash) && hex$11(revision.historyHeadHash), "NonrootBudgetRevisionBinding");
-		need$31(nonrootHash(revision) === nonrootHash(expectedRevision), "NonrootBudgetRevisionMismatch");
+		need$32(revision.version === 2 && revision.limitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2 && hex$11(revision.envelopeHash) && hex$11(revision.historyHeadHash), "NonrootBudgetRevisionBinding");
+		need$32(nonrootHash(revision) === nonrootHash(expectedRevision), "NonrootBudgetRevisionMismatch");
 		exact$10(expectedCeiling, fields$1);
-		for (const key of fields$1) need$31(Number.isSafeInteger(expectedCeiling[key]) && expectedCeiling[key] >= 0 && expectedCeiling[key] <= NONROOT_REMAINING_WORK_CAPS_V2[key], "NonrootBudgetCeiling");
+		for (const key of fields$1) need$32(Number.isSafeInteger(expectedCeiling[key]) && expectedCeiling[key] >= 0 && expectedCeiling[key] <= NONROOT_REMAINING_WORK_CAPS_V2[key], "NonrootBudgetCeiling");
 		version = 2;
 		caps = Object.freeze(copyNonrootJson(expectedCeiling));
 		budgetRevision = Object.freeze(copyNonrootJson(revision));
 	}
 	const counter = (value) => {
 		exact$10(value, fields$1);
-		for (const key of fields$1) need$31(Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= caps[key], "NonrootBudgetCounter");
+		for (const key of fields$1) need$32(Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= caps[key], "NonrootBudgetCounter");
 		return value;
 	};
 	return Object.freeze({
@@ -2943,11 +2989,11 @@ function nonrootAccountingPolicy(revision, expectedRevision, expectedCeiling) {
 		...budgetRevision ? { budgetRevision } : {}
 	});
 }
-var need$31, fields$1, revisionFields, exact$10, hex$11, NONROOT_LEGACY_ACCOUNTING_CAPS, NONROOT_REMAINING_WORK_CAPS_V2, NONROOT_REMAINING_WORK_REVISION_V2, NONROOT_REMAINING_WORK_LIMITS_HASH_V2;
+var need$32, fields$1, revisionFields, exact$10, hex$11, NONROOT_LEGACY_ACCOUNTING_CAPS, NONROOT_REMAINING_WORK_CAPS_V2, NONROOT_REMAINING_WORK_REVISION_V2, NONROOT_REMAINING_WORK_LIMITS_HASH_V2;
 var init_production_nonroot_budget_revision = __esmMin((() => {
 	init_production_image_transition();
 	init_production_nonroot_contracts();
-	need$31 = (ok, code) => {
+	need$32 = (ok, code) => {
 		if (!ok) throw Error(code);
 	};
 	fields$1 = [
@@ -2963,7 +3009,7 @@ var init_production_nonroot_budget_revision = __esmMin((() => {
 		"envelopeHash",
 		"historyHeadHash"
 	];
-	exact$10 = (value, keys) => need$31(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join() === keys.toSorted().join(), "NonrootBudgetRevisionFields");
+	exact$10 = (value, keys) => need$32(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join() === keys.toSorted().join(), "NonrootBudgetRevisionFields");
 	hex$11 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 	NONROOT_LEGACY_ACCOUNTING_CAPS = Object.freeze({
 		ecrRequests: IMAGE_TRANSITION_LIMITS.maxEcrCalls,
@@ -2990,7 +3036,11 @@ var init_production_nonroot_budget_revision = __esmMin((() => {
 //#endregion
 //#region scripts/lib/ci-smoke-acquisition-format.mjs
 function parseAcquisitionJson(bytes, maxBytes = 33554432) {
-	need$30(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= maxBytes && maxBytes <= 33554432, "CiAcquisitionJsonSize");
+	need$31(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 33554432, "CiAcquisitionJsonSize");
+	return parseBoundedAcquisitionJson(bytes, maxBytes);
+}
+function parseBoundedAcquisitionJson(bytes, maxBytes) {
+	need$31(bytes instanceof Uint8Array && bytes.byteLength > 0 && bytes.byteLength <= maxBytes, "CiAcquisitionJsonSize");
 	const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 	let at = 0, nodes = 0;
 	const ws = () => {
@@ -2998,7 +3048,7 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 	};
 	const str = () => {
 		const start = at;
-		need$30(text[at++] === "\"");
+		need$31(text[at++] === "\"");
 		let escape = false;
 		while (at < text.length) {
 			const c = text[at++];
@@ -3006,10 +3056,10 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 			if (escape) escape = false;
 			else if (c === "\\") escape = true;
 		}
-		need$30(false, "CiAcquisitionJson");
+		need$31(false, "CiAcquisitionJson");
 	};
 	const scan = (depth) => {
-		need$30(depth <= 64 && ++nodes <= 25e4, "CiAcquisitionJsonDepth");
+		need$31(depth <= 64 && ++nodes <= 25e4, "CiAcquisitionJsonDepth");
 		ws();
 		const c = text[at];
 		if (c === "{") {
@@ -3023,17 +3073,17 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 			while (true) {
 				ws();
 				const key = str();
-				need$30(!keys.has(key), "CiAcquisitionDuplicateKey");
+				need$31(!keys.has(key), "CiAcquisitionDuplicateKey");
 				keys.add(key);
 				ws();
-				need$30(text[at++] === ":");
+				need$31(text[at++] === ":");
 				scan(depth + 1);
 				ws();
 				if (text[at] === "}") {
 					at++;
 					return;
 				}
-				need$30(text[at++] === ",");
+				need$31(text[at++] === ",");
 			}
 		}
 		if (c === "[") {
@@ -3050,7 +3100,7 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 					at++;
 					return;
 				}
-				need$30(text[at++] === ",");
+				need$31(text[at++] === ",");
 			}
 		}
 		if (c === "\"") {
@@ -3059,13 +3109,13 @@ function parseAcquisitionJson(bytes, maxBytes = 33554432) {
 		}
 		const start = at;
 		while (at < text.length && !/[\x20\t\r\n,}\]]/.test(text[at])) at++;
-		need$30(at > start);
+		need$31(at > start);
 		const v = JSON.parse(text.slice(start, at));
-		need$30(typeof v !== "number" || Number.isFinite(v));
+		need$31(typeof v !== "number" || Number.isFinite(v));
 	};
 	scan(0);
 	ws();
-	need$30(at === text.length, "CiAcquisitionJsonTrailing");
+	need$31(at === text.length, "CiAcquisitionJsonTrailing");
 	return JSON.parse(text);
 }
 function addCounters(a, b) {
@@ -3074,14 +3124,14 @@ function addCounters(a, b) {
 	const c = {};
 	for (const k of COUNTERS) {
 		c[k] = a[k] + b[k];
-		need$30(integer$1(c[k]) && c[k] <= CAPS[k], "CustodyBudgetExceeded");
+		need$31(integer$1(c[k]) && c[k] <= CAPS[k], "CustodyBudgetExceeded");
 	}
 	return c;
 }
 function validateReserve(spent, reserve, activeWire = 0) {
 	counter(spent);
 	counter(reserve);
-	for (const k of COUNTERS) need$30(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= CAPS[k], "CustodyCompletionBudget");
+	for (const k of COUNTERS) need$31(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= CAPS[k], "CustodyCompletionBudget");
 }
 /** expectedBudgetRevision and compiledCeiling come from protected owner
 * configuration, never from the journal being replayed. */
@@ -3102,8 +3152,8 @@ function acquisitionAccounting({ budgetRevision, expectedBudgetRevision, compile
 	const validate = (spent, reserve, activeWire = 0) => {
 		check(spent);
 		check(reserve);
-		need$30(integer$1(activeWire), "CustodyCompletionBudget");
-		for (const k of COUNTERS) need$30(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= policy.caps[k], "CustodyCompletionBudget");
+		need$31(integer$1(activeWire), "CustodyCompletionBudget");
+		for (const k of COUNTERS) need$31(spent[k] + reserve[k] + (k === "httpBodyBytes" ? activeWire : 0) <= policy.caps[k], "CustodyCompletionBudget");
 	};
 	return {
 		...policy,
@@ -3138,10 +3188,10 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 			"remaining",
 			...arithmetic.version === 2 ? ["budgetRevision"] : []
 		]);
-		need$30(e.version === arithmetic.version && e.sequence === index + 1 && e.previousHash === previous, "CustodyEventChain");
+		need$31(e.version === arithmetic.version && e.sequence === index + 1 && e.previousHash === previous, "CustodyEventChain");
 		if (arithmetic.version === 2) same$8(e.budgetRevision, arithmetic.budgetRevision, "CustodyBudgetRevision");
-		for (const k of Object.keys(binding)) need$30(e[k] === binding[k], "CustodyEventBinding");
-		need$30(!sealed, "CustodyEventAfterSeal");
+		for (const k of Object.keys(binding)) need$31(e[k] === binding[k], "CustodyEventBinding");
+		need$31(!sealed, "CustodyEventAfterSeal");
 		const d = e.data;
 		if (e.type === "reservation") {
 			exact$9(d, [
@@ -3152,7 +3202,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"ecr",
 				"reserveDebit"
 			]);
-			need$30(integer$1(d.id) && d.id > 0 && !active.has(d.id) && integer$1(d.bound) && typeof d.ecr === "boolean", "CustodyReservation");
+			need$31(integer$1(d.id) && d.id > 0 && !active.has(d.id) && integer$1(d.bound) && typeof d.ecr === "boolean", "CustodyReservation");
 			active.set(d.id, d);
 			spent = addCounters(spent, {
 				...zero$6(),
@@ -3165,7 +3215,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"responseHash"
 			]);
 			const r = active.get(d.id);
-			need$30(r && integer$1(d.charged) && d.charged <= r.bound && (e.type !== "unknown" || d.charged === r.bound), "CustodySettlement");
+			need$31(r && integer$1(d.charged) && d.charged <= r.bound && (e.type !== "unknown" || d.charged === r.bound), "CustodySettlement");
 			spent = addCounters(spent, {
 				...zero$6(),
 				httpBodyBytes: d.charged
@@ -3179,7 +3229,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"origin",
 				"reserveDebit"
 			]);
-			need$30(!cache.has(d.key) && integer$1(d.descriptor.size) && ["source-cache", "completed-destination-cache"].includes(d.origin), "CustodySecondGraphPass");
+			need$31(!cache.has(d.key) && integer$1(d.descriptor.size) && ["source-cache", "completed-destination-cache"].includes(d.origin), "CustodySecondGraphPass");
 			cache.set(d.key, {
 				...d,
 				completed: false
@@ -3195,7 +3245,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"physicalBytes"
 			]);
 			const row = cache.get(d.key);
-			need$30(row && !row.completed && row.descriptor.digest === d.digest && row.descriptor.size === d.physicalBytes, "CustodyCacheCompletion");
+			need$31(row && !row.completed && row.descriptor.digest === d.digest && row.descriptor.size === d.physicalBytes, "CustodyCacheCompletion");
 			row.completed = true;
 		} else if (e.type === "filesystem") {
 			exact$9(d, [
@@ -3217,7 +3267,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"bytes",
 				"reserveDebit"
 			]);
-			need$30([
+			need$31([
 				"upload",
 				"manifest",
 				"metadata",
@@ -3236,7 +3286,7 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 				"charge",
 				"reserveDebit"
 			]);
-			need$30([
+			need$31([
 				d.allocationId,
 				d.planHash,
 				d.scopeHash
@@ -3252,11 +3302,11 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 		else if (e.type === "sealed") {
 			exact$9(d, ["reason"]);
 			sealed = true;
-		} else need$30(false, "CustodyEventType");
+		} else need$31(false, "CustodyEventType");
 		if (d.reserveDebit) {
 			counter(d.reserveDebit);
 			for (const k of COUNTERS) {
-				need$30(d.reserveDebit[k] <= remaining[k], "CustodyReserveDebit");
+				need$31(d.reserveDebit[k] <= remaining[k], "CustodyReserveDebit");
 				remaining[k] -= d.reserveDebit[k];
 			}
 		}
@@ -3275,19 +3325,20 @@ function replayAccounting(events, { binding, startingCounters, reserve, budgetRe
 		lastHash: previous
 	};
 }
-var sha$8, need$30, exact$9, same$8, integer$1, hex$10, COUNTERS, CAPS, zero$6, counter, freeze$2;
+var sha$8, need$31, exact$9, same$8, integer$1, hex$10, COUNTERS, CAPS, zero$6, counter, freeze$3;
 var init_ci_smoke_acquisition_format = __esmMin((() => {
+	init_production_nonroot_archive_capacity();
 	init_production_nonroot_local_work();
 	init_production_canary_verification();
 	init_ci_smoke_evidence();
 	init_production_image_transition();
 	init_production_nonroot_budget_revision();
 	sha$8 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-	need$30 = (ok, code = "CiAcquisitionInvalid") => {
+	need$31 = (ok, code = "CiAcquisitionInvalid") => {
 		if (!ok) throw Error(code);
 	};
-	exact$9 = (v, keys) => need$30(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CiAcquisitionFields");
-	same$8 = (a, b, code = "CiAcquisitionBinding") => need$30(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
+	exact$9 = (v, keys) => need$31(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CiAcquisitionFields");
+	same$8 = (a, b, code = "CiAcquisitionBinding") => need$31(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
 	integer$1 = (n) => Number.isSafeInteger(n) && n >= 0;
 	hex$10 = (v, n = 64) => typeof v === "string" && new RegExp("^[a-f0-9]{" + n + "}$").test(v);
 	COUNTERS = [
@@ -3307,12 +3358,12 @@ var init_ci_smoke_acquisition_format = __esmMin((() => {
 	zero$6 = () => Object.fromEntries(COUNTERS.map((k) => [k, 0]));
 	counter = (v) => {
 		exact$9(v, COUNTERS);
-		for (const k of COUNTERS) need$30(integer$1(v[k]) && v[k] <= CAPS[k], "CiAcquisitionCounter");
+		for (const k of COUNTERS) need$31(integer$1(v[k]) && v[k] <= CAPS[k], "CiAcquisitionCounter");
 		return v;
 	};
-	freeze$2 = (v) => {
+	freeze$3 = (v) => {
 		if (v && typeof v === "object") {
-			Object.values(v).forEach(freeze$2);
+			Object.values(v).forEach(freeze$3);
 			Object.freeze(v);
 		}
 		return v;
@@ -3322,14 +3373,14 @@ var init_ci_smoke_acquisition_format = __esmMin((() => {
 //#region scripts/lib/ci-carrier-sql-runtime-budget.mjs
 function carrierSqlCaseSecurityBytes({ runtimeFilesBytes, originalSourceBytes, nodeBytes, setprivBytes }) {
 	const n = 2 * (runtimeFilesBytes + nodeBytes + setprivBytes) + originalSourceBytes;
-	need$29(Number.isSafeInteger(n) && n > 0, "CarrierSqlRuntimeBudgetBounds");
+	need$30(Number.isSafeInteger(n) && n > 0, "CarrierSqlRuntimeBudgetBounds");
 	return n;
 }
 function carrierSqlDockerOutputLimit(args) {
 	return args[0] === "container" && args[1] === "start" && args.includes("--attach") ? L.maxDockerOutputBytes : L.maxDockerMetadataBytes;
 }
 function carrierSqlDockerCommandBudget(outputBytes = L.maxDockerMetadataBytes) {
-	need$29([L.maxDockerMetadataBytes, L.maxDockerOutputBytes].includes(outputBytes), "CarrierSqlDockerOutputLimit");
+	need$30([L.maxDockerMetadataBytes, L.maxDockerOutputBytes].includes(outputBytes), "CarrierSqlDockerOutputLimit");
 	return L.maxSupervisorBytes + 2 * L.maxDockerArgumentBytes + L.maxDockerProofBytes + L.maxIntentBytes + outputBytes;
 }
 /** Complete fixed part, including bounded readiness, teardown, schema/seeder
@@ -3379,8 +3430,8 @@ function carrierSqlRuntimeFixedBudget() {
 * This excludes the PG package, carrier build, result publication, and issuer. */
 function carrierSqlRuntimeBudget(value) {
 	const b = copyNonrootJson(value), keys = [...variableInputs];
-	need$29(b && Object.keys(b).sort().join() === keys.sort().join(), "CarrierSqlRuntimeBudgetFields");
-	need$29(Object.values(b).every((v) => Number.isSafeInteger(v) && v > 0) && b.originalSourceBytes <= b.runtimeFilesBytes && b.carrierGraphNodes <= 8192 && b.carrierEntries <= 1e6, "CarrierSqlRuntimeBudgetBounds");
+	need$30(b && Object.keys(b).sort().join() === keys.sort().join(), "CarrierSqlRuntimeBudgetFields");
+	need$30(Object.values(b).every((v) => Number.isSafeInteger(v) && v > 0) && b.originalSourceBytes <= b.runtimeFilesBytes && b.carrierGraphNodes <= 8192 && b.carrierEntries <= 1e6, "CarrierSqlRuntimeBudgetBounds");
 	const fixed = carrierSqlRuntimeFixedBudget(), archiveBytes = b.carrierGraphBytes + 1536 * b.carrierGraphNodes + 32768;
 	const parts = {
 		...fixed.parts,
@@ -3402,7 +3453,7 @@ function carrierSqlRuntimeBudget(value) {
 		additionalUnknownBytes: 0
 	});
 }
-var CARRIER_SQL_FIXTURE_LIMITS, L, need$29, logical, total, variableInputs;
+var CARRIER_SQL_FIXTURE_LIMITS, L, need$30, logical, total, variableInputs;
 var init_ci_carrier_sql_runtime_budget = __esmMin((() => {
 	init_production_nonroot_contracts();
 	init_ci_smoke_acquisition_format();
@@ -3445,7 +3496,7 @@ var init_ci_carrier_sql_runtime_budget = __esmMin((() => {
 		maxCarrierLoadMetadataBytes: 32768
 	});
 	L = CARRIER_SQL_FIXTURE_LIMITS;
-	need$29 = (ok, code) => {
+	need$30 = (ok, code) => {
 		if (!ok) throw Error(code);
 	};
 	logical = (n) => ({
@@ -3470,7 +3521,7 @@ function carrierNativeBuildAdmissionBytes({ nativeBound, contextBytes, derivedBy
 	return checked(nativeBound + contextBytes + derivedBytes);
 }
 function carrierPublicationAdmissionBytes(template, nodes) {
-	need$28(Array.isArray(nodes) && nodes.length > 0, "CarrierStageGraph");
+	need$29(Array.isArray(nodes) && nodes.length > 0, "CarrierStageGraph");
 	const manifest = (d) => d.mediaType.includes("manifest") || d.mediaType.includes("image.index"), blobs = nodes.filter((d) => !manifest(d)), manifests = nodes.filter(manifest);
 	let bytes = 0, parts = 0;
 	for (const d of nodes) {
@@ -3489,27 +3540,27 @@ function carrierPublicationAdmissionBytes(template, nodes) {
 	let cost = 2 * bytes + 8 * template.bounds.resultBytes;
 	for (const [purpose, count] of Object.entries(counts)) {
 		const p = template.profiles[purpose];
-		need$28(p && count <= p.count, "CarrierStagePublicationProfile");
+		need$29(p && count <= p.count, "CarrierStagePublicationProfile");
 		cost += count * (8 * (p.requestBytes + p.responseBytes) + 131072);
 	}
 	return checked(cost);
 }
 function carrierSqlStageAdmissionBytes({ runtime, packageLocal, publicationBytes, sourceReads = 0, fixtureCaptureBytes = 0, counterRecordBytes = 0 }) {
-	need$28(runtime?.caseSecurityReadPasses === void 0 || runtime.caseSecurityReadPasses === 2 * CARRIER_SQL_FIXTURE_LIMITS.cases, "CarrierStageSqlCases");
+	need$29(runtime?.caseSecurityReadPasses === void 0 || runtime.caseSecurityReadPasses === 2 * CARRIER_SQL_FIXTURE_LIMITS.cases, "CarrierStageSqlCases");
 	checked(sourceReads);
 	checked(fixtureCaptureBytes);
 	checked(counterRecordBytes);
 	return checked(4 * (counterRecordBytes + (2 * sourceReads + 1) * 4096) + runtime.total.logicalBytes + packageLocal.logicalBytes + publicationBytes + sourceReads * 50397184 + 8 * fixtureCaptureBytes + 262144 + 16384);
 }
-var need$28, checked;
+var need$29, checked;
 var init_ci_carrier_stage_admission = __esmMin((() => {
 	init_production_image_transition();
 	init_ci_carrier_sql_runtime_budget();
-	need$28 = (v, c) => {
+	need$29 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	checked = (n) => {
-		need$28(Number.isSafeInteger(n) && n >= 0, "CarrierStageCost");
+		need$29(Number.isSafeInteger(n) && n >= 0, "CarrierStageCost");
 		return n;
 	};
 }));
@@ -10168,17 +10219,17 @@ var require_dist$5 = /* @__PURE__ */ __commonJSMin(((exports) => {
 //#endregion
 //#region scripts/lib/production-image-response.mjs
 function* normalize$3(response, expected, maxBytes) {
-	need$27(record$2(expected) && Object.keys(expected).sort().join() === "imageDigest,registryId,repositoryName" && /^\d{12}$/.test(expected.registryId) && typeof expected.repositoryName === "string" && expected.repositoryName.length > 0 && /^sha256:[a-f0-9]{64}$/.test(expected.imageDigest), "ManifestDiscoveryExpectedImage");
-	need$27(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8388608, "ManifestDiscoveryImageBytes");
-	need$27(record$2(response), "ManifestDiscoveryResponseShape");
+	need$28(record$2(expected) && Object.keys(expected).sort().join() === "imageDigest,registryId,repositoryName" && /^\d{12}$/.test(expected.registryId) && typeof expected.repositoryName === "string" && expected.repositoryName.length > 0 && /^sha256:[a-f0-9]{64}$/.test(expected.imageDigest), "ManifestDiscoveryExpectedImage");
+	need$28(Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8388608, "ManifestDiscoveryImageBytes");
+	need$28(record$2(response), "ManifestDiscoveryResponseShape");
 	closed(response, ["images", "failures"], "ManifestDiscoveryResponseFields");
-	need$27(Array.isArray(response.failures), "ManifestDiscoveryFailuresShape");
-	need$27(response.failures.length === 0, "ManifestDiscoveryBusinessFailures");
-	need$27(Array.isArray(response.images), "ManifestDiscoveryImagesShape");
-	need$27(response.images.length > 0, "ManifestDiscoveryImageCount");
+	need$28(Array.isArray(response.failures), "ManifestDiscoveryFailuresShape");
+	need$28(response.failures.length === 0, "ManifestDiscoveryBusinessFailures");
+	need$28(Array.isArray(response.images), "ManifestDiscoveryImagesShape");
+	need$28(response.images.length > 0, "ManifestDiscoveryImageCount");
 	let normalized, manifestBytes, mediaType, totalBytes = 0;
 	for (const image of response.images) {
-		need$27(record$2(image), "ManifestDiscoveryImageShape");
+		need$28(record$2(image), "ManifestDiscoveryImageShape");
 		closed(image, [
 			"registryId",
 			"repositoryName",
@@ -10187,39 +10238,39 @@ function* normalize$3(response, expected, maxBytes) {
 			"imageManifestMediaType",
 			"imageManifestSize"
 		], "ManifestDiscoveryImageFields");
-		need$27(typeof image.registryId === "string" && /^\d{12}$/.test(image.registryId), "ManifestDiscoveryRegistryField");
-		need$27(image.registryId === expected.registryId, "ManifestDiscoveryRegistryMismatch");
-		need$27(record$2(image.imageId), "ManifestDiscoveryImageId");
+		need$28(typeof image.registryId === "string" && /^\d{12}$/.test(image.registryId), "ManifestDiscoveryRegistryField");
+		need$28(image.registryId === expected.registryId, "ManifestDiscoveryRegistryMismatch");
+		need$28(record$2(image.imageId), "ManifestDiscoveryImageId");
 		closed(image.imageId, ["imageDigest", "imageTag"], "ManifestDiscoveryImageIdFields");
-		need$27(image.repositoryName === expected.repositoryName && image.imageId.imageDigest === expected.imageDigest && typeof image.imageManifest === "string", "ManifestDiscoveryImageBinding");
-		if (Object.hasOwn(image.imageId, "imageTag")) need$27(typeof image.imageId.imageTag === "string" && image.imageId.imageTag.length > 0 && image.imageId.imageTag.length <= 300, "ManifestDiscoveryImageTag");
+		need$28(image.repositoryName === expected.repositoryName && image.imageId.imageDigest === expected.imageDigest && typeof image.imageManifest === "string", "ManifestDiscoveryImageBinding");
+		if (Object.hasOwn(image.imageId, "imageTag")) need$28(typeof image.imageId.imageTag === "string" && image.imageId.imageTag.length > 0 && image.imageId.imageTag.length <= 300, "ManifestDiscoveryImageTag");
 		const size = Buffer.byteLength(image.imageManifest);
 		totalBytes += size;
-		need$27(size <= 4194304 && totalBytes <= maxBytes, "ManifestDiscoveryImageBytes");
+		need$28(size <= 4194304 && totalBytes <= maxBytes, "ManifestDiscoveryImageBytes");
 		yield 2 * size;
 		const raw = Buffer.from(image.imageManifest);
-		need$27("sha256:" + createHash("sha256").update(raw).digest("hex") === expected.imageDigest, "ManifestDiscoveryImageDigest");
+		need$28("sha256:" + createHash("sha256").update(raw).digest("hex") === expected.imageDigest, "ManifestDiscoveryImageDigest");
 		let type = image.imageManifestMediaType;
 		if (type === void 0) {
-			need$27(!Object.hasOwn(image, "imageManifestMediaType"), "ManifestDiscoveryImageBinding");
+			need$28(!Object.hasOwn(image, "imageManifestMediaType"), "ManifestDiscoveryImageBinding");
 			const json = JSON.parse(image.imageManifest), doc = (0, import_dist$4.parseDocument)(image.imageManifest, {
 				schema: "json",
 				uniqueKeys: true,
 				prettyErrors: false
 			});
-			need$27(doc.errors.length === 0, "ManifestDiscoveryImageBinding");
+			need$28(doc.errors.length === 0, "ManifestDiscoveryImageBinding");
 			type = json.mediaType;
 		}
-		need$27(types$6.has(type), "ManifestDiscoveryImageBinding");
-		if (Object.hasOwn(image, "imageManifestSize")) need$27(Number.isSafeInteger(image.imageManifestSize) && image.imageManifestSize === size, "ManifestDiscoveryImageSize");
+		need$28(types$6.has(type), "ManifestDiscoveryImageBinding");
+		if (Object.hasOwn(image, "imageManifestSize")) need$28(Number.isSafeInteger(image.imageManifestSize) && image.imageManifestSize === size, "ManifestDiscoveryImageSize");
 		const canonical = {
 			...image,
 			imageId: { ...image.imageId }
 		};
 		delete canonical.imageId.imageTag;
-		if (normalized) need$27(raw.equals(manifestBytes) && isDeepStrictEqual(canonical, normalized), "ManifestDiscoveryAliasConflict");
+		if (normalized) need$28(raw.equals(manifestBytes) && isDeepStrictEqual(canonical, normalized), "ManifestDiscoveryAliasConflict");
 		else {
-			need$27(JSON.parse(image.imageManifest)?.mediaType === type, response.images.length > 1 ? "ManifestDiscoveryAliasConflict" : "ManifestDiscoveryImageBinding");
+			need$28(JSON.parse(image.imageManifest)?.mediaType === type, response.images.length > 1 ? "ManifestDiscoveryAliasConflict" : "ManifestDiscoveryImageBinding");
 			normalized = canonical;
 			manifestBytes = raw;
 			mediaType = type;
@@ -10236,17 +10287,17 @@ function* normalize$3(response, expected, maxBytes) {
 /** Pure evidence formatter, never a request/authority. EVERY returned image
 * must agree except imageTag. The caller retains its complete raw response. */
 function normalizeImageDigestResponse(response, expected, chargeLocal = () => {}, maxBytes = 8388608) {
-	need$27(typeof chargeLocal === "function", "ManifestDiscoveryCallbacks");
+	need$28(typeof chargeLocal === "function", "ManifestDiscoveryCallbacks");
 	const iterator = normalize$3(response, expected, maxBytes);
 	let step = iterator.next();
 	while (!step.done) {
 		const debit = chargeLocal(step.value);
-		need$27(!debit || typeof debit.then !== "function", "ImageResponseAsyncDebit");
+		need$28(!debit || typeof debit.then !== "function", "ImageResponseAsyncDebit");
 		step = iterator.next();
 	}
 	return step.value;
 }
-var import_dist$4, types$6, record$2, need$27, closed;
+var import_dist$4, types$6, record$2, need$28, closed;
 var init_production_image_response = __esmMin((() => {
 	import_dist$4 = require_dist$5();
 	types$6 = /* @__PURE__ */ new Set([
@@ -10256,18 +10307,18 @@ var init_production_image_response = __esmMin((() => {
 		"application/vnd.docker.distribution.manifest.v2+json"
 	]);
 	record$2 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-	need$27 = (ok, code) => {
+	need$28 = (ok, code) => {
 		if (!ok) throw Object.assign(Error(code), {
 			code,
 			hold: true
 		});
 	};
-	closed = (v, keys, code) => need$27(record$2(v) && Object.keys(v).every((k) => keys.includes(k)), code);
+	closed = (v, keys, code) => need$28(record$2(v) && Object.keys(v).every((k) => keys.includes(k)), code);
 }));
 //#endregion
 //#region scripts/lib/production-nonroot-descriptor-processing.mjs
 function requireDescriptorProcessing(work) {
-	need$26(owners.has(work), "DescriptorOriginalProcessing");
+	need$27(owners.has(work), "DescriptorOriginalProcessing");
 	work.check();
 	return work;
 }
@@ -10327,7 +10378,7 @@ function descriptorBufferFrom(work, value, encoding) {
 	if (work !== void 0) {
 		requireDescriptorProcessing(work);
 		if (encoding === "base64") {
-			need$26(typeof value === "string", "DescriptorBase64");
+			need$27(typeof value === "string", "DescriptorBase64");
 			work.byteCount(3 * Math.ceil(value.length / 4));
 		} else work.bytes(value);
 	}
@@ -10343,7 +10394,7 @@ function descriptorBufferByteLength(work, value, encoding) {
 function descriptorBufferString(work, value, encoding) {
 	if (work !== void 0) {
 		requireDescriptorProcessing(work);
-		need$26(value instanceof Uint8Array, "DescriptorBytes");
+		need$27(value instanceof Uint8Array, "DescriptorBytes");
 		work.byteCount(encoding === "base64" ? 4 * Math.ceil(value.byteLength / 3) : value.byteLength);
 	}
 	return value.toString(encoding);
@@ -10372,7 +10423,7 @@ function descriptorPathFind(work, rows, path) {
 function descriptorCertificate(work, bytes) {
 	if (work !== void 0) {
 		requireDescriptorProcessing(work);
-		need$26(bytes instanceof Uint8Array, "DescriptorCertificateBytes");
+		need$27(bytes instanceof Uint8Array, "DescriptorCertificateBytes");
 		work.certificate("parse", bytes.byteLength);
 	}
 	const result = new X509Certificate(bytes);
@@ -10386,7 +10437,7 @@ function descriptorCertificateOperation(work, certificate, operation, arg) {
 	if (work !== void 0) {
 		requireDescriptorProcessing(work);
 		const state = certificates.get(certificate);
-		need$26(state?.work === work, "DescriptorCertificateOwner");
+		need$27(state?.work === work, "DescriptorCertificateOwner");
 		work.certificate(operation, state.bytesLength);
 		if (arg !== void 0) work.guard(arg);
 	}
@@ -10401,9 +10452,9 @@ function descriptorCertificateOperation(work, certificate, operation, arg) {
 		default: throw Error("DescriptorCertificateOperation");
 	}
 }
-var need$26, MAX$2, owners, certificates;
+var need$27, MAX$2, owners, certificates;
 var init_production_nonroot_descriptor_processing = __esmMin((() => {
-	need$26 = (v, c = "DescriptorProcessing") => {
+	need$27 = (v, c = "DescriptorProcessing") => {
 		if (!v) throw Error(c);
 	};
 	MAX$2 = 33554432;
@@ -10423,11 +10474,11 @@ var init_production_nonroot_descriptor_processing = __esmMin((() => {
 //#endregion
 //#region scripts/lib/ci-carrier-http-policy.mjs
 function carrierHttpLocalAdmission(row, requestBytes, actor = "ci") {
-	need$25(["ci", "owner"].includes(actor));
+	need$26(["ci", "owner"].includes(actor));
 	return 2 * P.argumentBytes + 2 * row.responseBytes + 8 * requestBytes + 2 * (P.requestMetadataBytes + P.responseMetadataBytes) + (P.boundaryMetadataOperations + P.frameMetadataOperations * Math.ceil((row.responseBytes + 1) / P.streamFrameBytes)) * P.metadataOperationBytes + (actor === "owner" ? 12 * P.ownerPlanBytes : 0);
 }
 function inspectCarrierHttpPolicy(v) {
-	need$25(v && Object.keys(v).sort().join() === Object.keys(P).sort().join() && Object.keys(P).every((k) => v[k] === P[k]));
+	need$26(v && Object.keys(v).sort().join() === Object.keys(P).sort().join() && Object.keys(P).every((k) => v[k] === P[k]));
 	return describeCarrierHttpPolicy();
 }
 function githubAggregate(t) {
@@ -10438,7 +10489,7 @@ function githubAggregate(t) {
 }
 function carrierHttpCatalog(t, actor) {
 	inspectCarrierHttpPolicy(t.httpPolicy);
-	need$25(["ci", "owner"].includes(actor));
+	need$26(["ci", "owner"].includes(actor));
 	const row = (id, count, requestBytes, responseBytes, aggregateBytes = count * (requestBytes + responseBytes)) => ({
 		id,
 		count,
@@ -10485,29 +10536,29 @@ function inspectCarrierHttpEvidence(value, t, actor, events, expectedBinding, { 
 	const { JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS$5);
 	descriptorGuard(descriptorWork, value, t, events, expectedBinding);
 	const rows = carrierHttpCatalog(t, actor);
-	need$25(value?.version === 1 && value.kind === "carrier-raw-http-evidence" && value.actor === actor && Array.isArray(value.rows), "CarrierHttpEvidence");
-	need$25(value.binding && Object.keys(value.binding).sort().join() === "grantHash,planHash" && Object.values(value.binding).every((v) => /^[a-f0-9]{64}$/.test(v)), "CarrierHttpEvidenceBinding");
-	if (expectedBinding) need$25(["planHash", "grantHash"].every((k) => value.binding[k] === expectedBinding[k]), "CarrierHttpEvidenceBinding");
-	need$25(value.rows.length === rows.length, "CarrierHttpEvidence");
+	need$26(value?.version === 1 && value.kind === "carrier-raw-http-evidence" && value.actor === actor && Array.isArray(value.rows), "CarrierHttpEvidence");
+	need$26(value.binding && Object.keys(value.binding).sort().join() === "grantHash,planHash" && Object.values(value.binding).every((v) => /^[a-f0-9]{64}$/.test(v)), "CarrierHttpEvidenceBinding");
+	if (expectedBinding) need$26(["planHash", "grantHash"].every((k) => value.binding[k] === expectedBinding[k]), "CarrierHttpEvidenceBinding");
+	need$26(value.rows.length === rows.length, "CarrierHttpEvidence");
 	let active = 0;
 	for (const [i, row] of rows.entries()) {
 		const v = value.rows[i];
-		need$25(v.id === row.id && Number.isSafeInteger(v.calls) && v.calls >= 0 && v.calls <= row.count && Number.isSafeInteger(v.requestBytes) && v.requestBytes >= 0 && Number.isSafeInteger(v.responseBytes) && v.responseBytes >= 0 && v.requestBytes + v.responseBytes <= row.aggregateBytes + P.unknownBytes, "CarrierHttpEvidence");
-		need$25(Number.isSafeInteger(v.unknown) && v.unknown >= 0 && v.unknown <= 1, "CarrierHttpEvidence");
+		need$26(v.id === row.id && Number.isSafeInteger(v.calls) && v.calls >= 0 && v.calls <= row.count && Number.isSafeInteger(v.requestBytes) && v.requestBytes >= 0 && Number.isSafeInteger(v.responseBytes) && v.responseBytes >= 0 && v.requestBytes + v.responseBytes <= row.aggregateBytes + P.unknownBytes, "CarrierHttpEvidence");
+		need$26(Number.isSafeInteger(v.unknown) && v.unknown >= 0 && v.unknown <= 1, "CarrierHttpEvidence");
 		active += v.unknown;
 	}
-	need$25(active <= 1 && typeof value.held === "boolean" && typeof value.closed === "boolean", "CarrierHttpEvidence");
+	need$26(active <= 1 && typeof value.held === "boolean" && typeof value.closed === "boolean", "CarrierHttpEvidence");
 	if (events !== void 0) {
 		const replay = replayCarrierHttpEvents(events, t, actor, value.binding, { descriptorWork });
-		need$25(JSON.stringify(replay.rows) === JSON.stringify(value.rows), "CarrierHttpReplayTotals");
-		need$25(!replay.held || value.held, "CarrierHttpReplayHeld");
+		need$26(JSON.stringify(replay.rows) === JSON.stringify(value.rows), "CarrierHttpReplayTotals");
+		need$26(!replay.held || value.held, "CarrierHttpReplayHeld");
 	}
 	return value;
 }
 function replayCarrierHttpEvents(events, t, actor, expectedBinding = events[0]?.binding, { descriptorWork } = {}) {
 	const { JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS$5);
 	descriptorGuard(descriptorWork, events, t, expectedBinding);
-	need$25(Array.isArray(events) && events.length <= 1024, "CarrierHttpReplay");
+	need$26(Array.isArray(events) && events.length <= 1024, "CarrierHttpReplay");
 	const catalog = carrierHttpCatalog(t, actor), rows = catalog.map((r) => ({
 		id: r.id,
 		calls: 0,
@@ -10517,20 +10568,20 @@ function replayCarrierHttpEvents(events, t, actor, expectedBinding = events[0]?.
 	}));
 	let current, sequence = 0, held = false;
 	for (const e of events) {
-		need$25(e && e.version === 1 && e.kind === "carrier-http-intent" && e.actor === actor && e.binding && expectedBinding && ["planHash", "grantHash"].every((k) => e.binding[k] === expectedBinding[k]), "CarrierHttpReplayBinding");
+		need$26(e && e.version === 1 && e.kind === "carrier-http-intent" && e.actor === actor && e.binding && expectedBinding && ["planHash", "grantHash"].every((k) => e.binding[k] === expectedBinding[k]), "CarrierHttpReplayBinding");
 		const index = catalog.findIndex((r) => r.id === e.id), p = catalog[index], r = rows[index];
-		need$25(p, "CarrierHttpReplay");
+		need$26(p, "CarrierHttpReplay");
 		if (!Object.hasOwn(e, "outcome")) {
-			need$25(!current && !held && e.ordinal === ++sequence && r.calls < p.count && [
+			need$26(!current && !held && e.ordinal === ++sequence && r.calls < p.count && [
 				"GET",
 				"POST",
 				"PUT"
 			].includes(e.method) && /^[a-f0-9]{64}$/.test(e.urlHash), "CarrierHttpReplayIntent");
-			need$25(Number.isSafeInteger(e.requestBytes) && e.requestBytes >= 0 && e.requestBytes <= p.requestBytes && e.responseBytes === p.responseBytes && r.requestBytes + r.responseBytes + e.requestBytes + p.responseBytes <= p.aggregateBytes, "CarrierHttpReplayBudget");
+			need$26(Number.isSafeInteger(e.requestBytes) && e.requestBytes >= 0 && e.requestBytes <= p.requestBytes && e.responseBytes === p.responseBytes && r.requestBytes + r.responseBytes + e.requestBytes + p.responseBytes <= p.aggregateBytes, "CarrierHttpReplayBudget");
 			r.calls++;
 			current = e;
 		} else {
-			need$25(current && [
+			need$26(current && [
 				"actor",
 				"id",
 				"ordinal",
@@ -10539,19 +10590,19 @@ function replayCarrierHttpEvents(events, t, actor, expectedBinding = events[0]?.
 				"requestBytes",
 				"responseBytes"
 			].every((k) => e[k] === current[k]), "CarrierHttpReplayPair");
-			need$25(Number.isSafeInteger(e.observedRequestBytes) && e.observedRequestBytes >= 0 && e.observedRequestBytes <= e.requestBytes && Number.isSafeInteger(e.observedResponseBytes) && e.observedResponseBytes >= 0 && e.observedResponseBytes <= e.responseBytes + 1, "CarrierHttpReplayBytes");
-			if (e.outcome === "complete") need$25(e.observedRequestBytes === e.requestBytes && e.observedResponseBytes <= e.responseBytes && [
+			need$26(Number.isSafeInteger(e.observedRequestBytes) && e.observedRequestBytes >= 0 && e.observedRequestBytes <= e.requestBytes && Number.isSafeInteger(e.observedResponseBytes) && e.observedResponseBytes >= 0 && e.observedResponseBytes <= e.responseBytes + 1, "CarrierHttpReplayBytes");
+			if (e.outcome === "complete") need$26(e.observedRequestBytes === e.requestBytes && e.observedResponseBytes <= e.responseBytes && [
 				200,
 				201,
 				204,
 				302
 			].includes(e.status) && /^[a-f0-9]{64}$/.test(e.requestHash) && /^[a-f0-9]{64}$/.test(e.responseHash), "CarrierHttpReplayComplete");
 			else if (e.outcome === "unknown") {
-				need$25(e.chargedUnknownBytes === e.requestBytes + e.responseBytes + P.unknownBytes && Number.isSafeInteger(e.hashedResponseBytes) && e.hashedResponseBytes >= 0 && e.hashedResponseBytes <= e.observedResponseBytes && /^[a-f0-9]{64}$/.test(e.partialResponseHash), "CarrierHttpReplayUnknown");
+				need$26(e.chargedUnknownBytes === e.requestBytes + e.responseBytes + P.unknownBytes && Number.isSafeInteger(e.hashedResponseBytes) && e.hashedResponseBytes >= 0 && e.hashedResponseBytes <= e.observedResponseBytes && /^[a-f0-9]{64}$/.test(e.partialResponseHash), "CarrierHttpReplayUnknown");
 				r.unknown++;
 				held = true;
 			} else {
-				need$25(e.outcome === "not-dispatched" && e.observedRequestBytes === 0 && e.observedResponseBytes === 0 && e.chargedUnknownBytes === 0, "CarrierHttpReplayUnsubmitted");
+				need$26(e.outcome === "not-dispatched" && e.observedRequestBytes === 0 && e.observedResponseBytes === 0 && e.chargedUnknownBytes === 0, "CarrierHttpReplayUnsubmitted");
 				held = true;
 			}
 			r.requestBytes += e.observedRequestBytes;
@@ -10559,18 +10610,18 @@ function replayCarrierHttpEvents(events, t, actor, expectedBinding = events[0]?.
 			current = void 0;
 		}
 	}
-	need$25(!current, "CarrierHttpReplayIncomplete");
+	need$26(!current, "CarrierHttpReplayIncomplete");
 	return {
 		rows,
 		held
 	};
 }
-var K$3, M$3, need$25, P, describeCarrierHttpPolicy, DESCRIPTOR_BASE_OPERATIONS$5;
+var K$3, M$3, need$26, P, describeCarrierHttpPolicy, DESCRIPTOR_BASE_OPERATIONS$5;
 var init_ci_carrier_http_policy = __esmMin((() => {
 	init_production_nonroot_descriptor_processing();
 	K$3 = 1024;
 	M$3 = K$3 * K$3;
-	need$25 = (v, c = "CarrierHttpPolicy") => {
+	need$26 = (v, c = "CarrierHttpPolicy") => {
 		if (!v) throw Error(c);
 	};
 	P = Object.freeze({
@@ -10602,7 +10653,7 @@ function describeCarrierLocalPolicy() {
 function inspectCarrierLocalPolicy(value, { descriptorWork } = {}) {
 	const { hash } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS$4);
 	descriptorGuard(descriptorWork, value);
-	need$24(hash(value) === hash(POLICY));
+	need$25(hash(value) === hash(POLICY));
 	return describeCarrierLocalPolicy();
 }
 function carrierCleanupReservation(template) {
@@ -10616,13 +10667,13 @@ function inspectCarrierLocalEvidence(value, { plan, binding, descriptorWork }) {
 		planHash: hash(plan),
 		grantHash: binding.grantHash
 	}, { descriptorWork });
-	else need$24(!Object.hasOwn(v, "http"), "CarrierHttpLegacy");
-	need$24(v.version === 1 && v.kind === "carrier-local-evidence" && v.planHash === hash(plan) && v.grantHash === binding.grantHash && v.policyHash === hash(policy), "CarrierLocalEvidenceBinding");
-	need$24(v.cleanupReserved === carrierCleanupReservation(plan.template) && Number.isSafeInteger(v.cleanupUsed) && v.cleanupUsed >= 0 && v.cleanupUsed <= v.cleanupReserved, "CarrierLocalCleanup");
-	need$24(Array.isArray(v.records) && v.records.length >= 3 && v.records.length <= policy.maxRecords, "CarrierLocalRecords");
+	else need$25(!Object.hasOwn(v, "http"), "CarrierHttpLegacy");
+	need$25(v.version === 1 && v.kind === "carrier-local-evidence" && v.planHash === hash(plan) && v.grantHash === binding.grantHash && v.policyHash === hash(policy), "CarrierLocalEvidenceBinding");
+	need$25(v.cleanupReserved === carrierCleanupReservation(plan.template) && Number.isSafeInteger(v.cleanupUsed) && v.cleanupUsed >= 0 && v.cleanupUsed <= v.cleanupReserved, "CarrierLocalCleanup");
+	need$25(Array.isArray(v.records) && v.records.length >= 3 && v.records.length <= policy.maxRecords, "CarrierLocalRecords");
 	let previous = null, transferred = false, started = false, last = zero$6();
 	for (const [i, r] of v.records.entries()) {
-		need$24(r.sequence === i + 1 && r.previousHash === previous && r.planHash === v.planHash && [
+		need$25(r.sequence === i + 1 && r.previousHash === previous && r.planHash === v.planHash && [
 			"claim",
 			"capture",
 			"captured",
@@ -10635,32 +10686,32 @@ function inspectCarrierLocalEvidence(value, { plan, binding, descriptorWork }) {
 			"cleanup",
 			"closed"
 		].includes(r.type), "CarrierLocalRecord");
-		need$24(descriptorBufferByteLength(descriptorWork, JSON.stringify(r) + "\n") <= policy.recordBytes, "CarrierLocalRecordSize");
-		for (const k of COUNTERS) need$24(Number.isSafeInteger(r.spent[k]) && r.spent[k] >= last[k] && r.spent[k] <= plan.template.fundedLocal.ci[k], "CarrierLocalRecordCounter");
-		need$24(r.spent.ecrRequests === 0 && r.spent.httpBodyBytes === 0, "CarrierLocalRecordCounter");
-		if (i === 0) need$24(r.type === "claim" && r.data.grantHash === binding.grantHash && r.data.runId === binding.runId && r.data.runAttempt === binding.runAttempt, "CarrierLocalClaim");
+		need$25(descriptorBufferByteLength(descriptorWork, JSON.stringify(r) + "\n") <= policy.recordBytes, "CarrierLocalRecordSize");
+		for (const k of COUNTERS) need$25(Number.isSafeInteger(r.spent[k]) && r.spent[k] >= last[k] && r.spent[k] <= plan.template.fundedLocal.ci[k], "CarrierLocalRecordCounter");
+		need$25(r.spent.ecrRequests === 0 && r.spent.httpBodyBytes === 0, "CarrierLocalRecordCounter");
+		if (i === 0) need$25(r.type === "claim" && r.data.grantHash === binding.grantHash && r.data.runId === binding.runId && r.data.runAttempt === binding.runAttempt, "CarrierLocalClaim");
 		if (r.type === "startup") {
-			need$24(!started && hash(r.data) === hash(binding), "CarrierLocalBinding");
+			need$25(!started && hash(r.data) === hash(binding), "CarrierLocalBinding");
 			started = true;
 		}
 		if (r.type === "transfer") {
-			need$24(started && !transferred && hash(r.data) === hash(binding), "CarrierLocalBinding");
+			need$25(started && !transferred && hash(r.data) === hash(binding), "CarrierLocalBinding");
 			transferred = true;
 		}
 		previous = hash(r);
 		last = r.spent;
 	}
-	need$24(started && transferred && previous === v.lastHash && hash(last) === hash(v.spent), "CarrierLocalEvidenceTotals");
-	need$24(v.spent.logicalBytes >= v.records.length * policy.recordChargeBytes, "CarrierLocalRecordCoverage");
+	need$25(started && transferred && previous === v.lastHash && hash(last) === hash(v.spent), "CarrierLocalEvidenceTotals");
+	need$25(v.spent.logicalBytes >= v.records.length * policy.recordChargeBytes, "CarrierLocalRecordCoverage");
 	return v;
 }
-var need$24, POLICY, DESCRIPTOR_BASE_OPERATIONS$4;
+var need$25, POLICY, DESCRIPTOR_BASE_OPERATIONS$4;
 var init_ci_carrier_local_policy = __esmMin((() => {
 	init_production_nonroot_descriptor_processing();
 	init_ci_carrier_http_policy();
 	init_production_nonroot_contracts();
 	init_ci_smoke_acquisition_format();
-	need$24 = (v, c = "CarrierLocalPolicy") => {
+	need$25 = (v, c = "CarrierLocalPolicy") => {
 		if (!v) throw Error(c);
 	};
 	POLICY = Object.freeze({
@@ -48834,8 +48885,8 @@ function inspectOriginalIssuerSource(value) {
 		"configHash",
 		"credentialsHash"
 	]);
-	need$30(s.profile === "default" && ["instance-metadata", "static-temporary"].includes(s.provider) && hex$10(s.configHash) && (s.credentialsHash === null || hex$10(s.credentialsHash)), "OriginalIssuerSource");
-	for (const k of ["configFile", "credentialsFile"]) need$30(typeof s[k] === "string" && s[k].startsWith("/") && s[k].length <= 4096 && !s[k].split("/").includes(".."), "OriginalIssuerSourcePath");
+	need$31(s.profile === "default" && ["instance-metadata", "static-temporary"].includes(s.provider) && hex$10(s.configHash) && (s.credentialsHash === null || hex$10(s.credentialsHash)), "OriginalIssuerSource");
+	for (const k of ["configFile", "credentialsFile"]) need$31(typeof s[k] === "string" && s[k].startsWith("/") && s[k].length <= 4096 && !s[k].split("/").includes(".."), "OriginalIssuerSourcePath");
 	return s;
 }
 var K, M$1, ORIGINAL_ISSUER_LIMITS;
@@ -48845,7 +48896,7 @@ var init_production_nonroot_original_issuer_accounting = __esmMin((() => {
 	init_ci_smoke_private_archive();
 	K = 1024;
 	M$1 = K * K;
-	ORIGINAL_ISSUER_LIMITS = freeze$2({
+	ORIGINAL_ISSUER_LIMITS = freeze$3({
 		unknownBytes: 8 * M$1,
 		localBytes: 16 * M$1,
 		cleanupLocalBytes: 2 * M$1,
@@ -48871,7 +48922,7 @@ function assertCarrierSqlDatabasePin(f, { descriptorWork } = {}) {
 	const { hash, sha, same, copyNonrootJson, JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS$3);
 	descriptorGuard(descriptorWork, f);
 	const derived = carrierSqlDerivedProfile(f?.rootDigest);
-	need$23(f?.rootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || derived, "CarrierPgFixedImage");
+	need$24(f?.rootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || derived, "CarrierPgFixedImage");
 	if (derived) for (const key of [
 		"archive",
 		"arm64Digest",
@@ -48879,7 +48930,7 @@ function assertCarrierSqlDatabasePin(f, { descriptorWork } = {}) {
 		"attestationDigest",
 		"uncompressedBytes",
 		"processedEntries"
-	]) need$23(hash(f[key]) === hash(derived[key]), "CarrierPgDerivedPin");
+	]) need$24(hash(f[key]) === hash(derived[key]), "CarrierPgDerivedPin");
 }
 function carrierOwnerSourceProfiles(source, { descriptorWork } = {}) {
 	const { hash, sha, same, copyNonrootJson, JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS$3);
@@ -48900,7 +48951,7 @@ function image(v) {
 		"arm64Digest",
 		"configDigest"
 	]);
-	need$23(/^\d{12}$/.test(v.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(v.region) && /^[a-z0-9][a-z0-9/_-]{0,254}$/.test(v.repositoryName) && [
+	need$24(/^\d{12}$/.test(v.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(v.region) && /^[a-z0-9][a-z0-9/_-]{0,254}$/.test(v.repositoryName) && [
 		"rootDigest",
 		"arm64Digest",
 		"configDigest"
@@ -48913,7 +48964,7 @@ function profile(v, key) {
 			"requestBytes",
 			"responseBytes"
 		]);
-		need$23([0, 1].includes(v.count) && v.requestBytes === 0 && v.responseBytes === (key.endsWith("Token") ? 4096 : 65536), "CarrierSourceProfile");
+		need$24([0, 1].includes(v.count) && v.requestBytes === 0 && v.responseBytes === (key.endsWith("Token") ? 4096 : 65536), "CarrierSourceProfile");
 		return;
 	}
 	if (key === "baseBlob" || key === "ownerBlob") {
@@ -48924,7 +48975,7 @@ function profile(v, key) {
 			"maxObjectBytes",
 			"descriptorSource"
 		]);
-		need$23(v.kind === "carrier-blob-aggregate" && pos(v.maxRequests) && v.maxRequests <= 4096 && pos(v.aggregateResponseBytes) && v.aggregateResponseBytes <= 4294967296 && pos(v.maxObjectBytes) && v.maxObjectBytes <= 2147483648 && v.maxObjectBytes <= v.aggregateResponseBytes && v.descriptorSource === (key === "baseBlob" ? "authenticated-base-graph" : "verified-output-graph"), "CarrierBlobProfile");
+		need$24(v.kind === "carrier-blob-aggregate" && pos(v.maxRequests) && v.maxRequests <= 4096 && pos(v.aggregateResponseBytes) && v.aggregateResponseBytes <= 4294967296 && pos(v.maxObjectBytes) && v.maxObjectBytes <= 2147483648 && v.maxObjectBytes <= v.aggregateResponseBytes && v.descriptorSource === (key === "baseBlob" ? "authenticated-base-graph" : "verified-output-graph"), "CarrierBlobProfile");
 		return;
 	}
 	exact$8(v, [
@@ -48932,8 +48983,8 @@ function profile(v, key) {
 		"requestBytes",
 		"responseBytes"
 	]);
-	need$23(pos(v.count) && v.count <= 2e4 && Number.isSafeInteger(v.requestBytes) && v.requestBytes >= 0 && pos(v.responseBytes) && v.requestBytes <= 1073741824 && v.responseBytes <= 1073741824, "CarrierProfile");
-	if (single.has(key)) need$23(v.count === 1, "CarrierSingleAttempt");
+	need$24(pos(v.count) && v.count <= 2e4 && Number.isSafeInteger(v.requestBytes) && v.requestBytes >= 0 && pos(v.responseBytes) && v.requestBytes <= 1073741824 && v.responseBytes <= 1073741824, "CarrierProfile");
+	if (single.has(key)) need$24(v.count === 1, "CarrierSingleAttempt");
 }
 function templateArithmetic(t) {
 	if (!Object.hasOwn(t, "cumulativeLimitsHash")) return {
@@ -48941,10 +48992,10 @@ function templateArithmetic(t) {
 		counter,
 		addCounters
 	};
-	need$23(t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierCumulativeLimits");
+	need$24(t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierCumulativeLimits");
 	const check = (v) => {
 		exact$8(v, COUNTERS);
-		for (const k of COUNTERS) need$23(Number.isSafeInteger(v[k]) && v[k] >= 0 && v[k] <= NONROOT_REMAINING_WORK_CAPS_V2[k], "CarrierBudgetCounter");
+		for (const k of COUNTERS) need$24(Number.isSafeInteger(v[k]) && v[k] >= 0 && v[k] <= NONROOT_REMAINING_WORK_CAPS_V2[k], "CarrierBudgetCounter");
 		return v;
 	};
 	return {
@@ -48959,7 +49010,7 @@ function templateArithmetic(t) {
 }
 function local(v, check = counter) {
 	check(v);
-	need$23(v.ecrRequests === 0 && v.httpBodyBytes === 0, "CarrierLocalOnly");
+	need$24(v.ecrRequests === 0 && v.httpBodyBytes === 0, "CarrierLocalOnly");
 }
 function sqlFixture(f) {
 	exact$8(f, [
@@ -48976,7 +49027,7 @@ function sqlFixture(f) {
 	]);
 	exact$8(f.archive, ["sha256", "bytesLength"]);
 	exact$8(f.oldSource, ["revision", "tree"]);
-	need$23(f.version === 1 && f.kind === "carrier-sql-fixture" && hex$9(f.archive.sha256) && pos(f.archive.bytesLength) && f.archive.bytesLength <= 268435456 && [
+	need$24(f.version === 1 && f.kind === "carrier-sql-fixture" && hex$9(f.archive.sha256) && pos(f.archive.bytesLength) && f.archive.bytesLength <= 268435456 && [
 		"rootDigest",
 		"arm64Digest",
 		"configDigest",
@@ -49011,14 +49062,14 @@ function inspectCarrierBeforeCopyTemplate(value, { descriptorWork } = {}) {
 		...Object.hasOwn(t, "ciLocalPolicy") ? ["ciLocalPolicy"] : [],
 		...Object.hasOwn(t, "httpPolicy") ? ["httpPolicy"] : []
 	]);
-	need$23(t.version === 1 && t.kind === "carrier-before-copy-template" && t.purpose === "premerge-carrier-build" && hex$9(t.owner, 32) && hex$9(t.executionId, 32) && hex$9(t.slotNonce, 32) && pos(t.ownerGithubActorId), "CarrierTemplate");
+	need$24(t.version === 1 && t.kind === "carrier-before-copy-template" && t.purpose === "premerge-carrier-build" && hex$9(t.owner, 32) && hex$9(t.executionId, 32) && hex$9(t.slotNonce, 32) && pos(t.ownerGithubActorId), "CarrierTemplate");
 	if (Object.hasOwn(t, "httpPolicy")) {
 		inspectCarrierHttpPolicy(t.httpPolicy);
-		need$23(t.ciLocalPolicy && t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierHttpOriginalPolicy");
+		need$24(t.ciLocalPolicy && t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierHttpOriginalPolicy");
 	}
 	if (Object.hasOwn(t, "ciLocalPolicy")) {
 		const policy = inspectCarrierLocalPolicy(t.ciLocalPolicy, { descriptorWork });
-		need$23(t.fundedLocal.ci.logicalBytes === policy.logicalBytes && t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierLocalPolicyBinding");
+		need$24(t.fundedLocal.ci.logicalBytes === policy.logicalBytes && t.cumulativeLimitsHash === NONROOT_REMAINING_WORK_LIMITS_HASH_V2, "CarrierLocalPolicyBinding");
 	}
 	const s = t.source;
 	exact$8(s, [
@@ -49035,14 +49086,14 @@ function inspectCarrierBeforeCopyTemplate(value, { descriptorWork } = {}) {
 		"jobDefinitionHash",
 		"roleDefinitionHash"
 	]);
-	need$23(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s.repository) && pos(s.prNumber) && [
+	need$24(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s.repository) && pos(s.prNumber) && [
 		"candidateRevision",
 		"candidateTree",
 		"baseRevision",
 		"workflowSha"
 	].every((k) => hex$9(s[k], 40)) && s.workflowSha === s.candidateRevision, "CarrierSource");
-	need$23(/^refs\/heads\/[A-Za-z0-9_./-]+$/.test(s.candidateRef) && !s.candidateRef.includes("..") && /^\.github\/workflows\/[a-z0-9-]+\.ya?ml$/.test(s.workflowPath) && /^[a-z][a-z0-9-]{0,63}$/.test(s.jobKey) && text$2(s.jobName), "CarrierSource");
-	need$23([
+	need$24(/^refs\/heads\/[A-Za-z0-9_./-]+$/.test(s.candidateRef) && !s.candidateRef.includes("..") && /^\.github\/workflows\/[a-z0-9-]+\.ya?ml$/.test(s.workflowPath) && /^[a-z][a-z0-9-]{0,63}$/.test(s.jobKey) && text$2(s.jobName), "CarrierSource");
+	need$24([
 		"workflowPath",
 		"jobKey",
 		"jobName"
@@ -49059,10 +49110,10 @@ function inspectCarrierBeforeCopyTemplate(value, { descriptorWork } = {}) {
 		"kmsKeyArn",
 		"bucketKeyEnabled"
 	]);
-	need$23(/^\d{12}$/.test(q.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(q.region) && q.repositoryName === "mem9-on-aws/preview/bootstrap", "CarrierScope");
-	for (const k of ["previewRoleArn", "ownerRoleArn"]) need$23(new RegExp("^arn:aws:iam::" + q.account + ":role/[A-Za-z0-9_+=,.@/-]+$").test(q[k]), "CarrierRole");
-	need$23(q.previewRoleArn === "arn:aws:iam::" + q.account + ":role/" + CARRIER_CI_JOB.previewRoleName, "CarrierPreviewRole");
-	need$23(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(q.bucket) && !q.bucket.includes("..") && q.prefix === "decisions/pr-" + s.prNumber + "/carrier" && q.bucketKeyEnabled === true && new RegExp("^arn:aws:kms:" + q.region + ":" + q.account + ":key/(?:[a-f0-9-]{36}|mrk-[a-f0-9]{32})$").test(q.kmsKeyArn), "CarrierStorage");
+	need$24(/^\d{12}$/.test(q.account) && /^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(q.region) && q.repositoryName === "mem9-on-aws/preview/bootstrap", "CarrierScope");
+	for (const k of ["previewRoleArn", "ownerRoleArn"]) need$24(new RegExp("^arn:aws:iam::" + q.account + ":role/[A-Za-z0-9_+=,.@/-]+$").test(q[k]), "CarrierRole");
+	need$24(q.previewRoleArn === "arn:aws:iam::" + q.account + ":role/" + CARRIER_CI_JOB.previewRoleName, "CarrierPreviewRole");
+	need$24(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(q.bucket) && !q.bucket.includes("..") && q.prefix === "decisions/pr-" + s.prNumber + "/carrier" && q.bucketKeyEnabled === true && new RegExp("^arn:aws:kms:" + q.region + ":" + q.account + ":key/(?:[a-f0-9-]{36}|mrk-[a-f0-9]{32})$").test(q.kmsKeyArn), "CarrierStorage");
 	exact$8(t.anchors, [
 		"oldImage",
 		"oldImageEvidenceHash",
@@ -49074,14 +49125,14 @@ function inspectCarrierBeforeCopyTemplate(value, { descriptorWork } = {}) {
 	]);
 	image(t.anchors.oldImage);
 	image(t.base);
-	for (const k of Object.keys(t.anchors).filter((k) => k !== "oldImage")) need$23(hex$9(t.anchors[k]), "CarrierAnchor");
-	for (const i of [t.base, t.anchors.oldImage]) need$23(i.account === q.account && i.region === q.region, "CarrierImageScope");
+	for (const k of Object.keys(t.anchors).filter((k) => k !== "oldImage")) need$24(hex$9(t.anchors[k]), "CarrierAnchor");
+	for (const i of [t.base, t.anchors.oldImage]) need$24(i.account === q.account && i.region === q.region, "CarrierImageScope");
 	exact$8(t.recipe, [
 		"dockerfileHash",
 		"guardHash",
 		"sourceClosureHash"
 	]);
-	need$23(Object.values(t.recipe).every((v) => hex$9(v)), "CarrierRecipe");
+	need$24(Object.values(t.recipe).every((v) => hex$9(v)), "CarrierRecipe");
 	exact$8(t.bounds, [
 		"contextBytes",
 		"contextFiles",
@@ -49094,29 +49145,29 @@ function inspectCarrierBeforeCopyTemplate(value, { descriptorWork } = {}) {
 		"processedEntries",
 		"scanPages"
 	]);
-	need$23(Object.values(t.bounds).every(pos) && t.bounds.contextBytes <= 1073741824 && t.bounds.contextFiles <= 2e4 && t.bounds.grantBytes <= 33554432 && t.bounds.resultBytes <= 33554432 && t.bounds.manifestNodes <= 4096 && t.bounds.blobNodes <= 4096 && t.bounds.compressedBytes <= 4294967296 && t.bounds.uncompressedBytes <= 34359738368 && t.bounds.processedEntries <= 1e6 && t.bounds.scanPages <= 100, "CarrierBounds");
+	need$24(Object.values(t.bounds).every(pos) && t.bounds.contextBytes <= 1073741824 && t.bounds.contextFiles <= 2e4 && t.bounds.grantBytes <= 33554432 && t.bounds.resultBytes <= 33554432 && t.bounds.manifestNodes <= 4096 && t.bounds.blobNodes <= 4096 && t.bounds.compressedBytes <= 4294967296 && t.bounds.uncompressedBytes <= 34359738368 && t.bounds.processedEntries <= 1e6 && t.bounds.scanPages <= 100, "CarrierBounds");
 	const keys = Object.keys(fixed).filter((k) => t.ownerSource || !sourceProfiles.has(k));
 	exact$8(t.profiles, keys);
 	for (const k of keys) profile(t.profiles[k], k);
 	if (t.ownerSource) {
 		const expected = carrierOwnerSourceProfiles(t.ownerSource, { descriptorWork });
 		for (const [k, v] of Object.entries(expected)) same(t.profiles[k], v);
-		need$23(t.fundedLocal?.owner?.logicalBytes >= 2 * ORIGINAL_ISSUER_LIMITS.localBytes, "CarrierIssuerLocalCoverage");
+		need$24(t.fundedLocal?.owner?.logicalBytes >= 2 * ORIGINAL_ISSUER_LIMITS.localBytes, "CarrierIssuerLocalCoverage");
 	}
 	const f = sqlFixture(t.sqlFixture);
-	need$23(t.profiles.fixturePut.requestBytes === f.archive.bytesLength && t.profiles.fixturePut.responseBytes >= 16384 && t.profiles.fixtureGet.requestBytes === 0 && t.profiles.fixtureGet.responseBytes === f.archive.bytesLength, "CarrierSqlFixtureBudget");
-	for (const k of ["baseBlob", "ownerBlob"]) need$23(t.profiles[k].aggregateResponseBytes === t.bounds.compressedBytes && t.profiles[k].maxRequests >= t.bounds.blobNodes, "CarrierBlobCoverage");
-	need$23(t.profiles.ownerIdentity.count === 3 && t.profiles.ownerIssuerIdentity.count === 2 && t.profiles.ownerPublisherIssuerIdentity.count === 2 && t.profiles.scan.count === t.bounds.scanPages, "CarrierProfileCoverage");
-	for (const [identity, assume] of [["ownerIssuerIdentity", "ownerAssume"], ["ownerPublisherIssuerIdentity", "ownerPublisherAssume"]]) need$23(t.profiles[identity].requestBytes >= 16384 && t.profiles[identity].responseBytes >= 16384 && t.profiles[assume].requestBytes >= 16384 && t.profiles[assume].responseBytes >= 262144, "CarrierIssuerBudget");
-	for (const k of ["contextPut"]) need$23(t.profiles[k].requestBytes >= t.bounds.contextBytes, "CarrierContextBudget");
-	for (const k of ["contextConfirm", "contextGet"]) need$23(t.profiles[k].responseBytes >= t.bounds.contextBytes, "CarrierContextBudget");
-	need$23(t.profiles.resultPut.requestBytes >= t.bounds.resultBytes && t.profiles.resultGet.responseBytes >= t.bounds.resultBytes, "CarrierResultBudget");
-	need$23(t.profiles.grantPut.requestBytes >= t.bounds.grantBytes && t.profiles.grantConfirm.responseBytes >= t.bounds.grantBytes && t.profiles.grantGet.responseBytes >= t.bounds.grantBytes, "CarrierGrantBudget");
+	need$24(t.profiles.fixturePut.requestBytes === f.archive.bytesLength && t.profiles.fixturePut.responseBytes >= 16384 && t.profiles.fixtureGet.requestBytes === 0 && t.profiles.fixtureGet.responseBytes === f.archive.bytesLength, "CarrierSqlFixtureBudget");
+	for (const k of ["baseBlob", "ownerBlob"]) need$24(t.profiles[k].aggregateResponseBytes === t.bounds.compressedBytes && t.profiles[k].maxRequests >= t.bounds.blobNodes, "CarrierBlobCoverage");
+	need$24(t.profiles.ownerIdentity.count === 3 && t.profiles.ownerIssuerIdentity.count === 2 && t.profiles.ownerPublisherIssuerIdentity.count === 2 && t.profiles.scan.count === t.bounds.scanPages, "CarrierProfileCoverage");
+	for (const [identity, assume] of [["ownerIssuerIdentity", "ownerAssume"], ["ownerPublisherIssuerIdentity", "ownerPublisherAssume"]]) need$24(t.profiles[identity].requestBytes >= 16384 && t.profiles[identity].responseBytes >= 16384 && t.profiles[assume].requestBytes >= 16384 && t.profiles[assume].responseBytes >= 262144, "CarrierIssuerBudget");
+	for (const k of ["contextPut"]) need$24(t.profiles[k].requestBytes >= t.bounds.contextBytes, "CarrierContextBudget");
+	for (const k of ["contextConfirm", "contextGet"]) need$24(t.profiles[k].responseBytes >= t.bounds.contextBytes, "CarrierContextBudget");
+	need$24(t.profiles.resultPut.requestBytes >= t.bounds.resultBytes && t.profiles.resultGet.responseBytes >= t.bounds.resultBytes, "CarrierResultBudget");
+	need$24(t.profiles.grantPut.requestBytes >= t.bounds.grantBytes && t.profiles.grantConfirm.responseBytes >= t.bounds.grantBytes && t.profiles.grantGet.responseBytes >= t.bounds.grantBytes, "CarrierGrantBudget");
 	for (const k of [
 		"runPut",
 		"runConfirm",
 		"claimPut"
-	]) need$23((k === "runConfirm" ? t.profiles[k].responseBytes : t.profiles[k].requestBytes) >= 16384, "CarrierBindingBudget");
+	]) need$24((k === "runConfirm" ? t.profiles[k].responseBytes : t.profiles[k].requestBytes) >= 16384, "CarrierBindingBudget");
 	const arithmetic = templateArithmetic(t);
 	local(t.preFundingPreparation, arithmetic.counter);
 	exact$8(t.fundedLocal, ["owner", "ci"]);
@@ -49146,7 +49197,7 @@ function measureCarrierBeforeCopyBudget(value, { descriptorWork } = {}) {
 	}, { addCounters } = templateArithmetic(t);
 	for (const [purpose, p] of Object.entries(t.profiles)) {
 		const [actor, action] = fixed[purpose], bytes = p.kind === "carrier-blob-aggregate" ? p.aggregateResponseBytes : p.count * (p.requestBytes + p.responseBytes);
-		need$23(Number.isSafeInteger(bytes), "CarrierBudgetOverflow");
+		need$24(Number.isSafeInteger(bytes), "CarrierBudgetOverflow");
 		lanes[actor] = addCounters(lanes[actor], {
 			...zero$6(),
 			ecrRequests: ecr.has(action) ? p.count : 0,
@@ -49174,7 +49225,7 @@ function measureCarrierBeforeCopyBudget(value, { descriptorWork } = {}) {
 function carrierSqlPackageReadBounds(f) {
 	const v = sqlPackageReads[f.archive.sha256];
 	if (v) {
-		need$23(f.archive.bytesLength === v.archiveBytes, "CarrierSqlArchiveSize");
+		need$24(f.archive.bytesLength === v.archiveBytes, "CarrierSqlArchiveSize");
 		return { ...v };
 	}
 	return {
@@ -49197,7 +49248,7 @@ function carrierSqlFixtureComponentBudget(value, options) {
 	const f = sqlFixture(copyNonrootJson(value));
 	exact$8(options, ["putResponseBytes"]);
 	const { putResponseBytes } = options;
-	need$23(pos(putResponseBytes) && putResponseBytes >= 16384 && putResponseBytes <= 1073741824, "CarrierSqlPutResponseBytes");
+	need$24(pos(putResponseBytes) && putResponseBytes >= 16384 && putResponseBytes <= 1073741824, "CarrierSqlPutResponseBytes");
 	assertCarrierSqlDatabasePin(f, { descriptorWork });
 	const pin = carrierSqlDerivedProfile(f.rootDigest) ?? originalSqlFixture;
 	for (const key of [
@@ -49288,28 +49339,28 @@ function inspectCarrierFundingPlan(value, { descriptorWork } = {}) {
 		"budget",
 		...p.version === 2 ? ["budgetRevision", "compiledCeiling"] : []
 	]);
-	need$23([1, 2].includes(p.version) && p.kind === "carrier-before-copy-funding-plan" && p.purpose === "premerge-carrier-build", "CarrierFundingKind");
+	need$24([1, 2].includes(p.version) && p.kind === "carrier-before-copy-funding-plan" && p.purpose === "premerge-carrier-build", "CarrierFundingKind");
 	const t = inspectCarrierBeforeCopyTemplate(p.template, { descriptorWork });
-	need$23(p.version === templateArithmetic(t).version, "CarrierFundingVersion");
+	need$24(p.version === templateArithmetic(t).version, "CarrierFundingVersion");
 	if (p.version === 2) {
 		nonrootAccountingPolicy(p.budgetRevision, p.budgetRevision, p.compiledCeiling);
-		need$23(p.budgetRevision.limitsHash === t.cumulativeLimitsHash, "CarrierCumulativeLimits");
+		need$24(p.budgetRevision.limitsHash === t.cumulativeLimitsHash, "CarrierCumulativeLimits");
 	}
-	need$23(p.templateHash === hash(t) && hex$9(p.configHash) && hex$9(p.ledgerStartHash) && pos(p.issuedMs) && pos(p.deadlineMs) && p.issuedMs < p.deadlineMs, "CarrierFunding");
+	need$24(p.templateHash === hash(t) && hex$9(p.configHash) && hex$9(p.ledgerStartHash) && pos(p.issuedMs) && pos(p.deadlineMs) && p.issuedMs < p.deadlineMs, "CarrierFunding");
 	exact$8(p.ledgerBinding, [
 		"owner",
 		"executionId",
 		"planHash",
 		"publicationHash"
 	]);
-	need$23(p.ledgerBinding.owner === t.owner && p.ledgerBinding.executionId === t.executionId && p.ledgerBinding.planHash === p.configHash && hex$9(p.ledgerBinding.publicationHash), "CarrierLedgerBinding");
+	need$24(p.ledgerBinding.owner === t.owner && p.ledgerBinding.executionId === t.executionId && p.ledgerBinding.planHash === p.configHash && hex$9(p.ledgerBinding.publicationHash), "CarrierLedgerBinding");
 	exact$8(p.context, [
 		"key",
 		"manifestHash",
 		"sha256",
 		"bytesLength"
 	]);
-	need$23(p.context.key === carrierObjectKeys(t, { descriptorWork }).context && hex$9(p.context.manifestHash) && hex$9(p.context.sha256) && pos(p.context.bytesLength) && p.context.bytesLength <= t.bounds.contextBytes, "CarrierContext");
+	need$24(p.context.key === carrierObjectKeys(t, { descriptorWork }).context && hex$9(p.context.manifestHash) && hex$9(p.context.sha256) && pos(p.context.bytesLength) && p.context.bytesLength <= t.bounds.contextBytes, "CarrierContext");
 	same(p.budget, measureCarrierBeforeCopyBudget(t, { descriptorWork }).fundedRemaining);
 	return p;
 }
@@ -49331,7 +49382,7 @@ function carrierAccountingExpectation(plan, expected = {}) {
 		expectedBudgetRevision: expected.budgetRevision,
 		compiledCeiling: expected.compiledCeiling
 	});
-	need$23(plan.version === arithmetic.version, "CarrierFundingVersion");
+	need$24(plan.version === arithmetic.version, "CarrierFundingVersion");
 	if (plan.version === 2) same$7(plan.compiledCeiling, expected.compiledCeiling, "CarrierCompiledCeiling");
 	return arithmetic;
 }
@@ -49345,9 +49396,9 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 		"planHash",
 		"debit"
 	]);
-	need$23([1, 2].includes(g.version) && g.kind === "owner-prepaid-carrier-grant" && g.purpose === "premerge-carrier-build", "CarrierGrantKind");
+	need$24([1, 2].includes(g.version) && g.kind === "owner-prepaid-carrier-grant" && g.purpose === "premerge-carrier-build", "CarrierGrantKind");
 	const p = inspectCarrierFundingPlan(g.plan);
-	need$23([
+	need$24([
 		grantHash,
 		templateHash,
 		configHash,
@@ -49357,7 +49408,7 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 		budgetRevision,
 		compiledCeiling
 	});
-	need$23(g.version === p.version, "CarrierGrantVersion");
+	need$24(g.version === p.version, "CarrierGrantVersion");
 	const d = g.debit;
 	exact$8(d, [
 		"start",
@@ -49365,15 +49416,15 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 		"events",
 		"checkpoint"
 	]);
-	need$23(typeof d.startRaw === "string" && Buffer.from(d.startRaw, "base64").toString("base64") === d.startRaw && sha$8(Buffer.from(d.startRaw, "base64")) === ledgerStartHash, "CarrierLedgerStart");
+	need$24(typeof d.startRaw === "string" && Buffer.from(d.startRaw, "base64").toString("base64") === d.startRaw && sha$8(Buffer.from(d.startRaw, "base64")) === ledgerStartHash, "CarrierLedgerStart");
 	same$7(JSON.parse(Buffer.from(d.startRaw, "base64")), d.start);
-	need$23(d.start.mode === "copy" && d.start.deadlineMs === p.deadlineMs && p.issuedMs >= p.deadlineMs - 27e5, "CarrierOriginalDeadline");
+	need$24(d.start.mode === "copy" && d.start.deadlineMs === p.deadlineMs && p.issuedMs >= p.deadlineMs - 27e5, "CarrierOriginalDeadline");
 	same$7(d.start.binding, p.ledgerBinding);
 	if (p.version === 2) {
-		need$23(d.start.version === 2, "CarrierLedgerVersion");
+		need$24(d.start.version === 2, "CarrierLedgerVersion");
 		same$7(d.start.budgetRevision, budgetRevision, "CarrierLedgerRevision");
 		same$7(d.checkpoint.budgetRevision, budgetRevision, "CarrierLedgerRevision");
-	} else need$23(d.start.version === 1 && !Object.hasOwn(d.start, "budgetRevision") && !Object.hasOwn(d.checkpoint, "budgetRevision"), "CarrierLedgerVersion");
+	} else need$24(d.start.version === 1 && !Object.hasOwn(d.start, "budgetRevision") && !Object.hasOwn(d.checkpoint, "budgetRevision"), "CarrierLedgerVersion");
 	const h = replayAccounting(d.events, {
 		binding: d.start.binding,
 		startingCounters: d.start.startingCounters,
@@ -49384,9 +49435,9 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 			compiledCeiling
 		} : {}
 	});
-	need$23(!h.sealed && h.active.size === 0 && d.events.length > 0, "CarrierDebitHistory");
+	need$24(!h.sealed && h.active.size === 0 && d.events.length > 0, "CarrierDebitHistory");
 	const event = d.events.at(-1), scopeHash = nonrootHash(carrierLedgerScope(p.template));
-	need$23(event.type === "prepayment" && d.events.filter((e) => e.type === "prepayment" && e.data.scopeHash === scopeHash).length === 1, "CarrierDebitOnce");
+	need$24(event.type === "prepayment" && d.events.filter((e) => e.type === "prepayment" && e.data.scopeHash === scopeHash).length === 1, "CarrierDebitOnce");
 	same$7(event.data, {
 		allocationId: g.planHash,
 		planHash: g.planHash,
@@ -49398,8 +49449,8 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 	same$7(d.checkpoint.startingCounters, d.start.startingCounters);
 	same$7(d.checkpoint.counters, h.spent);
 	same$7(d.checkpoint.remainingReservation, h.remaining);
-	need$23(d.checkpoint.eventCount === d.events.length && d.checkpoint.lastEventHash === h.lastHash && d.checkpoint.active === 0 && d.checkpoint.sealed === false, "CarrierDebitCheckpoint");
-	if (now !== void 0) need$23(pos(now) && now >= p.issuedMs && now < p.deadlineMs, "CarrierGrantExpired");
+	need$24(d.checkpoint.eventCount === d.events.length && d.checkpoint.lastEventHash === h.lastHash && d.checkpoint.active === 0 && d.checkpoint.sealed === false, "CarrierDebitCheckpoint");
+	if (now !== void 0) need$24(pos(now) && now >= p.issuedMs && now < p.deadlineMs, "CarrierGrantExpired");
 	return copyNonrootJson({
 		plan: p,
 		grantHash,
@@ -49411,11 +49462,11 @@ function verifyCarrierBeforeCopyGrant(value, { grantHash, templateHash, configHa
 }
 function carrierRunBinding(planValue, grantHash, { run, commit, pullRequest, job }) {
 	const p = inspectCarrierFundingPlan(planValue), s = p.template.source;
-	need$23(hex$9(grantHash), "CarrierGrantHash");
-	need$23(run?.event === "workflow_dispatch" && run.head_sha === s.candidateRevision && run.head_branch === s.candidateRef.slice(11) && run.repository?.full_name === s.repository && run.path === s.workflowPath && pos(run.id) && pos(run.run_attempt) && ["queued", "in_progress"].includes(run.status), "CarrierActualRun");
-	need$23(commit?.sha === s.candidateRevision && commit.tree?.sha === s.candidateTree, "CarrierActualCommit");
-	need$23(pullRequest?.number === s.prNumber && pullRequest.state === "open" && pullRequest.merged === false && pullRequest.head?.sha === s.candidateRevision && pullRequest.head.repo?.full_name === s.repository && pullRequest.base?.sha === s.baseRevision && pullRequest.base.ref === "main", "CarrierActualPr");
-	need$23(job?.run_id === run.id && job.run_attempt === run.run_attempt && job.head_sha === s.candidateRevision && job.name === s.jobName && job.status === "in_progress" && pos(job.id), "CarrierActualJob");
+	need$24(hex$9(grantHash), "CarrierGrantHash");
+	need$24(run?.event === "workflow_dispatch" && run.head_sha === s.candidateRevision && run.head_branch === s.candidateRef.slice(11) && run.repository?.full_name === s.repository && run.path === s.workflowPath && pos(run.id) && pos(run.run_attempt) && ["queued", "in_progress"].includes(run.status), "CarrierActualRun");
+	need$24(commit?.sha === s.candidateRevision && commit.tree?.sha === s.candidateTree, "CarrierActualCommit");
+	need$24(pullRequest?.number === s.prNumber && pullRequest.state === "open" && pullRequest.merged === false && pullRequest.head?.sha === s.candidateRevision && pullRequest.head.repo?.full_name === s.repository && pullRequest.base?.sha === s.baseRevision && pullRequest.base.ref === "main", "CarrierActualPr");
+	need$24(job?.run_id === run.id && job.run_attempt === run.run_attempt && job.head_sha === s.candidateRevision && job.name === s.jobName && job.status === "in_progress" && pos(job.id), "CarrierActualJob");
 	return copyNonrootJson({
 		version: 1,
 		kind: "carrier-actual-run-binding",
@@ -49444,7 +49495,7 @@ function boundRun(p, b, { descriptorWork } = {}) {
 		"jobId",
 		"deadlineMs"
 	]);
-	need$23(b.version === 1 && b.kind === "carrier-actual-run-binding" && b.templateHash === p.templateHash && hex$9(b.grantHash) && b.contextHash === p.context.sha256 && b.deadlineMs === p.deadlineMs && [
+	need$24(b.version === 1 && b.kind === "carrier-actual-run-binding" && b.templateHash === p.templateHash && hex$9(b.grantHash) && b.contextHash === p.context.sha256 && b.deadlineMs === p.deadlineMs && [
 		b.runId,
 		b.runAttempt,
 		b.jobId
@@ -49482,7 +49533,7 @@ function carrierCheckpointSelection(planValue, binding, upload, { descriptorWork
 		checkpoint: "premerge-carrier-build",
 		jobKey: p.template.source.jobKey
 	}, bindingHash = hash(binding);
-	need$23(hex$9(upload.nonce) && upload.scopeHash === hash({
+	need$24(hex$9(upload.nonce) && upload.scopeHash === hash({
 		bindingHash,
 		scope
 	}) && pos(upload.artifactId) && hex$9(upload.artifactDigest), "CarrierArtifact");
@@ -49517,17 +49568,17 @@ function carrierBlobDebit(planValue, actor, usageValue, descriptor, { descriptor
 	const { hash, sha, same, copyNonrootJson, JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS$3);
 	descriptorGuard(descriptorWork, planValue, usageValue, descriptor);
 	const p = inspectCarrierFundingPlan(planValue, { descriptorWork });
-	need$23(["owner", "ci"].includes(actor), "CarrierBlobActor");
+	need$24(["owner", "ci"].includes(actor), "CarrierBlobActor");
 	const profile = p.template.profiles[actor === "owner" ? "ownerBlob" : "baseBlob"], usage = copyNonrootJson(usageValue);
 	exact$8(usage, [
 		"requests",
 		"responseBytes",
 		"digests"
 	]);
-	need$23(Number.isSafeInteger(usage.requests) && usage.requests >= 0 && Number.isSafeInteger(usage.responseBytes) && usage.responseBytes >= 0 && Array.isArray(usage.digests) && usage.digests.length === usage.requests && new Set(usage.digests).size === usage.requests && usage.digests.every(digest$4), "CarrierBlobUsage");
-	need$23(digest$4(descriptor?.digest) && pos(descriptor.size) && descriptor.size <= profile.maxObjectBytes && !usage.digests.includes(descriptor.digest), "CarrierBlobDescriptor");
+	need$24(Number.isSafeInteger(usage.requests) && usage.requests >= 0 && Number.isSafeInteger(usage.responseBytes) && usage.responseBytes >= 0 && Array.isArray(usage.digests) && usage.digests.length === usage.requests && new Set(usage.digests).size === usage.requests && usage.digests.every(digest$4), "CarrierBlobUsage");
+	need$24(digest$4(descriptor?.digest) && pos(descriptor.size) && descriptor.size <= profile.maxObjectBytes && !usage.digests.includes(descriptor.digest), "CarrierBlobDescriptor");
 	const requests = usage.requests + 1, responseBytes = usage.responseBytes + descriptor.size;
-	need$23(requests <= profile.maxRequests && Number.isSafeInteger(responseBytes) && responseBytes <= profile.aggregateResponseBytes, "CarrierBlobAggregateExceeded");
+	need$24(requests <= profile.maxRequests && Number.isSafeInteger(responseBytes) && responseBytes <= profile.aggregateResponseBytes, "CarrierBlobAggregateExceeded");
 	return copyNonrootJson({
 		usage: {
 			requests,
@@ -49546,7 +49597,7 @@ function carrierBlobDebit(planValue, actor, usageValue, descriptor, { descriptor
 		}
 	});
 }
-var CARRIER_CI_JOB, CARRIER_SQL_DATABASE_ROOT, CARRIER_SQL_DERIVED_FIXTURE, CARRIER_SQL_NOJIT_FIXTURE, originalSqlFixture, derivedProfiles, need$23, exact$8, hex$9, pos, same$7, digest$4, text$2, fixed, CARRIER_PROFILE_ACTIONS, sourceProfiles, single, ecr, sqlPackageReads, DESCRIPTOR_BASE_OPERATIONS$3;
+var CARRIER_CI_JOB, CARRIER_SQL_DATABASE_ROOT, CARRIER_SQL_DERIVED_FIXTURE, CARRIER_SQL_NOJIT_FIXTURE, originalSqlFixture, derivedProfiles, need$24, exact$8, hex$9, pos, same$7, digest$4, text$2, fixed, CARRIER_PROFILE_ACTIONS, sourceProfiles, single, ecr, sqlPackageReads, DESCRIPTOR_BASE_OPERATIONS$3;
 var init_ci_carrier_before_copy = __esmMin((() => {
 	init_production_nonroot_descriptor_processing();
 	init_ci_carrier_http_policy();
@@ -49607,13 +49658,13 @@ var init_ci_carrier_before_copy = __esmMin((() => {
 		processedEntries: 5e4
 	});
 	derivedProfiles = [CARRIER_SQL_DERIVED_FIXTURE, CARRIER_SQL_NOJIT_FIXTURE];
-	need$23 = (v, c = "CarrierContract") => {
+	need$24 = (v, c = "CarrierContract") => {
 		if (!v) throw Error(c);
 	};
-	exact$8 = (v, keys) => need$23(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CarrierFields");
+	exact$8 = (v, keys) => need$24(v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).sort().join() === keys.slice().sort().join(), "CarrierFields");
 	hex$9 = (s, n = 64) => typeof s === "string" && new RegExp("^[a-f0-9]{" + n + "}$").test(s);
 	pos = (n) => Number.isSafeInteger(n) && n > 0;
-	same$7 = (a, b, c = "CarrierBinding") => need$23(nonrootHash(a) === nonrootHash(b), c);
+	same$7 = (a, b, c = "CarrierBinding") => need$24(nonrootHash(a) === nonrootHash(b), c);
 	digest$4 = (s) => typeof s === "string" && /^sha256:[a-f0-9]{64}$/.test(s);
 	text$2 = (s) => typeof s === "string" && s.length > 0 && s.length <= 512 && !/[\x00-\x1f\x7f]/.test(s);
 	fixed = {
@@ -49719,7 +49770,7 @@ var init_ci_carrier_before_copy = __esmMin((() => {
 //#region scripts/lib/ci-carrier-http-account.mjs
 /** Constructed by the original CI counter or native owner funding accessor. It creates no parent credit. */
 function createCarrierHttpAccount({ template, actor, binding, check, local, reserveRecords, hold }) {
-	need$22(binding && Object.keys(binding).sort().join() === "grantHash,planHash" && Object.values(binding).every((v) => /^[a-f0-9]{64}$/.test(v)), "CarrierHttpOriginalBinding");
+	need$23(binding && Object.keys(binding).sort().join() === "grantHash,planHash" && Object.values(binding).every((v) => /^[a-f0-9]{64}$/.test(v)), "CarrierHttpOriginalBinding");
 	binding = Object.freeze({ ...binding });
 	const policy = inspectCarrierHttpPolicy(template.httpPolicy), catalog = carrierHttpCatalog(template, actor), rows = catalog.map((r) => ({
 		id: r.id,
@@ -49731,15 +49782,15 @@ function createCarrierHttpAccount({ template, actor, binding, check, local, rese
 	let active, admitting = false, held = false, closed = false, sequence = 0;
 	const guard = () => {
 		check();
-		need$22(!held && !closed, "CarrierHttpHeld");
+		need$23(!held && !closed, "CarrierHttpHeld");
 	};
 	function before(id, { method, urlHash, requestBytes }) {
 		guard();
-		need$22(!active && !admitting, "CarrierHttpConcurrent");
+		need$23(!active && !admitting, "CarrierHttpConcurrent");
 		const i = catalog.findIndex((r) => r.id === id), p = catalog[i], used = rows[i];
-		need$22(p && used.calls < p.count, "CarrierHttpCalls");
-		need$22(Number.isSafeInteger(requestBytes) && requestBytes >= 0 && requestBytes <= p.requestBytes, "CarrierHttpRequestLimit");
-		need$22(used.requestBytes + used.responseBytes + requestBytes + p.responseBytes <= p.aggregateBytes, "CarrierHttpAggregate");
+		need$23(p && used.calls < p.count, "CarrierHttpCalls");
+		need$23(Number.isSafeInteger(requestBytes) && requestBytes >= 0 && requestBytes <= p.requestBytes, "CarrierHttpRequestLimit");
+		need$23(used.requestBytes + used.responseBytes + requestBytes + p.responseBytes <= p.aggregateBytes, "CarrierHttpAggregate");
 		const ordinal = ++sequence;
 		let intent, record;
 		try {
@@ -49791,35 +49842,35 @@ function createCarrierHttpAccount({ template, actor, binding, check, local, rese
 			},
 			finalGuard() {
 				guard();
-				need$22(active === slot && !slot.done, "CarrierHttpSlot");
+				need$23(active === slot && !slot.done, "CarrierHttpSlot");
 			},
 			sent(bytes) {
 				this.finalGuard();
-				need$22(bytes instanceof Uint8Array && !slot.sentOnce && bytes.length === requestBytes, "CarrierHttpRequest");
+				need$23(bytes instanceof Uint8Array && !slot.sentOnce && bytes.length === requestBytes, "CarrierHttpRequest");
 				slot.sentOnce = true;
 				slot.sent = bytes.length;
 				slot.requestHash = sha$7(bytes);
 				used.requestBytes += bytes.length;
 			},
 			observe(bytes) {
-				need$22(active === slot && !slot.done && !held && !closed && bytes instanceof Uint8Array && !slot.bodyPaid, "CarrierHttpBytes");
+				need$23(active === slot && !slot.done && !held && !closed && bytes instanceof Uint8Array && !slot.bodyPaid, "CarrierHttpBytes");
 				slot.received += bytes.length;
 				used.responseBytes += bytes.length;
-				need$22(slot.received <= p.responseBytes && used.requestBytes + used.responseBytes <= p.aggregateBytes, "CarrierHttpResponseLimit");
+				need$23(slot.received <= p.responseBytes && used.requestBytes + used.responseBytes <= p.aggregateBytes, "CarrierHttpResponseLimit");
 			},
 			received(bytes) {
 				this.finalGuard();
-				need$22(bytes instanceof Uint8Array && bytes.length <= policy.streamFrameBytes && !slot.bodyPaid, "CarrierHttpFrame");
+				need$23(bytes instanceof Uint8Array && bytes.length <= policy.streamFrameBytes && !slot.bodyPaid, "CarrierHttpFrame");
 			},
 			finishBody() {
 				this.finalGuard();
-				need$22(!slot.bodyPaid, "CarrierHttpBodyPaid");
+				need$23(!slot.bodyPaid, "CarrierHttpBodyPaid");
 				local(8 * slot.received);
 				slot.bodyPaid = true;
 			},
 			async complete({ status, responseHash }) {
 				this.finalGuard();
-				need$22(slot.bodyPaid && Number.isInteger(status) && /^[a-f0-9]{64}$/.test(responseHash), "CarrierHttpResponse");
+				need$23(slot.bodyPaid && Number.isInteger(status) && /^[a-f0-9]{64}$/.test(responseHash), "CarrierHttpResponse");
 				slot.responseHash = responseHash;
 				await record("captured", { http: {
 					...intent,
@@ -49895,16 +49946,16 @@ function createCarrierHttpAccount({ template, actor, binding, check, local, rese
 			}, template, actor);
 		},
 		close() {
-			need$22(!active && !admitting, "CarrierHttpActiveCleanup");
+			need$23(!active && !admitting, "CarrierHttpActiveCleanup");
 			closed = true;
 		},
 		policy
 	});
 }
-var need$22, sha$7;
+var need$23, sha$7;
 var init_ci_carrier_http_account = __esmMin((() => {
 	init_ci_carrier_http_policy();
-	need$22 = (v, c) => {
+	need$23 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	sha$7 = (b) => createHash("sha256").update(b).digest("hex");
@@ -49915,7 +49966,7 @@ var init_ci_carrier_http_account = __esmMin((() => {
 * survive failure; neither serialized counters nor another run can resume it. */
 function carrierLocalNativeRun(env, cwd) {
 	return async (program, args, { maxBytes, encoding = "utf8", timeoutMs = 3e4, signal } = {}) => {
-		need$21(["git", "gh"].includes(program) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 16777216, "CarrierLocalCommand");
+		need$22(["git", "gh"].includes(program) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 16777216, "CarrierLocalCommand");
 		try {
 			return (await execute$4(program, args, {
 				env,
@@ -49932,16 +49983,16 @@ function carrierLocalNativeRun(env, cwd) {
 	};
 }
 function openCarrierLocalCounter({ config, env, now = Date.now }) {
-	const plan = freeze$2(inspectCarrierFundingPlan(config.plan)), policy = Object.freeze(inspectCarrierLocalPolicy(plan.template.ciLocalPolicy)), planHash = nonrootHash(plan), configHash = nonrootHash(config), initial = identity(env);
-	need$21(config.templateHash === plan.templateHash && config.configHash === plan.configHash && config.ledgerStartHash === plan.ledgerStartHash && env.INPUT_GRANT_COMMITMENT === config.grantHash && env.INPUT_CONTEXT_COMMITMENT === plan.context.sha256, "CarrierLocalBinding");
-	need$21(/^[a-f0-9]{64}$/.test(config.grantHash) && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "CarrierLocalBinding");
+	const plan = freeze$3(inspectCarrierFundingPlan(config.plan)), policy = Object.freeze(inspectCarrierLocalPolicy(plan.template.ciLocalPolicy)), planHash = nonrootHash(plan), configHash = nonrootHash(config), initial = identity(env);
+	need$22(config.templateHash === plan.templateHash && config.configHash === plan.configHash && config.ledgerStartHash === plan.ledgerStartHash && env.INPUT_GRANT_COMMITMENT === config.grantHash && env.INPUT_CONTEXT_COMMITMENT === plan.context.sha256, "CarrierLocalBinding");
+	need$22(/^[a-f0-9]{64}$/.test(config.grantHash) && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT ?? ""), "CarrierLocalBinding");
 	const root = env.RUNNER_TEMP;
-	need$21(typeof root === "string" && resolve(root) === root && realpathSync(root) === root && lstatSync(root).isDirectory(), "CarrierLocalDirectory");
+	need$22(typeof root === "string" && resolve(root) === root && realpathSync(root) === root && lstatSync(root).isDirectory(), "CarrierLocalDirectory");
 	const key = nonrootHash({
 		planHash,
 		grantHash: config.grantHash
 	}), directory = join(root, "mem9-carrier-local-" + key);
-	need$21(!claimed.has(key), "CarrierLocalClaim");
+	need$22(!claimed.has(key), "CarrierLocalClaim");
 	claimed.add(key);
 	try {
 		mkdirSync(directory, { mode: 448 });
@@ -49950,22 +50001,22 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 	}
 	const path = join(directory, "journal.jsonl"), fd = openSync(path, "wx", 384), stat = fstatSync(fd), spent = zero$6(), records = [];
 	const cleanupReserved = carrierCleanupReservation(plan.template);
-	need$21(cleanupReserved < policy.logicalBytes, "CarrierLocalCleanup");
+	need$22(cleanupReserved < policy.logicalBytes, "CarrierLocalCleanup");
 	const abort = new AbortController(), pending = /* @__PURE__ */ new Set();
 	let httpAccount;
 	let held = false, closed = false, cleanup = false, cleanupUsed = 0, binding, transferred = false, previous = null, recordBytes = 0, clock = now(), draining = false, cleanupUnknown = false, drainPromise;
 	const checkLocal = (retainedRecord = false) => {
-		need$21(!closed && identity(env) === initial, "CarrierLocalBinding");
+		need$22(!closed && identity(env) === initial, "CarrierLocalBinding");
 		const at = now();
-		need$21(Number.isSafeInteger(at) && at >= clock && at >= plan.issuedMs && at < plan.deadlineMs, "CarrierLocalDeadline");
+		need$22(Number.isSafeInteger(at) && at >= clock && at >= plan.issuedMs && at < plan.deadlineMs, "CarrierLocalDeadline");
 		clock = at;
 		const named = lstatSync(path), open = fstatSync(fd);
-		need$21(named.dev === stat.dev && named.ino === stat.ino && open.ino === stat.ino && named.nlink === 1 && (named.mode & 511) === 384, "CarrierLocalJournal");
-		if (!cleanup && !retainedRecord) need$21(!held && at < plan.deadlineMs - policy.cleanupMs, "CarrierLocalHeld");
+		need$22(named.dev === stat.dev && named.ino === stat.ino && open.ino === stat.ino && named.nlink === 1 && (named.mode & 511) === 384, "CarrierLocalJournal");
+		if (!cleanup && !retainedRecord) need$22(!held && at < plan.deadlineMs - policy.cleanupMs, "CarrierLocalHeld");
 	};
 	const reserveLocal = (charge) => {
 		checkLocal();
-		need$21(Object.keys(charge).sort().join() === COUNTERS.slice().sort().join() && charge.ecrRequests === 0 && charge.httpBodyBytes === 0, "CarrierLocalCharge");
+		need$22(Object.keys(charge).sort().join() === COUNTERS.slice().sort().join() && charge.ecrRequests === 0 && charge.httpBodyBytes === 0, "CarrierLocalCharge");
 		const limit = cleanup ? cleanupReserved - cleanupUsed : policy.logicalBytes - cleanupReserved - spent.logicalBytes;
 		if (!Number.isSafeInteger(charge.logicalBytes) || charge.logicalBytes < 0 || charge.logicalBytes > limit) {
 			held = true;
@@ -49979,7 +50030,7 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 		if (cleanup) cleanupUsed += charge.logicalBytes;
 	};
 	const writeRecord = (type, data, prepaid = false) => {
-		need$21(records.length < policy.maxRecords, "CarrierLocalRecords");
+		need$22(records.length < policy.maxRecords, "CarrierLocalRecords");
 		if (prepaid) checkLocal(true);
 		else reserveLocal({
 			...zero$6(),
@@ -49993,11 +50044,11 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 			data,
 			spent: { ...spent }
 		}, raw = Buffer.from(JSON.stringify(row) + "\n");
-		need$21(raw.length <= policy.recordBytes, "CarrierLocalRecordSize");
+		need$22(raw.length <= policy.recordBytes, "CarrierLocalRecordSize");
 		let at = 0;
 		while (at < raw.length) {
 			const n = writeSync(fd, raw, at, raw.length - at);
-			need$21(n > 0, "CarrierLocalJournal");
+			need$22(n > 0, "CarrierLocalJournal");
 			at += n;
 		}
 		fsyncSync(fd);
@@ -50013,7 +50064,7 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 		});
 		let remaining = 2;
 		return (type, data) => {
-			need$21(remaining > 0 && data?.http, "CarrierHttpRecord");
+			need$22(remaining > 0 && data?.http, "CarrierHttpRecord");
 			remaining--;
 			writeRecord(type, data, true);
 		};
@@ -50052,7 +50103,7 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 		reserveLocal,
 		record,
 		checkNormal() {
-			need$21(!cleanup, "CarrierLocalHeld");
+			need$22(!cleanup, "CarrierLocalHeld");
 			checkLocal();
 		},
 		snapshot: () => ({
@@ -50088,27 +50139,27 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 		},
 		bind(value) {
 			checkLocal();
-			need$21(!binding && nonrootHash(value.config) === configHash && value.binding.grantHash === config.grantHash && value.binding.templateHash === plan.templateHash && value.binding.runId === Number(env.GITHUB_RUN_ID) && value.binding.runAttempt === Number(env.GITHUB_RUN_ATTEMPT), "CarrierLocalBinding");
+			need$22(!binding && nonrootHash(value.config) === configHash && value.binding.grantHash === config.grantHash && value.binding.templateHash === plan.templateHash && value.binding.runId === Number(env.GITHUB_RUN_ID) && value.binding.runAttempt === Number(env.GITHUB_RUN_ATTEMPT), "CarrierLocalBinding");
 			record("startup", value.binding);
 			binding = nonrootHash(value.binding);
 		},
 		consume(value) {
 			checkLocal();
-			need$21(!transferred, "CarrierLocalTransfer");
-			need$21(binding === nonrootHash(value.binding) && nonrootHash(value.config) === configHash, "CarrierLocalBinding");
+			need$22(!transferred, "CarrierLocalTransfer");
+			need$22(binding === nonrootHash(value.binding) && nonrootHash(value.config) === configHash, "CarrierLocalBinding");
 			record("transfer", value.binding);
 			transferred = true;
 			return state;
 		},
 		cleanup() {
-			need$21(!closed && !cleanup, "CarrierLocalCleanup");
+			need$22(!closed && !cleanup, "CarrierLocalCleanup");
 			cleanup = true;
 			abort.abort();
 			record("cleanup", {});
 		},
 		capture(fn) {
 			checkLocal();
-			need$21(!draining && !cleanup, "CarrierLocalHeld");
+			need$22(!draining && !cleanup, "CarrierLocalHeld");
 			const call = Promise.resolve().then(() => fn(abort.signal));
 			pending.add(call);
 			call.then(() => pending.delete(call), () => pending.delete(call));
@@ -50127,7 +50178,7 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 					await Promise.race([Promise.allSettled([...pending]), new Promise((_, reject) => {
 						timer = setTimeout(() => reject(Error("CarrierLocalDrainHeld")), Math.max(1, Math.min(policy.cleanupMs, plan.deadlineMs - now())));
 					})]);
-					need$21(pending.size === 0, "CarrierLocalDrainHeld");
+					need$22(pending.size === 0, "CarrierLocalDrainHeld");
 				} catch {
 					throw unknownCleanup();
 				} finally {
@@ -50209,17 +50260,17 @@ function openCarrierLocalCounter({ config, env, now = Date.now }) {
 }
 function carrierLocalState(handle) {
 	const s = states$3.get(handle);
-	need$21(s, "CarrierLocalOriginal");
+	need$22(s, "CarrierLocalOriginal");
 	return s;
 }
 function carrierLocalHost(handle, host) {
 	const s = carrierLocalState(handle);
-	need$21(host?.env === s.env && typeof host.run === "function", "CarrierLocalHost");
+	need$22(host?.env === s.env && typeof host.run === "function", "CarrierLocalHost");
 	const run = async (program, args, options = {}) => {
 		s.checkNormal();
 		const maxBytes = options.maxBytes ?? s.policy.captureBytes;
-		need$21(["git", "gh"].includes(program) && Array.isArray(args) && args.every((a) => typeof a === "string" && !a.includes("\0")) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= s.policy.captureBytes, "CarrierLocalCommand");
-		need$21(Object.keys(options).every((k) => [
+		need$22(["git", "gh"].includes(program) && Array.isArray(args) && args.every((a) => typeof a === "string" && !a.includes("\0")) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= s.policy.captureBytes, "CarrierLocalCommand");
+		need$22(Object.keys(options).every((k) => [
 			"maxBytes",
 			"timeoutMs",
 			"encoding"
@@ -50228,7 +50279,7 @@ function carrierLocalHost(handle, host) {
 			...zero$6(),
 			logicalBytes: 2 * s.policy.commandArgumentBytes
 		});
-		need$21(Buffer.byteLength(JSON.stringify(args)) <= s.policy.commandArgumentBytes, "CarrierLocalArguments");
+		need$22(Buffer.byteLength(JSON.stringify(args)) <= s.policy.commandArgumentBytes, "CarrierLocalArguments");
 		s.reserveLocal({
 			...zero$6(),
 			logicalBytes: 2 * maxBytes
@@ -50245,9 +50296,9 @@ function carrierLocalHost(handle, host) {
 				...host.runBounded ? { signal } : {}
 			}));
 			s.checkNormal();
-			need$21(typeof value === "string" || value instanceof Uint8Array, "CarrierLocalCapture");
+			need$22(typeof value === "string" || value instanceof Uint8Array, "CarrierLocalCapture");
 			const length = Buffer.byteLength(value);
-			need$21(length <= maxBytes, "CarrierLocalCapture");
+			need$22(length <= maxBytes, "CarrierLocalCapture");
 			s.reserveLocal({
 				...zero$6(),
 				logicalBytes: 4 * length
@@ -50267,7 +50318,7 @@ function carrierLocalHost(handle, host) {
 		}
 	};
 	const api = async (path) => {
-		need$21(typeof path === "string" && /^[A-Za-z0-9_./?=&%+-]+$/.test(path) && !path.includes("..") && !path.startsWith("/"), "CarrierLocalGithubPath");
+		need$22(typeof path === "string" && /^[A-Za-z0-9_./?=&%+-]+$/.test(path) && !path.includes("..") && !path.startsWith("/"), "CarrierLocalGithubPath");
 		const raw = await run("gh", [
 			"api",
 			"--hostname",
@@ -50288,7 +50339,7 @@ function carrierLocalHost(handle, host) {
 			"--quiet"
 		]);
 		const revision = String(await run("git", ["rev-parse", "HEAD"])).trim(), tree = String(await run("git", ["rev-parse", "HEAD^{tree}"])).trim();
-		need$21(revision === s.plan.template.source.candidateRevision && tree === s.plan.template.source.candidateTree, "CarrierLocalCheckout");
+		need$22(revision === s.plan.template.source.candidateRevision && tree === s.plan.template.source.candidateTree, "CarrierLocalCheckout");
 		return {
 			revision,
 			tree
@@ -50301,7 +50352,7 @@ function carrierLocalHost(handle, host) {
 		checkout
 	};
 }
-var states$3, claimed, need$21, execute$4, identity, bindCarrierLocalStartup, consumeCarrierLocalCounter, beginCarrierLocalCleanup, closeCarrierLocalCounter, drainCarrierLocalCounter;
+var states$3, claimed, need$22, execute$4, identity, bindCarrierLocalStartup, consumeCarrierLocalCounter, beginCarrierLocalCleanup, closeCarrierLocalCounter, drainCarrierLocalCounter;
 var init_ci_carrier_local_counter = __esmMin((() => {
 	init_ci_carrier_http_account();
 	init_ci_carrier_before_copy();
@@ -50310,7 +50361,7 @@ var init_ci_carrier_local_counter = __esmMin((() => {
 	init_ci_carrier_local_policy();
 	states$3 = /* @__PURE__ */ new WeakMap();
 	claimed = /* @__PURE__ */ new Set();
-	need$21 = (v, c) => {
+	need$22 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	execute$4 = promisify(execFile);
@@ -50336,13 +50387,13 @@ var init_ci_carrier_local_counter = __esmMin((() => {
 //#region scripts/lib/ci-carrier-http-transport.mjs
 /** Fixed native HTTPS: every dispatch is prepaid, no implicit retry/redirect/decompression. */
 async function* chunks(stream, cap, { alive, observe, frameBytes }) {
-	need$20(stream instanceof Readable && !stream.readableObjectMode && stream.readableEncoding === null, "CarrierHttpRawStream");
+	need$21(stream instanceof Readable && !stream.readableObjectMode && stream.readableEncoding === null, "CarrierHttpRawStream");
 	let n = 0, used = 0, frame = Buffer.alloc(Math.min(frameBytes, cap + 1));
 	while (n <= cap) {
 		alive();
 		const b = stream.readableLength > 0 ? stream.read(Math.min(frame.length - used, stream.readableLength, cap - n + 1)) : null;
 		if (b !== null) {
-			need$20(b instanceof Uint8Array, "CarrierHttpRawBytes");
+			need$21(b instanceof Uint8Array, "CarrierHttpRawBytes");
 			observe(b);
 			n += b.length;
 			b.copy(frame, used);
@@ -50387,14 +50438,14 @@ function createCarrierRawHttp({ account, deadlineMs, now = Date.now, track = (p)
 	}) : void 0, requests = /* @__PURE__ */ new Set(), streams = /* @__PURE__ */ new Set(), pending = /* @__PURE__ */ new Set();
 	let closed = false, closing;
 	const check = () => {
-		need$20(!closed && now() < deadlineMs, "CarrierHttpDeadline");
+		need$21(!closed && now() < deadlineMs, "CarrierHttpDeadline");
 		account.check();
 	};
 	async function execute(id, { url, method = "GET", headers = {}, body = Buffer.alloc(0), statuses = [200] }) {
 		check();
 		const u = new URL(url);
-		need$20(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash, "CarrierHttpUrl");
-		need$20([
+		need$21(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash, "CarrierHttpUrl");
+		need$21([
 			"GET",
 			"POST",
 			"PUT"
@@ -50408,7 +50459,7 @@ function createCarrierRawHttp({ account, deadlineMs, now = Date.now, track = (p)
 		const responseHash = createHash("sha256");
 		try {
 			await slot.ready;
-			need$20(Buffer.byteLength(JSON.stringify({
+			need$21(Buffer.byteLength(JSON.stringify({
 				method,
 				url: u.href,
 				headers: requestHeaders
@@ -50445,11 +50496,11 @@ function createCarrierRawHttp({ account, deadlineMs, now = Date.now, track = (p)
 			}));
 			streams.add(response);
 			response.once("close", () => streams.delete(response));
-			need$20(Buffer.byteLength(JSON.stringify(response.rawHeaders ?? response.headers ?? {})) <= account.policy.responseMetadataBytes, "CarrierHttpMetadata");
+			need$21(Buffer.byteLength(JSON.stringify(response.rawHeaders ?? response.headers ?? {})) <= account.policy.responseMetadataBytes, "CarrierHttpMetadata");
 			const parts = [];
 			let count = 0;
 			for await (const b of chunks(response, slot.caps.responseBytes, {
-				alive: () => need$20(!closed && now() < deadlineMs, "CarrierHttpDeadline"),
+				alive: () => need$21(!closed && now() < deadlineMs, "CarrierHttpDeadline"),
 				observe: (b) => {
 					slot.observe(b);
 					responseHash.update(b);
@@ -50464,9 +50515,9 @@ function createCarrierRawHttp({ account, deadlineMs, now = Date.now, track = (p)
 			}
 			slot.finishBody();
 			const raw = Buffer.concat(parts, count), h = response.headers ?? {}, status = response.statusCode;
-			need$20(!h["content-encoding"] || h["content-encoding"] === "identity", "CarrierHttpEncoding");
-			need$20(h["content-length"] === void 0 || /^(0|[1-9][0-9]*)$/.test(String(h["content-length"])) && Number(h["content-length"]) === count, "CarrierHttpLength");
-			need$20(statuses.includes(status), "CarrierHttpStatus");
+			need$21(!h["content-encoding"] || h["content-encoding"] === "identity", "CarrierHttpEncoding");
+			need$21(h["content-length"] === void 0 || /^(0|[1-9][0-9]*)$/.test(String(h["content-length"])) && Number(h["content-length"]) === count, "CarrierHttpLength");
+			need$21(statuses.includes(status), "CarrierHttpStatus");
 			await slot.complete({
 				status,
 				responseHash: responseHash.copy().digest("hex")
@@ -50537,9 +50588,9 @@ function createCarrierRawHttp({ account, deadlineMs, now = Date.now, track = (p)
 		}
 	});
 }
-var need$20, sha$6;
+var need$21, sha$6;
 var init_ci_carrier_http_transport = __esmMin((() => {
-	need$20 = (v, c) => {
+	need$21 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	sha$6 = (b) => createHash("sha256").update(b).digest("hex");
@@ -50548,17 +50599,17 @@ var init_ci_carrier_http_transport = __esmMin((() => {
 //#region scripts/lib/ci-carrier-github-raw.mjs
 function carrierArtifactLocation(value) {
 	const u = new URL(value);
-	need$19(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && /^[a-z0-9]+\.blob\.core\.windows\.net$/.test(u.hostname) && u.pathname.length > 1 && u.searchParams.has("sig") && new Set(u.searchParams.keys()).size === [...u.searchParams.keys()].length, "CarrierArtifactSignedUrl");
+	need$20(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && /^[a-z0-9]+\.blob\.core\.windows\.net$/.test(u.hostname) && u.pathname.length > 1 && u.searchParams.has("sig") && new Set(u.searchParams.keys()).size === [...u.searchParams.keys()].length, "CarrierArtifactSignedUrl");
 	return u;
 }
 function createCarrierGithubRaw({ http, env, repository, actor, checkCredential = async () => {} }) {
-	need$19(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) && ["ci", "owner"].includes(actor), "CarrierHttpRepository");
+	need$20(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) && ["ci", "owner"].includes(actor), "CarrierHttpRepository");
 	let token = env.GH_TOKEN ?? env.GITHUB_TOKEN, closed = false;
-	need$19(typeof token === "string" && token.length > 0 && token.length <= 65536, "CarrierHttpGithubCredential");
+	need$20(typeof token === "string" && token.length > 0 && token.length <= 65536, "CarrierHttpGithubCredential");
 	const headers = async () => {
-		need$19(!closed, "CarrierHttpGithubClosed");
+		need$20(!closed, "CarrierHttpGithubClosed");
 		await checkCredential();
-		need$19((env.GH_TOKEN ?? env.GITHUB_TOKEN) === token, "CarrierHttpCredentialChanged");
+		need$20((env.GH_TOKEN ?? env.GITHUB_TOKEN) === token, "CarrierHttpCredentialChanged");
 		return {
 			authorization: "Bearer " + token,
 			accept: "application/vnd.github+json",
@@ -50568,9 +50619,9 @@ function createCarrierGithubRaw({ http, env, repository, actor, checkCredential 
 	};
 	const prefix = "repos/" + repository + "/";
 	const pathCheck = (path, method) => {
-		need$19(typeof path === "string" && !path.includes("..") && !path.startsWith("/") && !/[#\\\x00-\x20]/.test(path), "CarrierHttpGithubPath");
-		need$19(path === "user" && actor === "owner" && method === "GET" || path.startsWith(prefix), "CarrierHttpGithubScope");
-		if (method !== "GET") need$19(actor === "owner" && method === "POST" && (path === prefix + "actions/workflows/infra-ci.yml/dispatches" || new RegExp("^" + prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "statuses/[a-f0-9]{40}$").test(path)), "CarrierHttpGithubWrite");
+		need$20(typeof path === "string" && !path.includes("..") && !path.startsWith("/") && !/[#\\\x00-\x20]/.test(path), "CarrierHttpGithubPath");
+		need$20(path === "user" && actor === "owner" && method === "GET" || path.startsWith(prefix), "CarrierHttpGithubScope");
+		if (method !== "GET") need$20(actor === "owner" && method === "POST" && (path === prefix + "actions/workflows/infra-ci.yml/dispatches" || new RegExp("^" + prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "statuses/[a-f0-9]{40}$").test(path)), "CarrierHttpGithubWrite");
 	};
 	const decode = (bytes) => parseCiSmokeJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 	return Object.freeze({
@@ -50580,9 +50631,9 @@ function createCarrierGithubRaw({ http, env, repository, actor, checkCredential 
 		},
 		async api({ path, method = "GET", body, binary = false }) {
 			pathCheck(path, method);
-			need$19(!body || method === "POST", "CarrierHttpGithubBody");
+			need$20(!body || method === "POST", "CarrierHttpGithubBody");
 			if (binary) {
-				need$19(actor === "owner" && method === "GET" && new RegExp("^" + prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "actions/artifacts/[1-9][0-9]*/zip$").test(path), "CarrierHttpArtifactPath");
+				need$20(actor === "owner" && method === "GET" && new RegExp("^" + prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "actions/artifacts/[1-9][0-9]*/zip$").test(path), "CarrierHttpArtifactPath");
 				const first = await http.request("artifact-redirect", {
 					url: "https://api.github.com/" + path,
 					headers: await headers(),
@@ -50614,7 +50665,7 @@ function createCarrierGithubRaw({ http, env, repository, actor, checkCredential 
 			}
 		},
 		async setSecret({ name, bytes, seal }) {
-			need$19(actor === "owner" && name === "MEM9_CARRIER_WORKER_CONFIG" && bytes instanceof Uint8Array && bytes.length > 0 && bytes.length <= 49152 && typeof seal === "function", "CarrierHttpSecretInput");
+			need$20(actor === "owner" && name === "MEM9_CARRIER_WORKER_CONFIG" && bytes instanceof Uint8Array && bytes.length > 0 && bytes.length <= 49152 && typeof seal === "function", "CarrierHttpSecretInput");
 			const path = prefix + "environments/preview-ci/secrets/", r = await http.request("secret-key", {
 				url: "https://api.github.com/" + path + "public-key",
 				headers: await headers()
@@ -50625,12 +50676,12 @@ function createCarrierGithubRaw({ http, env, repository, actor, checkCredential 
 			} finally {
 				r.bytes.fill(0);
 			}
-			need$19(typeof key.key_id === "string" && key.key_id.length > 0 && key.key_id.length <= 1024 && typeof key.key === "string" && Buffer.from(key.key, "base64").length === 32 && Buffer.from(key.key, "base64").toString("base64") === key.key, "CarrierHttpSecretKey");
+			need$20(typeof key.key_id === "string" && key.key_id.length > 0 && key.key_id.length <= 1024 && typeof key.key === "string" && Buffer.from(key.key, "base64").length === 32 && Buffer.from(key.key, "base64").toString("base64") === key.key, "CarrierHttpSecretKey");
 			const encrypted = await seal({
 				publicKey: Buffer.from(key.key, "base64"),
 				plaintext: bytes
 			});
-			need$19(encrypted instanceof Uint8Array && encrypted.length === bytes.length + 48, "CarrierHttpSealedSecret");
+			need$20(encrypted instanceof Uint8Array && encrypted.length === bytes.length + 48, "CarrierHttpSealedSecret");
 			const payload = Buffer.from(JSON.stringify({
 				encrypted_value: Buffer.from(encrypted).toString("base64"),
 				key_id: key.key_id
@@ -50653,10 +50704,10 @@ function createCarrierGithubRaw({ http, env, repository, actor, checkCredential 
 		}
 	});
 }
-var need$19;
+var need$20;
 var init_ci_carrier_github_raw = __esmMin((() => {
 	init_ci_smoke_evidence();
-	need$19 = (v, c) => {
+	need$20 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 }));
@@ -108119,49 +108170,49 @@ var init_esm$2 = __esmMin((() => {
 //#region scripts/lib/ci-carrier-artifact.mjs
 function parseCarrierStartupArtifact(input) {
 	const b = bytes(input);
-	need$18(b.length >= 120 && b.length <= 65536, "CiAllowanceArtifactZip");
+	need$19(b.length >= 120 && b.length <= 65536, "CiAllowanceArtifactZip");
 	const end = b.length - 22;
-	need$18(b.readUInt32LE(end) === 101010256 && b.readUInt16LE(end + 4) === 0 && b.readUInt16LE(end + 6) === 0 && b.readUInt16LE(end + 8) === 1 && b.readUInt16LE(end + 10) === 1 && b.readUInt16LE(end + 20) === 0, "CiAllowanceArtifactZip");
+	need$19(b.readUInt32LE(end) === 101010256 && b.readUInt16LE(end + 4) === 0 && b.readUInt16LE(end + 6) === 0 && b.readUInt16LE(end + 8) === 1 && b.readUInt16LE(end + 10) === 1 && b.readUInt16LE(end + 20) === 0, "CiAllowanceArtifactZip");
 	const central = b.readUInt32LE(end + 16), centralSize = b.readUInt32LE(end + 12);
-	need$18(central >= 30 && central + centralSize === end && central + 46 <= end && b.readUInt32LE(central) === 33639248, "CiAllowanceArtifactZip");
+	need$19(central >= 30 && central + centralSize === end && central + 46 <= end && b.readUInt32LE(central) === 33639248, "CiAllowanceArtifactZip");
 	const flags = b.readUInt16LE(central + 8), method = b.readUInt16LE(central + 10), crc = b.readUInt32LE(central + 16), packed = b.readUInt32LE(central + 20), size = b.readUInt32LE(central + 24), nameLength = b.readUInt16LE(central + 28), extraLength = b.readUInt16LE(central + 30), commentLength = b.readUInt16LE(central + 32), mode = b.readUInt32LE(central + 38) >>> 16;
-	need$18([
+	need$19([
 		0,
 		8,
 		2048,
 		2056
 	].includes(flags) && [0, 8].includes(method) && size > 0 && size <= 1024 && packed <= 65536 && b.readUInt16LE(central + 34) === 0 && b.readUInt32LE(central + 42) === 0 && commentLength === 0 && extraLength === 0 && nameLength === 10 && central + 46 + nameLength === end, "CiAllowanceArtifactZip");
-	need$18((mode & 61440) === 0 || (mode & 61440) === 32768, "CiAllowanceArtifactZipType");
-	need$18(b.subarray(central + 46, central + 56).toString() === "claim.json" && b.readUInt32LE(0) === 67324752 && b.readUInt16LE(6) === flags && b.readUInt16LE(8) === method && b.readUInt16LE(26) === 10 && b.readUInt16LE(28) === 0 && b.subarray(30, 40).toString() === "claim.json", "CiAllowanceArtifactZip");
+	need$19((mode & 61440) === 0 || (mode & 61440) === 32768, "CiAllowanceArtifactZipType");
+	need$19(b.subarray(central + 46, central + 56).toString() === "claim.json" && b.readUInt32LE(0) === 67324752 && b.readUInt16LE(6) === flags && b.readUInt16LE(8) === method && b.readUInt16LE(26) === 10 && b.readUInt16LE(28) === 0 && b.subarray(30, 40).toString() === "claim.json", "CiAllowanceArtifactZip");
 	const dataEnd = 40 + packed;
-	need$18(dataEnd <= central, "CiAllowanceArtifactZip");
-	if (flags & 8) need$18(b.readUInt32LE(14) === 0 && b.readUInt32LE(18) === 0 && b.readUInt32LE(22) === 0 && central - dataEnd === 16 && b.readUInt32LE(dataEnd) === 134695760 && b.readUInt32LE(dataEnd + 4) === crc && b.readUInt32LE(dataEnd + 8) === packed && b.readUInt32LE(dataEnd + 12) === size, "CiAllowanceArtifactZip");
-	else need$18(dataEnd === central && b.readUInt32LE(14) === crc && b.readUInt32LE(18) === packed && b.readUInt32LE(22) === size, "CiAllowanceArtifactZip");
+	need$19(dataEnd <= central, "CiAllowanceArtifactZip");
+	if (flags & 8) need$19(b.readUInt32LE(14) === 0 && b.readUInt32LE(18) === 0 && b.readUInt32LE(22) === 0 && central - dataEnd === 16 && b.readUInt32LE(dataEnd) === 134695760 && b.readUInt32LE(dataEnd + 4) === crc && b.readUInt32LE(dataEnd + 8) === packed && b.readUInt32LE(dataEnd + 12) === size, "CiAllowanceArtifactZip");
+	else need$19(dataEnd === central && b.readUInt32LE(14) === crc && b.readUInt32LE(18) === packed && b.readUInt32LE(22) === size, "CiAllowanceArtifactZip");
 	const payload = method === 0 ? b.subarray(40, dataEnd) : inflateRawSync(b.subarray(40, dataEnd), { maxOutputLength: 1024 });
-	need$18(payload.length === size && crc32(payload) === crc, "CiAllowanceArtifactZipIntegrity");
+	need$19(payload.length === size && crc32(payload) === crc, "CiAllowanceArtifactZipIntegrity");
 	const value = parse$6(payload, 1024);
 	exact$7(value, ["nonce", "scopeHash"]);
-	need$18(hex$8(value.nonce) && hex$8(value.scopeHash), "CiAllowanceArtifactPayload");
+	need$19(hex$8(value.nonce) && hex$8(value.scopeHash), "CiAllowanceArtifactPayload");
 	return value;
 }
-var need$18, bytes, hex$8, exact$7, parse$6;
+var need$19, bytes, hex$8, exact$7, parse$6;
 var init_ci_carrier_artifact = __esmMin((() => {
 	init_production_nonroot_contracts();
-	need$18 = (v, c) => {
+	need$19 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	bytes = (v) => {
-		need$18(v instanceof Uint8Array, "CarrierArtifactBytes");
+		need$19(v instanceof Uint8Array, "CarrierArtifactBytes");
 		return Buffer.from(v);
 	};
 	hex$8 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
-	exact$7 = (v, k) => need$18(v && Object.keys(v).sort().join() === k.sort().join(), "CarrierArtifactFields");
+	exact$7 = (v, k) => need$19(v && Object.keys(v).sort().join() === k.sort().join(), "CarrierArtifactFields");
 	parse$6 = (v, maxBytes) => parseNonrootJson(new TextDecoder("utf-8", { fatal: true }).decode(v), { maxBytes });
 }));
 //#endregion
 //#region scripts/lib/ci-carrier-artifact-raw.mjs
 function zipClaim(raw) {
-	need$17(raw.length <= 1024, "CarrierArtifactClaimSize");
+	need$18(raw.length <= 1024, "CarrierArtifactClaimSize");
 	const name = Buffer.from("claim.json"), header = Buffer.alloc(40), central = Buffer.alloc(56), end = Buffer.alloc(22), crc = crc32(raw);
 	header.writeUInt32LE(67324752);
 	header.writeUInt16LE(20, 4);
@@ -108192,24 +108243,24 @@ function zipClaim(raw) {
 }
 async function uploadCarrierStartupArtifact({ http, env, name, file, directory, check, local }) {
 	check();
-	need$17(name.startsWith("mem9-carrier-start-") && /^[a-f0-9]{64}$/.test(name.slice(19)), "CarrierArtifactName");
-	need$17(resolve(directory) === directory && file === join(directory, "claim.json") && await realpath(directory) === directory, "CarrierArtifactDirectory");
+	need$18(name.startsWith("mem9-carrier-start-") && /^[a-f0-9]{64}$/.test(name.slice(19)), "CarrierArtifactName");
+	need$18(resolve(directory) === directory && file === join(directory, "claim.json") && await realpath(directory) === directory, "CarrierArtifactDirectory");
 	const token = env.ACTIONS_RUNTIME_TOKEN, endpoint = env.ACTIONS_RESULTS_URL;
-	need$17(token === process.env.ACTIONS_RUNTIME_TOKEN && endpoint === process.env.ACTIONS_RESULTS_URL && typeof token === "string" && token.length <= 65536, "CarrierArtifactRuntime");
+	need$18(token === process.env.ACTIONS_RUNTIME_TOKEN && endpoint === process.env.ACTIONS_RESULTS_URL && typeof token === "string" && token.length <= 65536, "CarrierArtifactRuntime");
 	const base = new URL(endpoint);
-	need$17(base.protocol === "https:" && !base.username && !base.password && !base.port && !base.hash && base.hostname.endsWith(".actions.githubusercontent.com"), "CarrierArtifactEndpoint");
+	need$18(base.protocol === "https:" && !base.username && !base.password && !base.port && !base.hash && base.hostname.endsWith(".actions.githubusercontent.com"), "CarrierArtifactEndpoint");
 	const payload = parseCiSmokeJson(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")), scopes = String(payload.scp ?? "").split(" ").filter((x) => x.startsWith("Actions.Results:"));
-	need$17(scopes.length === 1, "CarrierArtifactBackend");
+	need$18(scopes.length === 1, "CarrierArtifactBackend");
 	const ids = scopes[0].split(":");
-	need$17(ids.length === 3 && ids.slice(1).every((v) => /^[a-f0-9-]{36}$/i.test(v)), "CarrierArtifactBackend");
+	need$18(ids.length === 3 && ids.slice(1).every((v) => /^[a-f0-9-]{36}$/i.test(v)), "CarrierArtifactBackend");
 	let raw, zip;
 	try {
 		const before = await lstat(file, { bigint: true });
-		need$17(before.isFile() && !before.isSymbolicLink() && before.uid === BigInt(process.getuid()) && (before.mode & 511n) === 384n && before.nlink === 1n && before.size > 0n && before.size <= 1024n, "CarrierArtifactFile");
+		need$18(before.isFile() && !before.isSymbolicLink() && before.uid === BigInt(process.getuid()) && (before.mode & 511n) === 384n && before.nlink === 1n && before.size > 0n && before.size <= 1024n, "CarrierArtifactFile");
 		const fd = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		try {
 			const opened = await fd.stat({ bigint: true });
-			need$17(fields.every((k) => before[k] === opened[k]), "CarrierArtifactFile");
+			need$18(fields.every((k) => before[k] === opened[k]), "CarrierArtifactFile");
 			raw = Buffer.alloc(Number(before.size) + 1);
 			let n = 0;
 			while (n < raw.length) {
@@ -108217,20 +108268,20 @@ async function uploadCarrierStartupArtifact({ http, env, name, file, directory, 
 				if (!bytesRead) break;
 				n += bytesRead;
 			}
-			need$17(n === Number(before.size), "CarrierArtifactChanged");
+			need$18(n === Number(before.size), "CarrierArtifactChanged");
 			raw = raw.subarray(0, n);
 			const after = await fd.stat({ bigint: true }), named = await lstat(file, { bigint: true });
-			need$17(fields.every((k) => before[k] === after[k] && before[k] === named[k]), "CarrierArtifactChanged");
+			need$18(fields.every((k) => before[k] === after[k] && before[k] === named[k]), "CarrierArtifactChanged");
 		} finally {
 			await fd.close();
 		}
 		zip = zipClaim(raw);
 		parseCarrierStartupArtifact(zip);
-		need$17(zip.length <= 65536, "CarrierArtifactZip");
+		need$18(zip.length <= 65536, "CarrierArtifactZip");
 		const rpc = new ArtifactServiceClientJSON({ async request(service, method, contentType, data) {
-			need$17(service === "github.actions.results.api.v1.ArtifactService" && ["CreateArtifact", "FinalizeArtifact"].includes(method) && contentType === "application/json", "CarrierArtifactRpc");
+			need$18(service === "github.actions.results.api.v1.ArtifactService" && ["CreateArtifact", "FinalizeArtifact"].includes(method) && contentType === "application/json", "CarrierArtifactRpc");
 			check();
-			need$17(env.ACTIONS_RUNTIME_TOKEN === token && env.ACTIONS_RESULTS_URL === endpoint, "CarrierArtifactRuntimeChanged");
+			need$18(env.ACTIONS_RUNTIME_TOKEN === token && env.ACTIONS_RESULTS_URL === endpoint, "CarrierArtifactRuntimeChanged");
 			const r = await http.request(method === "CreateArtifact" ? "artifact-create" : "artifact-finalize", {
 				url: new URL("/twirp/" + service + "/" + method, base).href,
 				method: "POST",
@@ -108256,7 +108307,7 @@ async function uploadCarrierStartupArtifact({ http, env, name, file, directory, 
 			expiresAt: getExpiration(2)
 		};
 		const created = await rpc.CreateArtifact(request);
-		need$17(created.ok === true, "CarrierArtifactCreate");
+		need$18(created.ok === true, "CarrierArtifactCreate");
 		const url = carrierArtifactLocation(created.signedUploadUrl), blockId = Buffer.from("carrier-startup-block-0001").toString("base64");
 		let phase = 0;
 		const client = new BlockBlobClient(url.href, void 0, {
@@ -108264,13 +108315,13 @@ async function uploadCarrierStartupArtifact({ http, env, name, file, directory, 
 			keepAliveOptions: { enable: false },
 			httpClient: { async sendRequest(r) {
 				const u = new URL(r.url);
-				need$17(u.origin === url.origin && u.pathname === url.pathname && r.method === "PUT", "CarrierArtifactBlobScope");
-				for (const [k, v] of url.searchParams) need$17(u.searchParams.get(k) === v, "CarrierArtifactSasChanged");
-				need$17([...u.searchParams.keys()].every((k) => url.searchParams.has(k) || ["comp", "blockid"].includes(k)), "CarrierArtifactBlobQuery");
+				need$18(u.origin === url.origin && u.pathname === url.pathname && r.method === "PUT", "CarrierArtifactBlobScope");
+				for (const [k, v] of url.searchParams) need$18(u.searchParams.get(k) === v, "CarrierArtifactSasChanged");
+				need$18([...u.searchParams.keys()].every((k) => url.searchParams.has(k) || ["comp", "blockid"].includes(k)), "CarrierArtifactBlobQuery");
 				const wanted = phase === 0 ? "block" : "blocklist";
-				need$17(phase < 2 && u.searchParams.get("comp") === wanted && (phase !== 0 || u.searchParams.get("blockid") === blockId), "CarrierArtifactBlobOrder");
+				need$18(phase < 2 && u.searchParams.get("comp") === wanted && (phase !== 0 || u.searchParams.get("blockid") === blockId), "CarrierArtifactBlobOrder");
 				const v = typeof r.body === "function" ? r.body() : r.body, body = Buffer.from(v ?? "");
-				if (phase === 0) need$17(body.equals(zip), "CarrierArtifactBlobBytes");
+				if (phase === 0) need$18(body.equals(zip), "CarrierArtifactBlobBytes");
 				const id = phase++ === 0 ? "artifact-block" : "artifact-commit";
 				try {
 					const result = await http.request(id, {
@@ -108305,7 +108356,7 @@ async function uploadCarrierStartupArtifact({ http, env, name, file, directory, 
 			size: String(zip.length),
 			hash: StringValue.create({ value: "sha256:" + sha$5(zip) })
 		});
-		need$17(done.ok === true && /^[1-9][0-9]*$/.test(done.artifactId) && Number.isSafeInteger(Number(done.artifactId)), "CarrierArtifactFinalize");
+		need$18(done.ok === true && /^[1-9][0-9]*$/.test(done.artifactId) && Number.isSafeInteger(Number(done.artifactId)), "CarrierArtifactFinalize");
 		return {
 			id: Number(done.artifactId),
 			size: zip.length,
@@ -108323,7 +108374,7 @@ async function uploadCarrierStartupArtifact({ http, env, name, file, directory, 
 		zip?.fill(0);
 	}
 }
-var need$17, sha$5, fields;
+var need$18, sha$5, fields;
 var init_ci_carrier_artifact_raw = __esmMin((() => {
 	init_retention();
 	init_esm$2();
@@ -108333,7 +108384,7 @@ var init_ci_carrier_artifact_raw = __esmMin((() => {
 	init_ci_carrier_artifact();
 	init_ci_smoke_evidence();
 	init_ci_carrier_github_raw();
-	need$17 = (v, c) => {
+	need$18 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	sha$5 = (b) => createHash("sha256").update(b).digest("hex");
@@ -108352,7 +108403,7 @@ var init_ci_carrier_artifact_raw = __esmMin((() => {
 //#region scripts/lib/ci-carrier-native-http.mjs
 function createCarrierNativeHttp(counter, env, { request } = {}) {
 	const s = carrierLocalState(counter);
-	need$16(s.http && s.env === env, "CarrierHttpOriginalCounter");
+	need$17(s.http && s.env === env, "CarrierHttpOriginalCounter");
 	s.checkNormal();
 	s.reserveLocal({
 		...zero$5(),
@@ -108384,7 +108435,7 @@ function createCarrierNativeHttp(counter, env, { request } = {}) {
 	return Object.freeze({
 		api: (path) => run(() => github.api({ path: "repos/" + s.plan.template.source.repository + "/" + path })),
 		uploadArtifact(name, files, directory, options) {
-			need$16(name === "mem9-carrier-start-" + nonrootHash(carrierLedgerScope(s.plan.template)) && files.length === 1 && files[0] === directory + "/claim.json" && options.retentionDays === 2 && options.compressionLevel === 0 && options.skipArchive === false, "CarrierHttpArtifactInput");
+			need$17(name === "mem9-carrier-start-" + nonrootHash(carrierLedgerScope(s.plan.template)) && files.length === 1 && files[0] === directory + "/claim.json" && options.retentionDays === 2 && options.compressionLevel === 0 && options.skipArchive === false, "CarrierHttpArtifactInput");
 			return run(() => uploadCarrierStartupArtifact({
 				http,
 				env,
@@ -108407,14 +108458,14 @@ function createCarrierNativeHttp(counter, env, { request } = {}) {
 		}
 	});
 }
-var need$16, zero$5;
+var need$17, zero$5;
 var init_ci_carrier_native_http = __esmMin((() => {
 	init_ci_carrier_before_copy();
 	init_ci_carrier_local_counter();
 	init_ci_carrier_http_transport();
 	init_ci_carrier_github_raw();
 	init_ci_carrier_artifact_raw();
-	need$16 = (v, c) => {
+	need$17 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	zero$5 = () => ({
@@ -108431,7 +108482,7 @@ var init_ci_carrier_native_http = __esmMin((() => {
 * permission is obtained merely from a name or an ARN-shaped string. */
 async function verifyCarrierCiSource(template, sourceContext) {
 	const t = inspectCarrierBeforeCopyTemplate(template);
-	need$15(sourceContext?.tree === t.source.candidateTree, "CarrierSourceTree");
+	need$16(sourceContext?.tree === t.source.candidateTree, "CarrierSourceTree");
 	const workflow = await readControlSourceFile(sourceContext, CARRIER_CI_JOB.workflowPath), role = await readControlSourceFile(sourceContext, CARRIER_CI_JOB.roleSourcePath);
 	const decode = (bytes) => {
 		const doc = (0, import_dist$1.parseDocument)(new TextDecoder("utf-8", { fatal: true }).decode(bytes), {
@@ -108451,12 +108502,12 @@ async function verifyCarrierCiSource(template, sourceContext) {
 				}
 			]
 		});
-		need$15(!doc.errors.length, "CarrierSourceYaml");
+		need$16(!doc.errors.length, "CarrierSourceYaml");
 		return doc.toJS({ maxAliasCount: 0 });
 	};
 	const w = decode(workflow.bytes), r = decode(role.bytes), job = w.jobs?.[CARRIER_CI_JOB.jobKey], resource = r.Resources?.[CARRIER_CI_JOB.roleResource];
-	need$15(w.on && Object.hasOwn(w.on, "workflow_dispatch") && job?.name === CARRIER_CI_JOB.jobName && job.environment === "preview-ci" && nonrootHash(job) === t.source.jobDefinitionHash, "CarrierSourceJob");
-	need$15(resource?.Type === "AWS::IAM::Role" && resource.Properties?.RoleName?.["Fn::Sub"] === "github-actions-${GitHubRepo}-preview" && nonrootHash(resource) === t.source.roleDefinitionHash, "CarrierSourceRole");
+	need$16(w.on && Object.hasOwn(w.on, "workflow_dispatch") && job?.name === CARRIER_CI_JOB.jobName && job.environment === "preview-ci" && nonrootHash(job) === t.source.jobDefinitionHash, "CarrierSourceJob");
+	need$16(resource?.Type === "AWS::IAM::Role" && resource.Properties?.RoleName?.["Fn::Sub"] === "github-actions-${GitHubRepo}-preview" && nonrootHash(resource) === t.source.roleDefinitionHash, "CarrierSourceRole");
 	const handle = Object.freeze({ kind: "carrier-ci-source" });
 	contexts$2.set(handle, {
 		templateHash: nonrootHash(t),
@@ -108466,13 +108517,13 @@ async function verifyCarrierCiSource(template, sourceContext) {
 	});
 	return handle;
 }
-var import_dist$1, contexts$2, need$15;
+var import_dist$1, contexts$2, need$16;
 var init_ci_carrier_source_policy = __esmMin((() => {
 	import_dist$1 = require_dist$5();
 	init_production_control_source();
 	init_ci_carrier_before_copy();
 	contexts$2 = /* @__PURE__ */ new WeakMap();
-	need$15 = (v, c) => {
+	need$16 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 }));
@@ -108480,16 +108531,16 @@ var init_ci_carrier_source_policy = __esmMin((() => {
 //#region scripts/lib/ci-carrier-source.mjs
 function verifyCarrierWorkerDefinition(template, env) {
 	const s = template?.source;
-	need$14(s?.jobKey === CARRIER_JOB.key && s.jobName === CARRIER_JOB.name && s.workflowPath === CARRIER_JOB.workflowPath, "CarrierWorkerDefinition");
-	need$14(typeof env?.AWS_PREVIEW_ROLE_ARN === "string" && env.AWS_PREVIEW_ROLE_ARN === template.scope.previewRoleArn, "CarrierWorkerPreviewRole");
-	need$14(env.GITHUB_ACTIONS === "true" && env.GITHUB_REPOSITORY === s.repository && env.GITHUB_JOB === CARRIER_JOB.key && env.GITHUB_EVENT_NAME === "workflow_dispatch" && env.GITHUB_REF === s.candidateRef && env.GITHUB_SHA === s.candidateRevision && env.GITHUB_WORKFLOW_SHA === s.workflowSha && env.GITHUB_WORKFLOW_REF === s.repository + "/" + CARRIER_JOB.workflowPath + "@" + s.candidateRef && (env.GITHUB_SERVER_URL ?? "https://github.com") === "https://github.com", "CarrierWorkerEnvironment");
-	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$14(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CarrierWorkerEnvironment");
+	need$15(s?.jobKey === CARRIER_JOB.key && s.jobName === CARRIER_JOB.name && s.workflowPath === CARRIER_JOB.workflowPath, "CarrierWorkerDefinition");
+	need$15(typeof env?.AWS_PREVIEW_ROLE_ARN === "string" && env.AWS_PREVIEW_ROLE_ARN === template.scope.previewRoleArn, "CarrierWorkerPreviewRole");
+	need$15(env.GITHUB_ACTIONS === "true" && env.GITHUB_REPOSITORY === s.repository && env.GITHUB_JOB === CARRIER_JOB.key && env.GITHUB_EVENT_NAME === "workflow_dispatch" && env.GITHUB_REF === s.candidateRef && env.GITHUB_SHA === s.candidateRevision && env.GITHUB_WORKFLOW_SHA === s.workflowSha && env.GITHUB_WORKFLOW_REF === s.repository + "/" + CARRIER_JOB.workflowPath + "@" + s.candidateRef && (env.GITHUB_SERVER_URL ?? "https://github.com") === "https://github.com", "CarrierWorkerEnvironment");
+	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$15(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CarrierWorkerEnvironment");
 }
 function verifyCarrierWorkerSource({ plan: input, grantHash, env, observations, checkout }) {
 	verifyCarrierWorkerDefinition(input?.template, env);
 	const plan = inspectCarrierFundingPlan(input), binding = carrierRunBinding(plan, grantHash, observations);
-	need$14(binding.runId === Number(env.GITHUB_RUN_ID) && binding.runAttempt === Number(env.GITHUB_RUN_ATTEMPT) && observations.run.status === "in_progress", "CarrierWorkerActualRun");
-	need$14(checkout?.revision === plan.template.source.candidateRevision && checkout?.tree === plan.template.source.candidateTree, "CarrierWorkerCheckout");
+	need$15(binding.runId === Number(env.GITHUB_RUN_ID) && binding.runAttempt === Number(env.GITHUB_RUN_ATTEMPT) && observations.run.status === "in_progress", "CarrierWorkerActualRun");
+	need$15(checkout?.revision === plan.template.source.candidateRevision && checkout?.tree === plan.template.source.candidateTree, "CarrierWorkerCheckout");
 	return binding;
 }
 /** Host is the existing bounded Git/GitHub reader. No AWS dependency is loaded
@@ -108497,9 +108548,9 @@ function verifyCarrierWorkerSource({ plan: input, grantHash, env, observations, 
 async function authenticateCarrierWorkerSource({ config, env, host }) {
 	verifyCarrierWorkerDefinition(config?.plan?.template, env);
 	const plan = inspectCarrierFundingPlan(config.plan), s = plan.template.source;
-	need$14(host?.env === env && typeof host.api === "function" && typeof host.checkout === "function" && typeof host.run === "function", "CarrierWorkerHost");
+	need$15(host?.env === env && typeof host.api === "function" && typeof host.checkout === "function" && typeof host.run === "function", "CarrierWorkerHost");
 	const checkout = await host.checkout();
-	need$14((await host.run("git", [
+	need$15((await host.run("git", [
 		"status",
 		"--porcelain",
 		"--untracked-files=all"
@@ -108512,7 +108563,7 @@ async function authenticateCarrierWorkerSource({ config, env, host }) {
 		s.candidateRevision
 	])).split("\0").filter(Boolean).map((row) => {
 		const m = /^(\d+) (\w+) ([a-f0-9]{40})\t(.+)$/.exec(row);
-		need$14(m, "CarrierWorkerGitEntry");
+		need$15(m, "CarrierWorkerGitEntry");
 		return {
 			mode: m[1],
 			type: m[2],
@@ -108534,9 +108585,9 @@ async function authenticateCarrierWorkerSource({ config, env, host }) {
 	const sourcePolicy = await verifyCarrierCiSource(plan.template, sourceContext);
 	const run = await host.api("actions/runs/" + env.GITHUB_RUN_ID);
 	const jobs = await host.api("actions/runs/" + env.GITHUB_RUN_ID + "/attempts/" + env.GITHUB_RUN_ATTEMPT + "/jobs?per_page=100");
-	need$14(Number.isSafeInteger(jobs?.total_count) && jobs.total_count <= 100 && Array.isArray(jobs.jobs) && jobs.jobs.length === jobs.total_count, "CarrierWorkerJobInventory");
+	need$15(Number.isSafeInteger(jobs?.total_count) && jobs.total_count <= 100 && Array.isArray(jobs.jobs) && jobs.jobs.length === jobs.total_count, "CarrierWorkerJobInventory");
 	const matches = jobs.jobs.filter((j) => j.name === CARRIER_JOB.name);
-	need$14(matches.length === 1, "CarrierWorkerJobIdentity");
+	need$15(matches.length === 1, "CarrierWorkerJobIdentity");
 	const commit = await host.api("git/commits/" + s.candidateRevision), pullRequest = await host.api("pulls/" + s.prNumber);
 	const binding = verifyCarrierWorkerSource({
 		plan,
@@ -108556,7 +108607,7 @@ async function authenticateCarrierWorkerSource({ config, env, host }) {
 		sourcePolicy
 	});
 }
-var CARRIER_JOB, need$14;
+var CARRIER_JOB, need$15;
 var init_ci_carrier_source = __esmMin((() => {
 	init_ci_carrier_before_copy();
 	init_production_control_source();
@@ -108568,22 +108619,22 @@ var init_ci_carrier_source = __esmMin((() => {
 		environment: "preview-ci",
 		actionPath: ".github/actions/ci-carrier-before-copy"
 	});
-	need$14 = (ok, code) => {
+	need$15 = (ok, code) => {
 		if (!ok) throw Error(code);
 	};
 }));
 //#endregion
 //#region scripts/lib/ci-smoke-host.mjs
 function ciSmokeHost(env, cwd = process.cwd()) {
-	need$13(env.GITHUB_ACTIONS === "true" && /^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/.test(env.GITHUB_REPOSITORY ?? "") && git(env.GITHUB_SHA), "CiSmokeHostIdentity");
-	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$13(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CiSmokeHostIdentity");
+	need$14(env.GITHUB_ACTIONS === "true" && /^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/.test(env.GITHUB_REPOSITORY ?? "") && git(env.GITHUB_SHA), "CiSmokeHostIdentity");
+	for (const key of ["GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]) need$14(/^[1-9][0-9]*$/.test(env[key] ?? "") && Number.isSafeInteger(Number(env[key])), "CiSmokeHostIdentity");
 	const run = async (file, args, { maxBytes = 16777216, timeoutMs = 3e4, encoding = "utf8", input } = {}) => {
-		need$13([
+		need$14([
 			"git",
 			"gh",
 			"docker"
 		].includes(file) && Array.isArray(args) && args.every((v) => typeof v === "string" && !v.includes("\0")), "CiSmokeHostCommand");
-		need$13(timeoutMs > 0 && timeoutMs <= 18e4 && maxBytes > 0 && maxBytes <= 33554432);
+		need$14(timeoutMs > 0 && timeoutMs <= 18e4 && maxBytes > 0 && maxBytes <= 33554432);
 		try {
 			return (await execute$3(file, args, {
 				cwd,
@@ -108601,7 +108652,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 		}
 	};
 	const api = async (path) => {
-		need$13(typeof path === "string" && /^[A-Za-z0-9_./?=&%+-]+$/.test(path) && !path.includes("..") && !path.startsWith("/"), "CiSmokeGithubPath");
+		need$14(typeof path === "string" && /^[A-Za-z0-9_./?=&%+-]+$/.test(path) && !path.includes("..") && !path.startsWith("/"), "CiSmokeGithubPath");
 		return parseCiSmokeJson(await run("gh", [
 			"api",
 			"--hostname",
@@ -108610,7 +108661,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 		]));
 	};
 	const readLog = async (id) => {
-		need$13(Number.isSafeInteger(id) && id > 0);
+		need$14(Number.isSafeInteger(id) && id > 0);
 		return run("gh", [
 			"api",
 			"--hostname",
@@ -108627,7 +108678,7 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 			"--quiet"
 		]);
 		const revision = (await run("git", ["rev-parse", "HEAD"])).trim(), tree = (await run("git", ["rev-parse", "HEAD^{tree}"])).trim();
-		need$13(revision === env.GITHUB_SHA && git(tree), "CiSmokeCheckoutChanged");
+		need$14(revision === env.GITHUB_SHA && git(tree), "CiSmokeCheckoutChanged");
 		return {
 			revision,
 			tree
@@ -108643,15 +108694,15 @@ function ciSmokeHost(env, cwd = process.cwd()) {
 	};
 }
 async function smokePrivateRead(path, maxBytes = 8388608, beforeRead) {
-	need$13(typeof path === "string" && resolve(path) === path && await realpath(path) === path, "CiSmokePrivatePath");
+	need$14(typeof path === "string" && resolve(path) === path && await realpath(path) === path, "CiSmokePrivatePath");
 	const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 	try {
 		const before = await fd.stat();
-		need$13(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size <= maxBytes, "CiSmokePrivateFile");
+		need$14(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size <= maxBytes, "CiSmokePrivateFile");
 		if (beforeRead) {
-			need$13(typeof beforeRead === "function", "CiSmokeReadAccounting");
+			need$14(typeof beforeRead === "function", "CiSmokeReadAccounting");
 			const charged = beforeRead(before.size + 1);
-			need$13(!charged || typeof charged.then !== "function", "CiSmokeReadAccounting");
+			need$14(!charged || typeof charged.then !== "function", "CiSmokeReadAccounting");
 		}
 		const buffer = Buffer.alloc(before.size + 1);
 		let length = 0;
@@ -108661,7 +108712,7 @@ async function smokePrivateRead(path, maxBytes = 8388608, beforeRead) {
 			length += r.bytesRead;
 		}
 		const raw = buffer.subarray(0, length), after = await fd.stat(), named = await lstat(path);
-		need$13(raw.length === before.size && [
+		need$14(raw.length === before.size && [
 			"dev",
 			"ino",
 			"uid",
@@ -108678,7 +108729,7 @@ async function smokePrivateRead(path, maxBytes = 8388608, beforeRead) {
 }
 async function smokePrivateWrite(path, value) {
 	const raw = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
-	need$13(raw.length <= 33554432, "CiSmokePrivateSize");
+	need$14(raw.length <= 33554432, "CiSmokePrivateSize");
 	const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 384);
 	try {
 		await fd.writeFile(raw);
@@ -108688,7 +108739,7 @@ async function smokePrivateWrite(path, value) {
 	}
 	return smokeHash(raw);
 }
-var execute$3, smokeHash, smokeNeed, need$13, git;
+var execute$3, smokeHash, smokeNeed, need$14, git;
 var init_ci_smoke_host = __esmMin((() => {
 	init_ci_smoke_evidence();
 	init_production_control_source();
@@ -108697,7 +108748,7 @@ var init_ci_smoke_host = __esmMin((() => {
 	smokeNeed = (ok, code = "CiSmokeHostInvalid") => {
 		if (!ok) throw Error(code);
 	};
-	need$13 = smokeNeed;
+	need$14 = smokeNeed;
 	git = (v) => typeof v === "string" && /^[a-f0-9]{40}$/.test(v);
 }));
 //#endregion
@@ -149272,21 +149323,21 @@ function inspectCarrierWorkerConfig(value) {
 		"plan",
 		...c.version === 2 ? ["budgetRevision", "compiledCeiling"] : []
 	]);
-	need$30([1, 2].includes(c.version) && c.kind === "carrier-worker-config" && [
+	need$31([1, 2].includes(c.version) && c.kind === "carrier-worker-config" && [
 		c.grantHash,
 		c.templateHash,
 		c.configHash,
 		c.ledgerStartHash
 	].every((v) => hex$10(v)), "CarrierWorkerConfig");
 	const plan = inspectCarrierFundingPlan(c.plan);
-	need$30(c.version === plan.version, "CarrierWorkerConfigVersion");
+	need$31(c.version === plan.version, "CarrierWorkerConfigVersion");
 	carrierAccountingExpectation(plan, c);
 	for (const k of [
 		"templateHash",
 		"configHash",
 		"ledgerStartHash"
-	]) need$30(c[k] === plan[k], "CarrierWorkerConfigRoots");
-	return freeze$2({
+	]) need$31(c[k] === plan[k], "CarrierWorkerConfigRoots");
+	return freeze$3({
 		...c,
 		plan
 	});
@@ -149313,15 +149364,15 @@ function carrierGithubHost(env, cwd = env.GITHUB_WORKSPACE) {
 	};
 }
 async function artifactClient(env) {
-	for (const k of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL"]) need$30(typeof env[k] === "string" && env[k].length > 0 && env[k] === process.env[k], "CarrierArtifactRuntime");
-	need$30(!env.ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS && !env.ACTIONS_ARTIFACT_UPLOAD_CONCURRENCY, "CarrierArtifactOverride");
+	for (const k of ["ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL"]) need$31(typeof env[k] === "string" && env[k].length > 0 && env[k] === process.env[k], "CarrierArtifactRuntime");
+	need$31(!env.ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS && !env.ACTIONS_ARTIFACT_UPLOAD_CONCURRENCY, "CarrierArtifactOverride");
 	const url = new URL(env.ACTIONS_RESULTS_URL);
-	need$30(url.protocol === "https:" && !url.username && !url.password && !url.port && url.hostname.endsWith(".actions.githubusercontent.com"), "CarrierArtifactEndpoint");
+	need$31(url.protocol === "https:" && !url.username && !url.password && !url.port && url.hostname.endsWith(".actions.githubusercontent.com"), "CarrierArtifactEndpoint");
 	const { DefaultArtifactClient } = await Promise.resolve().then(() => (init_artifact(), artifact_exports));
 	return new DefaultArtifactClient();
 }
 async function openCarrierStartup({ config: input, env, host = carrierGithubHost(env) }, seams = {}) {
-	need$30(Object.keys(seams).every((k) => [
+	need$31(Object.keys(seams).every((k) => [
 		"artifactClient",
 		"now",
 		"sleep",
@@ -149329,7 +149380,7 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 	].includes(k)), "CarrierStartupSeams");
 	const config = inspectCarrierWorkerConfig(input), plan = config.plan, t = plan.template;
 	verifyCarrierWorkerDefinition(t, env);
-	need$30(t.httpPolicy ? !seams.artifactClient : !seams.httpRequest, "CarrierHttpVersion");
+	need$31(t.httpPolicy ? !seams.artifactClient : !seams.httpRequest, "CarrierHttpVersion");
 	const localCounter = t.ciLocalPolicy ? openCarrierLocalCounter({
 		config,
 		env,
@@ -149359,7 +149410,7 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 			"AWS_PREVIEW_ROLE_ARN"
 		].map((k) => [k, env[k] ?? null]))), initial = identity();
 		const check = () => {
-			need$30(identity() === initial && now() >= openedMs && now() < deadline, "CarrierStartupExpired");
+			need$31(identity() === initial && now() >= openedMs && now() < deadline, "CarrierStartupExpired");
 			verifyCarrierWorkerDefinition(t, env);
 		};
 		check();
@@ -149378,7 +149429,7 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 			}
 		};
 		const api = async (path) => {
-			need$30(++calls <= 244, "CarrierStartupReadBudget");
+			need$31(++calls <= 244, "CarrierStartupReadBudget");
 			return wait(() => host.api(path));
 		};
 		const source = await authenticateCarrierWorkerSource({
@@ -149391,9 +149442,9 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 		}), binding = source.binding, bindingHash = nonrootHash(binding), announcement = carrierRunAnnouncement(plan, binding), statusUrl = "https://api.github.com/repos/" + t.source.repository + "/" + announcement.path;
 		const current = async () => {
 			const r = await api("actions/runs/" + binding.runId);
-			need$30(r.id === binding.runId && r.run_attempt === binding.runAttempt && r.head_sha === t.source.candidateRevision && r.head_branch === t.source.candidateRef.slice(11) && r.status === "in_progress" && r.event === "workflow_dispatch" && r.path === t.source.workflowPath && r.repository?.full_name === t.source.repository, "CarrierStartupCurrentRun");
+			need$31(r.id === binding.runId && r.run_attempt === binding.runAttempt && r.head_sha === t.source.candidateRevision && r.head_branch === t.source.candidateRef.slice(11) && r.status === "in_progress" && r.event === "workflow_dispatch" && r.path === t.source.workflowPath && r.repository?.full_name === t.source.repository, "CarrierStartupCurrentRun");
 			const c = await wait(() => host.checkout());
-			need$30(c.revision === t.source.candidateRevision && c.tree === t.source.candidateTree, "CarrierStartupCheckout");
+			need$31(c.revision === t.source.candidateRevision && c.tree === t.source.candidateTree, "CarrierStartupCheckout");
 		};
 		const statuses = async (expected, winner = false) => {
 			for (let poll = 0; poll < 12; poll++) {
@@ -149401,17 +149452,17 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 				let complete = false, announced = false;
 				for (let page = 1; page <= 10; page++) {
 					const rows = await api("commits/" + t.source.candidateRevision + "/statuses?per_page=100&page=" + page);
-					need$30(Array.isArray(rows) && rows.length <= 100, "CarrierStartupStatusPage");
+					need$31(Array.isArray(rows) && rows.length <= 100, "CarrierStartupStatusPage");
 					for (const row of rows) {
-						need$30(positive$1(row?.id) && !ids.has(row.id), "CarrierStartupStatusHistory");
+						need$31(positive$1(row?.id) && !ids.has(row.id), "CarrierStartupStatusHistory");
 						ids.add(row.id);
 						if (row.creator?.id !== t.ownerGithubActorId) continue;
 						if (row.context === announcement.payload.context) {
-							need$30(row.url === statusUrl && Object.entries(announcement.payload).every(([k, v]) => row[k] === v), "CarrierStartupAnnouncementConflict");
+							need$31(row.url === statusUrl && Object.entries(announcement.payload).every(([k, v]) => row[k] === v), "CarrierStartupAnnouncementConflict");
 							announced = true;
 						}
 						if (winner && row.context === expected.payload.context) {
-							need$30(row.url === statusUrl && row.state === "success" && row.target_url === expected.payload.target_url && /^winner:[a-f0-9]{64}$/.test(row.description ?? ""), "CarrierStartupWinnerConflict");
+							need$31(row.url === statusUrl && row.state === "success" && row.target_url === expected.payload.target_url && /^winner:[a-f0-9]{64}$/.test(row.description ?? ""), "CarrierStartupWinnerConflict");
 							wins.add(row.description);
 						}
 					}
@@ -149420,15 +149471,15 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 						break;
 					}
 				}
-				need$30(complete, "CarrierStartupIncompleteHistory");
-				need$30(wins.size <= 1, "CarrierStartupWinnerConflict");
+				need$31(complete, "CarrierStartupIncompleteHistory");
+				need$31(wins.size <= 1, "CarrierStartupWinnerConflict");
 				if (winner && wins.size) {
-					need$30(announced && wins.has(expected.payload.description), "CarrierStartupNotWinner");
+					need$31(announced && wins.has(expected.payload.description), "CarrierStartupNotWinner");
 					return;
 				}
 				if (!winner && announced) return;
 				if (poll < 11) {
-					need$30(now() + 5e3 < deadline, "CarrierStartupAnnouncementMissing");
+					need$31(now() + 5e3 < deadline, "CarrierStartupAnnouncementMissing");
 					await wait(() => sleep(5e3));
 				}
 			}
@@ -149437,10 +149488,10 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 		await statuses(announcement);
 		await current();
 		const artifactName = "mem9-carrier-start-" + nonrootHash(carrierLedgerScope(t));
-		need$30(!attempted$2.has(artifactName), "CarrierStartupAlreadyAttempted");
+		need$31(!attempted$2.has(artifactName), "CarrierStartupAlreadyAttempted");
 		attempted$2.add(artifactName);
 		const root = env.RUNNER_TEMP;
-		need$30(typeof root === "string" && resolve(root) === root && await realpath(root) === root && (await lstat(root)).isDirectory(), "CarrierStartupTemporaryRoot");
+		need$31(typeof root === "string" && resolve(root) === root && await realpath(root) === root && (await lstat(root)).isDirectory(), "CarrierStartupTemporaryRoot");
 		if (nativeHttp) carrierLocalState(localCounter).reserveLocal({
 			ecrRequests: 0,
 			httpBodyBytes: 0,
@@ -149491,10 +149542,10 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 					}
 				});
 			});
-			need$30(positive$1(uploaded?.id) && positive$1(uploaded.size) && uploaded.size <= 65536 && hex$10(uploaded.digest), "CarrierStartupUpload");
+			need$31(positive$1(uploaded?.id) && positive$1(uploaded.size) && uploaded.size <= 65536 && hex$10(uploaded.digest), "CarrierStartupUpload");
 			const a = await api("actions/artifacts/" + uploaded.id), created = Date.parse(a?.created_at), expiry = Date.parse(a?.expires_at);
-			need$30(a?.id === uploaded.id && a.name === artifactName && a.size_in_bytes === uploaded.size && a.digest === "sha256:" + uploaded.digest && a.expired === false && positive$1(created) && created >= Math.floor(openedMs / 1e3) * 1e3 && created <= now() && positive$1(expiry) && expiry >= plan.deadlineMs, "CarrierStartupArtifact");
-			need$30(a.workflow_run?.id === binding.runId && a.workflow_run.head_sha === t.source.candidateRevision && a.workflow_run.head_branch === t.source.candidateRef.slice(11), "CarrierStartupArtifactRun");
+			need$31(a?.id === uploaded.id && a.name === artifactName && a.size_in_bytes === uploaded.size && a.digest === "sha256:" + uploaded.digest && a.expired === false && positive$1(created) && created >= Math.floor(openedMs / 1e3) * 1e3 && created <= now() && positive$1(expiry) && expiry >= plan.deadlineMs, "CarrierStartupArtifact");
+			need$31(a.workflow_run?.id === binding.runId && a.workflow_run.head_sha === t.source.candidateRevision && a.workflow_run.head_branch === t.source.candidateRef.slice(11), "CarrierStartupArtifactRun");
 			selection = carrierCheckpointSelection(plan, binding, {
 				nonce,
 				scopeHash,
@@ -149546,11 +149597,11 @@ async function openCarrierStartup({ config: input, env, host = carrierGithubHost
 }
 function consumeCarrierStartup(handle, configValue) {
 	const s = caps.get(handle);
-	need$30(s && !s.consumed, "CarrierStartupCapability");
+	need$31(s && !s.consumed, "CarrierStartupCapability");
 	s.consumed = true;
 	try {
 		const config = inspectCarrierWorkerConfig(configValue);
-		need$30(nonrootHash(config) === nonrootHash(s.config) && s.identity() === s.initial && s.now() < s.notAfter, "CarrierStartupCapabilityBinding");
+		need$31(nonrootHash(config) === nonrootHash(s.config) && s.identity() === s.initial && s.now() < s.notAfter, "CarrierStartupCapabilityBinding");
 		const local = s.localCounter ? consumeCarrierLocalCounter(s.localCounter, {
 			config,
 			binding: s.binding
@@ -149563,7 +149614,7 @@ function consumeCarrierStartup(handle, configValue) {
 				localCounter: s.localCounter,
 				local
 			} : {},
-			receipt: freeze$2({
+			receipt: freeze$3({
 				nonce: s.nonce,
 				scopeHash: s.scopeHash,
 				artifactId: s.artifactId,
@@ -149594,17 +149645,17 @@ var init_ci_carrier_startup = __esmMin((() => {
 //#endregion
 //#region scripts/lib/production-control-capacity.mjs
 function inspectFutureControlCapacity(value) {
-	need$12(nonrootHash(value) === FUTURE_CONTROL_CAPACITY_HASH, "FutureControlCapacityPolicy");
+	need$13(nonrootHash(value) === FUTURE_CONTROL_CAPACITY_HASH, "FutureControlCapacityPolicy");
 	return FUTURE_CONTROL_CAPACITY;
 }
 function verifyFutureControlGraphCapacity(nodes, policy) {
 	const p = inspectFutureControlCapacity(policy), seen = /* @__PURE__ */ new Map();
 	let graphBytes = 0, manifestNodes = 0, configNodes = 0, layerNodes = 0;
 	for (const d of nodes) {
-		need$12(/^sha256:[a-f0-9]{64}$/.test(d.digest) && nat(d.size) && (manifests$6.has(d.mediaType) || configs$1.has(d.mediaType) || layers.has(d.mediaType)), "FutureControlGraphDescriptor");
+		need$13(/^sha256:[a-f0-9]{64}$/.test(d.digest) && nat(d.size) && (manifests$6.has(d.mediaType) || configs$1.has(d.mediaType) || layers.has(d.mediaType)), "FutureControlGraphDescriptor");
 		const prior = seen.get(d.digest);
 		if (prior) {
-			need$12(prior.size === d.size && prior.mediaType === d.mediaType, "FutureControlGraphConflict");
+			need$13(prior.size === d.size && prior.mediaType === d.mediaType, "FutureControlGraphConflict");
 			continue;
 		}
 		seen.set(d.digest, d);
@@ -149612,7 +149663,7 @@ function verifyFutureControlGraphCapacity(nodes, policy) {
 		if (manifests$6.has(d.mediaType)) manifestNodes++;
 		else if (configs$1.has(d.mediaType)) configNodes++;
 		else layerNodes++;
-		need$12(graphBytes <= p.graphBytes && manifestNodes <= p.manifestNodes && configNodes <= p.configNodes && layerNodes <= p.layerNodes && configNodes + layerNodes <= p.blobNodes, "FutureControlGraphCapacity");
+		need$13(graphBytes <= p.graphBytes && manifestNodes <= p.manifestNodes && configNodes <= p.configNodes && layerNodes <= p.layerNodes && configNodes + layerNodes <= p.blobNodes, "FutureControlGraphCapacity");
 	}
 	return Object.freeze({
 		graphBytes,
@@ -149622,12 +149673,12 @@ function verifyFutureControlGraphCapacity(nodes, policy) {
 		capacityVerified: false
 	});
 }
-var M, need$12, nat, FUTURE_CONTROL_CAPACITY, FUTURE_CONTROL_CAPACITY_HASH, manifests$6, configs$1, layers;
+var M, need$13, nat, FUTURE_CONTROL_CAPACITY, FUTURE_CONTROL_CAPACITY_HASH, manifests$6, configs$1, layers;
 var init_production_control_capacity = __esmMin((() => {
 	init_production_nonroot_contracts();
 	M = 1048576;
 	8 * M;
-	need$12 = (v, c) => {
+	need$13 = (v, c) => {
 		if (!v) throw Error(c);
 	};
 	nat = (n) => Number.isSafeInteger(n) && n >= 0;
@@ -149718,48 +149769,61 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 	assertImageBudget(budget);
 	binding = copyNonrootJson(binding);
 	inventory = copyNonrootJson(inventory);
-	need$11(typeof directory === "string" && resolve(directory) === directory && await realpath(directory) === directory, "NonrootControlCachePath");
+	need$12(typeof directory === "string" && resolve(directory) === directory, "NonrootControlCachePath");
+	const realDirectory = await realpath(directory);
+	budget.check();
+	need$12(realDirectory === directory, "NonrootControlCachePath");
 	const initial = await lstat(directory);
-	need$11(initial.isDirectory() && initial.uid === process.getuid() && (initial.mode & 511) === 448, "NonrootControlCacheDirectory");
-	need$11(inventory.kind === "readonly-control-image-graph" && inventory.roots?.length === 1 && Array.isArray(inventory.nodes) && inventory.nodes.length > 0 && inventory.nodes.length <= IMAGE_TRANSITION_LIMITS.maxManifestNodes + IMAGE_TRANSITION_LIMITS.maxBlobNodes, "NonrootControlCacheInventory");
+	budget.check();
+	need$12(initial.isDirectory() && initial.uid === process.getuid() && (initial.mode & 511) === 448, "NonrootControlCacheDirectory");
+	need$12(inventory.kind === "readonly-control-image-graph" && inventory.roots?.length === 1 && Array.isArray(inventory.nodes) && inventory.nodes.length > 0 && inventory.nodes.length <= IMAGE_TRANSITION_LIMITS.maxManifestNodes + IMAGE_TRANSITION_LIMITS.maxBlobNodes, "NonrootControlCacheInventory");
 	const nodes = /* @__PURE__ */ new Map();
 	for (const node of inventory.nodes) {
-		need$11(!nodes.has(node.digest), "NonrootControlCacheInventory");
+		need$12(!nodes.has(node.digest), "NonrootControlCacheInventory");
 		validateImageDescriptor(node, manifests$5.has(node.mediaType) ? "manifest" : "blob");
 		nodes.set(node.digest, node);
 	}
 	const names = [...nodes.keys()].map((d) => d.slice(7)).sort(), identities = /* @__PURE__ */ new Map(), active = /* @__PURE__ */ new Set();
 	let closed = false, physicalCacheBytes = 0, reads = 0;
 	const check = () => {
-		need$11(!closed, "NonrootControlCacheClosed");
+		need$12(!closed, "NonrootControlCacheClosed");
 		budget.check();
 	};
 	const directoryUnchanged = async () => {
 		check();
 		const current = await lstat(directory);
-		need$11(await realpath(directory) === directory && unchanged$2(initial, current, [
+		check();
+		const real = await realpath(directory);
+		check();
+		const listed = await readdir(directory);
+		check();
+		need$12(real === directory && unchanged$2(initial, current, [
 			"dev",
 			"ino",
 			"mode",
 			"uid"
-		]) && nonrootHash((await readdir(directory)).sort()) === nonrootHash(names), "NonrootControlCacheInventory");
+		]) && nonrootHash(listed.sort()) === nonrootHash(names), "NonrootControlCacheInventory");
 	};
 	await directoryUnchanged();
+	check();
 	async function* bytes(descriptor) {
 		check();
 		const expected = nodes.get(descriptor.digest);
-		need$11(expected && expected.size === descriptor.size && expected.mediaType === descriptor.mediaType, "NonrootControlCacheDescriptor");
-		need$11(active.size < IMAGE_TRANSITION_LIMITS.maxConcurrency, "NonrootControlCacheConcurrency");
+		need$12(expected && expected.size === descriptor.size && expected.mediaType === descriptor.mediaType, "NonrootControlCacheDescriptor");
+		need$12(active.size < IMAGE_TRANSITION_LIMITS.maxConcurrency, "NonrootControlCacheConcurrency");
 		budget.cacheRead?.(descriptor.size);
-		const path = join(directory, descriptor.digest.slice(7));
-		need$11(await realpath(path) === path, "NonrootControlCacheAlias");
+		const path = join(directory, descriptor.digest.slice(7)), real = await realpath(path);
+		check();
+		need$12(real === path, "NonrootControlCacheAlias");
 		const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		active.add(fd);
 		try {
+			check();
 			const before = await fd.stat();
-			need$11(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size === descriptor.size, "NonrootControlCacheFile");
+			check();
+			need$12(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size === descriptor.size, "NonrootControlCacheFile");
 			const prior = identities.get(descriptor.digest);
-			if (prior) need$11(unchanged$2(prior, before, fileKeys$1), "NonrootControlCacheChanged");
+			if (prior) need$12(unchanged$2(prior, before, fileKeys$1), "NonrootControlCacheChanged");
 			else identities.set(descriptor.digest, before);
 			const digest = createHash("sha256"), buffer = Buffer.alloc(65536);
 			let size = 0;
@@ -149767,24 +149831,28 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 			while (true) {
 				check();
 				const { bytesRead } = await fd.read(buffer, 0, buffer.length, null);
+				check();
 				if (!bytesRead) break;
 				size += bytesRead;
 				physicalCacheBytes += bytesRead;
-				need$11(size <= descriptor.size && Number.isSafeInteger(physicalCacheBytes), "NonrootControlCacheSize");
+				need$12(size <= descriptor.size && Number.isSafeInteger(physicalCacheBytes), "NonrootControlCacheSize");
 				const chunk = Buffer.from(buffer.subarray(0, bytesRead));
 				digest.update(chunk);
 				yield chunk;
 			}
-			const after = await fd.stat(), named = await lstat(path);
-			need$11(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
-			need$11(unchanged$2(before, after, fileKeys$1) && unchanged$2(before, named, fileKeys$1), "NonrootControlCacheChanged");
+			const after = await fd.stat();
+			check();
+			const named = await lstat(path);
+			check();
+			need$12(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
+			need$12(unchanged$2(before, after, fileKeys$1) && unchanged$2(before, named, fileKeys$1), "NonrootControlCacheChanged");
 		} finally {
-			active.delete(fd);
 			await fd.close();
+			active.delete(fd);
 		}
 	}
 	const reader = (request) => {
-		need$11(request.repositoryName === binding.repositoryName, "NonrootControlCacheRepository");
+		need$12(request.repositoryName === binding.repositoryName, "NonrootControlCacheRepository");
 		return bytes(request.descriptor);
 	};
 	const store = {
@@ -149796,18 +149864,17 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 			for await (const chunk of stream) {
 				check();
 				size += chunk.length;
-				need$11(size <= descriptor.size, "NonrootControlCacheSize");
+				need$12(size <= descriptor.size, "NonrootControlCacheSize");
 				digest.update(chunk);
 			}
-			need$11(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
+			need$12(size === descriptor.size && "sha256:" + digest.digest("hex") === descriptor.digest, "NonrootControlCacheDigest");
 		}
 	};
 	const before = budget.usage();
 	const close = async () => {
 		closed = true;
-		const pending = [...active];
-		await Promise.all(pending.map((fd) => fd.close()));
-		need$11(pending.length === 0, "NonrootControlCacheActive");
+		const pending = [...active], results = await Promise.allSettled(pending.map((fd) => fd.close()));
+		need$12(results.every((r) => r.status === "fulfilled") && pending.length === 0, "NonrootControlCacheActive");
 	};
 	return Object.freeze({
 		store,
@@ -149816,15 +149883,18 @@ async function openOwnedNonrootControlCache({ directory, binding, inventory, bud
 			const chunks = [];
 			let size = 0;
 			for await (const chunk of reader(request)) {
+				check();
 				size += chunk.length;
-				need$11(size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "NonrootControlCacheManifest");
+				need$12(size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "NonrootControlCacheManifest");
 				chunks.push(chunk);
 			}
+			check();
 			return Buffer.concat(chunks, size);
 		},
 		check: async () => {
 			await directoryUnchanged();
-			need$11(active.size === 0, "NonrootControlCacheActive");
+			check();
+			need$12(active.size === 0, "NonrootControlCacheActive");
 		},
 		close,
 		usage: () => copyNonrootJson({
@@ -149867,13 +149937,13 @@ async function verifyOwnedNonrootControlCache({ directory, binding, inventory, b
 		throw error;
 	}
 }
-var need$11, unchanged$2, fileKeys$1, manifests$5;
+var need$12, unchanged$2, fileKeys$1, manifests$5;
 var init_production_nonroot_control_cache = __esmMin((() => {
 	init_production_image_graph();
 	init_production_image_filesystem();
 	init_production_nonroot_contracts();
 	init_production_image_transition();
-	need$11 = (ok, code = "NonrootControlCacheInvalid") => {
+	need$12 = (ok, code = "NonrootControlCacheInvalid") => {
 		if (!ok) throw Error(code);
 	};
 	unchanged$2 = (a, b, keys) => keys.every((key) => a[key] === b[key]);
@@ -149901,7 +149971,7 @@ var init_production_nonroot_control_cache = __esmMin((() => {
 * local watchdog can shorten work; only reserveLocal owns source/owner expiry.
 * No credential lifetime is invented for already cached bytes. */
 function createPrepaidControlCacheBudget(options = {}) {
-	need$10(record$1(options) && Object.keys(options).every((k) => [
+	need$11(record$1(options) && Object.keys(options).every((k) => [
 		"metadataReads",
 		"now",
 		"deadlineMs",
@@ -149910,16 +149980,16 @@ function createPrepaidControlCacheBudget(options = {}) {
 		"processedEntriesLimit"
 	].includes(k)), "ControlCacheBudgetOptions");
 	const metadataReads = options.metadataReads, now = options.now ?? Date.now, capacity = metadataReads?.controlCapacity ? inspectFutureControlCapacity(metadataReads.controlCapacity) : null;
-	need$10(metadataReads && typeof metadataReads.reserveLocal === "function" && typeof now === "function", "ControlCachePrepaymentRequired");
+	need$11(metadataReads && typeof metadataReads.reserveLocal === "function" && typeof now === "function", "ControlCachePrepaymentRequired");
 	const declaredU = options.uncompressedBytesLimit;
-	need$10(declaredU === void 0 || integer(declaredU) && declaredU > 0, "ControlCacheUncompressedLimit");
+	need$11(declaredU === void 0 || integer(declaredU) && declaredU > 0, "ControlCacheUncompressedLimit");
 	const uncompressedBytesLimit = declaredU === void 0 ? void 0 : Math.min(declaredU, IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity);
 	const declaredEntries = options.processedEntriesLimit;
-	need$10(declaredEntries === void 0 || integer(declaredEntries) && declaredEntries > 0, "ControlCacheProcessedEntriesLimit");
+	need$11(declaredEntries === void 0 || integer(declaredEntries) && declaredEntries > 0, "ControlCacheProcessedEntriesLimit");
 	const processedEntriesLimit = declaredEntries === void 0 ? void 0 : Math.min(declaredEntries, IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity);
 	const startedMs = now(), deadlineMs = options.deadlineMs ?? startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs;
-	need$10(integer(startedMs) && Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs + IMAGE_TRANSITION_LIMITS.cleanupReserveMs && deadlineMs <= startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs, "ControlCacheDeadline");
-	need$10(canaryEvidenceHash(IMAGE_TRANSITION_LIMITS) === IMAGE_TRANSITION_LIMITS_HASH, "ImageLimitsChanged");
+	need$11(integer(startedMs) && Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs + IMAGE_TRANSITION_LIMITS.cleanupReserveMs && deadlineMs <= startedMs + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs, "ControlCacheDeadline");
+	need$11(canaryEvidenceHash(IMAGE_TRANSITION_LIMITS) === IMAGE_TRANSITION_LIMITS_HASH, "ImageLimitsChanged");
 	const zero = () => ({
 		ecrRequests: 0,
 		logicalBytes: 0,
@@ -149941,11 +150011,11 @@ function createPrepaidControlCacheBudget(options = {}) {
 		}
 	};
 	const check = () => {
-		need$10(!held, "ControlCacheBudgetHeld");
+		need$11(!held, "ControlCacheBudgetHeld");
 		try {
 			options.signal?.throwIfAborted();
 			const t = now();
-			need$10(integer(t) && t >= startedMs && t < deadlineMs - IMAGE_TRANSITION_LIMITS.cleanupReserveMs, "ControlCacheDeadline");
+			need$11(integer(t) && t >= startedMs && t < deadlineMs - IMAGE_TRANSITION_LIMITS.cleanupReserveMs, "ControlCacheDeadline");
 			reserve(zero());
 		} catch (error) {
 			held = true;
@@ -149958,7 +150028,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		validateImageDescriptor(d, isManifest ? "manifest" : "blob");
 		const prior = seen.get(d.digest);
 		if (prior) {
-			need$10(prior.size === d.size && prior.isManifest === isManifest, "ImageDescriptorConflict");
+			need$11(prior.size === d.size && prior.isManifest === isManifest, "ImageDescriptorConflict");
 			return;
 		}
 		if (capacity) {
@@ -149970,8 +150040,8 @@ function createPrepaidControlCacheBudget(options = {}) {
 				throw error;
 			}
 		}
-		need$10(uniqueBytes + d.size <= IMAGE_TRANSITION_LIMITS.maxUniqueCompressedGraphBytes, "ImageGraphByteLimit");
-		need$10(isManifest ? manifestNodes < IMAGE_TRANSITION_LIMITS.maxManifestNodes : blobNodes < IMAGE_TRANSITION_LIMITS.maxBlobNodes, "ImageGraphNodeLimit");
+		need$11(uniqueBytes + d.size <= IMAGE_TRANSITION_LIMITS.maxUniqueCompressedGraphBytes, "ImageGraphByteLimit");
+		need$11(isManifest ? manifestNodes < IMAGE_TRANSITION_LIMITS.maxManifestNodes : blobNodes < IMAGE_TRANSITION_LIMITS.maxBlobNodes, "ImageGraphNodeLimit");
 		seen.set(d.digest, {
 			size: d.size,
 			isManifest
@@ -149995,16 +150065,16 @@ function createPrepaidControlCacheBudget(options = {}) {
 		blob: (d) => add(d, false),
 		edge(key) {
 			check();
-			need$10(typeof key === "string");
+			need$11(typeof key === "string");
 			if (!edges.has(key)) {
-				need$10(edges.size < IMAGE_TRANSITION_LIMITS.maxEdges, "ImageGraphEdgeLimit");
+				need$11(edges.size < IMAGE_TRANSITION_LIMITS.maxEdges, "ImageGraphEdgeLimit");
 				edges.add(key);
 			}
 		},
 		cacheRead(size) {
 			check();
-			need$10(integer(size) && logicalBytes + size <= IMAGE_TRANSITION_LIMITS.maxTransferredBytes, "ImageTransferLimit");
-			need$10(localReads < IMAGE_TRANSITION_LIMITS.maxEcrCalls, "ImageCallLimit");
+			need$11(integer(size) && logicalBytes + size <= IMAGE_TRANSITION_LIMITS.maxTransferredBytes, "ImageTransferLimit");
+			need$11(localReads < IMAGE_TRANSITION_LIMITS.maxEcrCalls, "ImageCallLimit");
 			reserve({
 				...zero(),
 				logicalBytes: size
@@ -150014,7 +150084,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		uncompressed(size) {
 			check();
-			need$10(integer(size) && uncompressedBytes + size <= Math.min(IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity), "ImageUncompressedLimit");
+			need$11(integer(size) && uncompressedBytes + size <= Math.min(IMAGE_TRANSITION_LIMITS.maxUncompressedBytes, capacity?.uncompressedBytes ?? Infinity), "ImageUncompressedLimit");
 			reserve({
 				...zero(),
 				uncompressedBytes: size
@@ -150023,7 +150093,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		entry() {
 			check();
-			need$10(fsEntries < Math.min(IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity), "ImageFilesystemEntryLimit");
+			need$11(fsEntries < Math.min(IMAGE_TRANSITION_LIMITS.maxFsEntries, capacity?.processedEntries ?? Infinity), "ImageFilesystemEntryLimit");
 			reserve({
 				...zero(),
 				processedEntries: 1
@@ -150032,7 +150102,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 		},
 		enter() {
 			check();
-			need$10(active < IMAGE_TRANSITION_LIMITS.maxConcurrency, "ImageConcurrencyLimit");
+			need$11(active < IMAGE_TRANSITION_LIMITS.maxConcurrency, "ImageConcurrencyLimit");
 			active++;
 			let closed = false;
 			return () => {
@@ -150068,7 +150138,7 @@ function createPrepaidControlCacheBudget(options = {}) {
 	return Object.freeze(budget);
 }
 function assertImageBudget(budget) {
-	need$10(budgets.has(budget), "ImageBudgetRequired");
+	need$11(budgets.has(budget), "ImageBudgetRequired");
 	budget.check();
 	return budget;
 }
@@ -150076,11 +150146,11 @@ function assertImageBudget(budget) {
 * data accounting only; callers reserve it before decode, and meter the cache
 * write/read separately. The containing manifest already paid its wire bytes. */
 function imageDescriptorDataLocalBytes(d) {
-	need$10(record$1(d), "ImageDescriptorFields");
+	need$11(record$1(d), "ImageDescriptorFields");
 	if (!Object.hasOwn(d, "data")) return 0;
-	need$10(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
+	need$11(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
 	const size = Buffer.byteLength(d.data, "base64");
-	need$10(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
+	need$11(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
 	return Buffer.byteLength(d.data) + 2 * size;
 }
 function validateImageDescriptor(d, kind) {
@@ -150090,7 +150160,7 @@ function validateImageDescriptor(d, kind) {
 /** Returns actual verified embedded bytes, or undefined. No network response,
 * registry presence, graph handle or authorization is implied by this data. */
 function decodeImageDescriptorData(d, kind) {
-	need$10(record$1(d) && Object.keys(d).every((k) => [
+	need$11(record$1(d) && Object.keys(d).every((k) => [
 		"mediaType",
 		"digest",
 		"size",
@@ -150099,18 +150169,18 @@ function decodeImageDescriptorData(d, kind) {
 		"artifactType",
 		"data"
 	].includes(k)), "ImageDescriptorFields");
-	need$10(hexDigest(d.digest) && integer(d.size) && media.has(d.mediaType), "ImageDescriptorInvalid");
-	if (kind === "manifest") need$10(manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "ImageManifestLimit");
-	if (kind === "blob") need$10(!manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxBlobBytes, "ImageBlobLimit");
-	if (configs.has(d.mediaType)) need$10(d.size <= IMAGE_TRANSITION_LIMITS.maxConfigBytes, "ImageConfigLimit");
-	if (d.mediaType === IMAGE_MEDIA.attestation) need$10(d.size <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes, "ImageAttestationLimit");
-	if (d.annotations !== void 0) need$10(record$1(d.annotations) && Object.entries(d.annotations).every(([k, v]) => typeof v === "string" && Buffer.byteLength(k) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && Buffer.byteLength(v) <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes), "ImageAnnotations");
-	if (d.platform !== void 0) need$10(record$1(d.platform) && typeof d.platform.os === "string" && typeof d.platform.architecture === "string", "ImagePlatform");
+	need$11(hexDigest(d.digest) && integer(d.size) && media.has(d.mediaType), "ImageDescriptorInvalid");
+	if (kind === "manifest") need$11(manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "ImageManifestLimit");
+	if (kind === "blob") need$11(!manifests$4.has(d.mediaType) && d.size <= IMAGE_TRANSITION_LIMITS.maxBlobBytes, "ImageBlobLimit");
+	if (configs.has(d.mediaType)) need$11(d.size <= IMAGE_TRANSITION_LIMITS.maxConfigBytes, "ImageConfigLimit");
+	if (d.mediaType === IMAGE_MEDIA.attestation) need$11(d.size <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes, "ImageAttestationLimit");
+	if (d.annotations !== void 0) need$11(record$1(d.annotations) && Object.entries(d.annotations).every(([k, v]) => typeof v === "string" && Buffer.byteLength(k) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && Buffer.byteLength(v) <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes), "ImageAnnotations");
+	if (d.platform !== void 0) need$11(record$1(d.platform) && typeof d.platform.os === "string" && typeof d.platform.architecture === "string", "ImagePlatform");
 	if (Object.hasOwn(d, "data")) {
-		need$10(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
-		need$10(Buffer.byteLength(d.data, "base64") <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
+		need$11(typeof d.data === "string" && d.size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes && d.data.length <= Math.ceil(IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes / 3) * 4, "ImageEmbeddedDataLimit");
+		need$11(Buffer.byteLength(d.data, "base64") <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageEmbeddedDataLimit");
 		const bytes = Buffer.from(d.data, "base64");
-		need$10(bytes.toString("base64") === d.data && bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageEmbeddedDataInvalid");
+		need$11(bytes.toString("base64") === d.data && bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageEmbeddedDataInvalid");
 		return bytes;
 	}
 }
@@ -150118,14 +150188,14 @@ function decodeImageDescriptorData(d, kind) {
 * attestation predicates. Raw bytes are separately retained and hashed. */
 async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 	assertImageBudget(budget);
-	need$10(integer(maxBytes) && maxBytes <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes);
+	need$11(integer(maxBytes) && maxBytes <= IMAGE_TRANSITION_LIMITS.maxAttestationPayloadBytes);
 	const iterator = stream[Symbol.asyncIterator](), decoder = new TextDecoder("utf-8", { fatal: true });
 	let text = "", offset = 0, total = 0, ended = false, steps = 0;
 	const limitAt = Math.min(budget.deadlineMs - IMAGE_TRANSITION_LIMITS.cleanupReserveMs, budget.now() + IMAGE_TRANSITION_LIMITS.maxBlobTransferMs);
 	const peek = async () => {
 		if (++steps % 4096 === 0) {
 			budget.check();
-			need$10(budget.now() < limitAt, "ImageJsonTimeout");
+			need$11(budget.now() < limitAt, "ImageJsonTimeout");
 		}
 		while (offset === text.length && !ended) {
 			const item = await iterator.next();
@@ -150136,7 +150206,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 			} else {
 				const bytes = bytesOf(item.value);
 				total += bytes.length;
-				need$10(total <= maxBytes, "ImageJsonSize");
+				need$11(total <= maxBytes, "ImageJsonSize");
 				text = decoder.decode(bytes, { stream: true });
 				offset = 0;
 			}
@@ -150145,7 +150215,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 	};
 	const take = async () => {
 		const c = await peek();
-		need$10(c !== null, "ImageJsonTruncated");
+		need$11(c !== null, "ImageJsonTruncated");
 		offset++;
 		return c;
 	};
@@ -150158,28 +150228,28 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 		].includes(await peek())) offset++;
 	};
 	const string = async (keep) => {
-		need$10(await take() === "\"");
+		need$11(await take() === "\"");
 		let raw = keep ? "\"" : "", rawBytes = 1, previousHigh = false;
 		const append = (c) => {
 			if (!keep) return;
 			const n = c.charCodeAt(0);
 			rawBytes += previousHigh && n >= 56320 && n <= 57343 ? 1 : Buffer.byteLength(c);
 			previousHigh = n >= 55296 && n <= 56319;
-			need$10(rawBytes <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
+			need$11(rawBytes <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
 			raw += c;
 		};
 		while (true) {
 			const c = await take();
 			append(c);
 			if (c === "\"") break;
-			need$10(c.charCodeAt(0) >= 32, "ImageJsonString");
+			need$11(c.charCodeAt(0) >= 32, "ImageJsonString");
 			if (c === "\\") {
 				const e = await take();
 				append(e);
-				need$10("\"\\/bfnrtu".includes(e), "ImageJsonEscape");
+				need$11("\"\\/bfnrtu".includes(e), "ImageJsonEscape");
 				if (e === "u") for (let n = 0; n < 4; n++) {
 					const h = await take();
-					need$10(/[a-fA-F0-9]/.test(h), "ImageJsonEscape");
+					need$11(/[a-fA-F0-9]/.test(h), "ImageJsonEscape");
 					append(h);
 				}
 			}
@@ -150187,7 +150257,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 		return keep ? JSON.parse(raw) : void 0;
 	};
 	const value = async (depth, keep) => {
-		need$10(depth <= IMAGE_TRANSITION_LIMITS.maxJsonDepth, "ImageJsonDepth");
+		need$11(depth <= IMAGE_TRANSITION_LIMITS.maxJsonDepth, "ImageJsonDepth");
 		await whitespace();
 		const c = await peek();
 		if (c === "\"") return string(keep);
@@ -150204,10 +150274,10 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 				let key;
 				if (object) {
 					key = await string(true);
-					need$10(!keys.has(key), "ImageJsonDuplicateKey");
+					need$11(!keys.has(key), "ImageJsonDuplicateKey");
 					keys.add(key);
 					await whitespace();
-					need$10(await take() === ":", "ImageJsonColon");
+					need$11(await take() === ":", "ImageJsonColon");
 				}
 				const capture = keep && (!object || depth !== 0 || !fields || fields.includes(key)), child = await value(depth + 1, capture);
 				if (capture) {
@@ -150222,7 +150292,7 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 				await whitespace();
 				const delimiter = await take();
 				if (delimiter === end) break;
-				need$10(delimiter === ",", "ImageJsonDelimiter");
+				need$11(delimiter === ",", "ImageJsonDelimiter");
 				await whitespace();
 			}
 			return result;
@@ -150240,17 +150310,17 @@ async function readImageJson(stream, { maxBytes, budget, fields } = {}) {
 				"}"
 			].includes(q)) break;
 			raw += await take();
-			need$10(raw.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
+			need$11(raw.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageJsonScalarLimit");
 		}
-		need$10(raw === "null" || raw === "true" || raw === "false" || /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw), "ImageJsonValue");
+		need$11(raw === "null" || raw === "true" || raw === "false" || /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw), "ImageJsonValue");
 		const parsed = JSON.parse(raw);
-		need$10(typeof parsed !== "number" || Number.isFinite(parsed), "ImageJsonNumber");
+		need$11(typeof parsed !== "number" || Number.isFinite(parsed), "ImageJsonNumber");
 		return keep ? parsed : void 0;
 	};
 	try {
 		const result = await value(0, true);
 		await whitespace();
-		need$10(await peek() === null, "ImageJsonTrailing");
+		need$11(await peek() === null, "ImageJsonTrailing");
 		return result;
 	} finally {
 		await iterator.return?.();
@@ -150265,14 +150335,14 @@ async function* verifyImageBytes(stream, descriptor, budget, { transfer = false 
 	try {
 		for await (const value of stream) {
 			budget.check();
-			need$10(budget.now() < until, "ImageBlobTimeout");
+			need$11(budget.now() < until, "ImageBlobTimeout");
 			const bytes = bytesOf(value);
 			count += bytes.length;
-			need$10(count <= descriptor.size, "ImageBlobSize");
+			need$11(count <= descriptor.size, "ImageBlobSize");
 			h.update(bytes);
 			yield bytes;
 		}
-		need$10(count === descriptor.size && "sha256:" + h.digest("hex") === descriptor.digest, "ImageBlobDigest");
+		need$11(count === descriptor.size && "sha256:" + h.digest("hex") === descriptor.digest, "ImageBlobDigest");
 		complete = true;
 	} finally {
 		if (!complete) {
@@ -150285,7 +150355,7 @@ async function* verifyImageBytes(stream, descriptor, budget, { transfer = false 
 /** A separate read-only class for the single CONTROL image. It is never a
 * three-image DATA graph, a source-copy handle or a publication permission. */
 function validateControlBinding(binding) {
-	need$10(record$1(binding) && Object.keys(binding).sort().join() === [
+	need$11(record$1(binding) && Object.keys(binding).sort().join() === [
 		"account",
 		"region",
 		"repositoryName",
@@ -150293,12 +150363,12 @@ function validateControlBinding(binding) {
 		"arm64Digest",
 		"configDigest"
 	].sort().join(), "ControlImageBinding");
-	need$10(typeof binding.account === "string" && /^\d{12}$/.test(binding.account) && typeof binding.region === "string" && /^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/.test(binding.region) && ["mem9-on-aws/bootstrap", "mem9-on-aws/preview/bootstrap"].includes(binding.repositoryName) && hexDigest(binding.arm64Digest) && hexDigest(binding.configDigest), "ControlImageScope");
+	need$11(typeof binding.account === "string" && /^\d{12}$/.test(binding.account) && typeof binding.region === "string" && /^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/.test(binding.region) && ["mem9-on-aws/bootstrap", "mem9-on-aws/preview/bootstrap"].includes(binding.repositoryName) && hexDigest(binding.arm64Digest) && hexDigest(binding.configDigest), "ControlImageScope");
 	validateImageDescriptor(binding.root, "manifest");
-	need$10(indexes$3.has(binding.root.mediaType), "ImageRootIndexRequired");
+	need$11(indexes$3.has(binding.root.mediaType), "ImageRootIndexRequired");
 }
 function controlGraph(binding, options) {
-	const pinned = freeze$1(structuredClone(binding));
+	const pinned = freeze$2(structuredClone(binding));
 	return readGraph([{
 		component: "bootstrap",
 		repositoryName: pinned.repositoryName,
@@ -150314,7 +150384,7 @@ function controlGraph(binding, options) {
 * avoids a module-initialization cycle; the ordinary graph API stays pure IO.
 */
 async function readOwnedControlImageCache(binding, options = {}) {
-	need$10(record$1(options) && Object.keys(options).every((k) => [
+	need$11(record$1(options) && Object.keys(options).every((k) => [
 		"directory",
 		"inventory",
 		"budget",
@@ -150324,24 +150394,27 @@ async function readOwnedControlImageCache(binding, options = {}) {
 	const { budget } = options;
 	assertImageBudget(budget);
 	const prepaid = prepaidControlBudgets.get(budget);
-	if (options.metadataReads !== void 0) need$10(prepaid?.metadataReads === options.metadataReads, "ControlCacheAcquisitionMismatch");
+	if (options.metadataReads !== void 0) need$11(prepaid?.metadataReads === options.metadataReads, "ControlCacheAcquisitionMismatch");
 	if (prepaid) {
-		need$10(!prepaid.used, "ControlCacheBudgetConsumed");
+		need$11(!prepaid.used, "ControlCacheBudgetConsumed");
 		prepaid.used = true;
 	}
 	const { openOwnedNonrootControlCache } = await Promise.resolve().then(() => (init_production_nonroot_control_cache(), production_nonroot_control_cache_exports));
+	budget.check();
 	const cache = await openOwnedNonrootControlCache({
 		...options,
 		binding
 	});
 	try {
+		budget.check();
 		const graph = await controlGraph(binding, {
 			budget,
 			store: cache.store,
 			readManifest: cache.readManifest,
 			readBlob: cache.readBlob
 		});
-		need$10(canaryEvidenceHash(graph.inventory) === canaryEvidenceHash(options.inventory), "NonrootControlCacheGraphChanged");
+		budget.check();
+		need$11(canaryEvidenceHash(graph.inventory) === canaryEvidenceHash(options.inventory), "NonrootControlCacheGraphChanged");
 		return {
 			graph,
 			cache
@@ -150355,7 +150428,7 @@ async function readOwnedControlImageCache(binding, options = {}) {
 * graph receipt. The fixed local reader reconstructs every edge/attestation,
 * then requires exact coverage of the downloaded nodes before returning it. */
 async function readCollectedControlImageCache(binding, options = {}) {
-	need$10(record$1(options) && Object.keys(options).every((k) => [
+	need$11(record$1(options) && Object.keys(options).every((k) => [
 		"directory",
 		"nodes",
 		"budget",
@@ -150365,11 +150438,11 @@ async function readCollectedControlImageCache(binding, options = {}) {
 	const { budget } = options;
 	assertImageBudget(budget);
 	const prepaid = prepaidControlBudgets.get(budget);
-	need$10(prepaid && prepaid.metadataReads === options.metadataReads && !prepaid.used, "ControlCacheAcquisitionMismatch");
+	need$11(prepaid && prepaid.metadataReads === options.metadataReads && !prepaid.used, "ControlCacheAcquisitionMismatch");
 	prepaid.used = true;
-	need$10(Array.isArray(options.nodes) && options.nodes.length > 0, "NonrootControlCacheInventory");
+	need$11(Array.isArray(options.nodes) && options.nodes.length > 0, "NonrootControlCacheInventory");
 	const nodes = structuredClone(options.nodes).sort((a, b) => a.digest.localeCompare(b.digest));
-	for (const node of nodes) need$10(record$1(node) && Object.keys(node).sort().join() === "digest,mediaType,size", "NonrootControlCacheDescriptor");
+	for (const node of nodes) need$11(record$1(node) && Object.keys(node).sort().join() === "digest,mediaType,size", "NonrootControlCacheDescriptor");
 	const inventory = {
 		kind: "readonly-control-image-graph",
 		roots: [{
@@ -150394,7 +150467,7 @@ async function readCollectedControlImageCache(binding, options = {}) {
 			readManifest: cache.readManifest,
 			readBlob: cache.readBlob
 		});
-		need$10(canaryEvidenceHash(graph.inventory.nodes) === canaryEvidenceHash(nodes), "NonrootControlCacheGraphChanged");
+		need$11(canaryEvidenceHash(graph.inventory.nodes) === canaryEvidenceHash(nodes), "NonrootControlCacheGraphChanged");
 		await cache.check();
 		return {
 			graph,
@@ -150408,11 +150481,11 @@ async function readCollectedControlImageCache(binding, options = {}) {
 async function readGraph(roots, { readManifest, readBlob, source, store, budget, side }, controlBinding) {
 	readManifest ??= source && (({ repositoryName, descriptor }) => source.manifest(repositoryName, descriptor));
 	readBlob ??= source && (({ repositoryName, descriptor }) => source.blob(repositoryName, descriptor));
-	need$10(typeof readManifest === "function" && typeof readBlob === "function" && typeof store?.put === "function" && typeof store.open === "function", "ImageReadAdapter");
+	need$11(typeof readManifest === "function" && typeof readBlob === "function" && typeof store?.put === "function" && typeof store.open === "function", "ImageReadAdapter");
 	const manifestMap = /* @__PURE__ */ new Map(), blobs = /* @__PURE__ */ new Map(), descriptors = /* @__PURE__ */ new Map(), visiting = /* @__PURE__ */ new Set(), done = /* @__PURE__ */ new Set(), origins = /* @__PURE__ */ new Set(), edges = [], attestations = [], images = /* @__PURE__ */ new Map(), readbacks = [];
 	const register = (d) => {
 		const before = descriptors.get(d.digest);
-		if (before) need$10(before.size === d.size && before.mediaType === d.mediaType, "ImageDescriptorConflict");
+		if (before) need$11(before.size === d.size && before.mediaType === d.mediaType, "ImageDescriptorConflict");
 		else descriptors.set(d.digest, {
 			digest: d.digest,
 			size: d.size,
@@ -150437,16 +150510,20 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 				descriptor: d,
 				signal: budget.signal
 			});
+			budget.check();
 			let consumed = false;
 			const checked = (async function* () {
 				yield* verifyImageBytes(input, d, budget);
+				budget.check();
 				consumed = true;
 			})();
 			if (!blobs.has(d.digest)) {
 				await store.put(d, checked);
-				need$10(consumed, "ImageBlobNotConsumed");
+				budget.check();
+				need$11(consumed, "ImageBlobNotConsumed");
 				blobs.set(d.digest, { ...descriptors.get(d.digest) });
-			} else for await (const _ of checked);
+			} else for await (const _ of checked) budget.check();
+			budget.check();
 			readbacks.push({
 				repositoryName,
 				...descriptors.get(d.digest)
@@ -150468,12 +150545,12 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		edges.push(row);
 	};
 	const visit = async (root, d, depth) => {
-		need$10(depth <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "ImageGraphDepth");
+		need$11(depth <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "ImageGraphDepth");
 		validateImageDescriptor(d, "manifest");
 		register(d);
 		budget.manifest(d);
 		const repositoryName = side === "control" ? root.repositoryName : side === "source" ? root.sourceRepository : root.destinationRepository, key = repositoryName + "\0" + d.digest;
-		need$10(!visiting.has(key), "ImageGraphCycle");
+		need$11(!visiting.has(key), "ImageGraphCycle");
 		if (done.has(key)) return;
 		visiting.add(key);
 		const leave = budget.enter();
@@ -150483,12 +150560,14 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		}
 		let bytes;
 		try {
-			bytes = bytesOf(await readManifest({
+			const received = await readManifest({
 				repositoryName,
 				descriptor: d,
 				signal: budget.signal
-			}));
-			need$10(bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageManifestDigest");
+			});
+			budget.check();
+			bytes = bytesOf(received);
+			need$11(bytes.length === d.size && imageDigest(bytes) === d.digest, "ImageManifestDigest");
 		} finally {
 			leave();
 		}
@@ -150496,7 +150575,8 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			maxBytes: IMAGE_TRANSITION_LIMITS.maxManifestBytes,
 			budget
 		});
-		need$10(record$1(document) && document.schemaVersion === 2 && document.mediaType === d.mediaType, "ImageManifestSchema");
+		budget.check();
+		need$11(record$1(document) && document.schemaVersion === 2 && document.mediaType === d.mediaType, "ImageManifestSchema");
 		readbacks.push({
 			repositoryName,
 			...descriptors.get(d.digest)
@@ -150517,28 +150597,31 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			"subject",
 			"artifactType"
 		];
-		need$10(Object.keys(document).every((k) => allowed.includes(k)), "ImageManifestFields");
+		need$11(Object.keys(document).every((k) => allowed.includes(k)), "ImageManifestFields");
 		if (!manifestMap.has(d.digest)) {
 			await store.put(d, oneChunk(bytes));
+			budget.check();
 			manifestMap.set(d.digest, {
 				...descriptors.get(d.digest),
 				document
 			});
 		}
 		if (indexes$3.has(d.mediaType)) {
-			need$10(Array.isArray(document.manifests) && document.manifests.length > 0 && document.manifests.length <= IMAGE_TRANSITION_LIMITS.maxEdges, "ImageIndexChildren");
+			need$11(Array.isArray(document.manifests) && document.manifests.length > 0 && document.manifests.length <= IMAGE_TRANSITION_LIMITS.maxEdges, "ImageIndexChildren");
 			const children = /* @__PURE__ */ new Set();
 			for (const [index, child] of document.manifests.entries()) {
-				need$10(!children.has(child.digest), "ImageDuplicateManifestEdge");
+				need$11(!children.has(child.digest), "ImageDuplicateManifestEdge");
 				children.add(child.digest);
 				edge(root.component, d.digest, child, "manifest", index);
 				await visit(root, child, depth + 1);
+				budget.check();
 			}
-			if (d.digest === root.root.digest) need$10(document.manifests.filter((c) => c.digest === root.arm64Digest && c.platform?.os === "linux" && c.platform.architecture === "arm64").length === 1, "ImageArm64Selection");
+			if (d.digest === root.root.digest) need$11(document.manifests.filter((c) => c.digest === root.arm64Digest && c.platform?.os === "linux" && c.platform.architecture === "arm64").length === 1, "ImageArm64Selection");
 		} else {
-			need$10(Array.isArray(document.layers) && document.layers.length <= IMAGE_TRANSITION_LIMITS.maxBlobNodes && configs.has(document.config?.mediaType), "ImageManifestConfig");
+			need$11(Array.isArray(document.layers) && document.layers.length <= IMAGE_TRANSITION_LIMITS.maxBlobNodes && configs.has(document.config?.mediaType), "ImageManifestConfig");
 			edge(root.component, d.digest, document.config, "config", 0);
 			await blob(repositoryName, document.config);
+			budget.check();
 			const config = await readImageJson(verifyImageBytes(store.open(document.config), document.config, budget), {
 				maxBytes: IMAGE_TRANSITION_LIMITS.maxConfigBytes,
 				budget,
@@ -150548,13 +150631,15 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 					"rootfs"
 				]
 			});
-			need$10(record$1(config), "ImageConfigSchema");
-			if (document.config.mediaType === IMAGE_MEDIA.emptyConfig) need$10(Object.keys(config).length === 0, "ImageEmptyConfig");
+			budget.check();
+			need$11(record$1(config), "ImageConfigSchema");
+			if (document.config.mediaType === IMAGE_MEDIA.emptyConfig) need$11(Object.keys(config).length === 0, "ImageEmptyConfig");
 			let payloads = 0;
 			for (const [index, layer] of document.layers.entries()) {
-				need$10(IMAGE_LAYER_MEDIA.includes(layer.mediaType) || layer.mediaType === IMAGE_MEDIA.attestation, "ImageLayerMedia");
+				need$11(IMAGE_LAYER_MEDIA.includes(layer.mediaType) || layer.mediaType === IMAGE_MEDIA.attestation, "ImageLayerMedia");
 				edge(root.component, d.digest, layer, "layer", index);
 				await blob(repositoryName, layer);
+				budget.check();
 				if (layer.mediaType === IMAGE_MEDIA.attestation) {
 					payloads++;
 					const payload = await readImageJson(verifyImageBytes(store.open(layer), layer, budget), {
@@ -150566,7 +150651,8 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 							"predicateType"
 						]
 					});
-					need$10(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && Array.isArray(payload.subject) && payload.subject.length > 0 && payload.subject.every((s) => record$1(s) && record$1(s.digest) && Object.keys(s.digest).length === 1 && s.digest.sha256 === root.arm64Digest.slice(7)), "ImageAttestationSubject");
+					budget.check();
+					need$11(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && Array.isArray(payload.subject) && payload.subject.length > 0 && payload.subject.every((s) => record$1(s) && record$1(s.digest) && Object.keys(s.digest).length === 1 && s.digest.sha256 === root.arm64Digest.slice(7)), "ImageAttestationSubject");
 					attestations.push({
 						component: root.component,
 						manifestDigest: d.digest,
@@ -150577,12 +150663,12 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 				}
 			}
 			if (payloads) {
-				need$10(payloads === document.layers.length, "ImageMixedArtifactLayers");
-				if (d.annotations?.["vnd.docker.reference.digest"] !== void 0) need$10(d.annotations["vnd.docker.reference.digest"] === root.arm64Digest, "ImageAttestationSubject");
-				if (d.annotations?.["vnd.docker.reference.type"] !== void 0) need$10(d.annotations["vnd.docker.reference.type"] === "attestation-manifest", "ImageAttestationType");
-			} else need$10(config.os === "linux" && ["arm64", "amd64"].includes(config.architecture) && config.rootfs?.type === "layers" && Array.isArray(config.rootfs.diff_ids) && config.rootfs.diff_ids.length === document.layers.length && config.rootfs.diff_ids.every(hexDigest), "ImageRuntimeConfig");
+				need$11(payloads === document.layers.length, "ImageMixedArtifactLayers");
+				if (d.annotations?.["vnd.docker.reference.digest"] !== void 0) need$11(d.annotations["vnd.docker.reference.digest"] === root.arm64Digest, "ImageAttestationSubject");
+				if (d.annotations?.["vnd.docker.reference.type"] !== void 0) need$11(d.annotations["vnd.docker.reference.type"] === "attestation-manifest", "ImageAttestationType");
+			} else need$11(config.os === "linux" && ["arm64", "amd64"].includes(config.architecture) && config.rootfs?.type === "layers" && Array.isArray(config.rootfs.diff_ids) && config.rootfs.diff_ids.length === document.layers.length && config.rootfs.diff_ids.every(hexDigest), "ImageRuntimeConfig");
 			if (d.digest === root.arm64Digest) {
-				need$10(!payloads && config.architecture === "arm64", "ImageArm64Config");
+				need$11(!payloads && config.architecture === "arm64", "ImageArm64Config");
 				images.set(root.component, {
 					manifest: descriptors.get(d.digest),
 					config: document.config,
@@ -150592,17 +150678,21 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 			}
 		}
 		if (document.subject) {
-			need$10(document.subject.digest === root.arm64Digest, "ImageArtifactSubject");
+			need$11(document.subject.digest === root.arm64Digest, "ImageArtifactSubject");
 			edge(root.component, d.digest, document.subject, "subject", 0);
 			await visit(root, document.subject, depth + 1);
+			budget.check();
 		}
 		visiting.delete(key);
 		done.add(key);
 	};
-	for (const root of roots) await visit(root, root.root, 0);
-	need$10(images.size === (controlBinding ? 1 : 3), "ImageMissingArm64");
-	if (controlBinding) need$10(images.get("bootstrap")?.config.digest === controlBinding.configDigest, "ControlImageConfigBinding");
-	const inventory = freeze$1({
+	for (const root of roots) {
+		await visit(root, root.root, 0);
+		budget.check();
+	}
+	need$11(images.size === (controlBinding ? 1 : 3), "ImageMissingArm64");
+	if (controlBinding) need$11(images.get("bootstrap")?.config.digest === controlBinding.configDigest, "ControlImageConfigBinding");
+	const inventory = freeze$2({
 		version: 1,
 		...controlBinding ? { kind: "readonly-control-image-graph" } : {},
 		limitsHash: IMAGE_TRANSITION_LIMITS_HASH,
@@ -150626,16 +150716,16 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		manifests: manifestMap,
 		blobs,
 		images,
-		readbacks: freeze$1(readbacks)
+		readbacks: freeze$2(readbacks)
 	});
 	return handle;
 }
 function controlImageGraphBinding(handle) {
 	const state = contexts$1.get(handle);
-	need$10(state?.side === "control" && state.controlBinding, "ControlImageContextRequired");
+	need$11(state?.side === "control" && state.controlBinding, "ControlImageContextRequired");
 	state.budget.check();
 	const binding = state.controlBinding;
-	return freeze$1({
+	return freeze$2({
 		account: binding.account,
 		region: binding.region,
 		repositoryName: binding.repositoryName,
@@ -150646,24 +150736,24 @@ function controlImageGraphBinding(handle) {
 	});
 }
 function imageGraphState(handle) {
-	need$10(contexts$1.has(handle), "ImageGraphContextRequired");
+	need$11(contexts$1.has(handle), "ImageGraphContextRequired");
 	const s = contexts$1.get(handle);
 	return {
-		roots: freeze$1(structuredClone(s.roots)),
+		roots: freeze$2(structuredClone(s.roots)),
 		side: s.side,
 		budget: s.budget,
-		manifests: new Map([...s.manifests].map(([k, v]) => [k, freeze$1(structuredClone(v))])),
-		blobs: new Map([...s.blobs].map(([k, v]) => [k, freeze$1(structuredClone(v))])),
-		images: new Map([...s.images].map(([k, v]) => [k, freeze$1(structuredClone(v))])),
+		manifests: new Map([...s.manifests].map(([k, v]) => [k, freeze$2(structuredClone(v))])),
+		blobs: new Map([...s.blobs].map(([k, v]) => [k, freeze$2(structuredClone(v))])),
+		images: new Map([...s.images].map(([k, v]) => [k, freeze$2(structuredClone(v))])),
 		readbacks: structuredClone(s.readbacks),
 		store: Object.freeze({ open(d) {
 			const known = s.blobs.get(d.digest) ?? s.manifests.get(d.digest);
-			need$10(known && known.size === d.size && known.mediaType === d.mediaType, "ImageCacheDescriptor");
+			need$11(known && known.size === d.size && known.mediaType === d.mediaType, "ImageCacheDescriptor");
 			return verifyImageBytes(s.store.open(d), d, s.budget);
 		} })
 	};
 }
-var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts$1, budgets, prepaidControlBudgets, imageDigest, imageFailure, need$10, record$1, integer, hexDigest, freeze$1, bytesOf, oneChunk;
+var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts$1, budgets, prepaidControlBudgets, imageDigest, imageFailure, need$11, record$1, integer, hexDigest, freeze$2, bytesOf, oneChunk;
 var init_production_image_graph = __esmMin((() => {
 	init_production_control_capacity();
 	init_production_image_transition();
@@ -150717,12 +150807,134 @@ var init_production_image_graph = __esmMin((() => {
 			hold: true
 		});
 	};
-	need$10 = (ok, code = "ImageGraphInvalid") => {
+	need$11 = (ok, code = "ImageGraphInvalid") => {
 		if (!ok) imageFailure(code);
 	};
 	record$1 = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 	integer = (v) => Number.isSafeInteger(v) && v >= 0;
 	hexDigest = (v) => typeof v === "string" && /^sha256:[a-f0-9]{64}$/.test(v);
+	freeze$2 = (v) => {
+		if (v && typeof v === "object") {
+			Object.values(v).forEach(freeze$2);
+			Object.freeze(v);
+		}
+		return v;
+	};
+	bytesOf = (value) => {
+		need$11(value instanceof Uint8Array, "ImageByteStreamRequired");
+		need$11(value.byteLength <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageStreamBufferLimit");
+		return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+	};
+	oneChunk = (bytes) => (async function* () {
+		yield bytes;
+	})();
+}));
+//#endregion
+//#region scripts/lib/production-image-filesystem-resolver.mjs
+/** Pure final-overlay resolution shared with the genuine native accessor.
+* DATA rows never create a filesystem verification context. */
+function normalize$2(path, { link = false, base = "" } = {}) {
+	need$10(typeof path === "string" && Buffer.byteLength(path) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && !path.includes("\0") && !path.includes("\\"), "ImageTarPath");
+	need$10(link || !path.startsWith("/"), "ImageTarAbsolutePath");
+	const parts = link && !path.startsWith("/") ? base.split("/").filter(Boolean) : [];
+	for (const part of path.split("/")) {
+		if (!part || part === ".") continue;
+		if (part === "..") {
+			need$10(link && parts.length > 0, "ImageTarEscape");
+			parts.pop();
+		} else parts.push(part);
+	}
+	return parts.join("/");
+}
+function resolved(nodes, path, { parent = false, missing = true, onLink } = {}) {
+	let rest = normalize$2(path).split("/").filter(Boolean), prefix = [], hops = 0;
+	while (rest.length) {
+		const part = rest.shift();
+		prefix.push(part);
+		const name = prefix.join("/"), node = nodes.get(name);
+		if (node?.type === "symlink" && (!parent || rest.length)) {
+			need$10(++hops <= IMAGE_TRANSITION_LIMITS.maxVirtualLinkHops, "ImageVirtualLinkLoop");
+			onLink?.(name, node);
+			rest = [...normalize$2(node.link, {
+				link: true,
+				base: prefix.slice(0, -1).join("/")
+			}).split("/").filter(Boolean), ...rest];
+			prefix = [];
+			continue;
+		}
+		if (rest.length && node) need$10(node.type === "directory", "ImageVirtualParent");
+		if (!node && !missing) imageFailure("ImageVirtualLinkMissing");
+	}
+	return prefix.join("/");
+}
+function resolveImageFilesystemFile(entries, path, { onRead } = {}) {
+	need$10(typeof path === "string" && path.startsWith("/") && path !== "/" && posix.normalize(path) === path && !path.endsWith("/"), "ImageRuntimeFilePath");
+	const all = new Map(entries.map(({ path, ...node }) => [path, node])), links = [];
+	const nodes = onRead ? { get(name) {
+		const node = all.get(name);
+		if (node) onRead(name, node);
+		return node;
+	} } : all;
+	const effectiveId = (node, key) => {
+		const raw = node.pax?.[key];
+		if (raw === void 0) return node[key];
+		need$10(typeof raw === "string" && /^(?:0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(Number(raw)), "ImageRuntimeFileOwner");
+		return Number(raw);
+	};
+	const metadata = (name, node) => ({
+		path: "/" + name,
+		type: node.type,
+		...node.implicit ? { implicit: true } : {},
+		...node.mode === void 0 ? {} : { mode: node.mode },
+		...effectiveId(node, "uid") === void 0 ? {} : { uid: effectiveId(node, "uid") },
+		...effectiveId(node, "gid") === void 0 ? {} : { gid: effectiveId(node, "gid") },
+		privilegeAttributes: Object.keys(node.pax ?? {}).filter((key) => key === "SCHILY.xattr.security.capability").sort(),
+		...node.type === "symlink" ? { link: node.link } : {}
+	});
+	const name = resolved(nodes, normalize$2(path, { link: true }), {
+		missing: false,
+		onLink: (name, node) => links.push(metadata(name, node))
+	}), node = nodes.get(name);
+	need$10(node?.type === "file" && node.content, "ImageRuntimeFileRequired");
+	const parentRecords = /* @__PURE__ */ new Map();
+	for (const start of [
+		normalize$2(path, { link: true }),
+		name,
+		...links.map((link) => link.path.slice(1))
+	]) {
+		let parent = posix.dirname(start);
+		while (parent !== "." && parent !== "/") {
+			const original = nodes.get(parent);
+			if (original) {
+				need$10(["directory", "symlink"].includes(original.type), "ImageVirtualParent");
+				parentRecords.set(parent, metadata(parent, original));
+			} else {
+				const actual = resolved(nodes, parent, { missing: false }), entry = nodes.get(actual);
+				need$10(entry?.type === "directory", "ImageVirtualParent");
+				parentRecords.set(actual, metadata(actual, entry));
+			}
+			parent = posix.dirname(parent);
+		}
+	}
+	return freeze$1({
+		...metadata(name, node),
+		path,
+		resolvedPath: "/" + name,
+		sha256: node.content.sha256,
+		size: node.content.size,
+		layerDigest: node.content.layerDigest,
+		symlinkChain: links,
+		parents: [...parentRecords.values()].sort((a, b) => a.path.localeCompare(b.path)),
+		rootMetadata: "not-recorded"
+	});
+}
+var need$10, freeze$1;
+var init_production_image_filesystem_resolver = __esmMin((() => {
+	init_production_image_transition();
+	init_production_image_graph();
+	need$10 = (v, code = "ImageFilesystemInvalid") => {
+		if (!v) imageFailure(code);
+	};
 	freeze$1 = (v) => {
 		if (v && typeof v === "object") {
 			Object.values(v).forEach(freeze$1);
@@ -150730,14 +150942,6 @@ var init_production_image_graph = __esmMin((() => {
 		}
 		return v;
 	};
-	bytesOf = (value) => {
-		need$10(value instanceof Uint8Array, "ImageByteStreamRequired");
-		need$10(value.byteLength <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageStreamBufferLimit");
-		return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-	};
-	oneChunk = (bytes) => (async function* () {
-		yield bytes;
-	})();
 }));
 //#endregion
 //#region scripts/lib/production-image-filesystem.mjs
@@ -150759,19 +150963,6 @@ function numeric(b, { negative = false } = {}) {
 	}
 	need$9(Number.isSafeInteger(value) && (negative || value >= 0), "ImageTarNumber");
 	return value;
-}
-function normalize$2(path, { link = false, base = "" } = {}) {
-	need$9(typeof path === "string" && Buffer.byteLength(path) <= IMAGE_TRANSITION_LIMITS.maxPathBytes && !path.includes("\0") && !path.includes("\\"), "ImageTarPath");
-	need$9(link || !path.startsWith("/"), "ImageTarAbsolutePath");
-	const parts = link && !path.startsWith("/") ? base.split("/").filter(Boolean) : [];
-	for (const part of path.split("/")) {
-		if (!part || part === ".") continue;
-		if (part === "..") {
-			need$9(link && parts.length > 0, "ImageTarEscape");
-			parts.pop();
-		} else parts.push(part);
-	}
-	return parts.join("/");
 }
 function filesystemPass(budget) {
 	const limit = budget.uncompressedBytesLimit, entryLimit = budget.processedEntriesLimit;
@@ -150811,11 +151002,13 @@ async function* unpacked(layer, diffId, readBlob, budget, pass = filesystemPass(
 	const sha = createHash("sha256");
 	try {
 		for await (const chunk of output) {
+			budget.check();
 			need$9(chunk.length <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageFilesystemBuffer");
 			pass.add(chunk.length);
 			sha.update(chunk);
 			yield chunk;
 		}
+		budget.check();
 		need$9("sha256:" + sha.digest("hex") === diffId, "ImageLayerDiffId");
 	} finally {
 		const stopped = [.../* @__PURE__ */ new Set([output, source])].map((stream) => finished(stream, { cleanup: true }).catch((error) => {
@@ -150859,27 +151052,6 @@ function pax(bytes) {
 	}
 	return result;
 }
-function resolved(nodes, path, { parent = false, missing = true, onLink } = {}) {
-	let rest = normalize$2(path).split("/").filter(Boolean), prefix = [], hops = 0;
-	while (rest.length) {
-		const part = rest.shift();
-		prefix.push(part);
-		const name = prefix.join("/"), node = nodes.get(name);
-		if (node?.type === "symlink" && (!parent || rest.length)) {
-			need$9(++hops <= IMAGE_TRANSITION_LIMITS.maxVirtualLinkHops, "ImageVirtualLinkLoop");
-			onLink?.(name, node);
-			rest = [...normalize$2(node.link, {
-				link: true,
-				base: prefix.slice(0, -1).join("/")
-			}).split("/").filter(Boolean), ...rest];
-			prefix = [];
-			continue;
-		}
-		if (rest.length && node) need$9(node.type === "directory", "ImageVirtualParent");
-		if (!node && !missing) imageFailure("ImageVirtualLinkMissing");
-	}
-	return prefix.join("/");
-}
 function parents(nodes, path, layer, pass) {
 	const parts = path.split("/");
 	parts.pop();
@@ -150902,16 +151074,20 @@ function remove(nodes, path, { olderThan } = {}) {
 	for (const [name, node] of nodes) if ((name === path || name.startsWith(path + "/")) && (olderThan === void 0 || node.layer < olderThan)) nodes.delete(name);
 }
 async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
-	const layerStart = pass.bytes, cursor = new Cursor$1(unpacked(layer, diffId, readBlob, budget, pass));
+	const layerStart = pass.bytes, cursor = new Cursor$1(unpacked(layer, diffId, readBlob, budget, pass), budget);
 	let local = {}, global = {}, longPath, longLink;
 	try {
 		while (true) {
 			budget.check();
 			const header = await cursor.read(512);
+			budget.check();
 			if (zero$4(header)) {
-				need$9(zero$4(await cursor.read(512)), "ImageTarTerminator");
+				const terminator = await cursor.read(512);
+				budget.check();
+				need$9(zero$4(terminator), "ImageTarTerminator");
 				need$9(!Object.keys(local).length && longPath === void 0 && longLink === void 0, "ImageTarDanglingExtension");
 				await cursor.drain({ zeros: true });
+				budget.check();
 				break;
 			}
 			pass.entry();
@@ -150931,7 +151107,9 @@ async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
 				pass.check(layerStart + cursor.offset + Math.ceil(rawSize / 512) * 512);
 				need$9(rawSize <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageTarExtensionSize");
 				const bytes = await cursor.read(rawSize);
+				budget.check();
 				await cursor.skip((512 - rawSize % 512) % 512);
+				budget.check();
 				if (type === "x") {
 					need$9(!Object.keys(local).length, "ImagePaxDuplicateHeader");
 					local = pax(bytes);
@@ -150996,8 +151174,13 @@ async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
 			};
 			if (type === "0") {
 				const offset = cursor.offset, sha = createHash("sha256");
-				for await (const chunk of cursor.chunks(size)) sha.update(chunk);
+				for await (const chunk of cursor.chunks(size)) {
+					budget.check();
+					sha.update(chunk);
+				}
+				budget.check();
 				await cursor.skip((512 - size % 512) % 512);
+				budget.check();
 				remove(nodes, path);
 				nodes.set(path, {
 					...metadata,
@@ -151048,7 +151231,7 @@ async function applyLayer(nodes, layer, diffId, index, readBlob, budget, pass) {
 }
 async function packageDatabase(content, layers, diffIds, readBlob, budget, requirements) {
 	need$9(content.size <= IMAGE_TRANSITION_LIMITS.maxPackageDatabaseBytes, "ImagePackageDatabaseLimit");
-	const layer = layers[content.layer], cursor = new Cursor$1(unpacked(layer, diffIds[content.layer], readBlob, budget)), decode = decoder(), sha = createHash("sha256");
+	const layer = layers[content.layer], cursor = new Cursor$1(unpacked(layer, diffIds[content.layer], readBlob, budget), budget), decode = decoder(), sha = createHash("sha256");
 	const matches = new Map(requirements.map((r) => [r.name, []]));
 	let pending = "", databaseText = "", pkg = {};
 	const line = (value) => {
@@ -151067,7 +151250,9 @@ async function packageDatabase(content, layers, diffIds, readBlob, budget, requi
 	};
 	try {
 		await cursor.skip(content.offset);
+		budget.check();
 		for await (const bytes of cursor.chunks(content.size)) {
+			budget.check();
 			sha.update(bytes);
 			const decoded = decode.decode(bytes, { stream: true });
 			databaseText += decoded;
@@ -151077,12 +151262,14 @@ async function packageDatabase(content, layers, diffIds, readBlob, budget, requi
 			pending = rows.pop();
 			for (const row of rows) line(row);
 		}
+		budget.check();
 		const final = decode.decode();
 		databaseText += final;
 		pending += final;
 		if (pending) line(pending);
 		line("");
 		await cursor.drain();
+		budget.check();
 		need$9(sha.digest("hex") === content.sha256, "ImagePackageDatabaseChanged");
 	} finally {
 		await cursor.close();
@@ -151140,7 +151327,10 @@ async function inspectImageFilesystem(graph, { component, requirements = [], bud
 		"version"
 	].sort().join() && r.manager === "apk" && typeof r.path === "string" && r.path.startsWith("/") && typeof r.name === "string" && /^[a-zA-Z0-9+_.-]{1,256}$/.test(r.name) && typeof r.version === "string" && /^[^\s\0]{1,512}$/.test(r.version), "ImagePackageRequirements");
 	const nodes = /* @__PURE__ */ new Map(), readBlob = (d) => state.store.open(d), pass = filesystemPass(budget);
-	for (let i = 0; i < image.layers.length; i++) await applyLayer(nodes, image.layers[i], image.diffIds[i], i, readBlob, budget, pass);
+	for (let i = 0; i < image.layers.length; i++) {
+		await applyLayer(nodes, image.layers[i], image.diffIds[i], i, readBlob, budget, pass);
+		budget.check();
+	}
 	for (const [path, node] of nodes) if (node.type === "symlink") resolved(nodes, path);
 	const groups = /* @__PURE__ */ new Map();
 	for (const r of requirements) {
@@ -151156,6 +151346,7 @@ async function inspectImageFilesystem(graph, { component, requirements = [], bud
 	const packages = [], databases = [];
 	for (const group of groups.values()) {
 		const db = await packageDatabase(group.content, image.layers, image.diffIds, readBlob, budget, group.requirements);
+		budget.check();
 		packages.push(...db.packages);
 		databases.push(db);
 	}
@@ -151243,59 +151434,7 @@ function inspectImageFilesystemFile(context, path, options) {
 	need$9(state && state.kind !== "archived-filesystem-evidence" && state.entries, "ImageFilesystemContextRequired");
 	need$9(typeof path === "string" && path.startsWith("/") && path !== "/" && posix.normalize(path) === path && !path.endsWith("/"), "ImageRuntimeFilePath");
 	prepayFilesystemRead(state, options);
-	const nodes = new Map(state.entries.map(({ path, ...node }) => [path, node])), links = [];
-	const effectiveId = (node, key) => {
-		const raw = node.pax?.[key];
-		if (raw === void 0) return node[key];
-		need$9(typeof raw === "string" && /^(?:0|[1-9][0-9]*)$/.test(raw) && Number.isSafeInteger(Number(raw)), "ImageRuntimeFileOwner");
-		return Number(raw);
-	};
-	const metadata = (name, node) => ({
-		path: "/" + name,
-		type: node.type,
-		...node.implicit ? { implicit: true } : {},
-		...node.mode === void 0 ? {} : { mode: node.mode },
-		...effectiveId(node, "uid") === void 0 ? {} : { uid: effectiveId(node, "uid") },
-		...effectiveId(node, "gid") === void 0 ? {} : { gid: effectiveId(node, "gid") },
-		privilegeAttributes: Object.keys(node.pax ?? {}).filter((key) => key === "SCHILY.xattr.security.capability").sort(),
-		...node.type === "symlink" ? { link: node.link } : {}
-	});
-	const name = resolved(nodes, normalize$2(path, { link: true }), {
-		missing: false,
-		onLink: (name, node) => links.push(metadata(name, node))
-	}), node = nodes.get(name);
-	need$9(node?.type === "file" && node.content, "ImageRuntimeFileRequired");
-	const parentRecords = /* @__PURE__ */ new Map();
-	for (const start of [
-		normalize$2(path, { link: true }),
-		name,
-		...links.map((link) => link.path.slice(1))
-	]) {
-		let parent = posix.dirname(start);
-		while (parent !== "." && parent !== "/") {
-			const original = nodes.get(parent);
-			if (original) {
-				need$9(["directory", "symlink"].includes(original.type), "ImageVirtualParent");
-				parentRecords.set(parent, metadata(parent, original));
-			} else {
-				const actual = resolved(nodes, parent, { missing: false }), entry = nodes.get(actual);
-				need$9(entry?.type === "directory", "ImageVirtualParent");
-				parentRecords.set(actual, metadata(actual, entry));
-			}
-			parent = posix.dirname(parent);
-		}
-	}
-	return freeze({
-		...metadata(name, node),
-		path,
-		resolvedPath: "/" + name,
-		sha256: node.content.sha256,
-		size: node.content.size,
-		layerDigest: node.content.layerDigest,
-		symlinkChain: links,
-		parents: [...parentRecords.values()].sort((a, b) => a.path.localeCompare(b.path)),
-		rootMetadata: "not-recorded"
-	});
+	return resolveImageFilesystemFile(state.entries, path);
 }
 /** Bounded reads for source modules, passwd and loader metadata. Large
 * executables use their verified content hash, not an unbounded Buffer. */
@@ -151305,11 +151444,14 @@ async function readImageFilesystemFile(context, path, { maxBytes = IMAGE_TRANSIT
 	need$9(fact.size <= maxBytes, "ImageRuntimeFileLimit");
 	const state = verified.get(context), graph = imageGraphState(state.graph), image = graph.images.get(state.evidence.component);
 	const content = new Map(state.entries.map(({ path, ...node }) => [path, node])).get(fact.resolvedPath.slice(1)).content, layer = image.layers[content.layer];
-	const cursor = new Cursor$1(unpacked(layer, image.diffIds[content.layer], (d) => graph.store.open(d), graph.budget));
+	const cursor = new Cursor$1(unpacked(layer, image.diffIds[content.layer], (d) => graph.store.open(d), graph.budget), graph.budget);
 	try {
 		await cursor.skip(content.offset);
+		graph.budget.check();
 		const bytes = await cursor.read(content.size);
+		graph.budget.check();
 		await cursor.drain();
+		graph.budget.check();
 		need$9(createHash("sha256").update(bytes).digest("hex") === fact.sha256, "ImageRuntimeFileChanged");
 		return bytes;
 	} finally {
@@ -151322,6 +151464,7 @@ function imageFilesystemVerificationKind(context) {
 }
 var verified, decoder, need$9, freeze, zero$4, Cursor$1;
 var init_production_image_filesystem = __esmMin((() => {
+	init_production_image_filesystem_resolver();
 	init_production_image_transition();
 	init_production_canary_verification();
 	init_production_image_graph();
@@ -151340,7 +151483,8 @@ var init_production_image_filesystem = __esmMin((() => {
 	};
 	zero$4 = (b) => b.every((v) => v === 0);
 	Cursor$1 = class {
-		constructor(stream) {
+		constructor(stream, budget) {
+			this.budget = budget;
 			this.iterator = stream[Symbol.asyncIterator]();
 			this.buffer = Buffer.alloc(0);
 			this.position = 0;
@@ -151350,6 +151494,7 @@ var init_production_image_filesystem = __esmMin((() => {
 		async available() {
 			while (this.position === this.buffer.length && !this.done) {
 				const next = await this.iterator.next();
+				this.budget.check();
 				this.done = next.done;
 				this.buffer = next.done ? Buffer.alloc(0) : next.value;
 				this.position = 0;
@@ -151359,7 +151504,9 @@ var init_production_image_filesystem = __esmMin((() => {
 		async *chunks(size) {
 			need$9(Number.isSafeInteger(size) && size >= 0);
 			while (size) {
-				need$9(await this.available() > 0, "ImageTarTruncated");
+				const available = await this.available();
+				this.budget.check();
+				need$9(available > 0, "ImageTarTruncated");
 				const count = Math.min(size, this.buffer.length - this.position);
 				const chunk = this.buffer.subarray(this.position, this.position + size);
 				this.position += count;
@@ -151371,14 +151518,22 @@ var init_production_image_filesystem = __esmMin((() => {
 		async read(size) {
 			need$9(size <= IMAGE_TRANSITION_LIMITS.maxBufferPerStreamBytes, "ImageTarBuffer");
 			const all = [];
-			for await (const chunk of this.chunks(size)) all.push(chunk);
+			for await (const chunk of this.chunks(size)) {
+				this.budget.check();
+				all.push(chunk);
+			}
+			this.budget.check();
 			return Buffer.concat(all, size);
 		}
 		async skip(size) {
-			for await (const _ of this.chunks(size));
+			for await (const _ of this.chunks(size)) this.budget.check();
+			this.budget.check();
 		}
 		async drain({ zeros = false } = {}) {
-			while (await this.available()) {
+			for (;;) {
+				const available = await this.available();
+				this.budget.check();
+				if (!available) break;
 				const count = this.buffer.length - this.position;
 				if (zeros) need$9(zero$4(this.buffer.subarray(this.position)), "ImageTarTrailingData");
 				this.position += count;
@@ -151783,7 +151938,7 @@ var init_ci_carrier_context = __esmMin((() => {
 	];
 	unchanged$1 = (a, b) => keys$2.every((k) => a[k] === b[k]);
 	decode$1 = (b) => new TextDecoder("utf-8", { fatal: true }).decode(b);
-	parse$3 = (b) => freeze$2(parseAcquisitionJson(b, 33554432));
+	parse$3 = (b) => freeze$3(parseAcquisitionJson(b, 33554432));
 	pathAllowed = (path) => typeof path === "string" && Buffer.byteLength(path) <= 4096 && !path.includes("\\") && !/[\x00-\x1f\x7f]/.test(path) && !path.startsWith("/") && posix.normalize(path) === path && !path.split("/").some((p) => p === ".." || p === ".ssh" || p.startsWith(".env") || p.includes(".local.")) && (fixedPaths.has(path) || path.startsWith(operatorPrefix) && (operator.has(path.slice(26)) || path.startsWith(operatorPrefix + "node_modules/")));
 	Cursor = class {
 		constructor(stream, cap, charge, check) {
@@ -151917,6 +152072,45 @@ var init_production_nonroot_launch = __esmMin((() => {
 		"GLIBC_TUNABLES"
 	]);
 }));
+//#endregion
+//#region scripts/lib/production-nonroot-control-current.mjs
+/** Forward the original caller's synchronous permit assertion. This helper
+* owns no authority, credit, expiry or callback result. Cleanup selects the
+* caller's already issued cleanup permit; it never revives normal work. */
+function assertNonrootControlCurrent(options, cleanup = false) {
+	const check = options?.assertCurrent;
+	if (check === void 0) return;
+	if (typeof check !== "function" || types.isAsyncFunction(check)) throw Error("NonrootControlSynchronousCurrent");
+	const result = check(cleanup);
+	if (result && typeof result.then === "function") {
+		Promise.resolve(result).catch(() => {});
+		throw Error("NonrootControlSynchronousCurrent");
+	}
+	if (result !== void 0) throw Error("NonrootControlSynchronousCurrent");
+}
+/** Pure recorded-command framing. Kept with the existing small shared helper
+* so runtime modules do not import the host archive/source replay closure. */
+function inspectNonrootRecordedCommands(rows, stages, { startedMs, completedMs }) {
+	const need = (v, c) => {
+		if (!v) throw Error(c);
+	};
+	need(Array.isArray(rows) && rows.length === stages.length, "RehearsalCommandCount");
+	let after = startedMs;
+	for (const [i, r] of rows.entries()) {
+		need(r.stage === stages[i] && r.cleanup === ["remove", "inspect-removed"].includes(r.stage), "RehearsalCommandStage");
+		need(Number.isSafeInteger(r.startedMs) && Number.isSafeInteger(r.completedMs) && r.startedMs >= after && r.completedMs >= r.startedMs && r.completedMs <= completedMs, "RehearsalCommandClock");
+		after = r.completedMs;
+		need(typeof r.stdout === "string" && typeof r.stderr === "string" && Buffer.byteLength(r.stdout) + Buffer.byteLength(r.stderr) <= 1048576, "RehearsalCommandOutputBound");
+		need(Array.isArray(r.args) && r.args.every((x) => typeof x === "string") && Buffer.byteLength(JSON.stringify(r.args)) <= 131072, "RehearsalCommandArguments");
+	}
+	return (stage, args, status = 0) => {
+		const row = rows[stages.indexOf(stage)];
+		need(row && row.status === status, "RehearsalCommandStatus");
+		need(row.args.length === args.length && row.args.every((v, i) => v === args[i]), "RehearsalCommandArguments");
+		return row;
+	};
+}
+var init_production_nonroot_control_current = __esmMin((() => {}));
 //#endregion
 //#region scripts/lib/production-nonroot-carrier-probe-supervisor.mjs
 /** Carrier-only fixed Docker probe commands with the reviewed pidfd/subreaper loop. */
@@ -152696,11 +152890,12 @@ function tarHeader(name, size, mtimeMs) {
 }
 /** One fixed Docker child and a bounded stdin pipeline. A broken stream or
 * uncertain child outcome never falls through to image cleanup or retry. */
-function streamDocker(args, input, { directory, check, signal, details }) {
+function streamDocker(args, input, { directory, check, checkCleanup, signal, details }) {
 	return new Promise((resolve, reject) => {
 		const controller = new AbortController(), out = [], err = [], ack = [];
 		let child, closed = false, pipeDone = false, pipeSettled = false, settled = false, problem = false, cancelSent = false, status, exitSignal, outputBytes = 0, ackBytes = 0, timer;
 		const terminal = () => {
+			checkCleanup();
 			const t = parseNonrootJson(Buffer.concat(ack).toString("utf8"), { maxBytes: 4096 });
 			need$6(Object.keys(t).sort().join() === "cleanupComplete,killedDescendants,kind,leaderEnded,leaderPid,reaped,reason,signal,status,supervisorPid,version", "NonrootControlDockerTermination");
 			need$6(t.version === 1 && t.kind === "docker-stdin-subreaper-echild", "NonrootControlDockerTermination");
@@ -152736,12 +152931,21 @@ function streamDocker(args, input, { directory, check, signal, details }) {
 				processStopped: Boolean(proof),
 				...proof ? { termination: proof } : {}
 			}));
-			else resolve({
-				status: proof.status,
-				stdout: Buffer.concat(out).toString("utf8"),
-				stderr: Buffer.concat(err).toString("utf8"),
-				termination: proof
-			});
+			else try {
+				check();
+				resolve({
+					status: proof.status,
+					stdout: Buffer.concat(out).toString("utf8"),
+					stderr: Buffer.concat(err).toString("utf8"),
+					termination: proof
+				});
+			} catch {
+				reject(cleanup({
+					...details(),
+					processStopped: true,
+					termination: proof
+				}));
+			}
 		};
 		function stop() {
 			if (settled) return;
@@ -152755,6 +152959,12 @@ function streamDocker(args, input, { directory, check, signal, details }) {
 		}
 		const collect = (chunks) => (chunk) => {
 			if (settled) return;
+			try {
+				check();
+			} catch {
+				stop();
+				return;
+			}
 			outputBytes += chunk.length;
 			if (outputBytes > 1048576) stop();
 			else chunks.push(chunk);
@@ -152798,6 +153008,12 @@ function streamDocker(args, input, { directory, check, signal, details }) {
 			child.stderr.on("data", collect(err));
 			child.on("error", stop);
 			child.stdio[3].on("data", (chunk) => {
+				try {
+					checkCleanup();
+				} catch {
+					stop();
+					return;
+				}
 				ackBytes += chunk.length;
 				if (ackBytes > 4096) stop();
 				else ack.push(chunk);
@@ -152831,19 +153047,26 @@ function streamDocker(args, input, { directory, check, signal, details }) {
 		}
 	});
 }
-async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, tempRoot, resourceHandle, signal }, { beforeCommand } = {}) {
+async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, tempRoot, resourceHandle, signal, assertCurrent }, { beforeCommand } = {}) {
+	const processing = { assertCurrent };
+	assertNonrootControlCurrent(processing);
+	const resumed = (value, cleanupOnly = false) => {
+		assertNonrootControlCurrent(processing, cleanupOnly);
+		return value;
+	};
 	const binding = controlImageGraphBinding(graph), state = imageGraphState(graph), nodes = graph.inventory.nodes;
-	const allocation = resourceHandle === void 0 ? null : await inspectAllocatedControlResources(resourceHandle);
+	const allocation = resourceHandle === void 0 ? null : resumed(await inspectAllocatedControlResources(resourceHandle));
 	if (allocation) need$6(allocation.tempRoot === tempRoot && allocation.rootDigest === binding.rootDigest && allocation.configDigest === binding.configDigest, "NonrootControlDockerResource");
 	need$6(state.side === "control" && typeof metadataReads?.reserveLocal === "function", "NonrootControlDockerBudget");
-	for (const path of [cacheDirectory, tempRoot]) need$6(typeof path === "string" && resolve(path) === path && await realpath(path) === path, "NonrootControlDockerDirectory");
+	for (const path of [cacheDirectory, tempRoot]) need$6(typeof path === "string" && resolve(path) === path && resumed(await realpath(path)) === path, "NonrootControlDockerDirectory");
 	need$6(tempRoot !== cacheDirectory && !tempRoot.startsWith(cacheDirectory + "/"), "NonrootControlDockerDirectory");
-	const directoryStat = await lstat(cacheDirectory);
+	const directoryStat = resumed(await lstat(cacheDirectory));
 	need$6(directoryStat.isDirectory() && directoryStat.uid === process.getuid() && (directoryStat.mode & 511) === 448, "NonrootControlDockerDirectory");
-	need$6((await lstat("/var/run/docker.sock")).isSocket(), "NonrootControlDockerSocket");
+	need$6(resumed(await lstat("/var/run/docker.sock")).isSocket(), "NonrootControlDockerSocket");
 	const expectedNames = nodes.map((d) => d.digest.slice(7)).sort();
-	need$6(nonrootHash((await readdir(cacheDirectory)).sort()) === nonrootHash(expectedNames), "NonrootControlDockerCache");
+	need$6(nonrootHash(resumed(await readdir(cacheDirectory)).sort()) === nonrootHash(expectedNames), "NonrootControlDockerCache");
 	const check = () => {
+		assertNonrootControlCurrent(processing);
 		signal?.throwIfAborted();
 		controlImageGraphBinding(graph);
 		metadataReads.reserveLocal(zero$2());
@@ -152858,22 +153081,24 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 		});
 		const path = join(cacheDirectory, d.digest.slice(7)), fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		try {
-			const before = await fd.stat();
+			assertNonrootControlCurrent(processing);
+			const before = resumed(await fd.stat());
 			need$6(before.isFile() && before.uid === process.getuid() && (before.mode & 511) === 384 && before.nlink === 1 && before.size === d.size, "NonrootControlDockerCache");
 			const digest = createHash("sha256"), buffer = Buffer.alloc(65536);
 			let count = 0;
 			while (true) {
 				check();
-				const { bytesRead } = await fd.read(buffer, 0, buffer.length, null);
+				const { bytesRead } = resumed(await fd.read(buffer, 0, buffer.length, null));
 				if (!bytesRead) break;
 				count += bytesRead;
 				need$6(count <= d.size, "NonrootControlDockerCache");
 				digest.update(buffer.subarray(0, bytesRead));
 			}
-			need$6(count === d.size && "sha256:" + digest.digest("hex") === d.digest && sameFile$1(before, await fd.stat()) && sameFile$1(before, await lstat(path)), "NonrootControlDockerCache");
+			need$6(count === d.size && "sha256:" + digest.digest("hex") === d.digest && sameFile$1(before, resumed(await fd.stat())) && sameFile$1(before, resumed(await lstat(path))), "NonrootControlDockerCache");
 			identities.set(path, before);
 		} finally {
 			await fd.close();
+			assertNonrootControlCurrent(processing, true);
 		}
 	}
 	const directory = await mkdtemp(join(tempRoot, "mem9-control-docker-")), tag = allocation?.tag ?? "mem9-control-check:" + randomBytes(16).toString("hex");
@@ -152887,6 +153112,7 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 				args: Object.freeze([...args]),
 				cleanupOnly
 			}));
+			assertNonrootControlCurrent(processing, cleanupOnly);
 		} catch (e) {
 			if (uncertain(e)) {
 				unknown = true;
@@ -152901,25 +153127,24 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 	const run = async (program, args, { cleanupOnly = false, timeout = 3e4 } = {}) => {
 		if (!cleanupOnly) check();
 		await hook(program, args, cleanupOnly);
+		assertNonrootControlCurrent(processing, cleanupOnly);
 		if (!cleanupOnly) check();
+		let output;
 		try {
-			return {
-				...await execute$1(program, args, {
-					cwd: directory,
-					env: {
-						PATH: "/usr/bin:/bin",
-						HOME: directory,
-						DOCKER_CONFIG: directory,
-						LANG: "C",
-						LC_ALL: "C"
-					},
-					encoding: "utf8",
-					maxBuffer: 1048576,
-					timeout,
-					...!cleanupOnly && signal ? { signal } : {}
-				}),
-				status: 0
-			};
+			output = await execute$1(program, args, {
+				cwd: directory,
+				env: {
+					PATH: "/usr/bin:/bin",
+					HOME: directory,
+					DOCKER_CONFIG: directory,
+					LANG: "C",
+					LC_ALL: "C"
+				},
+				encoding: "utf8",
+				maxBuffer: 1048576,
+				timeout,
+				...!cleanupOnly && signal ? { signal } : {}
+			});
 		} catch (e) {
 			if (uncertain(e)) {
 				unknown = true;
@@ -152928,6 +153153,7 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 					tag
 				});
 			}
+			assertNonrootControlCurrent(processing, cleanupOnly);
 			if (Number.isInteger(e.code) && e.code > 0 && e.code <= 255) return {
 				status: e.code,
 				stdout: e.stdout ?? "",
@@ -152935,6 +153161,11 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 			};
 			throw Error("NonrootControlDockerCommand");
 		}
+		assertNonrootControlCurrent(processing, cleanupOnly);
+		return {
+			...output,
+			status: 0
+		};
 	};
 	const docker = (args, options) => run("/usr/bin/docker", [
 		"--host",
@@ -152944,11 +153175,11 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 		...args
 	], options);
 	const ownImage = async (cleanupOnly = false) => {
-		const r = await docker([
+		const r = resumed(await docker([
 			"image",
 			"inspect",
 			tag
-		], { cleanupOnly });
+		], { cleanupOnly }), cleanupOnly);
 		if (r.status === 1 && r.stderr.includes("No such image: " + tag)) return null;
 		need$6(r.status === 0, "NonrootControlDockerInspect");
 		const rows = parseNonrootJson(r.stdout, { maxBytes: 1048576 });
@@ -152958,6 +153189,7 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 		return image;
 	};
 	const close = async () => {
+		assertNonrootControlCurrent(processing, true);
 		if (allocation) {
 			closed = true;
 			return;
@@ -152966,19 +153198,20 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 		need$6(!unknown, "ECLEANUP");
 		try {
 			if (loaded || attempted) {
-				if (await ownImage(true)) {
-					const r = await docker([
+				if (resumed(await ownImage(true), true)) {
+					const r = resumed(await docker([
 						"image",
 						"rm",
 						tag
-					], { cleanupOnly: true });
-					need$6(r.status === 0 && !await ownImage(true), "ECLEANUP");
+					], { cleanupOnly: true }), true);
+					need$6(r.status === 0 && !resumed(await ownImage(true), true), "ECLEANUP");
 				}
 			}
 			await rm(directory, {
 				recursive: true,
 				force: true
 			});
+			assertNonrootControlCurrent(processing, true);
 			closed = true;
 		} catch {
 			throw cleanup({
@@ -152988,11 +153221,12 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 		}
 	};
 	try {
-		const absent = await docker([
+		assertNonrootControlCurrent(processing);
+		const absent = resumed(await docker([
 			"image",
 			"inspect",
 			tag
-		]);
+		]));
 		need$6(absent.status === 1 && absent.stderr.includes("No such image: " + tag), "NonrootControlDockerTagExists");
 		const index = {
 			schemaVersion: 2,
@@ -153016,15 +153250,17 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 				mode: 384,
 				flag: "wx"
 			});
-			metadataStats.set(name, await lstat(join(directory, name)));
+			assertNonrootControlCurrent(processing);
+			metadataStats.set(name, resumed(await lstat(join(directory, name))));
 		}
 		const rawBytes = nodes.reduce((n, d) => n + d.size, 0), archiveBytes = [...nodes.map((d) => d.size), ...[...metadata.values()].map((b) => b.length)].reduce((n, size) => n + 512 + padded$2(size), 1024);
 		need$6(Number.isSafeInteger(archiveBytes) && archiveBytes <= rawBytes + nodes.length * 1536 + 32768, "NonrootControlDockerArchive");
 		const unchanged = async () => {
-			for (const [path, before] of identities) need$6(sameFile$1(before, await lstat(path)), "NonrootControlDockerCache");
-			for (const [name, before] of metadataStats) need$6(sameFile$1(before, await lstat(join(directory, name))), "NonrootControlDockerCache");
+			for (const [path, before] of identities) need$6(sameFile$1(before, resumed(await lstat(path))), "NonrootControlDockerCache");
+			for (const [name, before] of metadataStats) need$6(sameFile$1(before, resumed(await lstat(join(directory, name)))), "NonrootControlDockerCache");
 		};
 		await unchanged();
+		assertNonrootControlCurrent(processing);
 		metadataReads.reserveLocal({
 			...zero$2(),
 			logicalBytes: archiveBytes
@@ -153052,6 +153288,7 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 			"load"
 		];
 		await hook("/usr/bin/docker", args, false);
+		assertNonrootControlCurrent(processing);
 		await unchanged();
 		check();
 		let streamed = 0, readBytes = 0;
@@ -153070,23 +153307,25 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 				verify();
 				const path = join(cacheDirectory, name), before = identities.get(path), fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 				try {
-					need$6(sameFile$1(before, await fd.stat()) && sameFile$1(before, await lstat(path)), "NonrootControlDockerCache");
+					assertNonrootControlCurrent(processing);
+					need$6(sameFile$1(before, resumed(await fd.stat())) && sameFile$1(before, resumed(await lstat(path))), "NonrootControlDockerCache");
 					yield emit(tarHeader("blobs/sha256/" + name, before.size, before.mtimeMs));
 					const digest = createHash("sha256");
 					let count = 0;
 					while (count < before.size) {
 						verify();
-						const buffer = Buffer.alloc(Math.min(65536, before.size - count)), { bytesRead } = await fd.read(buffer, 0, buffer.length, null);
+						const buffer = Buffer.alloc(Math.min(65536, before.size - count)), { bytesRead } = resumed(await fd.read(buffer, 0, buffer.length, null));
 						need$6(bytesRead > 0, "NonrootControlDockerCache");
 						count += bytesRead;
 						readBytes += bytesRead;
 						digest.update(buffer.subarray(0, bytesRead));
 						yield emit(buffer.subarray(0, bytesRead));
 					}
-					need$6(digest.digest("hex") === name && sameFile$1(before, await fd.stat()) && sameFile$1(before, await lstat(path)), "NonrootControlDockerCache");
+					need$6(digest.digest("hex") === name && sameFile$1(before, resumed(await fd.stat())) && sameFile$1(before, resumed(await lstat(path))), "NonrootControlDockerCache");
 					if (padded$2(count) > count) yield emit(Buffer.alloc(padded$2(count) - count));
 				} finally {
 					await fd.close();
+					assertNonrootControlCurrent(processing, true);
 				}
 			}
 			await unchanged();
@@ -153105,6 +153344,7 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 			result = await streamDocker(args, stream, {
 				directory,
 				check,
+				checkCleanup: () => assertNonrootControlCurrent(processing, true),
 				signal,
 				details: () => ({
 					operationDirectory: directory,
@@ -153117,16 +153357,20 @@ async function loadNonrootControlImage({ graph, cacheDirectory, metadataReads, t
 			unknown = true;
 			throw error;
 		}
+		assertNonrootControlCurrent(processing);
 		need$6(result.status === 0, "NonrootControlDockerLoad");
-		const image = await ownImage();
+		const image = resumed(await ownImage());
 		need$6(image, "NonrootControlDockerLoad");
 		loaded = true;
-		for (const [path, before] of identities) need$6(sameFile$1(before, await lstat(path)), "NonrootControlDockerCache");
+		for (const [path, before] of identities) need$6(sameFile$1(before, resumed(await lstat(path))), "NonrootControlDockerCache");
 		check();
-		if (allocation) await recordControlImageLoad(resourceHandle, {
-			outcome: "loaded",
-			completedMs: Date.now()
-		});
+		if (allocation) {
+			await recordControlImageLoad(resourceHandle, {
+				outcome: "loaded",
+				completedMs: Date.now()
+			});
+			assertNonrootControlCurrent(processing);
+		}
 		return Object.freeze({
 			authority: false,
 			tag,
@@ -153178,6 +153422,7 @@ var init_production_nonroot_control_docker = __esmMin((() => {
 	init_production_nonroot_contracts();
 	init_ci_smoke_control_resources();
 	init_production_nonroot_control_docker_supervisor();
+	init_production_nonroot_control_current();
 	execute$1 = promisify(execFile);
 	need$6 = (ok, code = "NonrootControlDockerInvalid") => {
 		if (!ok) throw Error(code);
@@ -153217,7 +153462,10 @@ var production_nonroot_control_prerequisites_exports = /* @__PURE__ */ __exportA
 	collectCarrierImagePrerequisites: () => collectCarrierImagePrerequisites,
 	collectNonrootControlPrerequisites: () => collectNonrootControlPrerequisites,
 	getNonrootNativeProbeSource: () => getNonrootNativeProbeSource,
+	inspectNonrootControlPrerequisiteOriginals: () => inspectNonrootControlPrerequisiteOriginals,
 	inspectNonrootControlPrerequisites: () => inspectNonrootControlPrerequisites,
+	inspectReplayedNonrootControlPrerequisites: () => inspectReplayedNonrootControlPrerequisites,
+	replayNonrootControlPrerequisiteRecord: () => replayNonrootControlPrerequisiteRecord,
 	runNonrootControlDockerCommand: () => runNonrootControlDockerCommand
 });
 function nativeElf() {
@@ -153241,7 +153489,9 @@ function nativeElf() {
 	nativeCode.copy(b, 128);
 	return b;
 }
-function runNonrootControlDockerCommand(args, { directory, timeoutMs, signal }) {
+function runNonrootControlDockerCommand(args, { directory, timeoutMs, signal, assertCurrent, cleanup = false }) {
+	const processing = { assertCurrent };
+	assertNonrootControlCurrent(processing, cleanup);
 	return new Promise((resolve, reject) => {
 		const child = spawn("/usr/bin/docker", [
 			"--host",
@@ -153290,6 +153540,11 @@ function runNonrootControlDockerCommand(args, { directory, timeoutMs, signal }) 
 			clearTimeout(timer);
 			clearTimeout(drainTimer);
 			signal?.removeEventListener("abort", abort);
+			try {
+				assertNonrootControlCurrent(processing, cleanup);
+			} catch (error) {
+				problem ??= error;
+			}
 			if (problem) reject(problem);
 			else resolve({
 				status,
@@ -153317,6 +153572,13 @@ function runNonrootControlDockerCommand(args, { directory, timeoutMs, signal }) 
 			drain(Date.now() + 1e3);
 		};
 		const abort = () => stop("NonrootPrerequisitesAborted"), collect = (chunks) => (b) => {
+			try {
+				assertNonrootControlCurrent(processing, cleanup);
+			} catch (error) {
+				problem ??= error;
+				stop("NonrootPrerequisitesPayer");
+				return;
+			}
 			size += b.length;
 			if (size > 1048576) stop("NonrootPrerequisitesOutputLimit");
 			else chunks.push(b);
@@ -153346,6 +153608,7 @@ function runNonrootControlDockerCommand(args, { directory, timeoutMs, signal }) 
 	});
 }
 async function preflight(value, options) {
+	assertNonrootControlCurrent(options);
 	const input = copyNonrootJson(value);
 	exact$4(input, ["image", "sourceClosure"]);
 	const expected = copyNonrootJson(options.expected);
@@ -153355,8 +153618,10 @@ async function preflight(value, options) {
 	need$5(fs.component === "bootstrap" && fs.graphHash === binding.graphHash && imageFilesystemVerificationKind(filesystem) === "live-filesystem-evidence", "NonrootPrerequisitesFilesystem");
 	need$5(options.sourceContext?.tree === expected.candidateTree && input.sourceClosure.tree === expected.candidateTree, "NonrootPrerequisitesSource");
 	await verifyControlSourceClosure(options.sourceContext, input.sourceClosure);
+	assertNonrootControlCurrent(options);
 	need$5(input.sourceClosure.files.length > 0, "NonrootPrerequisitesSource");
 	const own = await readControlSourceFile(options.sourceContext, sourcePath);
+	assertNonrootControlCurrent(options);
 	need$5(own.file.sha256 === collectorCodeHash && own.bytes.equals(sourceBytes), "NonrootPrerequisitesCollectorSource");
 	const entries = inspectImageFilesystemEntries(filesystem), nodes = new Map(entries.map((e) => [e.path, e]));
 	const exists = (path) => {
@@ -153403,6 +153668,7 @@ async function preflight(value, options) {
 		maxBytes: 8388608,
 		budget: state.budget
 	});
+	assertNonrootControlCurrent(options);
 	need$5(descriptor.digest === binding.configDigest && config.architecture === "arm64" && config.os === "linux" && !Object.keys(config.config?.Volumes ?? {}).length, "NonrootPrerequisitesImageConfig");
 	const env = config.config?.Env ?? [], seen = /* @__PURE__ */ new Set();
 	let ca;
@@ -153606,15 +153872,21 @@ function validate(raw, p) {
 	return result;
 }
 async function collectNonrootControlPrerequisites(value, options = {}) {
+	assertNonrootControlCurrent(options);
 	need$5(options && typeof options === "object" && !Array.isArray(options) && Object.keys(options).every((key) => [
 		"controlVerification",
 		"sourceContext",
 		"expected",
 		"signal",
 		"deadlineMs",
-		"beforeDocker"
+		"beforeDocker",
+		"assertCurrent",
+		"retainOriginals"
 	].includes(key)), "NonrootPrerequisitesFields");
-	return collectPrerequisites(value, options, runNonrootControlDockerCommand, tmpdir());
+	need$5(options.retainOriginals === void 0 || options.retainOriginals === true, "NonrootPrerequisitesOriginals");
+	const result = await collectPrerequisites(value, options, runNonrootControlDockerCommand, tmpdir());
+	assertNonrootControlCurrent(options);
+	return result;
 }
 /** Carrier reuses the same actual native checks without an ActualMain or
 * deployment contract. Its process driver admits only the fixed probe verbs. */
@@ -153711,11 +153983,15 @@ function getNonrootNativeProbeSource() {
 	});
 }
 async function collectPrerequisites(value, options, runDocker, temporaryRoot, prepared) {
+	assertNonrootControlCurrent(options);
 	const startedMs = Date.now(), deadlineMs = Math.min(options.deadlineMs ?? startedMs + 12e4, startedMs + 12e4);
 	need$5(Number.isSafeInteger(deadlineMs) && deadlineMs > startedMs, "NonrootPrerequisitesDeadline");
 	const p = prepared ?? await preflight(value, options);
-	need$5((await lstat("/var/run/docker.sock")).isSocket(), "NonrootPrerequisitesLocalDocker");
-	const directory = await mkdtemp(join(temporaryRoot, "mem9-prerequisites-")), name = "mem9-prerequisites-" + randomBytes(16).toString("hex");
+	assertNonrootControlCurrent(options);
+	const socket = await lstat("/var/run/docker.sock");
+	assertNonrootControlCurrent(options);
+	need$5(socket.isSocket(), "NonrootPrerequisitesLocalDocker");
+	const directory = await mkdtemp(join(temporaryRoot, "mem9-prerequisites-")), name = "mem9-prerequisites-" + randomBytes(16).toString("hex"), originalCommands = [];
 	let id, attempted = false, sticky = false, primary, record;
 	const run = async (stage, args, cleanup = false) => {
 		if (options.beforeDocker !== void 0) {
@@ -153725,6 +154001,7 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 				containerId: id,
 				args: Object.freeze([...args])
 			}));
+			assertNonrootControlCurrent(options, cleanup);
 		}
 		if (!cleanup) {
 			controlImageGraphBinding(p.graph);
@@ -153732,11 +154009,29 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 		}
 		if (stage === "create") attempted = true;
 		try {
-			return await runDocker(args, {
+			assertNonrootControlCurrent(options, cleanup);
+			const startedMs = Date.now(), result = await runDocker(args, {
 				directory,
 				timeoutMs: cleanup ? 1e4 : Math.min(3e4, deadlineMs - Date.now()),
-				signal: cleanup ? void 0 : options.signal
+				signal: cleanup ? void 0 : options.signal,
+				assertCurrent: options.assertCurrent,
+				cleanup
 			});
+			assertNonrootControlCurrent(options, cleanup);
+			if (options.retainOriginals) {
+				need$5(originalCommands.length < 8, "NonrootPrerequisitesOriginals");
+				originalCommands.push({
+					stage,
+					args: [...args],
+					cleanup,
+					status: result.status,
+					stdout: result.stdout,
+					stderr: result.stderr,
+					startedMs,
+					completedMs: Date.now()
+				});
+			}
+			return result;
 		} catch (e) {
 			if (e.code === "ECLEANUP") sticky = true;
 			throw e;
@@ -153744,23 +154039,34 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 	};
 	const checked = async (stage, args, cleanup = false) => {
 		const r = await run(stage, args, cleanup);
+		assertNonrootControlCurrent(options, cleanup);
 		const probeFailure = stage === "start" && /^NonrootPrerequisitesProbeRejected:[A-Za-z0-9]{1,80}\n$/.test(r.stderr) ? r.stderr.trim() : "NonrootPrerequisitesDockerCommand";
 		need$5(r.status === 0, probeFailure);
 		return r;
 	};
-	const inspect = async (stage, args) => parseNonrootJson((await checked(stage, args)).stdout, { maxBytes: 1048576 });
+	const inspect = async (stage, args) => {
+		const r = await checked(stage, args);
+		assertNonrootControlCurrent(options);
+		return parseNonrootJson(r.stdout, { maxBytes: 1048576 });
+	};
 	try {
-		const root = checkImage(await inspect("inspect-root", [
+		assertNonrootControlCurrent(options);
+		const rootRaw = await inspect("inspect-root", [
 			"image",
 			"inspect",
 			p.binding.rootDigest
-		]), p), platform = checkImage(await inspect("inspect-platform", [
+		]);
+		assertNonrootControlCurrent(options);
+		const root = checkImage(rootRaw, p);
+		const platformRaw = await inspect("inspect-platform", [
 			"image",
 			"inspect",
 			"--platform",
 			"linux/arm64",
 			p.binding.rootDigest
-		]), p, true);
+		]);
+		assertNonrootControlCurrent(options);
+		const platform = checkImage(platformRaw, p, true);
 		const args = [
 			"--no-new-privs",
 			"--",
@@ -153771,7 +154077,7 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 			"--",
 			JSON.stringify(p.paths)
 		];
-		const candidate = (await checked("create", [
+		const created = await checked("create", [
 			"container",
 			"create",
 			"--pull=never",
@@ -153796,28 +154102,36 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 			"/bin/setpriv",
 			p.binding.rootDigest,
 			...args
-		])).stdout.trim();
+		]);
+		assertNonrootControlCurrent(options);
+		const candidate = created.stdout.trim();
 		need$5(/^[a-f0-9]{64}$/.test(candidate), "NonrootPrerequisitesContainerId");
 		id = candidate;
 		const container = {
 			id,
 			name,
 			args
-		}, before = checkContainer(await inspect("inspect-created", [
+		}, beforeRaw = await inspect("inspect-created", [
 			"container",
 			"inspect",
 			id
-		]), p, container, false);
+		]);
+		assertNonrootControlCurrent(options);
+		const before = checkContainer(beforeRaw, p, container, false);
 		const output = await checked("start", [
 			"container",
 			"start",
 			"--attach",
 			id
-		]), after = checkContainer(await inspect("inspect-exited", [
+		]);
+		assertNonrootControlCurrent(options);
+		const afterRaw = await inspect("inspect-exited", [
 			"container",
 			"inspect",
 			id
-		]), p, container, true), result = validate(output.stdout, p);
+		]);
+		assertNonrootControlCurrent(options);
+		const after = checkContainer(afterRaw, p, container, true), result = validate(output.stdout, p);
 		record = {
 			version: 1,
 			kind: "measured-control-prerequisites",
@@ -153854,11 +154168,14 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 				"--force",
 				"--volumes",
 				id
-			], true), absent = await run("inspect-removed", [
+			], true);
+			assertNonrootControlCurrent(options, true);
+			const absent = await run("inspect-removed", [
 				"container",
 				"inspect",
 				id
 			], true);
+			assertNonrootControlCurrent(options, true);
 			need$5(absent.status === 1 && new RegExp("(?:No such container|No such object): " + id + "(?:\\s|$)").test(absent.stderr), "ECLEANUP");
 			if (record) record.removal = {
 				containerId: id,
@@ -153872,6 +154189,7 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 			recursive: true,
 			force: true
 		});
+		assertNonrootControlCurrent(options, true);
 	} catch {
 		throw Object.assign(cleanupError(), {
 			containerId: id,
@@ -153885,9 +154203,11 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 	}
 	let caBytes;
 	try {
+		assertNonrootControlCurrent(options);
 		controlImageGraphBinding(p.graph);
 		need$5(Date.now() < deadlineMs && !options.signal?.aborted, "NonrootPrerequisitesExpired");
 		caBytes = p.ca ? await readImageFilesystemFile(p.filesystem, p.ca.path, { maxBytes: 1048576 }) : null;
+		assertNonrootControlCurrent(options);
 		need$5(Date.now() < deadlineMs && !options.signal?.aborted, "NonrootPrerequisitesExpired");
 	} catch (e) {
 		e.cleanupConfirmed = true;
@@ -153899,7 +154219,8 @@ async function collectPrerequisites(value, options, runDocker, temporaryRoot, pr
 	states$2.set(handle, {
 		p,
 		record: copyNonrootJson(record),
-		caBytes
+		caBytes,
+		...options.retainOriginals ? { originalCommands } : {}
 	});
 	return handle;
 }
@@ -153912,6 +154233,10 @@ function inspectNonrootControlPrerequisites(handle, { controlVerification, sourc
 	need$5(controlVerification?.graph === p.graph && controlVerification?.filesystem === p.filesystem && sourceContext === p.sourceContext, "NonrootPrerequisitesContextBinding");
 	controlImageGraphBinding(p.graph);
 	need$5(now >= r.completedMs && now - r.completedMs <= 3e5, "NonrootPrerequisitesStale");
+	return describePrerequisiteRecord(state);
+}
+function describePrerequisiteRecord(state) {
+	const { p, record: r } = state;
 	const objects = [], json = (value) => {
 		const raw = Buffer.from(JSON.stringify(value) + "\n"), ref = {
 			bytesHash: sha$3(raw),
@@ -154049,17 +154374,195 @@ function inspectNonrootControlPrerequisites(handle, { controlVerification, sourc
 		objects
 	};
 }
-var states$2, sha$3, sourcePath, sourceBytes, collectorCodeHash, need$5, same$5, exact$4, canonical$2, imageOnly, capNames, loaderPaths, cleanupError, nativeCode, nativeBytes, nativeProbeHash, probeSource, probeCode, probeCodeHash;
+/** Raw successful command evidence from the same live native handle only. */
+function inspectNonrootControlPrerequisiteOriginals(handle, options) {
+	assertNonrootControlCurrent(options);
+	inspectNonrootControlPrerequisites(handle, options);
+	const s = states$2.get(handle);
+	need$5(Array.isArray(s.originalCommands) && s.originalCommands.length === 8, "NonrootPrerequisitesOriginalsRequired");
+	const rows = s.originalCommands.map((r) => ({
+		...r,
+		args: [...r.args]
+	}));
+	assertNonrootControlCurrent(options);
+	return rows;
+}
+/** Re-evaluate every recorded native command under current graph/FS/source.
+* This produces a distinct archive verifier handle, never a native handle. */
+async function replayNonrootControlPrerequisiteRecord({ record, commands }, options) {
+	assertNonrootControlCurrent(options);
+	need$5(typeof options.assertCurrent === "function", "NonrootPrerequisitesReplayPayer");
+	const r = copyNonrootJson(record);
+	same$5(r.image, options.image, "NonrootPrerequisitesReplayImage");
+	const p = await preflight({
+		image: options.image,
+		sourceClosure: options.sourceClosure
+	}, {
+		...options,
+		expected: { candidateTree: options.sourceContext.tree }
+	});
+	assertNonrootControlCurrent(options);
+	need$5(r.startedMs <= r.completedMs && r.completedMs - r.startedMs <= 12e4 && r.completedMs <= options.now && options.now - r.completedMs <= 3e5, "NonrootPrerequisitesStale");
+	const command = inspectNonrootRecordedCommands(commands, [
+		"inspect-root",
+		"inspect-platform",
+		"create",
+		"inspect-created",
+		"start",
+		"inspect-exited",
+		"remove",
+		"inspect-removed"
+	], r);
+	const parse = (row) => parseNonrootJson(row.stdout, { maxBytes: 1048576 });
+	const root = checkImage(parse(command("inspect-root", [
+		"image",
+		"inspect",
+		p.binding.rootDigest
+	])), p);
+	const platform = checkImage(parse(command("inspect-platform", [
+		"image",
+		"inspect",
+		"--platform",
+		"linux/arm64",
+		p.binding.rootDigest
+	])), p, true);
+	const { id, name } = r.container;
+	need$5(/^[a-f0-9]{64}$/.test(id) && /^mem9-prerequisites-[a-f0-9]{32}$/.test(name), "NonrootPrerequisitesContainerId");
+	const args = [
+		"--no-new-privs",
+		"--",
+		"/usr/local/bin/node",
+		"--input-type=module",
+		"-e",
+		probeCode,
+		"--",
+		JSON.stringify(p.paths)
+	];
+	const create = command("create", [
+		"container",
+		"create",
+		"--pull=never",
+		"--platform=linux/arm64",
+		"--network=none",
+		"--read-only",
+		"--user=1000:1000",
+		"--cap-drop=ALL",
+		"--security-opt=no-new-privileges:true",
+		"--pids-limit=32",
+		"--memory=256m",
+		"--cpus=1",
+		"--restart=no",
+		"--no-healthcheck",
+		"--tmpfs",
+		"/tmp:rw,nosuid,nodev,exec,size=1048576,uid=1000,gid=1000,mode=0700",
+		"--label",
+		"mem9-prerequisites-probe=" + name,
+		"--name",
+		name,
+		"--entrypoint",
+		"/bin/setpriv",
+		p.binding.rootDigest,
+		...args
+	]);
+	need$5(create.stdout.trim() === id, "NonrootPrerequisitesContainerId");
+	const binding = {
+		id,
+		name,
+		args
+	}, before = checkContainer(parse(command("inspect-created", [
+		"container",
+		"inspect",
+		id
+	])), p, binding, false);
+	const output = command("start", [
+		"container",
+		"start",
+		"--attach",
+		id
+	]);
+	const after = checkContainer(parse(command("inspect-exited", [
+		"container",
+		"inspect",
+		id
+	])), p, binding, true), result = validate(output.stdout, p);
+	const removed = command("remove", [
+		"container",
+		"rm",
+		"--force",
+		"--volumes",
+		id
+	]);
+	const absent = command("inspect-removed", [
+		"container",
+		"inspect",
+		id
+	], 1);
+	need$5(new RegExp("(?:No such container|No such object): " + id + "(?:\\s|$)").test(absent.stderr), "ECLEANUP");
+	const wanted = {
+		version: 1,
+		kind: "measured-control-prerequisites",
+		image: p.input.image,
+		sourceTree: options.sourceContext.tree,
+		sourceClosureHash: nonrootHash(p.input.sourceClosure),
+		collectorCodeHash,
+		probeCodeHash,
+		nativeProbeHash,
+		graphHash: p.binding.graphHash,
+		filesystemHash: nonrootHash(p.fs),
+		startedMs: r.startedMs,
+		container: {
+			id,
+			name,
+			rootInspectHash: nonrootHash(root),
+			platformInspectHash: nonrootHash(platform),
+			createdInspectHash: nonrootHash(before),
+			exitedInspectHash: nonrootHash(after),
+			exitCode: after.State.ExitCode
+		},
+		probe: result,
+		probeOutput: output.stdout,
+		probeOutputHash: sha$3(output.stdout),
+		removal: {
+			containerId: id,
+			removeExitCode: removed.status,
+			absenceExitCode: absent.status,
+			absenceEvidenceHash: sha$3(absent.stderr)
+		},
+		completedMs: r.completedMs,
+		cleanupConfirmed: true
+	};
+	same$5(r, wanted, "NonrootPrerequisitesReplayRecord");
+	const caBytes = p.ca ? await readImageFilesystemFile(p.filesystem, p.ca.path, { maxBytes: 1048576 }) : null;
+	assertNonrootControlCurrent(options);
+	const handle = Object.freeze({ kind: "replayed-control-prerequisites" });
+	replayedPrerequisites.set(handle, {
+		p,
+		record: wanted,
+		caBytes,
+		assertCurrent: options.assertCurrent
+	});
+	return handle;
+}
+function inspectReplayedNonrootControlPrerequisites(handle, options) {
+	assertNonrootControlCurrent(options);
+	const state = replayedPrerequisites.get(handle);
+	need$5(state && state.assertCurrent === options.assertCurrent && state.p.graph === options.controlVerification?.graph && state.p.filesystem === options.controlVerification?.filesystem && state.p.sourceContext === options.sourceContext, "NonrootPrerequisitesReplayRequired");
+	const result = describePrerequisiteRecord(state);
+	assertNonrootControlCurrent(options);
+	return result;
+}
+var states$2, sha$3, sourcePath, sourceBytes, collectorCodeHash, need$5, same$5, exact$4, canonical$2, imageOnly, capNames, loaderPaths, cleanupError, nativeCode, nativeBytes, nativeProbeHash, probeSource, probeCode, probeCodeHash, replayedPrerequisites;
 var init_production_nonroot_control_prerequisites = __esmMin((() => {
 	init_production_nonroot_contracts();
 	init_production_nonroot_launch();
 	init_production_image_graph();
 	init_production_image_filesystem();
 	init_production_control_source();
+	init_production_nonroot_control_current();
 	states$2 = /* @__PURE__ */ new WeakMap();
 	sha$3 = (b) => createHash("sha256").update(b).digest("hex");
 	sourcePath = "scripts/lib/production-nonroot-control-prerequisites.mjs";
-	sourceBytes = Buffer.from("LyoqIEhvc3Qtb25seSwgZml4ZWQgbG9jYWwgRG9ja2VyIHByb2JlLiBHcmFwaC9GUy9zb3VyY2UgaGFuZGxlcyBhdXRoZW50aWNhdGUKICogaW5wdXRzOyBKU09OIHJlY29yZHMgcmV0dXJuZWQgaGVyZSBhcmUgbWVhc3VyZW1lbnRzLCBub3QgcmVsZWFzZSBhdXRob3JpdHkuICovCmltcG9ydCB7c3Bhd259IGZyb20gJ25vZGU6Y2hpbGRfcHJvY2Vzcyc7CmltcG9ydCB7cmVhZEZpbGVTeW5jfSBmcm9tICdub2RlOmZzJzsKaW1wb3J0IHtta2R0ZW1wLHJtLGxzdGF0fSBmcm9tICdub2RlOmZzL3Byb21pc2VzJzsKaW1wb3J0IHt0bXBkaXJ9IGZyb20gJ25vZGU6b3MnOwppbXBvcnQge2pvaW4scG9zaXh9IGZyb20gJ25vZGU6cGF0aCc7CmltcG9ydCB7Y3JlYXRlSGFzaCxyYW5kb21CeXRlc30gZnJvbSAnbm9kZTpjcnlwdG8nOwppbXBvcnQge2NvcHlOb25yb290SnNvbixwYXJzZU5vbnJvb3RKc29uLGluc3BlY3ROb25yb290UmVjb3JkLG5vbnJvb3RIYXNoIGFzIGhhc2h9IGZyb20gJy4vcHJvZHVjdGlvbi1ub25yb290LWNvbnRyYWN0cy5tanMnOwppbXBvcnQge05PTlJPT1RfRk9SQklEREVOX0VOVklST05NRU5UfSBmcm9tICcuL3Byb2R1Y3Rpb24tbm9ucm9vdC1sYXVuY2gubWpzJzsKaW1wb3J0IHtjb250cm9sSW1hZ2VHcmFwaEJpbmRpbmcsaW1hZ2VHcmFwaFN0YXRlLHJlYWRJbWFnZUpzb259IGZyb20gJy4vcHJvZHVjdGlvbi1pbWFnZS1ncmFwaC5tanMnOwppbXBvcnQge2luc3BlY3RJbWFnZUZpbGVzeXN0ZW1FdmlkZW5jZSxpbnNwZWN0SW1hZ2VGaWxlc3lzdGVtRW50cmllcyxpbnNwZWN0SW1hZ2VGaWxlc3lzdGVtRmlsZSxyZWFkSW1hZ2VGaWxlc3lzdGVtRmlsZSxpbWFnZUZpbGVzeXN0ZW1WZXJpZmljYXRpb25LaW5kfSBmcm9tICcuL3Byb2R1Y3Rpb24taW1hZ2UtZmlsZXN5c3RlbS5tanMnOwppbXBvcnQge3ZlcmlmeUNvbnRyb2xTb3VyY2VDbG9zdXJlLHJlYWRDb250cm9sU291cmNlRmlsZX0gZnJvbSAnLi9wcm9kdWN0aW9uLWNvbnRyb2wtc291cmNlLm1qcyc7Cgpjb25zdCBzdGF0ZXM9bmV3IFdlYWtNYXAoKSxzaGE9Yj0+Y3JlYXRlSGFzaCgnc2hhMjU2JykudXBkYXRlKGIpLmRpZ2VzdCgnaGV4Jyk7CmNvbnN0IHNvdXJjZVBhdGg9J3NjcmlwdHMvbGliL3Byb2R1Y3Rpb24tbm9ucm9vdC1jb250cm9sLXByZXJlcXVpc2l0ZXMubWpzJyxzb3VyY2VCeXRlcz1yZWFkRmlsZVN5bmMobmV3IFVSTChpbXBvcnQubWV0YS51cmwpKSxjb2xsZWN0b3JDb2RlSGFzaD1zaGEoc291cmNlQnl0ZXMpOwpjb25zdCBuZWVkPShvayxjb2RlPSdOb25yb290UHJlcmVxdWlzaXRlc0ludmFsaWQnKT0+e2lmKCFvayl0aHJvdyBPYmplY3QuYXNzaWduKEVycm9yKGNvZGUpLHtjb2RlLGhvbGQ6dHJ1ZX0pO307CmNvbnN0IHNhbWU9KGEsYixjb2RlPSdOb25yb290UHJlcmVxdWlzaXRlc0JpbmRpbmcnKT0+bmVlZChoYXNoKGEpPT09aGFzaChiKSxjb2RlKTsKY29uc3QgZXhhY3Q9KHYsa2V5cyk9Pm5lZWQodiYmdHlwZW9mIHY9PT0nb2JqZWN0JyYmIUFycmF5LmlzQXJyYXkodikmJk9iamVjdC5rZXlzKHYpLnNvcnQoKS5qb2luKCk9PT1rZXlzLnNsaWNlKCkuc29ydCgpLmpvaW4oKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNGaWVsZHMnKTsKY29uc3QgY2Fub25pY2FsPXA9PnR5cGVvZiBwPT09J3N0cmluZycmJnAubGVuZ3RoPD00MDk2JiYvXlwvW0EtWmEtejAtOV8uLystXSokLy50ZXN0KHApJiZwb3NpeC5ub3JtYWxpemUocCk9PT1wJiYocD09PScvJ3x8IXAuZW5kc1dpdGgoJy8nKSk7CmNvbnN0IGltYWdlT25seT0oe3Jvb3REaWdlc3QsYXJtNjREaWdlc3QsY29uZmlnRGlnZXN0fSk9Pih7cm9vdERpZ2VzdCxhcm02NERpZ2VzdCxjb25maWdEaWdlc3R9KTsKY29uc3QgY2FwTmFtZXM9WydDYXBJbmgnLCdDYXBQcm0nLCdDYXBFZmYnLCdDYXBCbmQnLCdDYXBBbWInXTsKY29uc3QgbG9hZGVyUGF0aHM9WycvZXRjL2xkLnNvLnByZWxvYWQnLCcvZXRjL2xkLnNvLmNvbmYnLCcvZXRjL2xkLnNvLmNhY2hlJywnL2V0Yy9sZC1tdXNsLWFhcmNoNjQucGF0aCddOwpjb25zdCBjbGVhbnVwRXJyb3I9KCk9Pk9iamVjdC5hc3NpZ24oRXJyb3IoJ0VDTEVBTlVQJykse2NvZGU6J0VDTEVBTlVQJyxob2xkOnRydWUsY2xlYW51cENvbmZpcm1lZDpmYWxzZX0pOwoKLy8gRml4ZWQgQUFyY2g2NCBFTEYsIG5vIGxpYmMvaW50ZXJwcmV0ZXIgb3IgZXh0ZXJuYWwgaW5wdXQuIFRoZSBpbnN0cnVjdGlvbnMKLy8gaW52b2tlIFBSX0dFVF9OT19ORVdfUFJJVlMsIGdldHVpZC9ldWlkL2dpZC9lZ2lkLCBQUl9TRVRfTk9fTkVXX1BSSVZTKDApLCBHRVQsCi8vIHNldHVpZCgwKSwgc2V0Z2lkKDApLCB0aGUgZm91ciBpZGVudGl0eSByZWFkcyBhbmQgR0VUIGFnYWluLCB0aGVuIHdyaXRlIHRoZQovLyBmb3VydGVlbiBzaWduZWQgNjQtYml0IHJldHVybiB2YWx1ZXMuIHN5c2NhbGwgbnVtYmVycyBmb2xsb3cgYXNtLWdlbmVyaWMKLy8gdW5pc3RkLmggKHByY3RsPTE2NywgdWlkPTE3NC8xNzUsIGdpZD0xNzYvMTc3LCBzZXR1aWQ9MTQ2LCBzZXRnaWQ9MTQ0KS4KLy8gVGhpcyBtZWFzdXJlcyBrZXJuZWwgcmVqZWN0aW9uLCByYXRoZXIgdGhhbiBtaXN0YWtpbmcgQ0xJIHN5bnRheCByZWplY3Rpb24KLy8gZm9yIGFuIGF0dGVtcHRlZCBOTlAgY2xlYXIuIEV4ZWN1dGVkIG9ubHkgaW4gdGhlIGJvdW5kZWQgbm9zdWlkL25vZGV2IHRtcGZzLgpjb25zdCBuYXRpdmVDb2RlPUJ1ZmZlci5mcm9tKCdmZjAzMDJkMWY0MDMwMDkxZTAwNDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMmU4MTQ4MGQyMDEwMDAwZDQ4MDAyMDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDJjODE1ODBkMjAxMDAwMGQ0ODAwNjAwZjkwMDAwODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyZTgxNTgwZDIwMTAwMDBkNDgwMGEwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMjA4MTY4MGQyMDEwMDAwZDQ4MDBlMDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDIyODE2ODBkMjAxMDAwMGQ0ODAxMjAwZjljMDA0ODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyZTgxNDgwZDIwMTAwMDBkNDgwMTYwMGY5ZTAwNDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMmU4MTQ4MGQyMDEwMDAwZDQ4MDFhMDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDI0ODEyODBkMjAxMDAwMGQ0ODAxZTAwZjkwMDAwODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyMDgxMjgwZDIwMTAwMDBkNDgwMjIwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMmM4MTU4MGQyMDEwMDAwZDQ4MDI2MDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDJlODE1ODBkMjAxMDAwMGQ0ODAyYTAwZjkwMDAwODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyMDgxNjgwZDIwMTAwMDBkNDgwMmUwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMjI4MTY4MGQyMDEwMDAwZDQ4MDMyMDBmOWUwMDQ4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDJlODE0ODBkMjAxMDAwMGQ0ODAzNjAwZjkyMDAwODBkMmUxMDMxNGFhMDIwZTgwZDIwODA4ODBkMjAxMDAwMGQ0MWZjMDAxZjFlMDA3OWY5YWE4MGI4MGQyMDEwMDAwZDQnLCdoZXgnKTsKZnVuY3Rpb24gbmF0aXZlRWxmKCl7CiBjb25zdCBiPUJ1ZmZlci5hbGxvYygxMjgrbmF0aXZlQ29kZS5sZW5ndGgpO0J1ZmZlci5mcm9tKCc3ZjQ1NGM0NjAyMDEwMTAwMDAwMDAwMDAwMDAwMDAwMCcsJ2hleCcpLmNvcHkoYik7CiBiLndyaXRlVUludDE2TEUoMiwxNik7Yi53cml0ZVVJbnQxNkxFKDE4MywxOCk7Yi53cml0ZVVJbnQzMkxFKDEsMjApO2Iud3JpdGVCaWdVSW50NjRMRSgweDQwMDA4MG4sMjQpO2Iud3JpdGVCaWdVSW50NjRMRSg2NG4sMzIpOwogYi53cml0ZVVJbnQxNkxFKDY0LDUyKTtiLndyaXRlVUludDE2TEUoNTYsNTQpO2Iud3JpdGVVSW50MTZMRSgxLDU2KTtiLndyaXRlVUludDMyTEUoMSw2NCk7Yi53cml0ZVVJbnQzMkxFKDUsNjgpOwogYi53cml0ZUJpZ1VJbnQ2NExFKDB4NDAwMDAwbiw4MCk7Yi53cml0ZUJpZ1VJbnQ2NExFKDB4NDAwMDAwbiw4OCk7Yi53cml0ZUJpZ1VJbnQ2NExFKEJpZ0ludChiLmxlbmd0aCksOTYpO2Iud3JpdGVCaWdVSW50NjRMRShCaWdJbnQoYi5sZW5ndGgpLDEwNCk7Yi53cml0ZUJpZ1VJbnQ2NExFKDQwOTZuLDExMik7bmF0aXZlQ29kZS5jb3B5KGIsMTI4KTtyZXR1cm4gYjsKfQpjb25zdCBuYXRpdmVCeXRlcz1uYXRpdmVFbGYoKSxuYXRpdmVQcm9iZUhhc2g9c2hhKG5hdGl2ZUJ5dGVzKTsKCi8vIEZ1bmN0aW9uIHNvdXJjZSBhbmQgdGhlIGZpeGVkIG5hdGl2ZSBieXRlcyBhcmUgY29tbWl0dGVkIGJ5IGNvbGxlY3RvckNvZGVIYXNoLgovLyBPbmx5IGEgYm91bmRlZCBsaXN0IG9mIGF1dGhlbnRpY2F0ZWQgZmlsZSBwYXRocyBjcm9zc2VzIHRoZSBwcm9iZSBpbnRlcmZhY2UuCi8vIEJFR0lOIEZJWEVEIENPTlRST0wgUFJFUkVRVUlTSVRFUyBQUk9CRQphc3luYyBmdW5jdGlvbiBmaXhlZFByb2JlKG5hdGl2ZUJhc2U2NCxwYXRocyxwaGFzZT0ncGFyZW50Jyl7CiBjb25zdCBmcz1hd2FpdCBpbXBvcnQoJ25vZGU6ZnMnKSxwYXRoPWF3YWl0IGltcG9ydCgnbm9kZTpwYXRoJyksY3A9YXdhaXQgaW1wb3J0KCdub2RlOmNoaWxkX3Byb2Nlc3MnKTsKIGNvbnN0IHJlcXVpcmVGYWN0PShvayxjb2RlKT0+e2lmKCFvayl0aHJvdyBFcnJvcihjb2RlKTt9OwogY29uc3QgY2Fub249cD0+dHlwZW9mIHA9PT0nc3RyaW5nJyYmcC5sZW5ndGg8PTQwOTYmJi9eXC9bQS1aYS16MC05Xy4vKy1dKiQvLnRlc3QocCkmJnBhdGgucG9zaXgubm9ybWFsaXplKHApPT09cDsKIGNvbnN0IHNtYWxsPXA9Pntjb25zdCBmZD1mcy5vcGVuU3luYyhwLCdyJyk7dHJ5e2NvbnN0IGNodW5rcz1bXSxidWZmZXI9QnVmZmVyLmFsbG9jKDgxOTIpO2xldCBzaXplPTA7Zm9yKDs7KXtjb25zdCBuPWZzLnJlYWRTeW5jKGZkLGJ1ZmZlciwwLGJ1ZmZlci5sZW5ndGgsbnVsbCk7aWYoIW4pYnJlYWs7c2l6ZSs9bjtyZXF1aXJlRmFjdChzaXplPD0yNjIxNDQsJ1Byb2JlUmVhZExpbWl0Jyk7Y2h1bmtzLnB1c2goQnVmZmVyLmZyb20oYnVmZmVyLnN1YmFycmF5KDAsbikpKTt9cmV0dXJuIEJ1ZmZlci5jb25jYXQoY2h1bmtzLHNpemUpLnRvU3RyaW5nKCd1dGY4Jyk7fWZpbmFsbHl7ZnMuY2xvc2VTeW5jKGZkKTt9fTsKIGNvbnN0IGlkZW50aXR5PSgpPT57CiAgY29uc3QgbGluZXM9bmV3IE1hcChzbWFsbCgnL3Byb2Mvc2VsZi9zdGF0dXMnKS5zcGxpdCgnXG4nKS5tYXAobGluZT0+e2NvbnN0IGk9bGluZS5pbmRleE9mKCc6Jyk7cmV0dXJuIFtsaW5lLnNsaWNlKDAsaSksbGluZS5zbGljZShpKzEpLnRyaW0oKV07fSkpOwogIGNvbnN0IGlkcz1rPT4obGluZXMuZ2V0KGspPz8nJykuc3BsaXQoL1xzKy8pLmZpbHRlcihCb29sZWFuKS5tYXAoTnVtYmVyKTsKICBjb25zdCB2YWx1ZT17cGlkOnByb2Nlc3MucGlkLHBwaWQ6cHJvY2Vzcy5wcGlkLGV4ZWN1dGFibGVQYXRoOmZzLnJlYWxwYXRoU3luYygnL3Byb2Mvc2VsZi9leGUnKSx1aWQ6aWRzKCdVaWQnKSxnaWQ6aWRzKCdHaWQnKSxncm91cHM6aWRzKCdHcm91cHMnKSxub05ld1ByaXZzOk51bWJlcihsaW5lcy5nZXQoJ05vTmV3UHJpdnMnKSl9OwogIGZvcihjb25zdCBrZXkgb2YgWydDYXBJbmgnLCdDYXBQcm0nLCdDYXBFZmYnLCdDYXBCbmQnLCdDYXBBbWInXSl2YWx1ZVtrZXldPWxpbmVzLmdldChrZXkpOwogIHJlcXVpcmVGYWN0KHZhbHVlLnVpZC5sZW5ndGg9PT00JiZ2YWx1ZS5naWQubGVuZ3RoPT09NCYmWy4uLnZhbHVlLnVpZCwuLi52YWx1ZS5naWQsLi4udmFsdWUuZ3JvdXBzXS5ldmVyeShuPT5uPT09MTAwMCkmJnZhbHVlLm5vTmV3UHJpdnM9PT0xJiZbJ0NhcEluaCcsJ0NhcFBybScsJ0NhcEVmZicsJ0NhcEJuZCcsJ0NhcEFtYiddLmV2ZXJ5KGs9PnZhbHVlW2tdPT09JzAwMDAwMDAwMDAwMDAwMDAnKSwnUHJvYmVJZGVudGl0eScpO3JldHVybiB2YWx1ZTsKIH07CiB0cnl7CiAgY29uc3QgaW5pdGlhbD1pZGVudGl0eSgpO3JlcXVpcmVGYWN0KHByb2Nlc3MuYXJjaD09PSdhcm02NCcmJi9edjI0XC5bMC05XStcLlswLTldKyQvLnRlc3QocHJvY2Vzcy52ZXJzaW9uKSYmaW5pdGlhbC5leGVjdXRhYmxlUGF0aD09PScvdXNyL2xvY2FsL2Jpbi9ub2RlJywnUHJvYmVOb2RlJyk7CiAgaWYocGhhc2U9PT0nY2hpbGQnKXtwcm9jZXNzLnN0ZG91dC53cml0ZShKU09OLnN0cmluZ2lmeShpbml0aWFsKSk7cmV0dXJuO30KICByZXF1aXJlRmFjdChwaGFzZT09PSdwYXJlbnQnJiZBcnJheS5pc0FycmF5KHBhdGhzKSYmcGF0aHMubGVuZ3RoPD01MTImJnBhdGhzLmV2ZXJ5KGNhbm9uKSwnUHJvYmVJbnB1dCcpOwogIGNvbnN0IGxvYWRlckFic2VuY2VzPVsnL2V0Yy9sZC5zby5wcmVsb2FkJywnL2V0Yy9sZC5zby5jb25mJywnL2V0Yy9sZC5zby5jYWNoZScsJy9ldGMvbGQtbXVzbC1hYXJjaDY0LnBhdGgnXTsKICBmb3IoY29uc3QgcCBvZiBsb2FkZXJBYnNlbmNlcyl7dHJ5e2ZzLmxzdGF0U3luYyhwKTt0aHJvdyBFcnJvcignUHJvYmVMb2FkZXJQcmVzZW50Jyk7fWNhdGNoKGUpe3JlcXVpcmVGYWN0KGUuY29kZT09PSdFTk9FTlQnLCdQcm9iZUxvYWRlclByZXNlbnQnKTt9fQogIGNvbnN0IHJ1bj0oZmlsZSxhcmdzKT0+e2NvbnN0IHI9Y3Auc3Bhd25TeW5jKGZpbGUsYXJncyx7ZW52Ont9LGVuY29kaW5nOm51bGwsc3RkaW86WydpZ25vcmUnLCdwaXBlJywncGlwZSddLHRpbWVvdXQ6MTUwMDAsbWF4QnVmZmVyOjI2MjE0NCxraWxsU2lnbmFsOidTSUdLSUxMJ30pO3JlcXVpcmVGYWN0KCFyLmVycm9yJiZyLnNpZ25hbD09PW51bGwmJnIuc3RhdHVzPT09MCYmci5zdGRlcnIubGVuZ3RoPT09MCwnUHJvYmVDaGlsZCcrcGF0aC5wb3NpeC5iYXNlbmFtZShmaWxlKSsoci5lcnJvcj8uY29kZT8/ci5zdGF0dXMpKTtyZXR1cm4gci5zdGRvdXQ7fTsKICBjb25zdCBjaGlsZENvZGU9JygnK2ZpeGVkUHJvYmUudG9TdHJpbmcoKSsnKSgnK0pTT04uc3RyaW5naWZ5KG5hdGl2ZUJhc2U2NCkrJyxbXSwiY2hpbGQiKSc7CiAgY29uc3QgY2hpbGQ9SlNPTi5wYXJzZShydW4oJy91c3IvbG9jYWwvYmluL25vZGUnLFsnLS1pbnB1dC10eXBlPW1vZHVsZScsJy1lJyxjaGlsZENvZGVdKSk7CiAgcmVxdWlyZUZhY3QoY2hpbGQucHBpZD09PWluaXRpYWwucGlkJiZjaGlsZC5waWQhPT1pbml0aWFsLnBpZCwnUHJvYmVJbmhlcml0YW5jZScpOwogIGNvbnN0IGVsZkNhY2hlPW5ldyBNYXAoKTtsZXQgdG90YWxSZWFkPTA7CiAgY29uc3QgZWxmPWlucHV0PT57CiAgIHJlcXVpcmVGYWN0KGNhbm9uKGlucHV0KSwnUHJvYmVFbGZQYXRoJyk7Y29uc3QgcmVzb2x2ZWRQYXRoPWZzLnJlYWxwYXRoU3luYyhpbnB1dCk7cmVxdWlyZUZhY3QoY2Fub24ocmVzb2x2ZWRQYXRoKSwnUHJvYmVFbGZQYXRoJyk7aWYoZWxmQ2FjaGUuaGFzKHJlc29sdmVkUGF0aCkpcmV0dXJuIGVsZkNhY2hlLmdldChyZXNvbHZlZFBhdGgpOwogICByZXF1aXJlRmFjdChlbGZDYWNoZS5zaXplPDY0LCdQcm9iZUVsZkNvdW50Jyk7Y29uc3QgZmQ9ZnMub3BlblN5bmMoaW5wdXQsJ3InKTsKICAgdHJ5ewogICAgY29uc3Qgc3RhdD1mcy5mc3RhdFN5bmMoZmQpO3JlcXVpcmVGYWN0KHN0YXQuaXNGaWxlKCkmJnN0YXQuc2l6ZTw9MjY4NDM1NDU2LCdQcm9iZUVsZkZpbGUnKTsKICAgIGNvbnN0IHJlYWQ9KGF0LHNpemUpPT57cmVxdWlyZUZhY3QoTnVtYmVyLmlzU2FmZUludGVnZXIoYXQpJiZhdD49MCYmTnVtYmVyLmlzU2FmZUludGVnZXIoc2l6ZSkmJnNpemU+PTAmJnNpemU8PTY1NTM2JiZhdCtzaXplPD1zdGF0LnNpemUmJih0b3RhbFJlYWQrPXNpemUpPD0yMDk3MTUyLCdQcm9iZUVsZkJvdW5kcycpO2NvbnN0IGI9QnVmZmVyLmFsbG9jKHNpemUpO3JlcXVpcmVGYWN0KGZzLnJlYWRTeW5jKGZkLGIsMCxzaXplLGF0KT09PXNpemUsJ1Byb2JlRWxmU2hvcnQnKTtyZXR1cm4gYjt9OwogICAgY29uc3QgbnVtYmVyPShiLG9mZik9Pntjb25zdCBuPU51bWJlcihiLnJlYWRCaWdVSW50NjRMRShvZmYpKTtyZXF1aXJlRmFjdChOdW1iZXIuaXNTYWZlSW50ZWdlcihuKSwnUHJvYmVFbGZJbnRlZ2VyJyk7cmV0dXJuIG47fTsKICAgIGNvbnN0IGg9cmVhZCgwLDY0KTtyZXF1aXJlRmFjdChoLnN1YmFycmF5KDAsNykudG9TdHJpbmcoJ2hleCcpPT09JzdmNDU0YzQ2MDIwMTAxJyYmaC5yZWFkVUludDE2TEUoMTgpPT09MTgzJiZbMiwzXS5pbmNsdWRlcyhoLnJlYWRVSW50MTZMRSgxNikpJiZoLnJlYWRVSW50MTZMRSg1NCk9PT01NiwnUHJvYmVFbGZGb3JtYXQnKTsKICAgIGNvbnN0IGNvdW50PWgucmVhZFVJbnQxNkxFKDU2KSxwaG9mZj1udW1iZXIoaCwzMik7cmVxdWlyZUZhY3QoY291bnQ+MCYmY291bnQ8PTEyOCwnUHJvYmVFbGZIZWFkZXJzJyk7Y29uc3QgaGVhZGVycz1yZWFkKHBob2ZmLGNvdW50KjU2KSxzZWdtZW50cz1bXTsKICAgIGZvcihsZXQgaT0wO2k8Y291bnQ7aSsrKXtjb25zdCBwPWhlYWRlcnMuc3ViYXJyYXkoaSo1NiwoaSsxKSo1Nik7c2VnbWVudHMucHVzaCh7dHlwZTpwLnJlYWRVSW50MzJMRSgwKSxvZmZzZXQ6bnVtYmVyKHAsOCksYWRkcmVzczpudW1iZXIocCwxNiksc2l6ZTpudW1iZXIocCwzMil9KTt9CiAgICBjb25zdCBpbnRlcnBzPXNlZ21lbnRzLmZpbHRlcihwPT5wLnR5cGU9PT0zKSxkeW5hbWljPXNlZ21lbnRzLmZpbHRlcihwPT5wLnR5cGU9PT0yKTtyZXF1aXJlRmFjdChpbnRlcnBzLmxlbmd0aDw9MSYmZHluYW1pYy5sZW5ndGg8PTEsJ1Byb2JlRWxmU2VnbWVudHMnKTsKICAgIGNvbnN0IGNzdHJpbmc9KGIpPT57Y29uc3QgZW5kPWIuaW5kZXhPZigwKTtyZXF1aXJlRmFjdChlbmQ+PTAsJ1Byb2JlRWxmU3RyaW5nJyk7cmV0dXJuIGIuc3ViYXJyYXkoMCxlbmQpLnRvU3RyaW5nKCd1dGY4Jyk7fTsKICAgIGNvbnN0IGludGVycHJldGVyPWludGVycHMubGVuZ3RoP2NzdHJpbmcocmVhZChpbnRlcnBzWzBdLm9mZnNldCxpbnRlcnBzWzBdLnNpemUpKTpudWxsO3JlcXVpcmVGYWN0KGludGVycHJldGVyPT09bnVsbHx8aW50ZXJwcmV0ZXI9PT0nL2xpYi9sZC1tdXNsLWFhcmNoNjQuc28uMScsJ1Byb2JlVW5zdXBwb3J0ZWRJbnRlcnByZXRlcicpOwogICAgbGV0IG5lZWRlZD1bXSxzb25hbWU9bnVsbDsKICAgIGlmKGR5bmFtaWMubGVuZ3RoKXtjb25zdCBkPXJlYWQoZHluYW1pY1swXS5vZmZzZXQsZHluYW1pY1swXS5zaXplKTtyZXF1aXJlRmFjdChkLmxlbmd0aCUxNj09PTAsJ1Byb2JlRWxmRHluYW1pYycpO2NvbnN0IHRhZ3M9W107bGV0IGVuZGVkPWZhbHNlOwogICAgIGZvcihsZXQgaT0wO2k8ZC5sZW5ndGg7aSs9MTYpe2NvbnN0IHRhZz1udW1iZXIoZCxpKSx2YWx1ZT1udW1iZXIoZCxpKzgpO2lmKHRhZz09PTApe2VuZGVkPXRydWU7YnJlYWs7fXJlcXVpcmVGYWN0KHRhZyE9PTE1JiZ0YWchPT0yOSwnUHJvYmVVbnN1cHBvcnRlZFJ1bnBhdGgnKTt0YWdzLnB1c2goe3RhZyx2YWx1ZX0pO30KICAgICByZXF1aXJlRmFjdChlbmRlZCwnUHJvYmVFbGZEeW5hbWljJyk7Y29uc3Qgc3RyaW5ncz10YWdzLmZpbHRlcih0PT50LnRhZz09PTUpLHNpemVzPXRhZ3MuZmlsdGVyKHQ9PnQudGFnPT09MTApO3JlcXVpcmVGYWN0KHN0cmluZ3MubGVuZ3RoPT09MSYmc2l6ZXMubGVuZ3RoPT09MSwnUHJvYmVFbGZTdHJpbmdzJyk7CiAgICAgY29uc3QgbG9hZD1zZWdtZW50cy5maWx0ZXIocD0+cC50eXBlPT09MSYmc3RyaW5nc1swXS52YWx1ZT49cC5hZGRyZXNzJiZzdHJpbmdzWzBdLnZhbHVlK3NpemVzWzBdLnZhbHVlPD1wLmFkZHJlc3MrcC5zaXplKTtyZXF1aXJlRmFjdChsb2FkLmxlbmd0aD09PTEsJ1Byb2JlRWxmU3RyaW5nUmFuZ2UnKTsKICAgICBjb25zdCB0ZXh0PW9mZnNldD0+e3JlcXVpcmVGYWN0KG9mZnNldDxzaXplc1swXS52YWx1ZSwnUHJvYmVFbGZTdHJpbmdSYW5nZScpO2NvbnN0IHZhbHVlPWNzdHJpbmcocmVhZChsb2FkWzBdLm9mZnNldCtzdHJpbmdzWzBdLnZhbHVlLWxvYWRbMF0uYWRkcmVzcytvZmZzZXQsTWF0aC5taW4oNTEyLHNpemVzWzBdLnZhbHVlLW9mZnNldCkpKTtyZXF1aXJlRmFjdCgvXltBLVphLXowLTlfListXSskLy50ZXN0KHZhbHVlKSwnUHJvYmVFbGZOYW1lJyk7cmV0dXJuIHZhbHVlO307CiAgICAgbmVlZGVkPXRhZ3MuZmlsdGVyKHQ9PnQudGFnPT09MSkubWFwKHQ9PnRleHQodC52YWx1ZSkpO3JlcXVpcmVGYWN0KG5lZWRlZC5sZW5ndGg8PTY0JiZuZXcgU2V0KG5lZWRlZCkuc2l6ZT09PW5lZWRlZC5sZW5ndGgsJ1Byb2JlRWxmRGVwZW5kZW5jaWVzJyk7CiAgICAgY29uc3QgbmFtZXM9dGFncy5maWx0ZXIodD0+dC50YWc9PT0xNCk7cmVxdWlyZUZhY3QobmFtZXMubGVuZ3RoPD0xLCdQcm9iZUVsZlNvbmFtZScpO2lmKG5hbWVzLmxlbmd0aClzb25hbWU9dGV4dChuYW1lc1swXS52YWx1ZSk7CiAgICB9CiAgICBjb25zdCBvdXQ9e3BhdGg6aW5wdXQscmVzb2x2ZWRQYXRoLGludGVycHJldGVyLG5lZWRlZCxzb25hbWV9O2VsZkNhY2hlLnNldChyZXNvbHZlZFBhdGgsb3V0KTtyZXR1cm4gb3V0OwogICB9ZmluYWxseXtmcy5jbG9zZVN5bmMoZmQpO30KICB9OwogIGNvbnN0IGNsb3N1cmU9ZXhlY3V0YWJsZT0+ewogICBjb25zdCBtYWluPWVsZihleGVjdXRhYmxlKTtyZXF1aXJlRmFjdChtYWluLmludGVycHJldGVyPT09Jy9saWIvbGQtbXVzbC1hYXJjaDY0LnNvLjEnLCdQcm9iZUR5bmFtaWNNdXNsUmVxdWlyZWQnKTsKICAgY29uc3QgdGV4dD1ydW4obWFpbi5pbnRlcnByZXRlcixbJy0tbGlzdCcsZXhlY3V0YWJsZV0pLnRvU3RyaW5nKCd1dGY4JyksYmluZGluZ3M9W10sc2Vlbj1uZXcgU2V0KCk7CiAgIGZvcihjb25zdCBsaW5lIG9mIHRleHQudHJpbSgpLnNwbGl0KCdcbicpKXtjb25zdCBtPS9eXHMqKD86KFxTKykgPT4gKT8oXC9bXlxzXSspIFwoW15cbl0rXCkkLy5leGVjKGxpbmUpO3JlcXVpcmVGYWN0KG0mJmNhbm9uKG1bMl0pLCdQcm9iZUxvYWRlck91dHB1dCcpO2JpbmRpbmdzLnB1c2goe25hbWU6bVsxXT8/cGF0aC5wb3NpeC5iYXNlbmFtZShtWzJdKSxwYXRoOm1bMl19KTtzZWVuLmFkZChtWzJdKTt9CiAgIHNlZW4uYWRkKG1haW4uaW50ZXJwcmV0ZXIpO3JlcXVpcmVGYWN0KHNlZW4uc2l6ZTw9NjQmJmJpbmRpbmdzLmxlbmd0aDw9MTI4LCdQcm9iZUxvYWRlckNvdW50Jyk7Y29uc3QgZmlsZXM9Wy4uLnNlZW5dLnNvcnQoKS5tYXAoZWxmKSxuYW1lcz1uZXcgU2V0KGJpbmRpbmdzLm1hcChiPT5iLm5hbWUpKTsKICAgZm9yKGNvbnN0IGUgb2YgW21haW4sLi4uZmlsZXNdKWZvcihjb25zdCBuYW1lIG9mIGUubmVlZGVkKXJlcXVpcmVGYWN0KG5hbWVzLmhhcyhuYW1lKSwnUHJvYmVEZXBlbmRlbmN5VW5yZXNvbHZlZCcpOwogICByZXR1cm4ge2V4ZWN1dGFibGU6bWFpbixmaWxlcyxiaW5kaW5nc307CiAgfTsKICBjb25zdCBub2RlPWNsb3N1cmUoJy91c3IvbG9jYWwvYmluL25vZGUnKSxwcmltaXRpdmU9Y2xvc3VyZSgnL2Jpbi9zZXRwcml2Jyk7CiAgY29uc3QgbWFwcGVkPVsuLi5uZXcgU2V0KHNtYWxsKCcvcHJvYy9zZWxmL21hcHMnKS5zcGxpdCgnXG4nKS5maWx0ZXIoQm9vbGVhbikuZmxhdE1hcChsaW5lPT57Y29uc3QgbT0vXlxTK1xzK1xTK1xzK1xTK1xzK1xTK1xzK1xTKyg/OlxzKyguKykpPyQvLmV4ZWMobGluZS50cmltRW5kKCkpO3JlcXVpcmVGYWN0KG0sJ1Byb2JlTWFwcycpO2lmKCFtWzFdfHxtWzFdLnN0YXJ0c1dpdGgoJ1snKSlyZXR1cm4gW107cmVxdWlyZUZhY3QoY2Fub24obVsxXSksJ1Byb2JlTWFwUGF0aCcpO3JldHVybiBbZnMucmVhbHBhdGhTeW5jKG1bMV0pXTt9KSldLnNvcnQoKTsKICBjb25zdCBhbGxvd2VkPW5ldyBTZXQoW25vZGUuZXhlY3V0YWJsZS5yZXNvbHZlZFBhdGgsLi4ubm9kZS5maWxlcy5tYXAoZj0+Zi5yZXNvbHZlZFBhdGgpXSk7cmVxdWlyZUZhY3QobWFwcGVkLmxlbmd0aD4wJiZtYXBwZWQuZXZlcnkocD0+YWxsb3dlZC5oYXMocCkpLCdQcm9iZVVuZXhwZWN0ZWRNYXBwZWRGaWxlJyk7CiAgY29uc3QgbmF0aXZlUGF0aD0nL3RtcC9tZW05LWZpeGVkLW5hdGl2ZS1wcm9iZSc7ZnMud3JpdGVGaWxlU3luYyhuYXRpdmVQYXRoLEJ1ZmZlci5mcm9tKG5hdGl2ZUJhc2U2NCwnYmFzZTY0Jykse2ZsYWc6J3d4Jyxtb2RlOjBvNzAwfSk7CiAgbGV0IG5hdGl2ZTt0cnl7Y29uc3QgcmF3PXJ1bihuYXRpdmVQYXRoLFtdKTtyZXF1aXJlRmFjdChyYXcubGVuZ3RoPT09MTEyLCdQcm9iZU5hdGl2ZU91dHB1dCcpO25hdGl2ZT1BcnJheS5mcm9tKHtsZW5ndGg6MTR9LChfLGkpPT5OdW1iZXIocmF3LnJlYWRCaWdJbnQ2NExFKGkqOCkpKTt9ZmluYWxseXtmcy51bmxpbmtTeW5jKG5hdGl2ZVBhdGgpO30KICBjb25zdCByZXF1ZXN0ZWQ9bmV3IFNldChbJy8nXSk7CiAgY29uc3QgYWRkPXA9PntyZXF1aXJlRmFjdChjYW5vbihwKSwnUHJvYmVQYXRoJyk7cmVxdWVzdGVkLmFkZChwKTt3aGlsZShwIT09Jy8nKXtwPXBhdGgucG9zaXguZGlybmFtZShwKTtyZXF1ZXN0ZWQuYWRkKHApO319OwogIGZvcihjb25zdCBwIG9mIFsuLi5wYXRocywuLi5ub2RlLmZpbGVzLm1hcChmPT5mLnBhdGgpLC4uLnByaW1pdGl2ZS5maWxlcy5tYXAoZj0+Zi5wYXRoKSwnL3Vzci9sb2NhbC9iaW4vbm9kZScsJy9iaW4vc2V0cHJpdiddKXthZGQocCk7YWRkKGZzLnJlYWxwYXRoU3luYyhwKSk7bGV0IGN1cnJlbnQ9Jyc7Zm9yKGNvbnN0IHBhcnQgb2YgcC5zcGxpdCgnLycpLmZpbHRlcihCb29sZWFuKSl7Y3VycmVudCs9Jy8nK3BhcnQ7YWRkKGZzLnJlYWxwYXRoU3luYyhjdXJyZW50KSk7fX0KICByZXF1aXJlRmFjdChyZXF1ZXN0ZWQuc2l6ZTw9NTEyLCdQcm9iZVBhdGhDb3VudCcpO2NvbnN0IG9ic2VydmF0aW9ucz1bLi4ucmVxdWVzdGVkXS5zb3J0KCkubWFwKHA9Pntjb25zdCBzPWZzLmxzdGF0U3luYyhwKTtyZXF1aXJlRmFjdChzLmlzRmlsZSgpfHxzLmlzRGlyZWN0b3J5KCl8fHMuaXNTeW1ib2xpY0xpbmsoKSwnUHJvYmVQYXRoVHlwZScpO3JldHVybiB7cGF0aDpwLHJlc29sdmVkUGF0aDpmcy5yZWFscGF0aFN5bmMocCksdHlwZTpzLmlzU3ltYm9saWNMaW5rKCk/J3N5bWxpbmsnOnMuaXNEaXJlY3RvcnkoKT8nZGlyZWN0b3J5JzonZmlsZScsbW9kZTpzLm1vZGUmMG83Nzc3LHVpZDpzLnVpZCxnaWQ6cy5naWR9O30pOwogIGNvbnN0IG91dD1KU09OLnN0cmluZ2lmeSh7dmVyc2lvbjoxLGtpbmQ6J2NvbnRyb2wtbmF0aXZlLXByZXJlcXVpc2l0ZXMnLG5vZGVWZXJzaW9uOnByb2Nlc3MudmVyc2lvbixhcmNoaXRlY3R1cmU6cHJvY2Vzcy5hcmNoLGlkZW50aXR5OmluaXRpYWwsY2hpbGQsbmF0aXZlLG5vZGUscHJpbWl0aXZlLG1hcHBlZCxvYnNlcnZhdGlvbnMsbG9hZGVyQWJzZW5jZXMsZmluYWxJZGVudGl0eTppZGVudGl0eSgpfSk7cmVxdWlyZUZhY3QoQnVmZmVyLmJ5dGVMZW5ndGgob3V0KTw9MjYyMTQ0LCdQcm9iZU91dHB1dExpbWl0Jyk7cHJvY2Vzcy5zdGRvdXQud3JpdGUob3V0KydcbicpOwogfWNhdGNoKGVycm9yKXtwcm9jZXNzLnN0ZGVyci53cml0ZSgnTm9ucm9vdFByZXJlcXVpc2l0ZXNQcm9iZVJlamVjdGVkOicrU3RyaW5nKGVycm9yLm1lc3NhZ2UpLnJlcGxhY2UoL1teQS1aYS16MC05XS9nLCcnKS5zbGljZSgwLDgwKSsnXG4nKTtwcm9jZXNzLmV4aXRDb2RlPTE7fQp9Ci8vIEVORCBGSVhFRCBDT05UUk9MIFBSRVJFUVVJU0lURVMgUFJPQkUKLy8gUmVhZCBsaXRlcmFsIHJldmlld2VkIHNvdXJjZSwgbm90IGEgYnVuZGxlci90ZXN0IHJ1bm5lcidzIHRyYW5zZm9ybWVkCi8vIEZ1bmN0aW9uLnRvU3RyaW5nKCkuIE5vIGNhbGxlciBpbnB1dCBjYW4gc2VsZWN0IG9yIHJlcGxhY2UgdGhpcyBwcm9ncmFtLgpjb25zdCBwcm9iZVNvdXJjZT1zb3VyY2VCeXRlcy50b1N0cmluZygndXRmOCcpLnNwbGl0KCcvLyBCRUdJTiBGSVhFRCBDT05UUk9MIFBSRVJFUVVJU0lURVMgUFJPQkVcbicpWzFdPy5zcGxpdCgnLy8gRU5EIEZJWEVEIENPTlRST0wgUFJFUkVRVUlTSVRFUyBQUk9CRVxuJylbMF07Cm5lZWQocHJvYmVTb3VyY2U/LnN0YXJ0c1dpdGgoJ2FzeW5jIGZ1bmN0aW9uIGZpeGVkUHJvYmUoJyksJ05vbnJvb3RQcmVyZXF1aXNpdGVzUHJvYmVTb3VyY2UnKTsKY29uc3QgcHJvYmVDb2RlPScoJytwcm9iZVNvdXJjZS50cmltKCkrJykoJytKU09OLnN0cmluZ2lmeShuYXRpdmVCeXRlcy50b1N0cmluZygnYmFzZTY0JykpKycsSlNPTi5wYXJzZShwcm9jZXNzLmFyZ3ZbMV0pKSc7CmNvbnN0IHByb2JlQ29kZUhhc2g9c2hhKHByb2JlQ29kZSk7CgovLyBTYW1lIGJvdW5kZWQgcG9zaXRpdmUgcHJvY2Vzcy1ncm91cCBleGl0IGRpc2NpcGxpbmUgYXMgdGhlIHBhdGggb2JzZXJ2ZXIuCi8vIEludGVybmFsIGhvc3QgdHJhbnNwb3J0IHNoYXJlZCBieSB0aGUgdHdvIGZpeGVkIGNvbGxlY3RvcnMuIFRoaXMgZnVuY3Rpb24KLy8gY3JlYXRlcyBubyBldmlkZW5jZS9hdXRob3JpdHk7IGNhbGxlcnMgbXVzdCBzdXBwbHkgdGhlaXIgY29kZS1vd25lZCBhcmd2LgpleHBvcnQgZnVuY3Rpb24gcnVuTm9ucm9vdENvbnRyb2xEb2NrZXJDb21tYW5kKGFyZ3Mse2RpcmVjdG9yeSx0aW1lb3V0TXMsc2lnbmFsfSl7CiByZXR1cm4gbmV3IFByb21pc2UoKHJlc29sdmUscmVqZWN0KT0+ewogIGNvbnN0IGNoaWxkPXNwYXduKCcvdXNyL2Jpbi9kb2NrZXInLFsnLS1ob3N0JywndW5peDovLy92YXIvcnVuL2RvY2tlci5zb2NrJywnLS1jb25maWcnLGRpcmVjdG9yeSwuLi5hcmdzXSx7Y3dkOmRpcmVjdG9yeSxlbnY6e1BBVEg6Jy91c3IvYmluOi9iaW4nLEhPTUU6ZGlyZWN0b3J5LERPQ0tFUl9DT05GSUc6ZGlyZWN0b3J5LExBTkc6J0MnLExDX0FMTDonQyd9LGRldGFjaGVkOnRydWUsc3RkaW86WydpZ25vcmUnLCdwaXBlJywncGlwZSddfSk7CiAgY29uc3Qgb3V0PVtdLGVycj1bXTtsZXQgc2l6ZT0wLGNsb3NlZD1mYWxzZSxmaW5pc2hlZD1mYWxzZSxwcm9ibGVtLHN0YXR1cyx0aW1lcixkcmFpblRpbWVyOwogIGNvbnN0IGFsaXZlPSgpPT57aWYoIWNoaWxkLnBpZClyZXR1cm4gZmFsc2U7dHJ5e3Byb2Nlc3Mua2lsbCgtY2hpbGQucGlkLDApO3JldHVybiB0cnVlO31jYXRjaChlKXtpZihlLmNvZGU9PT0nRVNSQ0gnKXJldHVybiBmYWxzZTt0aHJvdyBlO319OwogIGNvbnN0IGtpbGw9KCk9Pnt0cnl7aWYoY2hpbGQucGlkKXByb2Nlc3Mua2lsbCgtY2hpbGQucGlkLCdTSUdLSUxMJyk7fWNhdGNoKGUpe2lmKGUuY29kZSE9PSdFU1JDSCcpcHJvYmxlbT1jbGVhbnVwRXJyb3IoKTt9fTsKICBjb25zdCBmaW5pc2g9KCk9PntpZihmaW5pc2hlZClyZXR1cm47ZmluaXNoZWQ9dHJ1ZTtjbGVhclRpbWVvdXQodGltZXIpO2NsZWFyVGltZW91dChkcmFpblRpbWVyKTtzaWduYWw/LnJlbW92ZUV2ZW50TGlzdGVuZXIoJ2Fib3J0JyxhYm9ydCk7aWYocHJvYmxlbSlyZWplY3QocHJvYmxlbSk7ZWxzZSByZXNvbHZlKHtzdGF0dXMsc3Rkb3V0OkJ1ZmZlci5jb25jYXQob3V0KS50b1N0cmluZygndXRmOCcpLHN0ZGVycjpCdWZmZXIuY29uY2F0KGVycikudG9TdHJpbmcoJ3V0ZjgnKX0pO307CiAgY29uc3QgZHJhaW49dW50aWw9PntpZihmaW5pc2hlZClyZXR1cm47bGV0IGV4aXN0cz10cnVlO3RyeXtleGlzdHM9YWxpdmUoKTt9Y2F0Y2h7fWlmKGNsb3NlZCYmIWV4aXN0cylyZXR1cm4gZmluaXNoKCk7aWYoRGF0ZS5ub3coKT49dW50aWwpe3Byb2JsZW09Y2xlYW51cEVycm9yKCk7cmV0dXJuIGZpbmlzaCgpO31kcmFpblRpbWVyPXNldFRpbWVvdXQoKCk9PmRyYWluKHVudGlsKSwxMCk7fTsKICBjb25zdCBzdG9wPWNvZGU9Pntwcm9ibGVtPz89T2JqZWN0LmFzc2lnbihFcnJvcihjb2RlKSx7Y29kZX0pO2tpbGwoKTtjbGVhclRpbWVvdXQoZHJhaW5UaW1lcik7ZHJhaW4oRGF0ZS5ub3coKSsxMDAwKTt9OwogIGNvbnN0IGFib3J0PSgpPT5zdG9wKCdOb25yb290UHJlcmVxdWlzaXRlc0Fib3J0ZWQnKSxjb2xsZWN0PWNodW5rcz0+Yj0+e3NpemUrPWIubGVuZ3RoO2lmKHNpemU+MTA0ODU3NilzdG9wKCdOb25yb290UHJlcmVxdWlzaXRlc091dHB1dExpbWl0Jyk7ZWxzZSBjaHVua3MucHVzaChiKTt9OwogIGNoaWxkLnN0ZG91dC5vbignZGF0YScsY29sbGVjdChvdXQpKTtjaGlsZC5zdGRlcnIub24oJ2RhdGEnLGNvbGxlY3QoZXJyKSk7CiAgY2hpbGQub24oJ2Vycm9yJywoKT0+e2Nsb3NlZD10cnVlO3Byb2JsZW0/Pz1FcnJvcignTm9ucm9vdFByZXJlcXVpc2l0ZXNEb2NrZXJVbmF2YWlsYWJsZScpO2lmKGNoaWxkLnBpZClzdG9wKCdFQ0xFQU5VUCcpO2Vsc2UgZmluaXNoKCk7fSk7CiAgY2hpbGQub24oJ2Nsb3NlJyxjb2RlPT57Y2xvc2VkPXRydWU7c3RhdHVzPWNvZGU7dHJ5e2lmKGFsaXZlKCkpc3RvcCgnTm9ucm9vdFByZXJlcXVpc2l0ZXNEZXNjZW5kYW50Jyk7ZWxzZSBmaW5pc2goKTt9Y2F0Y2h7cHJvYmxlbT1jbGVhbnVwRXJyb3IoKTtmaW5pc2goKTt9fSk7CiAgdGltZXI9c2V0VGltZW91dCgoKT0+c3RvcCgnTm9ucm9vdFByZXJlcXVpc2l0ZXNUaW1lb3V0JyksdGltZW91dE1zKTtzaWduYWw/LmFkZEV2ZW50TGlzdGVuZXIoJ2Fib3J0JyxhYm9ydCx7b25jZTp0cnVlfSk7aWYoc2lnbmFsPy5hYm9ydGVkKWFib3J0KCk7CiB9KTsKfQoKYXN5bmMgZnVuY3Rpb24gcHJlZmxpZ2h0KHZhbHVlLG9wdGlvbnMpewogY29uc3QgaW5wdXQ9Y29weU5vbnJvb3RKc29uKHZhbHVlKTtleGFjdChpbnB1dCxbJ2ltYWdlJywnc291cmNlQ2xvc3VyZSddKTtjb25zdCBleHBlY3RlZD1jb3B5Tm9ucm9vdEpzb24ob3B0aW9ucy5leHBlY3RlZCk7ZXhhY3QoZXhwZWN0ZWQsWydjYW5kaWRhdGVUcmVlJ10pOwogY29uc3Qge2dyYXBoLGZpbGVzeXN0ZW19PW9wdGlvbnMuY29udHJvbFZlcmlmaWNhdGlvbj8/e30sYmluZGluZz1jb250cm9sSW1hZ2VHcmFwaEJpbmRpbmcoZ3JhcGgpLGZzPWluc3BlY3RJbWFnZUZpbGVzeXN0ZW1FdmlkZW5jZShmaWxlc3lzdGVtKTsKIHNhbWUoaW5wdXQuaW1hZ2UsKCgoe2dyYXBoSGFzaCwuLi5pbWFnZX0pPT5pbWFnZSkoYmluZGluZykpKTtuZWVkKGZzLmNvbXBvbmVudD09PSdib290c3RyYXAnJiZmcy5ncmFwaEhhc2g9PT1iaW5kaW5nLmdyYXBoSGFzaCYmaW1hZ2VGaWxlc3lzdGVtVmVyaWZpY2F0aW9uS2luZChmaWxlc3lzdGVtKT09PSdsaXZlLWZpbGVzeXN0ZW0tZXZpZGVuY2UnLCdOb25yb290UHJlcmVxdWlzaXRlc0ZpbGVzeXN0ZW0nKTsKIG5lZWQob3B0aW9ucy5zb3VyY2VDb250ZXh0Py50cmVlPT09ZXhwZWN0ZWQuY2FuZGlkYXRlVHJlZSYmaW5wdXQuc291cmNlQ2xvc3VyZS50cmVlPT09ZXhwZWN0ZWQuY2FuZGlkYXRlVHJlZSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNTb3VyY2UnKTsKIGF3YWl0IHZlcmlmeUNvbnRyb2xTb3VyY2VDbG9zdXJlKG9wdGlvbnMuc291cmNlQ29udGV4dCxpbnB1dC5zb3VyY2VDbG9zdXJlKTsKIG5lZWQoaW5wdXQuc291cmNlQ2xvc3VyZS5maWxlcy5sZW5ndGg+MCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNTb3VyY2UnKTsKIGNvbnN0IG93bj1hd2FpdCByZWFkQ29udHJvbFNvdXJjZUZpbGUob3B0aW9ucy5zb3VyY2VDb250ZXh0LHNvdXJjZVBhdGgpO25lZWQob3duLmZpbGUuc2hhMjU2PT09Y29sbGVjdG9yQ29kZUhhc2gmJm93bi5ieXRlcy5lcXVhbHMoc291cmNlQnl0ZXMpLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbGxlY3RvclNvdXJjZScpOwogY29uc3QgZW50cmllcz1pbnNwZWN0SW1hZ2VGaWxlc3lzdGVtRW50cmllcyhmaWxlc3lzdGVtKSxub2Rlcz1uZXcgTWFwKGVudHJpZXMubWFwKGU9PltlLnBhdGgsZV0pKTsKIC8vIFJlc29sdmUgZXZlcnkgaW50ZXJtZWRpYXRlIHN5bWxpbmsgYmVmb3JlIGRlY2xhcmluZyBhIGxvYWRlciBwYXRoIGFic2VudC4KIC8vIFByZXNlcnZlICcuLicgdW50aWwgZXhwYW5zaW9uOyBub3JtYWxpemF0aW9uIGFsb25lIGNhbiBza2lwIGEgcmVhbCBob3AuCiBjb25zdCBleGlzdHM9cGF0aD0+e2xldCBwZW5kaW5nPXBhdGguc3BsaXQoJy8nKS5maWx0ZXIoQm9vbGVhbikscGFydHM9W10sbGlua3M9MCxzdGVwcz0wO3doaWxlKHBlbmRpbmcubGVuZ3RoKXtuZWVkKCsrc3RlcHM8PTUxMiwnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2FkZXJQYXRoJyk7Y29uc3QgcGFydD1wZW5kaW5nLnNoaWZ0KCk7aWYocGFydD09PScuJyljb250aW51ZTtpZihwYXJ0PT09Jy4uJyl7bmVlZChwYXJ0cy5sZW5ndGg+MCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2FkZXJQYXRoJyk7cGFydHMucG9wKCk7Y29udGludWU7fWNvbnN0IG5vZGU9bm9kZXMuZ2V0KFsuLi5wYXJ0cyxwYXJ0XS5qb2luKCcvJykpO2lmKCFub2RlKXJldHVybiBmYWxzZTtpZihub2RlLnR5cGU9PT0nc3ltbGluaycpe25lZWQoKytsaW5rczw9NDAsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTG9hZGVyUGF0aCcpO2lmKCFwZW5kaW5nLmxlbmd0aClyZXR1cm4gdHJ1ZTtpZihub2RlLmxpbmsuc3RhcnRzV2l0aCgnLycpKXBhcnRzPVtdO3BlbmRpbmc9Wy4uLm5vZGUubGluay5zcGxpdCgnLycpLmZpbHRlcihCb29sZWFuKSwuLi5wZW5kaW5nXTt9ZWxzZXtwYXJ0cy5wdXNoKHBhcnQpO2lmKHBlbmRpbmcubGVuZ3RoKW5lZWQobm9kZS50eXBlPT09J2RpcmVjdG9yeScsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTG9hZGVyUGF0aCcpO319cmV0dXJuIHRydWU7fTsKIGZvcihjb25zdCBwIG9mIGxvYWRlclBhdGhzKW5lZWQoIWV4aXN0cyhwKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2FkZXJGaWxlJyk7CiBjb25zdCBmaWxlcz1uZXcgTWFwKCk7CiBjb25zdCBmaWxlPShwYXRoLGV4ZWN1dGFibGU9ZmFsc2UpPT57Y29uc3QgZj1pbnNwZWN0SW1hZ2VGaWxlc3lzdGVtRmlsZShmaWxlc3lzdGVtLHBhdGgpO25lZWQoZi51aWQ9PT0wJiZmLmdpZD09PTAmJihmLm1vZGUmMG82MDIyKT09PTAmJiFmLnByaXZpbGVnZUF0dHJpYnV0ZXMubGVuZ3RoJiYoZXhlY3V0YWJsZT9mLm1vZGU9PT0wbzc1NTooZi5tb2RlJjBvMDA0KSE9PTApLCdOb25yb290UHJlcmVxdWlzaXRlc0ZpbGVQZXJtaXNzaW9ucycpO2ZpbGVzLnNldChwYXRoLGYpO3JldHVybiBmO307CiBmaWxlKCcvdXNyL2xvY2FsL2Jpbi9ub2RlJyx0cnVlKTtmaWxlKCcvYmluL3NldHByaXYnLHRydWUpO2ZpbGUoJy9saWIvbGQtbXVzbC1hYXJjaDY0LnNvLjEnKTsKIGZvcihjb25zdCBmIG9mIGlucHV0LnNvdXJjZUNsb3N1cmUuZmlsZXMpe2lmKGYucGF0aC5zdGFydHNXaXRoKCdkb2NrZXIvYm9vdHN0cmFwLycpKXtjb25zdCBhY3R1YWw9ZmlsZSgnL2Jvb3RzdHJhcC8nK2YucGF0aC5zbGljZSgnZG9ja2VyL2Jvb3RzdHJhcC8nLmxlbmd0aCkpO25lZWQoYWN0dWFsLnNoYTI1Nj09PWYuc2hhMjU2LCdOb25yb290UHJlcmVxdWlzaXRlc1NvdXJjZUZpbGUnKTt9fQogY29uc3Qgc3RhdGU9aW1hZ2VHcmFwaFN0YXRlKGdyYXBoKSxkZXNjcmlwdG9yPXN0YXRlLmltYWdlcy5nZXQoJ2Jvb3RzdHJhcCcpLmNvbmZpZyxjb25maWc9YXdhaXQgcmVhZEltYWdlSnNvbihzdGF0ZS5zdG9yZS5vcGVuKGRlc2NyaXB0b3IpLHttYXhCeXRlczo4Mzg4NjA4LGJ1ZGdldDpzdGF0ZS5idWRnZXR9KTsKIG5lZWQoZGVzY3JpcHRvci5kaWdlc3Q9PT1iaW5kaW5nLmNvbmZpZ0RpZ2VzdCYmY29uZmlnLmFyY2hpdGVjdHVyZT09PSdhcm02NCcmJmNvbmZpZy5vcz09PSdsaW51eCcmJiFPYmplY3Qua2V5cyhjb25maWcuY29uZmlnPy5Wb2x1bWVzPz97fSkubGVuZ3RoLCdOb25yb290UHJlcmVxdWlzaXRlc0ltYWdlQ29uZmlnJyk7CiBjb25zdCBlbnY9Y29uZmlnLmNvbmZpZz8uRW52Pz9bXSxzZWVuPW5ldyBTZXQoKTtsZXQgY2E7CiBuZWVkKEFycmF5LmlzQXJyYXkoZW52KSYmZW52Lmxlbmd0aDw9MzIsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRW52aXJvbm1lbnQnKTsKIGZvcihjb25zdCBpdGVtIG9mIGVudil7bmVlZCh0eXBlb2YgaXRlbT09PSdzdHJpbmcnJiZpdGVtLmxlbmd0aDw9NDA5NiYmaXRlbS5pbmNsdWRlcygnPScpLCdOb25yb290UHJlcmVxdWlzaXRlc0Vudmlyb25tZW50Jyk7Y29uc3QgaT1pdGVtLmluZGV4T2YoJz0nKSxrZXk9aXRlbS5zbGljZSgwLGkpLHY9aXRlbS5zbGljZShpKzEpO25lZWQoIXNlZW4uaGFzKGtleSkmJiFrZXkuc3RhcnRzV2l0aCgnTERfJykmJiFOT05ST09UX0ZPUkJJRERFTl9FTlZJUk9OTUVOVC5pbmNsdWRlcyhrZXkpJiZbJ1BBVEgnLCdIT01FJywnTk9ERV9WRVJTSU9OJywnWUFSTl9WRVJTSU9OJywnTk9ERV9FWFRSQV9DQV9DRVJUUyddLmluY2x1ZGVzKGtleSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRW52aXJvbm1lbnQnKTtzZWVuLmFkZChrZXkpOwogIGlmKGtleT09PSdQQVRIJyluZWVkKHYuc3BsaXQoJzonKS5ldmVyeShjYW5vbmljYWwpLCdOb25yb290UHJlcmVxdWlzaXRlc0Vudmlyb25tZW50Jyk7ZWxzZSBpZihrZXk9PT0nSE9NRScpbmVlZCh2PT09Jy90bXAnLCdOb25yb290UHJlcmVxdWlzaXRlc0Vudmlyb25tZW50Jyk7ZWxzZSBpZihrZXk9PT0nTk9ERV9FWFRSQV9DQV9DRVJUUycpe25lZWQoWycvYm9vdHN0cmFwL2dsb2JhbC1idW5kbGUucGVtJywnL2FwcC9nbG9iYWwtYnVuZGxlLnBlbSddLmluY2x1ZGVzKHYpLCdOb25yb290UHJlcmVxdWlzaXRlc0NhJyk7Y2E9ZmlsZSh2KTtuZWVkKGNhLnJlc29sdmVkUGF0aD09PXYsJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ2EnKTt9ZWxzZSBuZWVkKC9eXGQrXC5cZCtcLlxkKyQvLnRlc3QodiksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRW52aXJvbm1lbnQnKTsKIH0KIGNvbnN0IHBhdGhzPW5ldyBTZXQoWycvJ10pO2Zvcihjb25zdCBmIG9mIGZpbGVzLnZhbHVlcygpKWZvcihjb25zdCBwIG9mIFtmLnBhdGgsZi5yZXNvbHZlZFBhdGgsLi4uZi5wYXJlbnRzLm1hcChyPT5yLnBhdGgpLC4uLmYuc3ltbGlua0NoYWluLm1hcChyPT5yLnBhdGgpXSlwYXRocy5hZGQocCk7CiBuZWVkKHBhdGhzLnNpemU8PTUxMiYmWy4uLnBhdGhzXS5ldmVyeShjYW5vbmljYWwpLCdOb25yb290UHJlcmVxdWlzaXRlc1BhdGhzJyk7CiByZXR1cm4ge2lucHV0LGdyYXBoLGZpbGVzeXN0ZW0sYmluZGluZyxmcyxjb25maWcsZmlsZXMsZmlsZSxwYXRoczpbLi4ucGF0aHNdLnNvcnQoKSxjYSxub2Rlcyxzb3VyY2VDb250ZXh0Om9wdGlvbnMuc291cmNlQ29udGV4dH07Cn0KZnVuY3Rpb24gY2hlY2tJbWFnZShyYXcscCxwbGF0Zm9ybT1mYWxzZSl7CiBuZWVkKEFycmF5LmlzQXJyYXkocmF3KSYmcmF3Lmxlbmd0aD09PTEsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRG9ja2VySW1hZ2UnKTtjb25zdCB2PXJhd1swXSx3YW50ZWQ9cGxhdGZvcm0/cC5iaW5kaW5nLmFybTY0RGlnZXN0OnAuYmluZGluZy5yb290RGlnZXN0OwogbmVlZCh2Lk9zPT09J2xpbnV4JyYmdi5BcmNoaXRlY3R1cmU9PT0nYXJtNjQnLCdOb25yb290UHJlcmVxdWlzaXRlc0RvY2tlckltYWdlJyk7CiBpZih2LkRlc2NyaXB0b3IpbmVlZCh2LkRlc2NyaXB0b3IuZGlnZXN0PT09d2FudGVkJiZ2LklkPT09d2FudGVkLCdOb25yb290UHJlcmVxdWlzaXRlc0RvY2tlckltYWdlJyk7ZWxzZSBuZWVkKHYuSWQ9PT1wLmJpbmRpbmcuY29uZmlnRGlnZXN0JiZ2LlJlcG9EaWdlc3RzPy5zb21lKGQ9PmQuZW5kc1dpdGgoJ0AnK3AuYmluZGluZy5yb290RGlnZXN0KSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRG9ja2VySW1hZ2UnKTsKIHNhbWUodi5Db25maWcscC5jb25maWcuY29uZmlnKTtzYW1lKHYuUm9vdEZTLHtUeXBlOidsYXllcnMnLExheWVyczpwLmNvbmZpZy5yb290ZnMuZGlmZl9pZHN9KTtyZXR1cm4gdjsKfQpmdW5jdGlvbiBjaGVja0NvbnRhaW5lcihyYXcscCx7aWQsbmFtZSxhcmdzfSxleGl0ZWQpewogbmVlZChBcnJheS5pc0FycmF5KHJhdykmJnJhdy5sZW5ndGg9PT0xLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lcicpO2NvbnN0IHY9cmF3WzBdLGM9di5Db25maWcsaD12Lkhvc3RDb25maWc7CiBuZWVkKHYuSWQ9PT1pZCYmdi5OYW1lPT09Jy8nK25hbWUmJmMuSW1hZ2U9PT1wLmJpbmRpbmcucm9vdERpZ2VzdCYmYy5Vc2VyPT09JzEwMDA6MTAwMCcmJmMuTGFiZWxzPy5bJ21lbTktcHJlcmVxdWlzaXRlcy1wcm9iZSddPT09bmFtZSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNDb250YWluZXJJZGVudGl0eScpOwogbmVlZChbcC5iaW5kaW5nLmNvbmZpZ0RpZ2VzdCxwLmJpbmRpbmcucm9vdERpZ2VzdCxwLmJpbmRpbmcuYXJtNjREaWdlc3RdLmluY2x1ZGVzKHYuSW1hZ2UpLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lckltYWdlJyk7CiBpZih2LkltYWdlTWFuaWZlc3REZXNjcmlwdG9yKW5lZWQodi5JbWFnZU1hbmlmZXN0RGVzY3JpcHRvci5kaWdlc3Q9PT1wLmJpbmRpbmcuYXJtNjREaWdlc3QsJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ29udGFpbmVySW1hZ2UnKTtlbHNlIG5lZWQodi5JbWFnZT09PXAuYmluZGluZy5jb25maWdEaWdlc3QsJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ29udGFpbmVySW1hZ2UnKTsKIHNhbWUoYy5FbnRyeXBvaW50LFsnL2Jpbi9zZXRwcml2J10pO3NhbWUoYy5DbWQsYXJncyk7c2FtZShjLkVudixwLmNvbmZpZy5jb25maWc/LkVudj8/W10pOwogbmVlZChoLk5ldHdvcmtNb2RlPT09J25vbmUnJiZoLlJlYWRvbmx5Um9vdGZzPT09dHJ1ZSYmaC5Qcml2aWxlZ2VkPT09ZmFsc2UmJmguUHVibGlzaEFsbFBvcnRzPT09ZmFsc2UmJmguUGlkTW9kZSE9PSdob3N0JyYmaC5JcGNNb2RlIT09J2hvc3QnJiZoLlVUU01vZGUhPT0naG9zdCcmJiFoLlVzZXJuc01vZGUsJ05vbnJvb3RQcmVyZXF1aXNpdGVzSXNvbGF0aW9uJyk7CiBzYW1lKGguQ2FwRHJvcCxbJ0FMTCddKTtuZWVkKCFoLkNhcEFkZD8ubGVuZ3RoJiZoLlNlY3VyaXR5T3B0Py5sZW5ndGg9PT0xJiZbJ25vLW5ldy1wcml2aWxlZ2VzJywnbm8tbmV3LXByaXZpbGVnZXM6dHJ1ZSddLmluY2x1ZGVzKGguU2VjdXJpdHlPcHRbMF0pLCdOb25yb290UHJlcmVxdWlzaXRlc0lzb2xhdGlvbicpOwogbmVlZChoLlBpZHNMaW1pdD09PTMyJiZoLk1lbW9yeT09PTI2ODQzNTQ1NiYmaC5OYW5vQ3B1cz09PTEwMDAwMDAwMDAmJmguUmVzdGFydFBvbGljeT8uTmFtZT09PSdubycmJmMuSGVhbHRoY2hlY2s/LlRlc3Q/LlswXT09PSdOT05FJywnTm9ucm9vdFByZXJlcXVpc2l0ZXNJc29sYXRpb24nKTsKIGZvcihjb25zdCBrZXkgb2YgWydCaW5kcycsJ0RldmljZXMnLCdEZXZpY2VSZXF1ZXN0cycsJ1ZvbHVtZXNGcm9tJ10pbmVlZCghaFtrZXldPy5sZW5ndGgsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTW91bnQnKTsKIHNhbWUoaC5UbXBmcyx7Jy90bXAnOidydyxub3N1aWQsbm9kZXYsZXhlYyxzaXplPTEwNDg1NzYsdWlkPTEwMDAsZ2lkPTEwMDAsbW9kZT0wNzAwJ30pO25lZWQodi5Nb3VudHM/Lmxlbmd0aD09PTB8fHYuTW91bnRzPy5sZW5ndGg9PT0xJiZ2Lk1vdW50c1swXS5UeXBlPT09J3RtcGZzJyYmdi5Nb3VudHNbMF0uRGVzdGluYXRpb249PT0nL3RtcCcsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTW91bnQnKTsKIG5lZWQodi5TdGF0ZS5SdW5uaW5nPT09ZmFsc2UmJnYuU3RhdGUuU3RhdHVzPT09KGV4aXRlZD8nZXhpdGVkJzonY3JlYXRlZCcpLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lclN0YXRlJyk7CiBpZihleGl0ZWQpbmVlZCh2LlN0YXRlLkV4aXRDb2RlPT09MCYmdi5TdGF0ZS5QaWQ9PT0wJiZ2LlN0YXRlLk9PTUtpbGxlZD09PWZhbHNlJiYhdi5TdGF0ZS5FcnJvciwnTm9ucm9vdFByZXJlcXVpc2l0ZXNFeGl0Jyk7cmV0dXJuIHY7Cn0KZnVuY3Rpb24gdmFsaWRhdGUocmF3LHApewogY29uc3QgcmVzdWx0PXBhcnNlTm9ucm9vdEpzb24ocmF3LHttYXhCeXRlczoyNjIxNDR9KTtleGFjdChyZXN1bHQsWyd2ZXJzaW9uJywna2luZCcsJ25vZGVWZXJzaW9uJywnYXJjaGl0ZWN0dXJlJywnaWRlbnRpdHknLCdjaGlsZCcsJ25hdGl2ZScsJ25vZGUnLCdwcmltaXRpdmUnLCdtYXBwZWQnLCdvYnNlcnZhdGlvbnMnLCdsb2FkZXJBYnNlbmNlcycsJ2ZpbmFsSWRlbnRpdHknXSk7CiBzYW1lKHJlc3VsdC5sb2FkZXJBYnNlbmNlcyxsb2FkZXJQYXRocywnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2FkZXJGaWxlJyk7CiBuZWVkKHJlc3VsdC52ZXJzaW9uPT09MSYmcmVzdWx0LmtpbmQ9PT0nY29udHJvbC1uYXRpdmUtcHJlcmVxdWlzaXRlcycmJi9edjI0XC5bMC05XStcLlswLTldKyQvLnRlc3QocmVzdWx0Lm5vZGVWZXJzaW9uKSYmcmVzdWx0LmFyY2hpdGVjdHVyZT09PSdhcm02NCcsJ05vbnJvb3RQcmVyZXF1aXNpdGVzUHJvYmUnKTsKIGNvbnN0IGRlY2xhcmVkVmVyc2lvbj1wLmNvbmZpZy5jb25maWc/LkVudj8uZmluZChlPT5lLnN0YXJ0c1dpdGgoJ05PREVfVkVSU0lPTj0nKSk7aWYoZGVjbGFyZWRWZXJzaW9uKW5lZWQoZGVjbGFyZWRWZXJzaW9uLnNsaWNlKDEzKT09PXJlc3VsdC5ub2RlVmVyc2lvbi5zbGljZSgxKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNOb2RlVmVyc2lvbicpOwogZm9yKGNvbnN0IGlkZW50aXR5IG9mIFtyZXN1bHQuaWRlbnRpdHkscmVzdWx0LmNoaWxkLHJlc3VsdC5maW5hbElkZW50aXR5XSl7CiAgZXhhY3QoaWRlbnRpdHksWydwaWQnLCdwcGlkJywnZXhlY3V0YWJsZVBhdGgnLCd1aWQnLCdnaWQnLCdncm91cHMnLCdub05ld1ByaXZzJywuLi5jYXBOYW1lc10pO25lZWQoTnVtYmVyLmlzU2FmZUludGVnZXIoaWRlbnRpdHkucGlkKSYmaWRlbnRpdHkucGlkPjAmJmlkZW50aXR5LmV4ZWN1dGFibGVQYXRoPT09Jy91c3IvbG9jYWwvYmluL25vZGUnJiZpZGVudGl0eS51aWQubGVuZ3RoPT09NCYmaWRlbnRpdHkuZ2lkLmxlbmd0aD09PTQmJlsuLi5pZGVudGl0eS51aWQsLi4uaWRlbnRpdHkuZ2lkLC4uLmlkZW50aXR5Lmdyb3Vwc10uZXZlcnkobj0+bj09PTEwMDApJiZpZGVudGl0eS5ub05ld1ByaXZzPT09MSYmY2FwTmFtZXMuZXZlcnkoaz0+aWRlbnRpdHlba109PT0nMDAwMDAwMDAwMDAwMDAwMCcpLCdOb25yb290UHJlcmVxdWlzaXRlc0lkZW50aXR5Jyk7CiB9CiBzYW1lKHJlc3VsdC5maW5hbElkZW50aXR5LHJlc3VsdC5pZGVudGl0eSk7bmVlZChyZXN1bHQuY2hpbGQucHBpZD09PXJlc3VsdC5pZGVudGl0eS5waWQmJnJlc3VsdC5jaGlsZC5waWQhPT1yZXN1bHQuaWRlbnRpdHkucGlkLCdOb25yb290UHJlcmVxdWlzaXRlc0luaGVyaXRhbmNlJyk7CiBzYW1lKHJlc3VsdC5uYXRpdmUsWzEsMTAwMCwxMDAwLDEwMDAsMTAwMCwtMjIsMSwtMSwtMSwxMDAwLDEwMDAsMTAwMCwxMDAwLDFdLCdOb25yb290UHJlcmVxdWlzaXRlc05hdGl2ZUNoZWNrcycpOwogZm9yKGNvbnN0IFtrZXkscGF0aF1vZiBbWydub2RlJywnL3Vzci9sb2NhbC9iaW4vbm9kZSddLFsncHJpbWl0aXZlJywnL2Jpbi9zZXRwcml2J11dKXsKICBjb25zdCBjPXJlc3VsdFtrZXldO2V4YWN0KGMsWydleGVjdXRhYmxlJywnZmlsZXMnLCdiaW5kaW5ncyddKTtuZWVkKGMuZXhlY3V0YWJsZS5wYXRoPT09cGF0aCYmYy5leGVjdXRhYmxlLmludGVycHJldGVyPT09Jy9saWIvbGQtbXVzbC1hYXJjaDY0LnNvLjEnJiZjLmZpbGVzLmxlbmd0aD4wJiZjLmZpbGVzLmxlbmd0aDw9NjQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRGVwZW5kZW5jaWVzJyk7CiAgZm9yKGNvbnN0IHJvdyBvZiBbYy5leGVjdXRhYmxlLC4uLmMuZmlsZXNdKXtleGFjdChyb3csWydwYXRoJywncmVzb2x2ZWRQYXRoJywnaW50ZXJwcmV0ZXInLCduZWVkZWQnLCdzb25hbWUnXSk7Y29uc3QgZj1wLmZpbGUocm93LnBhdGgscm93PT09Yy5leGVjdXRhYmxlKTtuZWVkKGYucmVzb2x2ZWRQYXRoPT09cm93LnJlc29sdmVkUGF0aCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNEZXBlbmRlbmN5QmluZGluZycpO30KIH0KIGNvbnN0IG9ic2VydmF0aW9ucz1uZXcgTWFwKCk7bmVlZChyZXN1bHQub2JzZXJ2YXRpb25zLmxlbmd0aD4wJiZyZXN1bHQub2JzZXJ2YXRpb25zLmxlbmd0aDw9NTEyLCdOb25yb290UHJlcmVxdWlzaXRlc09ic2VydmF0aW9ucycpOwogZm9yKGNvbnN0IHJvdyBvZiByZXN1bHQub2JzZXJ2YXRpb25zKXtleGFjdChyb3csWydwYXRoJywncmVzb2x2ZWRQYXRoJywndHlwZScsJ21vZGUnLCd1aWQnLCdnaWQnXSk7bmVlZChjYW5vbmljYWwocm93LnBhdGgpJiZjYW5vbmljYWwocm93LnJlc29sdmVkUGF0aCkmJiFvYnNlcnZhdGlvbnMuaGFzKHJvdy5wYXRoKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNQYXRoJyk7b2JzZXJ2YXRpb25zLnNldChyb3cucGF0aCxyb3cpOwogIG5lZWQocm93LnVpZD09PTAmJnJvdy5naWQ9PT0wJiZOdW1iZXIuaXNTYWZlSW50ZWdlcihyb3cubW9kZSkmJnJvdy5tb2RlPj0wJiZyb3cubW9kZTw9NDA5NSYmKHJvdy5tb2RlJjBvNjAwMCk9PT0wJiYocm93LnR5cGU9PT0nc3ltbGluayd8fChyb3cubW9kZSYwbzAyMik9PT0wKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNQYXRoUGVybWlzc2lvbnMnKTsKICBjb25zdCBub2RlPXAubm9kZXMuZ2V0KHJvdy5wYXRoLnNsaWNlKDEpKT8/cC5ub2Rlcy5nZXQocm93LnJlc29sdmVkUGF0aC5zbGljZSgxKSk7CiAgaWYobm9kZSYmIW5vZGUuaW1wbGljaXQpe25lZWQobm9kZS50eXBlPT09cm93LnR5cGUsJ05vbnJvb3RQcmVyZXF1aXNpdGVzUGF0aFR5cGUnKTtmb3IoY29uc3QgayBvZiBbJ21vZGUnLCd1aWQnLCdnaWQnXSluZWVkKHJvd1trXT09PShub2RlLnBheD8uW2tdPT09dW5kZWZpbmVkP25vZGVba106TnVtYmVyKG5vZGUucGF4W2tdKSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzUGF0aE1ldGFkYXRhJyk7fWVsc2UgbmVlZChyb3cudHlwZT09PSdkaXJlY3RvcnknLCdOb25yb290UHJlcmVxdWlzaXRlc1BhdGhUeXBlJyk7CiB9CiBmb3IoY29uc3QgZiBvZiBwLmZpbGVzLnZhbHVlcygpKWZvcihjb25zdCBwYXRoIG9mIFtmLnBhdGgsZi5yZXNvbHZlZFBhdGgsLi4uZi5wYXJlbnRzLm1hcChyPT5yLnBhdGgpLC4uLmYuc3ltbGlua0NoYWluLm1hcChyPT5yLnBhdGgpXSluZWVkKG9ic2VydmF0aW9ucy5oYXMocGF0aCksJ05vbnJvb3RQcmVyZXF1aXNpdGVzUGF0aENvdmVyYWdlJyk7CiBuZWVkKG9ic2VydmF0aW9ucy5nZXQoJy8nKT8udHlwZT09PSdkaXJlY3RvcnknLCdOb25yb290UHJlcmVxdWlzaXRlc1Jvb3QnKTsKIHJldHVybiByZXN1bHQ7Cn0KCmV4cG9ydCBhc3luYyBmdW5jdGlvbiBjb2xsZWN0Tm9ucm9vdENvbnRyb2xQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnM9e30pewogbmVlZChvcHRpb25zJiZ0eXBlb2Ygb3B0aW9ucz09PSdvYmplY3QnJiYhQXJyYXkuaXNBcnJheShvcHRpb25zKSYmT2JqZWN0LmtleXMob3B0aW9ucykuZXZlcnkoa2V5PT5bJ2NvbnRyb2xWZXJpZmljYXRpb24nLCdzb3VyY2VDb250ZXh0JywnZXhwZWN0ZWQnLCdzaWduYWwnLCdkZWFkbGluZU1zJywnYmVmb3JlRG9ja2VyJ10uaW5jbHVkZXMoa2V5KSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRmllbGRzJyk7CiByZXR1cm4gY29sbGVjdFByZXJlcXVpc2l0ZXModmFsdWUsb3B0aW9ucyxydW5Ob25yb290Q29udHJvbERvY2tlckNvbW1hbmQsdG1wZGlyKCkpOwp9Ci8qKiBDYXJyaWVyIHJldXNlcyB0aGUgc2FtZSBhY3R1YWwgbmF0aXZlIGNoZWNrcyB3aXRob3V0IGFuIEFjdHVhbE1haW4gb3IKICogZGVwbG95bWVudCBjb250cmFjdC4gSXRzIHByb2Nlc3MgZHJpdmVyIGFkbWl0cyBvbmx5IHRoZSBmaXhlZCBwcm9iZSB2ZXJicy4gKi8KZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIGNvbGxlY3RDYXJyaWVyQmFzZVByZXJlcXVpc2l0ZXModmFsdWUsb3B0aW9ucz17fSl7CiBuZWVkKG9wdGlvbnMmJnR5cGVvZiBvcHRpb25zPT09J29iamVjdCcmJiFBcnJheS5pc0FycmF5KG9wdGlvbnMpJiZPYmplY3Qua2V5cyhvcHRpb25zKS5ldmVyeShrZXk9PlsnY29udHJvbFZlcmlmaWNhdGlvbicsJ3NvdXJjZUNvbnRleHQnLCdleHBlY3RlZCcsJ3NpZ25hbCcsJ2RlYWRsaW5lTXMnLCdtZXRhZGF0YVJlYWRzJywndGVtcFJvb3QnLCdiYXNlQ2FjaGVEaXJlY3RvcnknXS5pbmNsdWRlcyhrZXkpKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNGaWVsZHMnKTsKIG5lZWQodHlwZW9mIG9wdGlvbnMubWV0YWRhdGFSZWFkcz8ucmVzZXJ2ZUxvY2FsPT09J2Z1bmN0aW9uJyYmdHlwZW9mIG9wdGlvbnMudGVtcFJvb3Q9PT0nc3RyaW5nJyYmdHlwZW9mIG9wdGlvbnMuYmFzZUNhY2hlRGlyZWN0b3J5PT09J3N0cmluZycsJ0NhcnJpZXJQcmVyZXF1aXNpdGVzQnVkZ2V0Jyk7CiByZXR1cm4gY29sbGVjdENhcnJpZXJQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnMsb3B0aW9ucy5iYXNlQ2FjaGVEaXJlY3RvcnkpOwp9Ci8qKiBSdW4gdGhlIHNhbWUgcmVhbCBuYXRpdmUgY2hlY2tzIGFnYWluc3QgdGhlIGZpbmFsIGluZGVwZW5kZW50bHkgdmVyaWZpZWQKICogY2Fycmllci4gVGhlIHJldHVybmVkIGxpdmUgaGFuZGxlIGlzIGJvdW5kIHRvIHRoYXQgZ3JhcGgvRlMgYW5kIGNhbm5vdCBiZQogKiByZXBsYWNlZCB3aXRoIHRoZSBiYXNlIHByb2JlJ3MgaGFuZGxlIG9yIHRyYW5zcG9ydGVkIGFzIEpTT04uICovCmV4cG9ydCBhc3luYyBmdW5jdGlvbiBjb2xsZWN0Q2FycmllckltYWdlUHJlcmVxdWlzaXRlcyh2YWx1ZSxvcHRpb25zPXt9KXsKIG5lZWQob3B0aW9ucyYmdHlwZW9mIG9wdGlvbnM9PT0nb2JqZWN0JyYmIUFycmF5LmlzQXJyYXkob3B0aW9ucykmJk9iamVjdC5rZXlzKG9wdGlvbnMpLmV2ZXJ5KGtleT0+Wydjb250cm9sVmVyaWZpY2F0aW9uJywnc291cmNlQ29udGV4dCcsJ2V4cGVjdGVkJywnc2lnbmFsJywnZGVhZGxpbmVNcycsJ21ldGFkYXRhUmVhZHMnLCd0ZW1wUm9vdCcsJ2NhY2hlRGlyZWN0b3J5J10uaW5jbHVkZXMoa2V5KSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRmllbGRzJyk7CiBuZWVkKHR5cGVvZiBvcHRpb25zLm1ldGFkYXRhUmVhZHM/LnJlc2VydmVMb2NhbD09PSdmdW5jdGlvbicmJnR5cGVvZiBvcHRpb25zLnRlbXBSb290PT09J3N0cmluZycmJnR5cGVvZiBvcHRpb25zLmNhY2hlRGlyZWN0b3J5PT09J3N0cmluZycsJ0NhcnJpZXJQcmVyZXF1aXNpdGVzQnVkZ2V0Jyk7CiByZXNlcnZlQ2FycmllclByb2JlKG9wdGlvbnMpOwogY29uc3QgcHJlcGFyZWQ9YXdhaXQgcHJlZmxpZ2h0KHZhbHVlLG9wdGlvbnMpLGNvbmZpZz1wcmVwYXJlZC5jb25maWcuY29uZmlnOwogbmVlZChjb25maWcuVXNlcj09PScxMDAwOjEwMDAnJiZjb25maWcuRW52LmluY2x1ZGVzKCdIT01FPS90bXAnKSYmY29uZmlnLkVudi5pbmNsdWRlcygnUEFUSD0vdXNyL2xvY2FsL2JpbjovdXNyL2JpbjovYmluJykmJmNvbmZpZy5FbnYuaW5jbHVkZXMoJ05PREVfRVhUUkFfQ0FfQ0VSVFM9L2Jvb3RzdHJhcC9nbG9iYWwtYnVuZGxlLnBlbScpJiYhY29uZmlnLk9uQnVpbGQ/Lmxlbmd0aCwnQ2FycmllclByZXJlcXVpc2l0ZXNSZWNpcGUnKTsKIHNhbWUoY29uZmlnLkVudHJ5cG9pbnQsWycvYmluL3NldHByaXYnLCctLW5vLW5ldy1wcml2cycsJy0tJywnL3Vzci9sb2NhbC9iaW4vbm9kZScsJy9jYXJyaWVyL2d1YXJkLWZpcnN0Lm1qcycsJ2F1ZGl0LW9yaWdpbmFsLXJvb3QnXSwnQ2FycmllclByZXJlcXVpc2l0ZXNSZWNpcGUnKTtzYW1lKGNvbmZpZy5DbWQ/P1tdLFtdLCdDYXJyaWVyUHJlcmVxdWlzaXRlc1JlY2lwZScpOwogY29uc3QgdXNhZ2U9aW1hZ2VHcmFwaFN0YXRlKHByZXBhcmVkLmdyYXBoKS5idWRnZXQudXNhZ2UoKTsKIG5lZWQoTnVtYmVyLmlzU2FmZUludGVnZXIodXNhZ2UudW5jb21wcmVzc2VkQnl0ZXMpJiZ1c2FnZS51bmNvbXByZXNzZWRCeXRlcz4wJiZOdW1iZXIuaXNTYWZlSW50ZWdlcih1c2FnZS5mc0VudHJpZXMpJiZ1c2FnZS5mc0VudHJpZXM+MCwnQ2FycmllclByZXJlcXVpc2l0ZXNJbXBvcnRCb3VuZCcpOwogLy8gSW1wb3J0IG1hdGVyaWFsaXphdGlvbiBpcyBwcmVwYWlkIGJlZm9yZSBEb2NrZXIsIGluZGVwZW5kZW50bHkgb2YgdGhlCiAvLyBzdHJlYW0gbG9hZGVyJ3MgYWN0dWFsIGNoYXJnZWQgcmVhZHMuIE5vIHVudXNlZCB3b3JrIGlzIHJlZnVuZGVkLgogb3B0aW9ucy5tZXRhZGF0YVJlYWRzLnJlc2VydmVMb2NhbCh7ZWNyUmVxdWVzdHM6MCxodHRwQm9keUJ5dGVzOjAsbG9naWNhbEJ5dGVzOjIqdXNhZ2UudW5jb21wcmVzc2VkQnl0ZXMsdW5jb21wcmVzc2VkQnl0ZXM6dXNhZ2UudW5jb21wcmVzc2VkQnl0ZXMscHJvY2Vzc2VkRW50cmllczp1c2FnZS5mc0VudHJpZXN9KTsKIHJldHVybiBjb2xsZWN0Q2FycmllclByZXJlcXVpc2l0ZXModmFsdWUsb3B0aW9ucyxvcHRpb25zLmNhY2hlRGlyZWN0b3J5LHByZXBhcmVkKTsKfQpmdW5jdGlvbiByZXNlcnZlQ2FycmllclByb2JlKG9wdGlvbnMpewogbmVlZChwcm9jZXNzLnBsYXRmb3JtPT09J2xpbnV4JyYmcHJvY2Vzcy5hcmNoPT09J2FybTY0JywnQ2FycmllclByZXJlcXVpc2l0ZXNOYXRpdmVBcm02NCcpOwogb3B0aW9ucy5tZXRhZGF0YVJlYWRzLnJlc2VydmVMb2NhbCh7ZWNyUmVxdWVzdHM6MCxodHRwQm9keUJ5dGVzOjAsbG9naWNhbEJ5dGVzOjE2Nzc3MjE2KzIqc291cmNlQnl0ZXMubGVuZ3RoLHVuY29tcHJlc3NlZEJ5dGVzOjAscHJvY2Vzc2VkRW50cmllczo0MDk2fSk7Cn0KYXN5bmMgZnVuY3Rpb24gY29sbGVjdENhcnJpZXJQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnMsY2FjaGVEaXJlY3RvcnkscHJlcGFyZWQpewogaWYoIXByZXBhcmVkKXJlc2VydmVDYXJyaWVyUHJvYmUob3B0aW9ucyk7CiBjb25zdCB7cnVuQ2FycmllclByb2JlRG9ja2VyQ29tbWFuZH09YXdhaXQgaW1wb3J0KCcuL3Byb2R1Y3Rpb24tbm9ucm9vdC1jYXJyaWVyLXByb2JlLXN1cGVydmlzb3IubWpzJyk7CiBjb25zdCB7bG9hZE5vbnJvb3RDb250cm9sSW1hZ2V9PWF3YWl0IGltcG9ydCgnLi9wcm9kdWN0aW9uLW5vbnJvb3QtY29udHJvbC1kb2NrZXIubWpzJyk7CiBsZXQgbG9hZGVkLHByaW1hcnk7CiB0cnl7CiAgbG9hZGVkPWF3YWl0IGxvYWROb25yb290Q29udHJvbEltYWdlKHtncmFwaDpvcHRpb25zLmNvbnRyb2xWZXJpZmljYXRpb24uZ3JhcGgsY2FjaGVEaXJlY3RvcnksbWV0YWRhdGFSZWFkczpvcHRpb25zLm1ldGFkYXRhUmVhZHMsdGVtcFJvb3Q6b3B0aW9ucy50ZW1wUm9vdCxzaWduYWw6b3B0aW9ucy5zaWduYWx9KTsKICBjb25zdCBoYW5kbGU9YXdhaXQgY29sbGVjdFByZXJlcXVpc2l0ZXModmFsdWUsb3B0aW9ucyxydW5DYXJyaWVyUHJvYmVEb2NrZXJDb21tYW5kLG9wdGlvbnMudGVtcFJvb3QscHJlcGFyZWQpOwogIGF3YWl0IGxvYWRlZC5jbG9zZSgpO2xvYWRlZD11bmRlZmluZWQ7cmV0dXJuIGhhbmRsZTsKIH1jYXRjaChlKXtwcmltYXJ5PWU7dGhyb3cgZTt9CiBmaW5hbGx5e2lmKGxvYWRlZCYmcHJpbWFyeT8uY29kZSE9PSdFQ0xFQU5VUCcpYXdhaXQgbG9hZGVkLmNsb3NlKCk7fQp9CmV4cG9ydCBmdW5jdGlvbiBnZXROb25yb290TmF0aXZlUHJvYmVTb3VyY2UoKXtyZXR1cm4gT2JqZWN0LmZyZWV6ZSh7Y29kZTpwcm9iZUNvZGUsc2hhMjU2OnByb2JlQ29kZUhhc2h9KTt9CmFzeW5jIGZ1bmN0aW9uIGNvbGxlY3RQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnMscnVuRG9ja2VyLHRlbXBvcmFyeVJvb3QscHJlcGFyZWQpewogY29uc3Qgc3RhcnRlZE1zPURhdGUubm93KCksZGVhZGxpbmVNcz1NYXRoLm1pbihvcHRpb25zLmRlYWRsaW5lTXM/P3N0YXJ0ZWRNcysxMjAwMDAsc3RhcnRlZE1zKzEyMDAwMCk7bmVlZChOdW1iZXIuaXNTYWZlSW50ZWdlcihkZWFkbGluZU1zKSYmZGVhZGxpbmVNcz5zdGFydGVkTXMsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRGVhZGxpbmUnKTsKIGNvbnN0IHA9cHJlcGFyZWQ/P2F3YWl0IHByZWZsaWdodCh2YWx1ZSxvcHRpb25zKTtuZWVkKChhd2FpdCBsc3RhdCgnL3Zhci9ydW4vZG9ja2VyLnNvY2snKSkuaXNTb2NrZXQoKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2NhbERvY2tlcicpOwogY29uc3QgZGlyZWN0b3J5PWF3YWl0IG1rZHRlbXAoam9pbih0ZW1wb3JhcnlSb290LCdtZW05LXByZXJlcXVpc2l0ZXMtJykpLG5hbWU9J21lbTktcHJlcmVxdWlzaXRlcy0nK3JhbmRvbUJ5dGVzKDE2KS50b1N0cmluZygnaGV4Jyk7bGV0IGlkLGF0dGVtcHRlZD1mYWxzZSxzdGlja3k9ZmFsc2UscHJpbWFyeSxyZWNvcmQ7CiBjb25zdCBydW49YXN5bmMoc3RhZ2UsYXJncyxjbGVhbnVwPWZhbHNlKT0+ewogIGlmKG9wdGlvbnMuYmVmb3JlRG9ja2VyIT09dW5kZWZpbmVkKXtuZWVkKHR5cGVvZiBvcHRpb25zLmJlZm9yZURvY2tlcj09PSdmdW5jdGlvbicpO2F3YWl0IG9wdGlvbnMuYmVmb3JlRG9ja2VyKE9iamVjdC5mcmVlemUoe3N0YWdlLGNvbnRhaW5lcklkOmlkLGFyZ3M6T2JqZWN0LmZyZWV6ZShbLi4uYXJnc10pfSkpO30KICBpZighY2xlYW51cCl7Y29udHJvbEltYWdlR3JhcGhCaW5kaW5nKHAuZ3JhcGgpO25lZWQoRGF0ZS5ub3coKTxkZWFkbGluZU1zJiYhb3B0aW9ucy5zaWduYWw/LmFib3J0ZWQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRXhwaXJlZCcpO31pZihzdGFnZT09PSdjcmVhdGUnKWF0dGVtcHRlZD10cnVlOwogIHRyeXtyZXR1cm4gYXdhaXQgcnVuRG9ja2VyKGFyZ3Mse2RpcmVjdG9yeSx0aW1lb3V0TXM6Y2xlYW51cD8xMDAwMDpNYXRoLm1pbigzMDAwMCxkZWFkbGluZU1zLURhdGUubm93KCkpLHNpZ25hbDpjbGVhbnVwP3VuZGVmaW5lZDpvcHRpb25zLnNpZ25hbH0pO31jYXRjaChlKXtpZihlLmNvZGU9PT0nRUNMRUFOVVAnKXN0aWNreT10cnVlO3Rocm93IGU7fQogfTsKIGNvbnN0IGNoZWNrZWQ9YXN5bmMoc3RhZ2UsYXJncyxjbGVhbnVwPWZhbHNlKT0+e2NvbnN0IHI9YXdhaXQgcnVuKHN0YWdlLGFyZ3MsY2xlYW51cCk7Y29uc3QgcHJvYmVGYWlsdXJlPXN0YWdlPT09J3N0YXJ0JyYmL15Ob25yb290UHJlcmVxdWlzaXRlc1Byb2JlUmVqZWN0ZWQ6W0EtWmEtejAtOV17MSw4MH1cbiQvLnRlc3Qoci5zdGRlcnIpP3Iuc3RkZXJyLnRyaW0oKTonTm9ucm9vdFByZXJlcXVpc2l0ZXNEb2NrZXJDb21tYW5kJztuZWVkKHIuc3RhdHVzPT09MCxwcm9iZUZhaWx1cmUpO3JldHVybiByO307CiBjb25zdCBpbnNwZWN0PWFzeW5jKHN0YWdlLGFyZ3MpPT5wYXJzZU5vbnJvb3RKc29uKChhd2FpdCBjaGVja2VkKHN0YWdlLGFyZ3MpKS5zdGRvdXQse21heEJ5dGVzOjEwNDg1NzZ9KTsKIHRyeXsKICBjb25zdCByb290PWNoZWNrSW1hZ2UoYXdhaXQgaW5zcGVjdCgnaW5zcGVjdC1yb290JyxbJ2ltYWdlJywnaW5zcGVjdCcscC5iaW5kaW5nLnJvb3REaWdlc3RdKSxwKSxwbGF0Zm9ybT1jaGVja0ltYWdlKGF3YWl0IGluc3BlY3QoJ2luc3BlY3QtcGxhdGZvcm0nLFsnaW1hZ2UnLCdpbnNwZWN0JywnLS1wbGF0Zm9ybScsJ2xpbnV4L2FybTY0JyxwLmJpbmRpbmcucm9vdERpZ2VzdF0pLHAsdHJ1ZSk7CiAgY29uc3QgYXJncz1bJy0tbm8tbmV3LXByaXZzJywnLS0nLCcvdXNyL2xvY2FsL2Jpbi9ub2RlJywnLS1pbnB1dC10eXBlPW1vZHVsZScsJy1lJyxwcm9iZUNvZGUsJy0tJyxKU09OLnN0cmluZ2lmeShwLnBhdGhzKV07CiAgY29uc3QgY3JlYXRlZD1hd2FpdCBjaGVja2VkKCdjcmVhdGUnLFsnY29udGFpbmVyJywnY3JlYXRlJywnLS1wdWxsPW5ldmVyJywnLS1wbGF0Zm9ybT1saW51eC9hcm02NCcsJy0tbmV0d29yaz1ub25lJywnLS1yZWFkLW9ubHknLCctLXVzZXI9MTAwMDoxMDAwJywnLS1jYXAtZHJvcD1BTEwnLCctLXNlY3VyaXR5LW9wdD1uby1uZXctcHJpdmlsZWdlczp0cnVlJywnLS1waWRzLWxpbWl0PTMyJywnLS1tZW1vcnk9MjU2bScsJy0tY3B1cz0xJywnLS1yZXN0YXJ0PW5vJywnLS1uby1oZWFsdGhjaGVjaycsJy0tdG1wZnMnLCcvdG1wOnJ3LG5vc3VpZCxub2RldixleGVjLHNpemU9MTA0ODU3Nix1aWQ9MTAwMCxnaWQ9MTAwMCxtb2RlPTA3MDAnLCctLWxhYmVsJywnbWVtOS1wcmVyZXF1aXNpdGVzLXByb2JlPScrbmFtZSwnLS1uYW1lJyxuYW1lLCctLWVudHJ5cG9pbnQnLCcvYmluL3NldHByaXYnLHAuYmluZGluZy5yb290RGlnZXN0LC4uLmFyZ3NdKTsKICBjb25zdCBjYW5kaWRhdGU9Y3JlYXRlZC5zdGRvdXQudHJpbSgpO25lZWQoL15bYS1mMC05XXs2NH0kLy50ZXN0KGNhbmRpZGF0ZSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ29udGFpbmVySWQnKTtpZD1jYW5kaWRhdGU7CiAgY29uc3QgY29udGFpbmVyPXtpZCxuYW1lLGFyZ3N9LGJlZm9yZT1jaGVja0NvbnRhaW5lcihhd2FpdCBpbnNwZWN0KCdpbnNwZWN0LWNyZWF0ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdKSxwLGNvbnRhaW5lcixmYWxzZSk7CiAgY29uc3Qgb3V0cHV0PWF3YWl0IGNoZWNrZWQoJ3N0YXJ0JyxbJ2NvbnRhaW5lcicsJ3N0YXJ0JywnLS1hdHRhY2gnLGlkXSksYWZ0ZXI9Y2hlY2tDb250YWluZXIoYXdhaXQgaW5zcGVjdCgnaW5zcGVjdC1leGl0ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdKSxwLGNvbnRhaW5lcix0cnVlKSxyZXN1bHQ9dmFsaWRhdGUob3V0cHV0LnN0ZG91dCxwKTsKICByZWNvcmQ9e3ZlcnNpb246MSxraW5kOidtZWFzdXJlZC1jb250cm9sLXByZXJlcXVpc2l0ZXMnLGltYWdlOnAuaW5wdXQuaW1hZ2Usc291cmNlVHJlZTpvcHRpb25zLmV4cGVjdGVkLmNhbmRpZGF0ZVRyZWUsc291cmNlQ2xvc3VyZUhhc2g6aGFzaChwLmlucHV0LnNvdXJjZUNsb3N1cmUpLGNvbGxlY3RvckNvZGVIYXNoLHByb2JlQ29kZUhhc2gsbmF0aXZlUHJvYmVIYXNoLGdyYXBoSGFzaDpwLmJpbmRpbmcuZ3JhcGhIYXNoLGZpbGVzeXN0ZW1IYXNoOmhhc2gocC5mcyksc3RhcnRlZE1zLAogICBjb250YWluZXI6e2lkLG5hbWUscm9vdEluc3BlY3RIYXNoOmhhc2gocm9vdCkscGxhdGZvcm1JbnNwZWN0SGFzaDpoYXNoKHBsYXRmb3JtKSxjcmVhdGVkSW5zcGVjdEhhc2g6aGFzaChiZWZvcmUpLGV4aXRlZEluc3BlY3RIYXNoOmhhc2goYWZ0ZXIpLGV4aXRDb2RlOmFmdGVyLlN0YXRlLkV4aXRDb2RlfSxwcm9iZTpyZXN1bHQscHJvYmVPdXRwdXQ6b3V0cHV0LnN0ZG91dCxwcm9iZU91dHB1dEhhc2g6c2hhKG91dHB1dC5zdGRvdXQpfTsKIH1jYXRjaChlKXtwcmltYXJ5PWU7fQogdHJ5ewogIGlmKGlkKXtjb25zdCByZW1vdmVkPWF3YWl0IGNoZWNrZWQoJ3JlbW92ZScsWydjb250YWluZXInLCdybScsJy0tZm9yY2UnLCctLXZvbHVtZXMnLGlkXSx0cnVlKSxhYnNlbnQ9YXdhaXQgcnVuKCdpbnNwZWN0LXJlbW92ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdLHRydWUpO25lZWQoYWJzZW50LnN0YXR1cz09PTEmJm5ldyBSZWdFeHAoJyg/Ok5vIHN1Y2ggY29udGFpbmVyfE5vIHN1Y2ggb2JqZWN0KTogJytpZCsnKD86XFxzfCQpJykudGVzdChhYnNlbnQuc3RkZXJyKSwnRUNMRUFOVVAnKTtpZihyZWNvcmQpcmVjb3JkLnJlbW92YWw9e2NvbnRhaW5lcklkOmlkLHJlbW92ZUV4aXRDb2RlOnJlbW92ZWQuc3RhdHVzLGFic2VuY2VFeGl0Q29kZTphYnNlbnQuc3RhdHVzLGFic2VuY2VFdmlkZW5jZUhhc2g6c2hhKGFic2VudC5zdGRlcnIpfTt9CiAgZWxzZSBpZihhdHRlbXB0ZWQpc3RpY2t5PXRydWU7bmVlZCghc3RpY2t5LCdFQ0xFQU5VUCcpO2F3YWl0IHJtKGRpcmVjdG9yeSx7cmVjdXJzaXZlOnRydWUsZm9yY2U6dHJ1ZX0pOwogfWNhdGNoe3Rocm93IE9iamVjdC5hc3NpZ24oY2xlYW51cEVycm9yKCkse2NvbnRhaW5lcklkOmlkLGNvbnRhaW5lck5hbWU6bmFtZSxvcGVyYXRpb25EaXJlY3Rvcnk6ZGlyZWN0b3J5fSk7fQogaWYocHJpbWFyeSl7cHJpbWFyeS5jbGVhbnVwQ29uZmlybWVkPXRydWU7dGhyb3cgcHJpbWFyeTt9CiBsZXQgY2FCeXRlczsKIHRyeXtjb250cm9sSW1hZ2VHcmFwaEJpbmRpbmcocC5ncmFwaCk7bmVlZChEYXRlLm5vdygpPGRlYWRsaW5lTXMmJiFvcHRpb25zLnNpZ25hbD8uYWJvcnRlZCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNFeHBpcmVkJyk7CiAgY2FCeXRlcz1wLmNhP2F3YWl0IHJlYWRJbWFnZUZpbGVzeXN0ZW1GaWxlKHAuZmlsZXN5c3RlbSxwLmNhLnBhdGgse21heEJ5dGVzOjEwNDg1NzZ9KTpudWxsOwogIG5lZWQoRGF0ZS5ub3coKTxkZWFkbGluZU1zJiYhb3B0aW9ucy5zaWduYWw/LmFib3J0ZWQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRXhwaXJlZCcpOwogfWNhdGNoKGUpe2UuY2xlYW51cENvbmZpcm1lZD10cnVlO3Rocm93IGU7fQogcmVjb3JkLmNvbXBsZXRlZE1zPURhdGUubm93KCk7cmVjb3JkLmNsZWFudXBDb25maXJtZWQ9dHJ1ZTsKIGNvbnN0IGhhbmRsZT1PYmplY3QuZnJlZXplKHtraW5kOidjb250cm9sLXByZXJlcXVpc2l0ZXMtY29udGV4dCd9KTtzdGF0ZXMuc2V0KGhhbmRsZSx7cCxyZWNvcmQ6Y29weU5vbnJvb3RKc29uKHJlY29yZCksY2FCeXRlc30pO3JldHVybiBoYW5kbGU7Cn0KCi8qKiBSZXR1cm4gdHlwZWQgaW5wdXRzIGFuZCB0aGVpciBleGFjdCBhcmNoaXZlIGJ5dGVzIG9ubHkgZnJvbSBhIGxpdmUgaGFuZGxlLgogKiBUaGlzIGRvZXMgbm90IGNyZWF0ZSBndWFyZC10ZXN0LCBwb2xpY3ktcmV2aWV3IG9yIGRlcGxveW1lbnQgYXV0aG9yaXphdGlvbi4gKi8KZXhwb3J0IGZ1bmN0aW9uIGluc3BlY3ROb25yb290Q29udHJvbFByZXJlcXVpc2l0ZXMoaGFuZGxlLHtjb250cm9sVmVyaWZpY2F0aW9uLHNvdXJjZUNvbnRleHQsbm93PURhdGUubm93KCl9PXt9KXsKIGNvbnN0IHN0YXRlPXN0YXRlcy5nZXQoaGFuZGxlKTtuZWVkKHN0YXRlLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRleHRSZXF1aXJlZCcpO2NvbnN0IHtwLHJlY29yZDpyfT1zdGF0ZTsKIG5lZWQoY29udHJvbFZlcmlmaWNhdGlvbj8uZ3JhcGg9PT1wLmdyYXBoJiZjb250cm9sVmVyaWZpY2F0aW9uPy5maWxlc3lzdGVtPT09cC5maWxlc3lzdGVtJiZzb3VyY2VDb250ZXh0PT09cC5zb3VyY2VDb250ZXh0LCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRleHRCaW5kaW5nJyk7Y29udHJvbEltYWdlR3JhcGhCaW5kaW5nKHAuZ3JhcGgpOwogbmVlZChub3c+PXIuY29tcGxldGVkTXMmJm5vdy1yLmNvbXBsZXRlZE1zPD0zMDAwMDAsJ05vbnJvb3RQcmVyZXF1aXNpdGVzU3RhbGUnKTsKIGNvbnN0IG9iamVjdHM9W10sanNvbj12YWx1ZT0+e2NvbnN0IHJhdz1CdWZmZXIuZnJvbShKU09OLnN0cmluZ2lmeSh2YWx1ZSkrJ1xuJykscmVmPXtieXRlc0hhc2g6c2hhKHJhdyksY2Fub25pY2FsSGFzaDpoYXNoKHZhbHVlKSxieXRlc0xlbmd0aDpyYXcubGVuZ3RofTtpZighb2JqZWN0cy5zb21lKG89Pm8ucmVmLmJ5dGVzSGFzaD09PXJlZi5ieXRlc0hhc2gpKW9iamVjdHMucHVzaCh7cmVmLGJ5dGVzOnJhd30pO3JldHVybiByZWY7fTsKIGNvbnN0IGltYWdlPWltYWdlT25seShyLmltYWdlKSxub2RlPXAuZmlsZXMuZ2V0KCcvdXNyL2xvY2FsL2Jpbi9ub2RlJykscHJpbWl0aXZlPXAuZmlsZXMuZ2V0KCcvYmluL3NldHByaXYnKTsKIGNvbnN0IGxpYnJhcmllcz1jPT5qc29uKHtmaWxlczpbLi4ubmV3IE1hcChjLmZpbGVzLm1hcChmPT57Y29uc3QgZmFjdD1wLmZpbGVzLmdldChmLnBhdGgpO3JldHVybiBbZmFjdC5wYXRoLHtwYXRoOmZhY3QucGF0aCxzaGEyNTY6ZmFjdC5zaGEyNTZ9XTt9KSkudmFsdWVzKCldLnNvcnQoKGEsYik9PmEucGF0aC5sb2NhbGVDb21wYXJlKGIucGF0aCkpfSk7CiBjb25zdCBub2RlUnVudGltZT1pbnNwZWN0Tm9ucm9vdFJlY29yZCgnTm9kZVJ1bnRpbWVWMScse3ZlcnNpb246MSxraW5kOidwaW5uZWQtbm9kZS1ydW50aW1lJyx2ZXJzaW9uU3RyaW5nOnIucHJvYmUubm9kZVZlcnNpb24sZXhlY3V0YWJsZVBhdGg6bm9kZS5wYXRoLGV4ZWN1dGFibGVTaGEyNTY6bm9kZS5zaGEyNTYsaW1hZ2UsbG9hZGVyQW5kTmF0aXZlTGlicmFyaWVzOmxpYnJhcmllcyhyLnByb2JlLm5vZGUpLGludmVudG9yeTpqc29uKHtpbWFnZSxleGVjdXRhYmxlUGF0aDpub2RlLnBhdGgsZXhlY3V0YWJsZVNoYTI1Njpub2RlLnNoYTI1NixlbGY6ci5wcm9iZS5ub2RlLG1hcHBlZDpyLnByb2JlLm1hcHBlZCxvYnNlcnZhdGlvbkhhc2g6aGFzaChyKX0pfSk7CiBjb25zdCBwcmltaXRpdmVFdmlkZW5jZT1pbnNwZWN0Tm9ucm9vdFJlY29yZCgnUHJpbWl0aXZlRXZpZGVuY2VWMScse3ZlcnNpb246MSxraW5kOid2ZXJpZmllZC1ubnAtcHJpbWl0aXZlJyxpbWFnZSxpbnZva2VkUGF0aDpwcmltaXRpdmUucGF0aCxyZXNvbHZlZFBhdGg6cHJpbWl0aXZlLnJlc29sdmVkUGF0aCxmaWxlU2hhMjU2OnByaW1pdGl2ZS5zaGEyNTYsbW9kZTpwcmltaXRpdmUubW9kZSx1aWQ6cHJpbWl0aXZlLnVpZCxnaWQ6cHJpbWl0aXZlLmdpZCwKICBzeW1saW5rQ2hhaW46anNvbihwcmltaXRpdmUuc3ltbGlua0NoYWluKSxsb2FkZXJBbmRMaWJyYXJpZXM6bGlicmFyaWVzKHIucHJvYmUucHJpbWl0aXZlKSxwcml2aWxlZ2VNZXRhZGF0YTpqc29uKHtzZXR1aWQ6KHByaW1pdGl2ZS5tb2RlJjBvNDAwMCkhPT0wLHNldGdpZDoocHJpbWl0aXZlLm1vZGUmMG8yMDAwKSE9PTAsZmlsZUNhcGFiaWxpdGllczpwcmltaXRpdmUucHJpdmlsZWdlQXR0cmlidXRlcy5sZW5ndGghPT0wLGFjdHVhbEZpbGU6cHJpbWl0aXZlfSksCiAgZmVhdHVyZVByb2JlOmpzb24oe2ltYWdlLGV4ZWN1dGFibGVTaGEyNTY6cHJpbWl0aXZlLnNoYTI1Nixub05ld1ByaXZzOnIucHJvYmUuaWRlbnRpdHkubm9OZXdQcml2cyxleGl0Q29kZTpyLmNvbnRhaW5lci5leGl0Q29kZSxpZGVudGl0eTpyLnByb2JlLmlkZW50aXR5LG9ic2VydmF0aW9uSGFzaDpoYXNoKHIpfSksCiAgaW5oZXJpdGFuY2VBbmROZWdhdGl2ZVByb2Jlczpqc29uKHtpbWFnZSxleGVjdXRhYmxlU2hhMjU2OnByaW1pdGl2ZS5zaGEyNTYscGFyZW50OnIucHJvYmUuaWRlbnRpdHksY2hpbGQ6ci5wcm9iZS5jaGlsZCxtZXRob2Q6J2ZpeGVkLWFhcmNoNjQta2VybmVsLXN5c2NhbGxzJyxuYXRpdmVQcm9iZUhhc2gsa2VybmVsUmVzdWx0czpyLnByb2JlLm5hdGl2ZSxzZXR1aWRCbG9ja2VkOnIucHJvYmUubmF0aXZlWzddPT09LTEsc2V0Z2lkQmxvY2tlZDpyLnByb2JlLm5hdGl2ZVs4XT09PS0xLGNsZWFyUmVqZWN0ZWQ6ci5wcm9iZS5uYXRpdmVbNV09PT0tMjImJnIucHJvYmUubmF0aXZlWzZdPT09MSYmci5wcm9iZS5uYXRpdmVbMTNdPT09MSxvYnNlcnZhdGlvbkhhc2g6aGFzaChyKX0pfSk7CiBjb25zdCBtZXRhZGF0YT1yLnByb2JlLm9ic2VydmF0aW9ucy5maWx0ZXIobz0+by50eXBlPT09J2RpcmVjdG9yeScpLm1hcCgoe3BhdGgsdHlwZSxtb2RlLHVpZCxnaWR9KT0+KHtwYXRoLHR5cGUsbW9kZSx1aWQsZ2lkfSkpOwogZm9yKGNvbnN0IGYgb2YgcC5maWxlcy52YWx1ZXMoKSltZXRhZGF0YS5wdXNoKHtwYXRoOmYucGF0aCx0eXBlOidmaWxlJyxtb2RlOmYubW9kZSx1aWQ6Zi51aWQsZ2lkOmYuZ2lkLHNoYTI1NjpmLnNoYTI1Nn0pOwogY29uc3QgY2FCaW5kaW5ncz1bXTsKIGlmKHAuY2Epe2NvbnN0IGZpbGU9e3NoYTI1NjpzaGEoc3RhdGUuY2FCeXRlcyksYnl0ZXNMZW5ndGg6c3RhdGUuY2FCeXRlcy5sZW5ndGh9O29iamVjdHMucHVzaCh7cmVmOmZpbGUsYnl0ZXM6QnVmZmVyLmZyb20oc3RhdGUuY2FCeXRlcyl9KTtjYUJpbmRpbmdzLnB1c2goaW5zcGVjdE5vbnJvb3RSZWNvcmQoJ0NhQmluZGluZ1YxJyx7bmFtZTonTk9ERV9FWFRSQV9DQV9DRVJUUycsdmFsdWU6cC5jYS5wYXRoLGZpbGUscmVzb2x2ZWRQYXRoOnAuY2EucmVzb2x2ZWRQYXRoLG1vZGU6cC5jYS5tb2RlLHVpZDpwLmNhLnVpZCxnaWQ6cC5jYS5naWQscGFyZW50UGF0aEV2aWRlbmNlOmpzb24oe2ZpbGU6cC5jYSxvYnNlcnZhdGlvbnM6ci5wcm9iZS5vYnNlcnZhdGlvbnN9KX0pKTt9CiBjb25zdCBlbnZpcm9ubWVudD1jb3B5Tm9ucm9vdEpzb24oe2ltYWdlRW52aXJvbm1lbnQ6cC5jb25maWcuY29uZmlnPy5FbnY/P1tdLGZpbGVzOm1ldGFkYXRhLGV4cGVjdGVkQ2E6Y2FCaW5kaW5ncy5tYXAoYz0+KHtwYXRoOmMudmFsdWUsc2hhMjU2OmMuZmlsZS5zaGEyNTZ9KSksY2FCaW5kaW5ncyxsb2FkZXJBYnNlbmNlczpsb2FkZXJQYXRocyxvYnNlcnZlZE1zOnIuY29tcGxldGVkTXN9KTsKIGNvbnN0IHJlY29yZFJlZj1qc29uKHIpOwogcmV0dXJuIHtyZWNvcmQ6Y29weU5vbnJvb3RKc29uKHIpLHJlY29yZFJlZixub2RlUnVudGltZSxwcmltaXRpdmVFdmlkZW5jZSxlbnZpcm9ubWVudCxvYmplY3RzfTsKfQo=", "base64");
+	sourceBytes = Buffer.from("LyoqIEhvc3Qtb25seSwgZml4ZWQgbG9jYWwgRG9ja2VyIHByb2JlLiBHcmFwaC9GUy9zb3VyY2UgaGFuZGxlcyBhdXRoZW50aWNhdGUKICogaW5wdXRzOyBKU09OIHJlY29yZHMgcmV0dXJuZWQgaGVyZSBhcmUgbWVhc3VyZW1lbnRzLCBub3QgcmVsZWFzZSBhdXRob3JpdHkuICovCmltcG9ydCB7c3Bhd259IGZyb20gJ25vZGU6Y2hpbGRfcHJvY2Vzcyc7CmltcG9ydCB7cmVhZEZpbGVTeW5jfSBmcm9tICdub2RlOmZzJzsKaW1wb3J0IHtta2R0ZW1wLHJtLGxzdGF0fSBmcm9tICdub2RlOmZzL3Byb21pc2VzJzsKaW1wb3J0IHt0bXBkaXJ9IGZyb20gJ25vZGU6b3MnOwppbXBvcnQge2pvaW4scG9zaXh9IGZyb20gJ25vZGU6cGF0aCc7CmltcG9ydCB7Y3JlYXRlSGFzaCxyYW5kb21CeXRlc30gZnJvbSAnbm9kZTpjcnlwdG8nOwppbXBvcnQge2NvcHlOb25yb290SnNvbixwYXJzZU5vbnJvb3RKc29uLGluc3BlY3ROb25yb290UmVjb3JkLG5vbnJvb3RIYXNoIGFzIGhhc2h9IGZyb20gJy4vcHJvZHVjdGlvbi1ub25yb290LWNvbnRyYWN0cy5tanMnOwppbXBvcnQge05PTlJPT1RfRk9SQklEREVOX0VOVklST05NRU5UfSBmcm9tICcuL3Byb2R1Y3Rpb24tbm9ucm9vdC1sYXVuY2gubWpzJzsKaW1wb3J0IHtjb250cm9sSW1hZ2VHcmFwaEJpbmRpbmcsaW1hZ2VHcmFwaFN0YXRlLHJlYWRJbWFnZUpzb259IGZyb20gJy4vcHJvZHVjdGlvbi1pbWFnZS1ncmFwaC5tanMnOwppbXBvcnQge2luc3BlY3RJbWFnZUZpbGVzeXN0ZW1FdmlkZW5jZSxpbnNwZWN0SW1hZ2VGaWxlc3lzdGVtRW50cmllcyxpbnNwZWN0SW1hZ2VGaWxlc3lzdGVtRmlsZSxyZWFkSW1hZ2VGaWxlc3lzdGVtRmlsZSxpbWFnZUZpbGVzeXN0ZW1WZXJpZmljYXRpb25LaW5kfSBmcm9tICcuL3Byb2R1Y3Rpb24taW1hZ2UtZmlsZXN5c3RlbS5tanMnOwppbXBvcnQge3ZlcmlmeUNvbnRyb2xTb3VyY2VDbG9zdXJlLHJlYWRDb250cm9sU291cmNlRmlsZX0gZnJvbSAnLi9wcm9kdWN0aW9uLWNvbnRyb2wtc291cmNlLm1qcyc7CmltcG9ydCB7YXNzZXJ0Tm9ucm9vdENvbnRyb2xDdXJyZW50IGFzIGN1cnJlbnQsaW5zcGVjdE5vbnJvb3RSZWNvcmRlZENvbW1hbmRzfSBmcm9tICcuL3Byb2R1Y3Rpb24tbm9ucm9vdC1jb250cm9sLWN1cnJlbnQubWpzJzsKCmNvbnN0IHN0YXRlcz1uZXcgV2Vha01hcCgpLHNoYT1iPT5jcmVhdGVIYXNoKCdzaGEyNTYnKS51cGRhdGUoYikuZGlnZXN0KCdoZXgnKTsKY29uc3Qgc291cmNlUGF0aD0nc2NyaXB0cy9saWIvcHJvZHVjdGlvbi1ub25yb290LWNvbnRyb2wtcHJlcmVxdWlzaXRlcy5tanMnLHNvdXJjZUJ5dGVzPXJlYWRGaWxlU3luYyhuZXcgVVJMKGltcG9ydC5tZXRhLnVybCkpLGNvbGxlY3RvckNvZGVIYXNoPXNoYShzb3VyY2VCeXRlcyk7CmNvbnN0IG5lZWQ9KG9rLGNvZGU9J05vbnJvb3RQcmVyZXF1aXNpdGVzSW52YWxpZCcpPT57aWYoIW9rKXRocm93IE9iamVjdC5hc3NpZ24oRXJyb3IoY29kZSkse2NvZGUsaG9sZDp0cnVlfSk7fTsKY29uc3Qgc2FtZT0oYSxiLGNvZGU9J05vbnJvb3RQcmVyZXF1aXNpdGVzQmluZGluZycpPT5uZWVkKGhhc2goYSk9PT1oYXNoKGIpLGNvZGUpOwpjb25zdCBleGFjdD0odixrZXlzKT0+bmVlZCh2JiZ0eXBlb2Ygdj09PSdvYmplY3QnJiYhQXJyYXkuaXNBcnJheSh2KSYmT2JqZWN0LmtleXModikuc29ydCgpLmpvaW4oKT09PWtleXMuc2xpY2UoKS5zb3J0KCkuam9pbigpLCdOb25yb290UHJlcmVxdWlzaXRlc0ZpZWxkcycpOwpjb25zdCBjYW5vbmljYWw9cD0+dHlwZW9mIHA9PT0nc3RyaW5nJyYmcC5sZW5ndGg8PTQwOTYmJi9eXC9bQS1aYS16MC05Xy4vKy1dKiQvLnRlc3QocCkmJnBvc2l4Lm5vcm1hbGl6ZShwKT09PXAmJihwPT09Jy8nfHwhcC5lbmRzV2l0aCgnLycpKTsKY29uc3QgaW1hZ2VPbmx5PSh7cm9vdERpZ2VzdCxhcm02NERpZ2VzdCxjb25maWdEaWdlc3R9KT0+KHtyb290RGlnZXN0LGFybTY0RGlnZXN0LGNvbmZpZ0RpZ2VzdH0pOwpjb25zdCBjYXBOYW1lcz1bJ0NhcEluaCcsJ0NhcFBybScsJ0NhcEVmZicsJ0NhcEJuZCcsJ0NhcEFtYiddOwpjb25zdCBsb2FkZXJQYXRocz1bJy9ldGMvbGQuc28ucHJlbG9hZCcsJy9ldGMvbGQuc28uY29uZicsJy9ldGMvbGQuc28uY2FjaGUnLCcvZXRjL2xkLW11c2wtYWFyY2g2NC5wYXRoJ107CmNvbnN0IGNsZWFudXBFcnJvcj0oKT0+T2JqZWN0LmFzc2lnbihFcnJvcignRUNMRUFOVVAnKSx7Y29kZTonRUNMRUFOVVAnLGhvbGQ6dHJ1ZSxjbGVhbnVwQ29uZmlybWVkOmZhbHNlfSk7CgovLyBGaXhlZCBBQXJjaDY0IEVMRiwgbm8gbGliYy9pbnRlcnByZXRlciBvciBleHRlcm5hbCBpbnB1dC4gVGhlIGluc3RydWN0aW9ucwovLyBpbnZva2UgUFJfR0VUX05PX05FV19QUklWUywgZ2V0dWlkL2V1aWQvZ2lkL2VnaWQsIFBSX1NFVF9OT19ORVdfUFJJVlMoMCksIEdFVCwKLy8gc2V0dWlkKDApLCBzZXRnaWQoMCksIHRoZSBmb3VyIGlkZW50aXR5IHJlYWRzIGFuZCBHRVQgYWdhaW4sIHRoZW4gd3JpdGUgdGhlCi8vIGZvdXJ0ZWVuIHNpZ25lZCA2NC1iaXQgcmV0dXJuIHZhbHVlcy4gc3lzY2FsbCBudW1iZXJzIGZvbGxvdyBhc20tZ2VuZXJpYwovLyB1bmlzdGQuaCAocHJjdGw9MTY3LCB1aWQ9MTc0LzE3NSwgZ2lkPTE3Ni8xNzcsIHNldHVpZD0xNDYsIHNldGdpZD0xNDQpLgovLyBUaGlzIG1lYXN1cmVzIGtlcm5lbCByZWplY3Rpb24sIHJhdGhlciB0aGFuIG1pc3Rha2luZyBDTEkgc3ludGF4IHJlamVjdGlvbgovLyBmb3IgYW4gYXR0ZW1wdGVkIE5OUCBjbGVhci4gRXhlY3V0ZWQgb25seSBpbiB0aGUgYm91bmRlZCBub3N1aWQvbm9kZXYgdG1wZnMuCmNvbnN0IG5hdGl2ZUNvZGU9QnVmZmVyLmZyb20oJ2ZmMDMwMmQxZjQwMzAwOTFlMDA0ODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyZTgxNDgwZDIwMTAwMDBkNDgwMDIwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMmM4MTU4MGQyMDEwMDAwZDQ4MDA2MDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDJlODE1ODBkMjAxMDAwMGQ0ODAwYTAwZjkwMDAwODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyMDgxNjgwZDIwMTAwMDBkNDgwMGUwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMjI4MTY4MGQyMDEwMDAwZDQ4MDEyMDBmOWMwMDQ4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDJlODE0ODBkMjAxMDAwMGQ0ODAxNjAwZjllMDA0ODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyZTgxNDgwZDIwMTAwMDBkNDgwMWEwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMjQ4MTI4MGQyMDEwMDAwZDQ4MDFlMDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDIwODEyODBkMjAxMDAwMGQ0ODAyMjAwZjkwMDAwODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyYzgxNTgwZDIwMTAwMDBkNDgwMjYwMGY5MDAwMDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMmU4MTU4MGQyMDEwMDAwZDQ4MDJhMDBmOTAwMDA4MGQyMDEwMDgwZDIwMjAwODBkMjAzMDA4MGQyMDQwMDgwZDIwODE2ODBkMjAxMDAwMGQ0ODAyZTAwZjkwMDAwODBkMjAxMDA4MGQyMDIwMDgwZDIwMzAwODBkMjA0MDA4MGQyMjgxNjgwZDIwMTAwMDBkNDgwMzIwMGY5ZTAwNDgwZDIwMTAwODBkMjAyMDA4MGQyMDMwMDgwZDIwNDAwODBkMmU4MTQ4MGQyMDEwMDAwZDQ4MDM2MDBmOTIwMDA4MGQyZTEwMzE0YWEwMjBlODBkMjA4MDg4MGQyMDEwMDAwZDQxZmMwMDFmMWUwMDc5ZjlhYTgwYjgwZDIwMTAwMDBkNCcsJ2hleCcpOwpmdW5jdGlvbiBuYXRpdmVFbGYoKXsKIGNvbnN0IGI9QnVmZmVyLmFsbG9jKDEyOCtuYXRpdmVDb2RlLmxlbmd0aCk7QnVmZmVyLmZyb20oJzdmNDU0YzQ2MDIwMTAxMDAwMDAwMDAwMDAwMDAwMDAwJywnaGV4JykuY29weShiKTsKIGIud3JpdGVVSW50MTZMRSgyLDE2KTtiLndyaXRlVUludDE2TEUoMTgzLDE4KTtiLndyaXRlVUludDMyTEUoMSwyMCk7Yi53cml0ZUJpZ1VJbnQ2NExFKDB4NDAwMDgwbiwyNCk7Yi53cml0ZUJpZ1VJbnQ2NExFKDY0biwzMik7CiBiLndyaXRlVUludDE2TEUoNjQsNTIpO2Iud3JpdGVVSW50MTZMRSg1Niw1NCk7Yi53cml0ZVVJbnQxNkxFKDEsNTYpO2Iud3JpdGVVSW50MzJMRSgxLDY0KTtiLndyaXRlVUludDMyTEUoNSw2OCk7CiBiLndyaXRlQmlnVUludDY0TEUoMHg0MDAwMDBuLDgwKTtiLndyaXRlQmlnVUludDY0TEUoMHg0MDAwMDBuLDg4KTtiLndyaXRlQmlnVUludDY0TEUoQmlnSW50KGIubGVuZ3RoKSw5Nik7Yi53cml0ZUJpZ1VJbnQ2NExFKEJpZ0ludChiLmxlbmd0aCksMTA0KTtiLndyaXRlQmlnVUludDY0TEUoNDA5Nm4sMTEyKTtuYXRpdmVDb2RlLmNvcHkoYiwxMjgpO3JldHVybiBiOwp9CmNvbnN0IG5hdGl2ZUJ5dGVzPW5hdGl2ZUVsZigpLG5hdGl2ZVByb2JlSGFzaD1zaGEobmF0aXZlQnl0ZXMpOwoKLy8gRnVuY3Rpb24gc291cmNlIGFuZCB0aGUgZml4ZWQgbmF0aXZlIGJ5dGVzIGFyZSBjb21taXR0ZWQgYnkgY29sbGVjdG9yQ29kZUhhc2guCi8vIE9ubHkgYSBib3VuZGVkIGxpc3Qgb2YgYXV0aGVudGljYXRlZCBmaWxlIHBhdGhzIGNyb3NzZXMgdGhlIHByb2JlIGludGVyZmFjZS4KLy8gQkVHSU4gRklYRUQgQ09OVFJPTCBQUkVSRVFVSVNJVEVTIFBST0JFCmFzeW5jIGZ1bmN0aW9uIGZpeGVkUHJvYmUobmF0aXZlQmFzZTY0LHBhdGhzLHBoYXNlPSdwYXJlbnQnKXsKIGNvbnN0IGZzPWF3YWl0IGltcG9ydCgnbm9kZTpmcycpLHBhdGg9YXdhaXQgaW1wb3J0KCdub2RlOnBhdGgnKSxjcD1hd2FpdCBpbXBvcnQoJ25vZGU6Y2hpbGRfcHJvY2VzcycpOwogY29uc3QgcmVxdWlyZUZhY3Q9KG9rLGNvZGUpPT57aWYoIW9rKXRocm93IEVycm9yKGNvZGUpO307CiBjb25zdCBjYW5vbj1wPT50eXBlb2YgcD09PSdzdHJpbmcnJiZwLmxlbmd0aDw9NDA5NiYmL15cL1tBLVphLXowLTlfLi8rLV0qJC8udGVzdChwKSYmcGF0aC5wb3NpeC5ub3JtYWxpemUocCk9PT1wOwogY29uc3Qgc21hbGw9cD0+e2NvbnN0IGZkPWZzLm9wZW5TeW5jKHAsJ3InKTt0cnl7Y29uc3QgY2h1bmtzPVtdLGJ1ZmZlcj1CdWZmZXIuYWxsb2MoODE5Mik7bGV0IHNpemU9MDtmb3IoOzspe2NvbnN0IG49ZnMucmVhZFN5bmMoZmQsYnVmZmVyLDAsYnVmZmVyLmxlbmd0aCxudWxsKTtpZighbilicmVhaztzaXplKz1uO3JlcXVpcmVGYWN0KHNpemU8PTI2MjE0NCwnUHJvYmVSZWFkTGltaXQnKTtjaHVua3MucHVzaChCdWZmZXIuZnJvbShidWZmZXIuc3ViYXJyYXkoMCxuKSkpO31yZXR1cm4gQnVmZmVyLmNvbmNhdChjaHVua3Msc2l6ZSkudG9TdHJpbmcoJ3V0ZjgnKTt9ZmluYWxseXtmcy5jbG9zZVN5bmMoZmQpO319OwogY29uc3QgaWRlbnRpdHk9KCk9PnsKICBjb25zdCBsaW5lcz1uZXcgTWFwKHNtYWxsKCcvcHJvYy9zZWxmL3N0YXR1cycpLnNwbGl0KCdcbicpLm1hcChsaW5lPT57Y29uc3QgaT1saW5lLmluZGV4T2YoJzonKTtyZXR1cm4gW2xpbmUuc2xpY2UoMCxpKSxsaW5lLnNsaWNlKGkrMSkudHJpbSgpXTt9KSk7CiAgY29uc3QgaWRzPWs9PihsaW5lcy5nZXQoayk/PycnKS5zcGxpdCgvXHMrLykuZmlsdGVyKEJvb2xlYW4pLm1hcChOdW1iZXIpOwogIGNvbnN0IHZhbHVlPXtwaWQ6cHJvY2Vzcy5waWQscHBpZDpwcm9jZXNzLnBwaWQsZXhlY3V0YWJsZVBhdGg6ZnMucmVhbHBhdGhTeW5jKCcvcHJvYy9zZWxmL2V4ZScpLHVpZDppZHMoJ1VpZCcpLGdpZDppZHMoJ0dpZCcpLGdyb3VwczppZHMoJ0dyb3VwcycpLG5vTmV3UHJpdnM6TnVtYmVyKGxpbmVzLmdldCgnTm9OZXdQcml2cycpKX07CiAgZm9yKGNvbnN0IGtleSBvZiBbJ0NhcEluaCcsJ0NhcFBybScsJ0NhcEVmZicsJ0NhcEJuZCcsJ0NhcEFtYiddKXZhbHVlW2tleV09bGluZXMuZ2V0KGtleSk7CiAgcmVxdWlyZUZhY3QodmFsdWUudWlkLmxlbmd0aD09PTQmJnZhbHVlLmdpZC5sZW5ndGg9PT00JiZbLi4udmFsdWUudWlkLC4uLnZhbHVlLmdpZCwuLi52YWx1ZS5ncm91cHNdLmV2ZXJ5KG49Pm49PT0xMDAwKSYmdmFsdWUubm9OZXdQcml2cz09PTEmJlsnQ2FwSW5oJywnQ2FwUHJtJywnQ2FwRWZmJywnQ2FwQm5kJywnQ2FwQW1iJ10uZXZlcnkoaz0+dmFsdWVba109PT0nMDAwMDAwMDAwMDAwMDAwMCcpLCdQcm9iZUlkZW50aXR5Jyk7cmV0dXJuIHZhbHVlOwogfTsKIHRyeXsKICBjb25zdCBpbml0aWFsPWlkZW50aXR5KCk7cmVxdWlyZUZhY3QocHJvY2Vzcy5hcmNoPT09J2FybTY0JyYmL152MjRcLlswLTldK1wuWzAtOV0rJC8udGVzdChwcm9jZXNzLnZlcnNpb24pJiZpbml0aWFsLmV4ZWN1dGFibGVQYXRoPT09Jy91c3IvbG9jYWwvYmluL25vZGUnLCdQcm9iZU5vZGUnKTsKICBpZihwaGFzZT09PSdjaGlsZCcpe3Byb2Nlc3Muc3Rkb3V0LndyaXRlKEpTT04uc3RyaW5naWZ5KGluaXRpYWwpKTtyZXR1cm47fQogIHJlcXVpcmVGYWN0KHBoYXNlPT09J3BhcmVudCcmJkFycmF5LmlzQXJyYXkocGF0aHMpJiZwYXRocy5sZW5ndGg8PTUxMiYmcGF0aHMuZXZlcnkoY2Fub24pLCdQcm9iZUlucHV0Jyk7CiAgY29uc3QgbG9hZGVyQWJzZW5jZXM9WycvZXRjL2xkLnNvLnByZWxvYWQnLCcvZXRjL2xkLnNvLmNvbmYnLCcvZXRjL2xkLnNvLmNhY2hlJywnL2V0Yy9sZC1tdXNsLWFhcmNoNjQucGF0aCddOwogIGZvcihjb25zdCBwIG9mIGxvYWRlckFic2VuY2VzKXt0cnl7ZnMubHN0YXRTeW5jKHApO3Rocm93IEVycm9yKCdQcm9iZUxvYWRlclByZXNlbnQnKTt9Y2F0Y2goZSl7cmVxdWlyZUZhY3QoZS5jb2RlPT09J0VOT0VOVCcsJ1Byb2JlTG9hZGVyUHJlc2VudCcpO319CiAgY29uc3QgcnVuPShmaWxlLGFyZ3MpPT57Y29uc3Qgcj1jcC5zcGF3blN5bmMoZmlsZSxhcmdzLHtlbnY6e30sZW5jb2Rpbmc6bnVsbCxzdGRpbzpbJ2lnbm9yZScsJ3BpcGUnLCdwaXBlJ10sdGltZW91dDoxNTAwMCxtYXhCdWZmZXI6MjYyMTQ0LGtpbGxTaWduYWw6J1NJR0tJTEwnfSk7cmVxdWlyZUZhY3QoIXIuZXJyb3ImJnIuc2lnbmFsPT09bnVsbCYmci5zdGF0dXM9PT0wJiZyLnN0ZGVyci5sZW5ndGg9PT0wLCdQcm9iZUNoaWxkJytwYXRoLnBvc2l4LmJhc2VuYW1lKGZpbGUpKyhyLmVycm9yPy5jb2RlPz9yLnN0YXR1cykpO3JldHVybiByLnN0ZG91dDt9OwogIGNvbnN0IGNoaWxkQ29kZT0nKCcrZml4ZWRQcm9iZS50b1N0cmluZygpKycpKCcrSlNPTi5zdHJpbmdpZnkobmF0aXZlQmFzZTY0KSsnLFtdLCJjaGlsZCIpJzsKICBjb25zdCBjaGlsZD1KU09OLnBhcnNlKHJ1bignL3Vzci9sb2NhbC9iaW4vbm9kZScsWyctLWlucHV0LXR5cGU9bW9kdWxlJywnLWUnLGNoaWxkQ29kZV0pKTsKICByZXF1aXJlRmFjdChjaGlsZC5wcGlkPT09aW5pdGlhbC5waWQmJmNoaWxkLnBpZCE9PWluaXRpYWwucGlkLCdQcm9iZUluaGVyaXRhbmNlJyk7CiAgY29uc3QgZWxmQ2FjaGU9bmV3IE1hcCgpO2xldCB0b3RhbFJlYWQ9MDsKICBjb25zdCBlbGY9aW5wdXQ9PnsKICAgcmVxdWlyZUZhY3QoY2Fub24oaW5wdXQpLCdQcm9iZUVsZlBhdGgnKTtjb25zdCByZXNvbHZlZFBhdGg9ZnMucmVhbHBhdGhTeW5jKGlucHV0KTtyZXF1aXJlRmFjdChjYW5vbihyZXNvbHZlZFBhdGgpLCdQcm9iZUVsZlBhdGgnKTtpZihlbGZDYWNoZS5oYXMocmVzb2x2ZWRQYXRoKSlyZXR1cm4gZWxmQ2FjaGUuZ2V0KHJlc29sdmVkUGF0aCk7CiAgIHJlcXVpcmVGYWN0KGVsZkNhY2hlLnNpemU8NjQsJ1Byb2JlRWxmQ291bnQnKTtjb25zdCBmZD1mcy5vcGVuU3luYyhpbnB1dCwncicpOwogICB0cnl7CiAgICBjb25zdCBzdGF0PWZzLmZzdGF0U3luYyhmZCk7cmVxdWlyZUZhY3Qoc3RhdC5pc0ZpbGUoKSYmc3RhdC5zaXplPD0yNjg0MzU0NTYsJ1Byb2JlRWxmRmlsZScpOwogICAgY29uc3QgcmVhZD0oYXQsc2l6ZSk9PntyZXF1aXJlRmFjdChOdW1iZXIuaXNTYWZlSW50ZWdlcihhdCkmJmF0Pj0wJiZOdW1iZXIuaXNTYWZlSW50ZWdlcihzaXplKSYmc2l6ZT49MCYmc2l6ZTw9NjU1MzYmJmF0K3NpemU8PXN0YXQuc2l6ZSYmKHRvdGFsUmVhZCs9c2l6ZSk8PTIwOTcxNTIsJ1Byb2JlRWxmQm91bmRzJyk7Y29uc3QgYj1CdWZmZXIuYWxsb2Moc2l6ZSk7cmVxdWlyZUZhY3QoZnMucmVhZFN5bmMoZmQsYiwwLHNpemUsYXQpPT09c2l6ZSwnUHJvYmVFbGZTaG9ydCcpO3JldHVybiBiO307CiAgICBjb25zdCBudW1iZXI9KGIsb2ZmKT0+e2NvbnN0IG49TnVtYmVyKGIucmVhZEJpZ1VJbnQ2NExFKG9mZikpO3JlcXVpcmVGYWN0KE51bWJlci5pc1NhZmVJbnRlZ2VyKG4pLCdQcm9iZUVsZkludGVnZXInKTtyZXR1cm4gbjt9OwogICAgY29uc3QgaD1yZWFkKDAsNjQpO3JlcXVpcmVGYWN0KGguc3ViYXJyYXkoMCw3KS50b1N0cmluZygnaGV4Jyk9PT0nN2Y0NTRjNDYwMjAxMDEnJiZoLnJlYWRVSW50MTZMRSgxOCk9PT0xODMmJlsyLDNdLmluY2x1ZGVzKGgucmVhZFVJbnQxNkxFKDE2KSkmJmgucmVhZFVJbnQxNkxFKDU0KT09PTU2LCdQcm9iZUVsZkZvcm1hdCcpOwogICAgY29uc3QgY291bnQ9aC5yZWFkVUludDE2TEUoNTYpLHBob2ZmPW51bWJlcihoLDMyKTtyZXF1aXJlRmFjdChjb3VudD4wJiZjb3VudDw9MTI4LCdQcm9iZUVsZkhlYWRlcnMnKTtjb25zdCBoZWFkZXJzPXJlYWQocGhvZmYsY291bnQqNTYpLHNlZ21lbnRzPVtdOwogICAgZm9yKGxldCBpPTA7aTxjb3VudDtpKyspe2NvbnN0IHA9aGVhZGVycy5zdWJhcnJheShpKjU2LChpKzEpKjU2KTtzZWdtZW50cy5wdXNoKHt0eXBlOnAucmVhZFVJbnQzMkxFKDApLG9mZnNldDpudW1iZXIocCw4KSxhZGRyZXNzOm51bWJlcihwLDE2KSxzaXplOm51bWJlcihwLDMyKX0pO30KICAgIGNvbnN0IGludGVycHM9c2VnbWVudHMuZmlsdGVyKHA9PnAudHlwZT09PTMpLGR5bmFtaWM9c2VnbWVudHMuZmlsdGVyKHA9PnAudHlwZT09PTIpO3JlcXVpcmVGYWN0KGludGVycHMubGVuZ3RoPD0xJiZkeW5hbWljLmxlbmd0aDw9MSwnUHJvYmVFbGZTZWdtZW50cycpOwogICAgY29uc3QgY3N0cmluZz0oYik9Pntjb25zdCBlbmQ9Yi5pbmRleE9mKDApO3JlcXVpcmVGYWN0KGVuZD49MCwnUHJvYmVFbGZTdHJpbmcnKTtyZXR1cm4gYi5zdWJhcnJheSgwLGVuZCkudG9TdHJpbmcoJ3V0ZjgnKTt9OwogICAgY29uc3QgaW50ZXJwcmV0ZXI9aW50ZXJwcy5sZW5ndGg/Y3N0cmluZyhyZWFkKGludGVycHNbMF0ub2Zmc2V0LGludGVycHNbMF0uc2l6ZSkpOm51bGw7cmVxdWlyZUZhY3QoaW50ZXJwcmV0ZXI9PT1udWxsfHxpbnRlcnByZXRlcj09PScvbGliL2xkLW11c2wtYWFyY2g2NC5zby4xJywnUHJvYmVVbnN1cHBvcnRlZEludGVycHJldGVyJyk7CiAgICBsZXQgbmVlZGVkPVtdLHNvbmFtZT1udWxsOwogICAgaWYoZHluYW1pYy5sZW5ndGgpe2NvbnN0IGQ9cmVhZChkeW5hbWljWzBdLm9mZnNldCxkeW5hbWljWzBdLnNpemUpO3JlcXVpcmVGYWN0KGQubGVuZ3RoJTE2PT09MCwnUHJvYmVFbGZEeW5hbWljJyk7Y29uc3QgdGFncz1bXTtsZXQgZW5kZWQ9ZmFsc2U7CiAgICAgZm9yKGxldCBpPTA7aTxkLmxlbmd0aDtpKz0xNil7Y29uc3QgdGFnPW51bWJlcihkLGkpLHZhbHVlPW51bWJlcihkLGkrOCk7aWYodGFnPT09MCl7ZW5kZWQ9dHJ1ZTticmVhazt9cmVxdWlyZUZhY3QodGFnIT09MTUmJnRhZyE9PTI5LCdQcm9iZVVuc3VwcG9ydGVkUnVucGF0aCcpO3RhZ3MucHVzaCh7dGFnLHZhbHVlfSk7fQogICAgIHJlcXVpcmVGYWN0KGVuZGVkLCdQcm9iZUVsZkR5bmFtaWMnKTtjb25zdCBzdHJpbmdzPXRhZ3MuZmlsdGVyKHQ9PnQudGFnPT09NSksc2l6ZXM9dGFncy5maWx0ZXIodD0+dC50YWc9PT0xMCk7cmVxdWlyZUZhY3Qoc3RyaW5ncy5sZW5ndGg9PT0xJiZzaXplcy5sZW5ndGg9PT0xLCdQcm9iZUVsZlN0cmluZ3MnKTsKICAgICBjb25zdCBsb2FkPXNlZ21lbnRzLmZpbHRlcihwPT5wLnR5cGU9PT0xJiZzdHJpbmdzWzBdLnZhbHVlPj1wLmFkZHJlc3MmJnN0cmluZ3NbMF0udmFsdWUrc2l6ZXNbMF0udmFsdWU8PXAuYWRkcmVzcytwLnNpemUpO3JlcXVpcmVGYWN0KGxvYWQubGVuZ3RoPT09MSwnUHJvYmVFbGZTdHJpbmdSYW5nZScpOwogICAgIGNvbnN0IHRleHQ9b2Zmc2V0PT57cmVxdWlyZUZhY3Qob2Zmc2V0PHNpemVzWzBdLnZhbHVlLCdQcm9iZUVsZlN0cmluZ1JhbmdlJyk7Y29uc3QgdmFsdWU9Y3N0cmluZyhyZWFkKGxvYWRbMF0ub2Zmc2V0K3N0cmluZ3NbMF0udmFsdWUtbG9hZFswXS5hZGRyZXNzK29mZnNldCxNYXRoLm1pbig1MTIsc2l6ZXNbMF0udmFsdWUtb2Zmc2V0KSkpO3JlcXVpcmVGYWN0KC9eW0EtWmEtejAtOV8uKy1dKyQvLnRlc3QodmFsdWUpLCdQcm9iZUVsZk5hbWUnKTtyZXR1cm4gdmFsdWU7fTsKICAgICBuZWVkZWQ9dGFncy5maWx0ZXIodD0+dC50YWc9PT0xKS5tYXAodD0+dGV4dCh0LnZhbHVlKSk7cmVxdWlyZUZhY3QobmVlZGVkLmxlbmd0aDw9NjQmJm5ldyBTZXQobmVlZGVkKS5zaXplPT09bmVlZGVkLmxlbmd0aCwnUHJvYmVFbGZEZXBlbmRlbmNpZXMnKTsKICAgICBjb25zdCBuYW1lcz10YWdzLmZpbHRlcih0PT50LnRhZz09PTE0KTtyZXF1aXJlRmFjdChuYW1lcy5sZW5ndGg8PTEsJ1Byb2JlRWxmU29uYW1lJyk7aWYobmFtZXMubGVuZ3RoKXNvbmFtZT10ZXh0KG5hbWVzWzBdLnZhbHVlKTsKICAgIH0KICAgIGNvbnN0IG91dD17cGF0aDppbnB1dCxyZXNvbHZlZFBhdGgsaW50ZXJwcmV0ZXIsbmVlZGVkLHNvbmFtZX07ZWxmQ2FjaGUuc2V0KHJlc29sdmVkUGF0aCxvdXQpO3JldHVybiBvdXQ7CiAgIH1maW5hbGx5e2ZzLmNsb3NlU3luYyhmZCk7fQogIH07CiAgY29uc3QgY2xvc3VyZT1leGVjdXRhYmxlPT57CiAgIGNvbnN0IG1haW49ZWxmKGV4ZWN1dGFibGUpO3JlcXVpcmVGYWN0KG1haW4uaW50ZXJwcmV0ZXI9PT0nL2xpYi9sZC1tdXNsLWFhcmNoNjQuc28uMScsJ1Byb2JlRHluYW1pY011c2xSZXF1aXJlZCcpOwogICBjb25zdCB0ZXh0PXJ1bihtYWluLmludGVycHJldGVyLFsnLS1saXN0JyxleGVjdXRhYmxlXSkudG9TdHJpbmcoJ3V0ZjgnKSxiaW5kaW5ncz1bXSxzZWVuPW5ldyBTZXQoKTsKICAgZm9yKGNvbnN0IGxpbmUgb2YgdGV4dC50cmltKCkuc3BsaXQoJ1xuJykpe2NvbnN0IG09L15ccyooPzooXFMrKSA9PiApPyhcL1teXHNdKykgXChbXlxuXStcKSQvLmV4ZWMobGluZSk7cmVxdWlyZUZhY3QobSYmY2Fub24obVsyXSksJ1Byb2JlTG9hZGVyT3V0cHV0Jyk7YmluZGluZ3MucHVzaCh7bmFtZTptWzFdPz9wYXRoLnBvc2l4LmJhc2VuYW1lKG1bMl0pLHBhdGg6bVsyXX0pO3NlZW4uYWRkKG1bMl0pO30KICAgc2Vlbi5hZGQobWFpbi5pbnRlcnByZXRlcik7cmVxdWlyZUZhY3Qoc2Vlbi5zaXplPD02NCYmYmluZGluZ3MubGVuZ3RoPD0xMjgsJ1Byb2JlTG9hZGVyQ291bnQnKTtjb25zdCBmaWxlcz1bLi4uc2Vlbl0uc29ydCgpLm1hcChlbGYpLG5hbWVzPW5ldyBTZXQoYmluZGluZ3MubWFwKGI9PmIubmFtZSkpOwogICBmb3IoY29uc3QgZSBvZiBbbWFpbiwuLi5maWxlc10pZm9yKGNvbnN0IG5hbWUgb2YgZS5uZWVkZWQpcmVxdWlyZUZhY3QobmFtZXMuaGFzKG5hbWUpLCdQcm9iZURlcGVuZGVuY3lVbnJlc29sdmVkJyk7CiAgIHJldHVybiB7ZXhlY3V0YWJsZTptYWluLGZpbGVzLGJpbmRpbmdzfTsKICB9OwogIGNvbnN0IG5vZGU9Y2xvc3VyZSgnL3Vzci9sb2NhbC9iaW4vbm9kZScpLHByaW1pdGl2ZT1jbG9zdXJlKCcvYmluL3NldHByaXYnKTsKICBjb25zdCBtYXBwZWQ9Wy4uLm5ldyBTZXQoc21hbGwoJy9wcm9jL3NlbGYvbWFwcycpLnNwbGl0KCdcbicpLmZpbHRlcihCb29sZWFuKS5mbGF0TWFwKGxpbmU9Pntjb25zdCBtPS9eXFMrXHMrXFMrXHMrXFMrXHMrXFMrXHMrXFMrKD86XHMrKC4rKSk/JC8uZXhlYyhsaW5lLnRyaW1FbmQoKSk7cmVxdWlyZUZhY3QobSwnUHJvYmVNYXBzJyk7aWYoIW1bMV18fG1bMV0uc3RhcnRzV2l0aCgnWycpKXJldHVybiBbXTtyZXF1aXJlRmFjdChjYW5vbihtWzFdKSwnUHJvYmVNYXBQYXRoJyk7cmV0dXJuIFtmcy5yZWFscGF0aFN5bmMobVsxXSldO30pKV0uc29ydCgpOwogIGNvbnN0IGFsbG93ZWQ9bmV3IFNldChbbm9kZS5leGVjdXRhYmxlLnJlc29sdmVkUGF0aCwuLi5ub2RlLmZpbGVzLm1hcChmPT5mLnJlc29sdmVkUGF0aCldKTtyZXF1aXJlRmFjdChtYXBwZWQubGVuZ3RoPjAmJm1hcHBlZC5ldmVyeShwPT5hbGxvd2VkLmhhcyhwKSksJ1Byb2JlVW5leHBlY3RlZE1hcHBlZEZpbGUnKTsKICBjb25zdCBuYXRpdmVQYXRoPScvdG1wL21lbTktZml4ZWQtbmF0aXZlLXByb2JlJztmcy53cml0ZUZpbGVTeW5jKG5hdGl2ZVBhdGgsQnVmZmVyLmZyb20obmF0aXZlQmFzZTY0LCdiYXNlNjQnKSx7ZmxhZzond3gnLG1vZGU6MG83MDB9KTsKICBsZXQgbmF0aXZlO3RyeXtjb25zdCByYXc9cnVuKG5hdGl2ZVBhdGgsW10pO3JlcXVpcmVGYWN0KHJhdy5sZW5ndGg9PT0xMTIsJ1Byb2JlTmF0aXZlT3V0cHV0Jyk7bmF0aXZlPUFycmF5LmZyb20oe2xlbmd0aDoxNH0sKF8saSk9Pk51bWJlcihyYXcucmVhZEJpZ0ludDY0TEUoaSo4KSkpO31maW5hbGx5e2ZzLnVubGlua1N5bmMobmF0aXZlUGF0aCk7fQogIGNvbnN0IHJlcXVlc3RlZD1uZXcgU2V0KFsnLyddKTsKICBjb25zdCBhZGQ9cD0+e3JlcXVpcmVGYWN0KGNhbm9uKHApLCdQcm9iZVBhdGgnKTtyZXF1ZXN0ZWQuYWRkKHApO3doaWxlKHAhPT0nLycpe3A9cGF0aC5wb3NpeC5kaXJuYW1lKHApO3JlcXVlc3RlZC5hZGQocCk7fX07CiAgZm9yKGNvbnN0IHAgb2YgWy4uLnBhdGhzLC4uLm5vZGUuZmlsZXMubWFwKGY9PmYucGF0aCksLi4ucHJpbWl0aXZlLmZpbGVzLm1hcChmPT5mLnBhdGgpLCcvdXNyL2xvY2FsL2Jpbi9ub2RlJywnL2Jpbi9zZXRwcml2J10pe2FkZChwKTthZGQoZnMucmVhbHBhdGhTeW5jKHApKTtsZXQgY3VycmVudD0nJztmb3IoY29uc3QgcGFydCBvZiBwLnNwbGl0KCcvJykuZmlsdGVyKEJvb2xlYW4pKXtjdXJyZW50Kz0nLycrcGFydDthZGQoZnMucmVhbHBhdGhTeW5jKGN1cnJlbnQpKTt9fQogIHJlcXVpcmVGYWN0KHJlcXVlc3RlZC5zaXplPD01MTIsJ1Byb2JlUGF0aENvdW50Jyk7Y29uc3Qgb2JzZXJ2YXRpb25zPVsuLi5yZXF1ZXN0ZWRdLnNvcnQoKS5tYXAocD0+e2NvbnN0IHM9ZnMubHN0YXRTeW5jKHApO3JlcXVpcmVGYWN0KHMuaXNGaWxlKCl8fHMuaXNEaXJlY3RvcnkoKXx8cy5pc1N5bWJvbGljTGluaygpLCdQcm9iZVBhdGhUeXBlJyk7cmV0dXJuIHtwYXRoOnAscmVzb2x2ZWRQYXRoOmZzLnJlYWxwYXRoU3luYyhwKSx0eXBlOnMuaXNTeW1ib2xpY0xpbmsoKT8nc3ltbGluayc6cy5pc0RpcmVjdG9yeSgpPydkaXJlY3RvcnknOidmaWxlJyxtb2RlOnMubW9kZSYwbzc3NzcsdWlkOnMudWlkLGdpZDpzLmdpZH07fSk7CiAgY29uc3Qgb3V0PUpTT04uc3RyaW5naWZ5KHt2ZXJzaW9uOjEsa2luZDonY29udHJvbC1uYXRpdmUtcHJlcmVxdWlzaXRlcycsbm9kZVZlcnNpb246cHJvY2Vzcy52ZXJzaW9uLGFyY2hpdGVjdHVyZTpwcm9jZXNzLmFyY2gsaWRlbnRpdHk6aW5pdGlhbCxjaGlsZCxuYXRpdmUsbm9kZSxwcmltaXRpdmUsbWFwcGVkLG9ic2VydmF0aW9ucyxsb2FkZXJBYnNlbmNlcyxmaW5hbElkZW50aXR5OmlkZW50aXR5KCl9KTtyZXF1aXJlRmFjdChCdWZmZXIuYnl0ZUxlbmd0aChvdXQpPD0yNjIxNDQsJ1Byb2JlT3V0cHV0TGltaXQnKTtwcm9jZXNzLnN0ZG91dC53cml0ZShvdXQrJ1xuJyk7CiB9Y2F0Y2goZXJyb3Ipe3Byb2Nlc3Muc3RkZXJyLndyaXRlKCdOb25yb290UHJlcmVxdWlzaXRlc1Byb2JlUmVqZWN0ZWQ6JytTdHJpbmcoZXJyb3IubWVzc2FnZSkucmVwbGFjZSgvW15BLVphLXowLTldL2csJycpLnNsaWNlKDAsODApKydcbicpO3Byb2Nlc3MuZXhpdENvZGU9MTt9Cn0KLy8gRU5EIEZJWEVEIENPTlRST0wgUFJFUkVRVUlTSVRFUyBQUk9CRQovLyBSZWFkIGxpdGVyYWwgcmV2aWV3ZWQgc291cmNlLCBub3QgYSBidW5kbGVyL3Rlc3QgcnVubmVyJ3MgdHJhbnNmb3JtZWQKLy8gRnVuY3Rpb24udG9TdHJpbmcoKS4gTm8gY2FsbGVyIGlucHV0IGNhbiBzZWxlY3Qgb3IgcmVwbGFjZSB0aGlzIHByb2dyYW0uCmNvbnN0IHByb2JlU291cmNlPXNvdXJjZUJ5dGVzLnRvU3RyaW5nKCd1dGY4Jykuc3BsaXQoJy8vIEJFR0lOIEZJWEVEIENPTlRST0wgUFJFUkVRVUlTSVRFUyBQUk9CRVxuJylbMV0/LnNwbGl0KCcvLyBFTkQgRklYRUQgQ09OVFJPTCBQUkVSRVFVSVNJVEVTIFBST0JFXG4nKVswXTsKbmVlZChwcm9iZVNvdXJjZT8uc3RhcnRzV2l0aCgnYXN5bmMgZnVuY3Rpb24gZml4ZWRQcm9iZSgnKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNQcm9iZVNvdXJjZScpOwpjb25zdCBwcm9iZUNvZGU9JygnK3Byb2JlU291cmNlLnRyaW0oKSsnKSgnK0pTT04uc3RyaW5naWZ5KG5hdGl2ZUJ5dGVzLnRvU3RyaW5nKCdiYXNlNjQnKSkrJyxKU09OLnBhcnNlKHByb2Nlc3MuYXJndlsxXSkpJzsKY29uc3QgcHJvYmVDb2RlSGFzaD1zaGEocHJvYmVDb2RlKTsKCi8vIFNhbWUgYm91bmRlZCBwb3NpdGl2ZSBwcm9jZXNzLWdyb3VwIGV4aXQgZGlzY2lwbGluZSBhcyB0aGUgcGF0aCBvYnNlcnZlci4KLy8gSW50ZXJuYWwgaG9zdCB0cmFuc3BvcnQgc2hhcmVkIGJ5IHRoZSB0d28gZml4ZWQgY29sbGVjdG9ycy4gVGhpcyBmdW5jdGlvbgovLyBjcmVhdGVzIG5vIGV2aWRlbmNlL2F1dGhvcml0eTsgY2FsbGVycyBtdXN0IHN1cHBseSB0aGVpciBjb2RlLW93bmVkIGFyZ3YuCmV4cG9ydCBmdW5jdGlvbiBydW5Ob25yb290Q29udHJvbERvY2tlckNvbW1hbmQoYXJncyx7ZGlyZWN0b3J5LHRpbWVvdXRNcyxzaWduYWwsYXNzZXJ0Q3VycmVudCxjbGVhbnVwPWZhbHNlfSl7CiBjb25zdCBwcm9jZXNzaW5nPXthc3NlcnRDdXJyZW50fTtjdXJyZW50KHByb2Nlc3NpbmcsY2xlYW51cCk7CiByZXR1cm4gbmV3IFByb21pc2UoKHJlc29sdmUscmVqZWN0KT0+ewogIGNvbnN0IGNoaWxkPXNwYXduKCcvdXNyL2Jpbi9kb2NrZXInLFsnLS1ob3N0JywndW5peDovLy92YXIvcnVuL2RvY2tlci5zb2NrJywnLS1jb25maWcnLGRpcmVjdG9yeSwuLi5hcmdzXSx7Y3dkOmRpcmVjdG9yeSxlbnY6e1BBVEg6Jy91c3IvYmluOi9iaW4nLEhPTUU6ZGlyZWN0b3J5LERPQ0tFUl9DT05GSUc6ZGlyZWN0b3J5LExBTkc6J0MnLExDX0FMTDonQyd9LGRldGFjaGVkOnRydWUsc3RkaW86WydpZ25vcmUnLCdwaXBlJywncGlwZSddfSk7CiAgY29uc3Qgb3V0PVtdLGVycj1bXTtsZXQgc2l6ZT0wLGNsb3NlZD1mYWxzZSxmaW5pc2hlZD1mYWxzZSxwcm9ibGVtLHN0YXR1cyx0aW1lcixkcmFpblRpbWVyOwogIGNvbnN0IGFsaXZlPSgpPT57aWYoIWNoaWxkLnBpZClyZXR1cm4gZmFsc2U7dHJ5e3Byb2Nlc3Mua2lsbCgtY2hpbGQucGlkLDApO3JldHVybiB0cnVlO31jYXRjaChlKXtpZihlLmNvZGU9PT0nRVNSQ0gnKXJldHVybiBmYWxzZTt0aHJvdyBlO319OwogIGNvbnN0IGtpbGw9KCk9Pnt0cnl7aWYoY2hpbGQucGlkKXByb2Nlc3Mua2lsbCgtY2hpbGQucGlkLCdTSUdLSUxMJyk7fWNhdGNoKGUpe2lmKGUuY29kZSE9PSdFU1JDSCcpcHJvYmxlbT1jbGVhbnVwRXJyb3IoKTt9fTsKICBjb25zdCBmaW5pc2g9KCk9PntpZihmaW5pc2hlZClyZXR1cm47ZmluaXNoZWQ9dHJ1ZTtjbGVhclRpbWVvdXQodGltZXIpO2NsZWFyVGltZW91dChkcmFpblRpbWVyKTtzaWduYWw/LnJlbW92ZUV2ZW50TGlzdGVuZXIoJ2Fib3J0JyxhYm9ydCk7dHJ5e2N1cnJlbnQocHJvY2Vzc2luZyxjbGVhbnVwKTt9Y2F0Y2goZXJyb3Ipe3Byb2JsZW0/Pz1lcnJvcjt9aWYocHJvYmxlbSlyZWplY3QocHJvYmxlbSk7ZWxzZSByZXNvbHZlKHtzdGF0dXMsc3Rkb3V0OkJ1ZmZlci5jb25jYXQob3V0KS50b1N0cmluZygndXRmOCcpLHN0ZGVycjpCdWZmZXIuY29uY2F0KGVycikudG9TdHJpbmcoJ3V0ZjgnKX0pO307CiAgY29uc3QgZHJhaW49dW50aWw9PntpZihmaW5pc2hlZClyZXR1cm47bGV0IGV4aXN0cz10cnVlO3RyeXtleGlzdHM9YWxpdmUoKTt9Y2F0Y2h7fWlmKGNsb3NlZCYmIWV4aXN0cylyZXR1cm4gZmluaXNoKCk7aWYoRGF0ZS5ub3coKT49dW50aWwpe3Byb2JsZW09Y2xlYW51cEVycm9yKCk7cmV0dXJuIGZpbmlzaCgpO31kcmFpblRpbWVyPXNldFRpbWVvdXQoKCk9PmRyYWluKHVudGlsKSwxMCk7fTsKICBjb25zdCBzdG9wPWNvZGU9Pntwcm9ibGVtPz89T2JqZWN0LmFzc2lnbihFcnJvcihjb2RlKSx7Y29kZX0pO2tpbGwoKTtjbGVhclRpbWVvdXQoZHJhaW5UaW1lcik7ZHJhaW4oRGF0ZS5ub3coKSsxMDAwKTt9OwogIGNvbnN0IGFib3J0PSgpPT5zdG9wKCdOb25yb290UHJlcmVxdWlzaXRlc0Fib3J0ZWQnKSxjb2xsZWN0PWNodW5rcz0+Yj0+e3RyeXtjdXJyZW50KHByb2Nlc3NpbmcsY2xlYW51cCk7fWNhdGNoKGVycm9yKXtwcm9ibGVtPz89ZXJyb3I7c3RvcCgnTm9ucm9vdFByZXJlcXVpc2l0ZXNQYXllcicpO3JldHVybjt9c2l6ZSs9Yi5sZW5ndGg7aWYoc2l6ZT4xMDQ4NTc2KXN0b3AoJ05vbnJvb3RQcmVyZXF1aXNpdGVzT3V0cHV0TGltaXQnKTtlbHNlIGNodW5rcy5wdXNoKGIpO307CiAgY2hpbGQuc3Rkb3V0Lm9uKCdkYXRhJyxjb2xsZWN0KG91dCkpO2NoaWxkLnN0ZGVyci5vbignZGF0YScsY29sbGVjdChlcnIpKTsKICBjaGlsZC5vbignZXJyb3InLCgpPT57Y2xvc2VkPXRydWU7cHJvYmxlbT8/PUVycm9yKCdOb25yb290UHJlcmVxdWlzaXRlc0RvY2tlclVuYXZhaWxhYmxlJyk7aWYoY2hpbGQucGlkKXN0b3AoJ0VDTEVBTlVQJyk7ZWxzZSBmaW5pc2goKTt9KTsKICBjaGlsZC5vbignY2xvc2UnLGNvZGU9PntjbG9zZWQ9dHJ1ZTtzdGF0dXM9Y29kZTt0cnl7aWYoYWxpdmUoKSlzdG9wKCdOb25yb290UHJlcmVxdWlzaXRlc0Rlc2NlbmRhbnQnKTtlbHNlIGZpbmlzaCgpO31jYXRjaHtwcm9ibGVtPWNsZWFudXBFcnJvcigpO2ZpbmlzaCgpO319KTsKICB0aW1lcj1zZXRUaW1lb3V0KCgpPT5zdG9wKCdOb25yb290UHJlcmVxdWlzaXRlc1RpbWVvdXQnKSx0aW1lb3V0TXMpO3NpZ25hbD8uYWRkRXZlbnRMaXN0ZW5lcignYWJvcnQnLGFib3J0LHtvbmNlOnRydWV9KTtpZihzaWduYWw/LmFib3J0ZWQpYWJvcnQoKTsKIH0pOwp9Cgphc3luYyBmdW5jdGlvbiBwcmVmbGlnaHQodmFsdWUsb3B0aW9ucyl7CiBjdXJyZW50KG9wdGlvbnMpOwogY29uc3QgaW5wdXQ9Y29weU5vbnJvb3RKc29uKHZhbHVlKTtleGFjdChpbnB1dCxbJ2ltYWdlJywnc291cmNlQ2xvc3VyZSddKTtjb25zdCBleHBlY3RlZD1jb3B5Tm9ucm9vdEpzb24ob3B0aW9ucy5leHBlY3RlZCk7ZXhhY3QoZXhwZWN0ZWQsWydjYW5kaWRhdGVUcmVlJ10pOwogY29uc3Qge2dyYXBoLGZpbGVzeXN0ZW19PW9wdGlvbnMuY29udHJvbFZlcmlmaWNhdGlvbj8/e30sYmluZGluZz1jb250cm9sSW1hZ2VHcmFwaEJpbmRpbmcoZ3JhcGgpLGZzPWluc3BlY3RJbWFnZUZpbGVzeXN0ZW1FdmlkZW5jZShmaWxlc3lzdGVtKTsKIHNhbWUoaW5wdXQuaW1hZ2UsKCgoe2dyYXBoSGFzaCwuLi5pbWFnZX0pPT5pbWFnZSkoYmluZGluZykpKTtuZWVkKGZzLmNvbXBvbmVudD09PSdib290c3RyYXAnJiZmcy5ncmFwaEhhc2g9PT1iaW5kaW5nLmdyYXBoSGFzaCYmaW1hZ2VGaWxlc3lzdGVtVmVyaWZpY2F0aW9uS2luZChmaWxlc3lzdGVtKT09PSdsaXZlLWZpbGVzeXN0ZW0tZXZpZGVuY2UnLCdOb25yb290UHJlcmVxdWlzaXRlc0ZpbGVzeXN0ZW0nKTsKIG5lZWQob3B0aW9ucy5zb3VyY2VDb250ZXh0Py50cmVlPT09ZXhwZWN0ZWQuY2FuZGlkYXRlVHJlZSYmaW5wdXQuc291cmNlQ2xvc3VyZS50cmVlPT09ZXhwZWN0ZWQuY2FuZGlkYXRlVHJlZSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNTb3VyY2UnKTsKIGF3YWl0IHZlcmlmeUNvbnRyb2xTb3VyY2VDbG9zdXJlKG9wdGlvbnMuc291cmNlQ29udGV4dCxpbnB1dC5zb3VyY2VDbG9zdXJlKTtjdXJyZW50KG9wdGlvbnMpOwogbmVlZChpbnB1dC5zb3VyY2VDbG9zdXJlLmZpbGVzLmxlbmd0aD4wLCdOb25yb290UHJlcmVxdWlzaXRlc1NvdXJjZScpOwogY29uc3Qgb3duPWF3YWl0IHJlYWRDb250cm9sU291cmNlRmlsZShvcHRpb25zLnNvdXJjZUNvbnRleHQsc291cmNlUGF0aCk7Y3VycmVudChvcHRpb25zKTtuZWVkKG93bi5maWxlLnNoYTI1Nj09PWNvbGxlY3RvckNvZGVIYXNoJiZvd24uYnl0ZXMuZXF1YWxzKHNvdXJjZUJ5dGVzKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNDb2xsZWN0b3JTb3VyY2UnKTsKIGNvbnN0IGVudHJpZXM9aW5zcGVjdEltYWdlRmlsZXN5c3RlbUVudHJpZXMoZmlsZXN5c3RlbSksbm9kZXM9bmV3IE1hcChlbnRyaWVzLm1hcChlPT5bZS5wYXRoLGVdKSk7CiAvLyBSZXNvbHZlIGV2ZXJ5IGludGVybWVkaWF0ZSBzeW1saW5rIGJlZm9yZSBkZWNsYXJpbmcgYSBsb2FkZXIgcGF0aCBhYnNlbnQuCiAvLyBQcmVzZXJ2ZSAnLi4nIHVudGlsIGV4cGFuc2lvbjsgbm9ybWFsaXphdGlvbiBhbG9uZSBjYW4gc2tpcCBhIHJlYWwgaG9wLgogY29uc3QgZXhpc3RzPXBhdGg9PntsZXQgcGVuZGluZz1wYXRoLnNwbGl0KCcvJykuZmlsdGVyKEJvb2xlYW4pLHBhcnRzPVtdLGxpbmtzPTAsc3RlcHM9MDt3aGlsZShwZW5kaW5nLmxlbmd0aCl7bmVlZCgrK3N0ZXBzPD01MTIsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTG9hZGVyUGF0aCcpO2NvbnN0IHBhcnQ9cGVuZGluZy5zaGlmdCgpO2lmKHBhcnQ9PT0nLicpY29udGludWU7aWYocGFydD09PScuLicpe25lZWQocGFydHMubGVuZ3RoPjAsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTG9hZGVyUGF0aCcpO3BhcnRzLnBvcCgpO2NvbnRpbnVlO31jb25zdCBub2RlPW5vZGVzLmdldChbLi4ucGFydHMscGFydF0uam9pbignLycpKTtpZighbm9kZSlyZXR1cm4gZmFsc2U7aWYobm9kZS50eXBlPT09J3N5bWxpbmsnKXtuZWVkKCsrbGlua3M8PTQwLCdOb25yb290UHJlcmVxdWlzaXRlc0xvYWRlclBhdGgnKTtpZighcGVuZGluZy5sZW5ndGgpcmV0dXJuIHRydWU7aWYobm9kZS5saW5rLnN0YXJ0c1dpdGgoJy8nKSlwYXJ0cz1bXTtwZW5kaW5nPVsuLi5ub2RlLmxpbmsuc3BsaXQoJy8nKS5maWx0ZXIoQm9vbGVhbiksLi4ucGVuZGluZ107fWVsc2V7cGFydHMucHVzaChwYXJ0KTtpZihwZW5kaW5nLmxlbmd0aCluZWVkKG5vZGUudHlwZT09PSdkaXJlY3RvcnknLCdOb25yb290UHJlcmVxdWlzaXRlc0xvYWRlclBhdGgnKTt9fXJldHVybiB0cnVlO307CiBmb3IoY29uc3QgcCBvZiBsb2FkZXJQYXRocyluZWVkKCFleGlzdHMocCksJ05vbnJvb3RQcmVyZXF1aXNpdGVzTG9hZGVyRmlsZScpOwogY29uc3QgZmlsZXM9bmV3IE1hcCgpOwogY29uc3QgZmlsZT0ocGF0aCxleGVjdXRhYmxlPWZhbHNlKT0+e2NvbnN0IGY9aW5zcGVjdEltYWdlRmlsZXN5c3RlbUZpbGUoZmlsZXN5c3RlbSxwYXRoKTtuZWVkKGYudWlkPT09MCYmZi5naWQ9PT0wJiYoZi5tb2RlJjBvNjAyMik9PT0wJiYhZi5wcml2aWxlZ2VBdHRyaWJ1dGVzLmxlbmd0aCYmKGV4ZWN1dGFibGU/Zi5tb2RlPT09MG83NTU6KGYubW9kZSYwbzAwNCkhPT0wKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNGaWxlUGVybWlzc2lvbnMnKTtmaWxlcy5zZXQocGF0aCxmKTtyZXR1cm4gZjt9OwogZmlsZSgnL3Vzci9sb2NhbC9iaW4vbm9kZScsdHJ1ZSk7ZmlsZSgnL2Jpbi9zZXRwcml2Jyx0cnVlKTtmaWxlKCcvbGliL2xkLW11c2wtYWFyY2g2NC5zby4xJyk7CiBmb3IoY29uc3QgZiBvZiBpbnB1dC5zb3VyY2VDbG9zdXJlLmZpbGVzKXtpZihmLnBhdGguc3RhcnRzV2l0aCgnZG9ja2VyL2Jvb3RzdHJhcC8nKSl7Y29uc3QgYWN0dWFsPWZpbGUoJy9ib290c3RyYXAvJytmLnBhdGguc2xpY2UoJ2RvY2tlci9ib290c3RyYXAvJy5sZW5ndGgpKTtuZWVkKGFjdHVhbC5zaGEyNTY9PT1mLnNoYTI1NiwnTm9ucm9vdFByZXJlcXVpc2l0ZXNTb3VyY2VGaWxlJyk7fX0KIGNvbnN0IHN0YXRlPWltYWdlR3JhcGhTdGF0ZShncmFwaCksZGVzY3JpcHRvcj1zdGF0ZS5pbWFnZXMuZ2V0KCdib290c3RyYXAnKS5jb25maWcsY29uZmlnPWF3YWl0IHJlYWRJbWFnZUpzb24oc3RhdGUuc3RvcmUub3BlbihkZXNjcmlwdG9yKSx7bWF4Qnl0ZXM6ODM4ODYwOCxidWRnZXQ6c3RhdGUuYnVkZ2V0fSk7Y3VycmVudChvcHRpb25zKTsKIG5lZWQoZGVzY3JpcHRvci5kaWdlc3Q9PT1iaW5kaW5nLmNvbmZpZ0RpZ2VzdCYmY29uZmlnLmFyY2hpdGVjdHVyZT09PSdhcm02NCcmJmNvbmZpZy5vcz09PSdsaW51eCcmJiFPYmplY3Qua2V5cyhjb25maWcuY29uZmlnPy5Wb2x1bWVzPz97fSkubGVuZ3RoLCdOb25yb290UHJlcmVxdWlzaXRlc0ltYWdlQ29uZmlnJyk7CiBjb25zdCBlbnY9Y29uZmlnLmNvbmZpZz8uRW52Pz9bXSxzZWVuPW5ldyBTZXQoKTtsZXQgY2E7CiBuZWVkKEFycmF5LmlzQXJyYXkoZW52KSYmZW52Lmxlbmd0aDw9MzIsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRW52aXJvbm1lbnQnKTsKIGZvcihjb25zdCBpdGVtIG9mIGVudil7bmVlZCh0eXBlb2YgaXRlbT09PSdzdHJpbmcnJiZpdGVtLmxlbmd0aDw9NDA5NiYmaXRlbS5pbmNsdWRlcygnPScpLCdOb25yb290UHJlcmVxdWlzaXRlc0Vudmlyb25tZW50Jyk7Y29uc3QgaT1pdGVtLmluZGV4T2YoJz0nKSxrZXk9aXRlbS5zbGljZSgwLGkpLHY9aXRlbS5zbGljZShpKzEpO25lZWQoIXNlZW4uaGFzKGtleSkmJiFrZXkuc3RhcnRzV2l0aCgnTERfJykmJiFOT05ST09UX0ZPUkJJRERFTl9FTlZJUk9OTUVOVC5pbmNsdWRlcyhrZXkpJiZbJ1BBVEgnLCdIT01FJywnTk9ERV9WRVJTSU9OJywnWUFSTl9WRVJTSU9OJywnTk9ERV9FWFRSQV9DQV9DRVJUUyddLmluY2x1ZGVzKGtleSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRW52aXJvbm1lbnQnKTtzZWVuLmFkZChrZXkpOwogIGlmKGtleT09PSdQQVRIJyluZWVkKHYuc3BsaXQoJzonKS5ldmVyeShjYW5vbmljYWwpLCdOb25yb290UHJlcmVxdWlzaXRlc0Vudmlyb25tZW50Jyk7ZWxzZSBpZihrZXk9PT0nSE9NRScpbmVlZCh2PT09Jy90bXAnLCdOb25yb290UHJlcmVxdWlzaXRlc0Vudmlyb25tZW50Jyk7ZWxzZSBpZihrZXk9PT0nTk9ERV9FWFRSQV9DQV9DRVJUUycpe25lZWQoWycvYm9vdHN0cmFwL2dsb2JhbC1idW5kbGUucGVtJywnL2FwcC9nbG9iYWwtYnVuZGxlLnBlbSddLmluY2x1ZGVzKHYpLCdOb25yb290UHJlcmVxdWlzaXRlc0NhJyk7Y2E9ZmlsZSh2KTtuZWVkKGNhLnJlc29sdmVkUGF0aD09PXYsJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ2EnKTt9ZWxzZSBuZWVkKC9eXGQrXC5cZCtcLlxkKyQvLnRlc3QodiksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRW52aXJvbm1lbnQnKTsKIH0KIGNvbnN0IHBhdGhzPW5ldyBTZXQoWycvJ10pO2Zvcihjb25zdCBmIG9mIGZpbGVzLnZhbHVlcygpKWZvcihjb25zdCBwIG9mIFtmLnBhdGgsZi5yZXNvbHZlZFBhdGgsLi4uZi5wYXJlbnRzLm1hcChyPT5yLnBhdGgpLC4uLmYuc3ltbGlua0NoYWluLm1hcChyPT5yLnBhdGgpXSlwYXRocy5hZGQocCk7CiBuZWVkKHBhdGhzLnNpemU8PTUxMiYmWy4uLnBhdGhzXS5ldmVyeShjYW5vbmljYWwpLCdOb25yb290UHJlcmVxdWlzaXRlc1BhdGhzJyk7CiByZXR1cm4ge2lucHV0LGdyYXBoLGZpbGVzeXN0ZW0sYmluZGluZyxmcyxjb25maWcsZmlsZXMsZmlsZSxwYXRoczpbLi4ucGF0aHNdLnNvcnQoKSxjYSxub2Rlcyxzb3VyY2VDb250ZXh0Om9wdGlvbnMuc291cmNlQ29udGV4dH07Cn0KZnVuY3Rpb24gY2hlY2tJbWFnZShyYXcscCxwbGF0Zm9ybT1mYWxzZSl7CiBuZWVkKEFycmF5LmlzQXJyYXkocmF3KSYmcmF3Lmxlbmd0aD09PTEsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRG9ja2VySW1hZ2UnKTtjb25zdCB2PXJhd1swXSx3YW50ZWQ9cGxhdGZvcm0/cC5iaW5kaW5nLmFybTY0RGlnZXN0OnAuYmluZGluZy5yb290RGlnZXN0OwogbmVlZCh2Lk9zPT09J2xpbnV4JyYmdi5BcmNoaXRlY3R1cmU9PT0nYXJtNjQnLCdOb25yb290UHJlcmVxdWlzaXRlc0RvY2tlckltYWdlJyk7CiBpZih2LkRlc2NyaXB0b3IpbmVlZCh2LkRlc2NyaXB0b3IuZGlnZXN0PT09d2FudGVkJiZ2LklkPT09d2FudGVkLCdOb25yb290UHJlcmVxdWlzaXRlc0RvY2tlckltYWdlJyk7ZWxzZSBuZWVkKHYuSWQ9PT1wLmJpbmRpbmcuY29uZmlnRGlnZXN0JiZ2LlJlcG9EaWdlc3RzPy5zb21lKGQ9PmQuZW5kc1dpdGgoJ0AnK3AuYmluZGluZy5yb290RGlnZXN0KSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRG9ja2VySW1hZ2UnKTsKIHNhbWUodi5Db25maWcscC5jb25maWcuY29uZmlnKTtzYW1lKHYuUm9vdEZTLHtUeXBlOidsYXllcnMnLExheWVyczpwLmNvbmZpZy5yb290ZnMuZGlmZl9pZHN9KTtyZXR1cm4gdjsKfQpmdW5jdGlvbiBjaGVja0NvbnRhaW5lcihyYXcscCx7aWQsbmFtZSxhcmdzfSxleGl0ZWQpewogbmVlZChBcnJheS5pc0FycmF5KHJhdykmJnJhdy5sZW5ndGg9PT0xLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lcicpO2NvbnN0IHY9cmF3WzBdLGM9di5Db25maWcsaD12Lkhvc3RDb25maWc7CiBuZWVkKHYuSWQ9PT1pZCYmdi5OYW1lPT09Jy8nK25hbWUmJmMuSW1hZ2U9PT1wLmJpbmRpbmcucm9vdERpZ2VzdCYmYy5Vc2VyPT09JzEwMDA6MTAwMCcmJmMuTGFiZWxzPy5bJ21lbTktcHJlcmVxdWlzaXRlcy1wcm9iZSddPT09bmFtZSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNDb250YWluZXJJZGVudGl0eScpOwogbmVlZChbcC5iaW5kaW5nLmNvbmZpZ0RpZ2VzdCxwLmJpbmRpbmcucm9vdERpZ2VzdCxwLmJpbmRpbmcuYXJtNjREaWdlc3RdLmluY2x1ZGVzKHYuSW1hZ2UpLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lckltYWdlJyk7CiBpZih2LkltYWdlTWFuaWZlc3REZXNjcmlwdG9yKW5lZWQodi5JbWFnZU1hbmlmZXN0RGVzY3JpcHRvci5kaWdlc3Q9PT1wLmJpbmRpbmcuYXJtNjREaWdlc3QsJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ29udGFpbmVySW1hZ2UnKTtlbHNlIG5lZWQodi5JbWFnZT09PXAuYmluZGluZy5jb25maWdEaWdlc3QsJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ29udGFpbmVySW1hZ2UnKTsKIHNhbWUoYy5FbnRyeXBvaW50LFsnL2Jpbi9zZXRwcml2J10pO3NhbWUoYy5DbWQsYXJncyk7c2FtZShjLkVudixwLmNvbmZpZy5jb25maWc/LkVudj8/W10pOwogbmVlZChoLk5ldHdvcmtNb2RlPT09J25vbmUnJiZoLlJlYWRvbmx5Um9vdGZzPT09dHJ1ZSYmaC5Qcml2aWxlZ2VkPT09ZmFsc2UmJmguUHVibGlzaEFsbFBvcnRzPT09ZmFsc2UmJmguUGlkTW9kZSE9PSdob3N0JyYmaC5JcGNNb2RlIT09J2hvc3QnJiZoLlVUU01vZGUhPT0naG9zdCcmJiFoLlVzZXJuc01vZGUsJ05vbnJvb3RQcmVyZXF1aXNpdGVzSXNvbGF0aW9uJyk7CiBzYW1lKGguQ2FwRHJvcCxbJ0FMTCddKTtuZWVkKCFoLkNhcEFkZD8ubGVuZ3RoJiZoLlNlY3VyaXR5T3B0Py5sZW5ndGg9PT0xJiZbJ25vLW5ldy1wcml2aWxlZ2VzJywnbm8tbmV3LXByaXZpbGVnZXM6dHJ1ZSddLmluY2x1ZGVzKGguU2VjdXJpdHlPcHRbMF0pLCdOb25yb290UHJlcmVxdWlzaXRlc0lzb2xhdGlvbicpOwogbmVlZChoLlBpZHNMaW1pdD09PTMyJiZoLk1lbW9yeT09PTI2ODQzNTQ1NiYmaC5OYW5vQ3B1cz09PTEwMDAwMDAwMDAmJmguUmVzdGFydFBvbGljeT8uTmFtZT09PSdubycmJmMuSGVhbHRoY2hlY2s/LlRlc3Q/LlswXT09PSdOT05FJywnTm9ucm9vdFByZXJlcXVpc2l0ZXNJc29sYXRpb24nKTsKIGZvcihjb25zdCBrZXkgb2YgWydCaW5kcycsJ0RldmljZXMnLCdEZXZpY2VSZXF1ZXN0cycsJ1ZvbHVtZXNGcm9tJ10pbmVlZCghaFtrZXldPy5sZW5ndGgsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTW91bnQnKTsKIHNhbWUoaC5UbXBmcyx7Jy90bXAnOidydyxub3N1aWQsbm9kZXYsZXhlYyxzaXplPTEwNDg1NzYsdWlkPTEwMDAsZ2lkPTEwMDAsbW9kZT0wNzAwJ30pO25lZWQodi5Nb3VudHM/Lmxlbmd0aD09PTB8fHYuTW91bnRzPy5sZW5ndGg9PT0xJiZ2Lk1vdW50c1swXS5UeXBlPT09J3RtcGZzJyYmdi5Nb3VudHNbMF0uRGVzdGluYXRpb249PT0nL3RtcCcsJ05vbnJvb3RQcmVyZXF1aXNpdGVzTW91bnQnKTsKIG5lZWQodi5TdGF0ZS5SdW5uaW5nPT09ZmFsc2UmJnYuU3RhdGUuU3RhdHVzPT09KGV4aXRlZD8nZXhpdGVkJzonY3JlYXRlZCcpLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lclN0YXRlJyk7CiBpZihleGl0ZWQpbmVlZCh2LlN0YXRlLkV4aXRDb2RlPT09MCYmdi5TdGF0ZS5QaWQ9PT0wJiZ2LlN0YXRlLk9PTUtpbGxlZD09PWZhbHNlJiYhdi5TdGF0ZS5FcnJvciwnTm9ucm9vdFByZXJlcXVpc2l0ZXNFeGl0Jyk7cmV0dXJuIHY7Cn0KZnVuY3Rpb24gdmFsaWRhdGUocmF3LHApewogY29uc3QgcmVzdWx0PXBhcnNlTm9ucm9vdEpzb24ocmF3LHttYXhCeXRlczoyNjIxNDR9KTtleGFjdChyZXN1bHQsWyd2ZXJzaW9uJywna2luZCcsJ25vZGVWZXJzaW9uJywnYXJjaGl0ZWN0dXJlJywnaWRlbnRpdHknLCdjaGlsZCcsJ25hdGl2ZScsJ25vZGUnLCdwcmltaXRpdmUnLCdtYXBwZWQnLCdvYnNlcnZhdGlvbnMnLCdsb2FkZXJBYnNlbmNlcycsJ2ZpbmFsSWRlbnRpdHknXSk7CiBzYW1lKHJlc3VsdC5sb2FkZXJBYnNlbmNlcyxsb2FkZXJQYXRocywnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2FkZXJGaWxlJyk7CiBuZWVkKHJlc3VsdC52ZXJzaW9uPT09MSYmcmVzdWx0LmtpbmQ9PT0nY29udHJvbC1uYXRpdmUtcHJlcmVxdWlzaXRlcycmJi9edjI0XC5bMC05XStcLlswLTldKyQvLnRlc3QocmVzdWx0Lm5vZGVWZXJzaW9uKSYmcmVzdWx0LmFyY2hpdGVjdHVyZT09PSdhcm02NCcsJ05vbnJvb3RQcmVyZXF1aXNpdGVzUHJvYmUnKTsKIGNvbnN0IGRlY2xhcmVkVmVyc2lvbj1wLmNvbmZpZy5jb25maWc/LkVudj8uZmluZChlPT5lLnN0YXJ0c1dpdGgoJ05PREVfVkVSU0lPTj0nKSk7aWYoZGVjbGFyZWRWZXJzaW9uKW5lZWQoZGVjbGFyZWRWZXJzaW9uLnNsaWNlKDEzKT09PXJlc3VsdC5ub2RlVmVyc2lvbi5zbGljZSgxKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNOb2RlVmVyc2lvbicpOwogZm9yKGNvbnN0IGlkZW50aXR5IG9mIFtyZXN1bHQuaWRlbnRpdHkscmVzdWx0LmNoaWxkLHJlc3VsdC5maW5hbElkZW50aXR5XSl7CiAgZXhhY3QoaWRlbnRpdHksWydwaWQnLCdwcGlkJywnZXhlY3V0YWJsZVBhdGgnLCd1aWQnLCdnaWQnLCdncm91cHMnLCdub05ld1ByaXZzJywuLi5jYXBOYW1lc10pO25lZWQoTnVtYmVyLmlzU2FmZUludGVnZXIoaWRlbnRpdHkucGlkKSYmaWRlbnRpdHkucGlkPjAmJmlkZW50aXR5LmV4ZWN1dGFibGVQYXRoPT09Jy91c3IvbG9jYWwvYmluL25vZGUnJiZpZGVudGl0eS51aWQubGVuZ3RoPT09NCYmaWRlbnRpdHkuZ2lkLmxlbmd0aD09PTQmJlsuLi5pZGVudGl0eS51aWQsLi4uaWRlbnRpdHkuZ2lkLC4uLmlkZW50aXR5Lmdyb3Vwc10uZXZlcnkobj0+bj09PTEwMDApJiZpZGVudGl0eS5ub05ld1ByaXZzPT09MSYmY2FwTmFtZXMuZXZlcnkoaz0+aWRlbnRpdHlba109PT0nMDAwMDAwMDAwMDAwMDAwMCcpLCdOb25yb290UHJlcmVxdWlzaXRlc0lkZW50aXR5Jyk7CiB9CiBzYW1lKHJlc3VsdC5maW5hbElkZW50aXR5LHJlc3VsdC5pZGVudGl0eSk7bmVlZChyZXN1bHQuY2hpbGQucHBpZD09PXJlc3VsdC5pZGVudGl0eS5waWQmJnJlc3VsdC5jaGlsZC5waWQhPT1yZXN1bHQuaWRlbnRpdHkucGlkLCdOb25yb290UHJlcmVxdWlzaXRlc0luaGVyaXRhbmNlJyk7CiBzYW1lKHJlc3VsdC5uYXRpdmUsWzEsMTAwMCwxMDAwLDEwMDAsMTAwMCwtMjIsMSwtMSwtMSwxMDAwLDEwMDAsMTAwMCwxMDAwLDFdLCdOb25yb290UHJlcmVxdWlzaXRlc05hdGl2ZUNoZWNrcycpOwogZm9yKGNvbnN0IFtrZXkscGF0aF1vZiBbWydub2RlJywnL3Vzci9sb2NhbC9iaW4vbm9kZSddLFsncHJpbWl0aXZlJywnL2Jpbi9zZXRwcml2J11dKXsKICBjb25zdCBjPXJlc3VsdFtrZXldO2V4YWN0KGMsWydleGVjdXRhYmxlJywnZmlsZXMnLCdiaW5kaW5ncyddKTtuZWVkKGMuZXhlY3V0YWJsZS5wYXRoPT09cGF0aCYmYy5leGVjdXRhYmxlLmludGVycHJldGVyPT09Jy9saWIvbGQtbXVzbC1hYXJjaDY0LnNvLjEnJiZjLmZpbGVzLmxlbmd0aD4wJiZjLmZpbGVzLmxlbmd0aDw9NjQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRGVwZW5kZW5jaWVzJyk7CiAgZm9yKGNvbnN0IHJvdyBvZiBbYy5leGVjdXRhYmxlLC4uLmMuZmlsZXNdKXtleGFjdChyb3csWydwYXRoJywncmVzb2x2ZWRQYXRoJywnaW50ZXJwcmV0ZXInLCduZWVkZWQnLCdzb25hbWUnXSk7Y29uc3QgZj1wLmZpbGUocm93LnBhdGgscm93PT09Yy5leGVjdXRhYmxlKTtuZWVkKGYucmVzb2x2ZWRQYXRoPT09cm93LnJlc29sdmVkUGF0aCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNEZXBlbmRlbmN5QmluZGluZycpO30KIH0KIGNvbnN0IG9ic2VydmF0aW9ucz1uZXcgTWFwKCk7bmVlZChyZXN1bHQub2JzZXJ2YXRpb25zLmxlbmd0aD4wJiZyZXN1bHQub2JzZXJ2YXRpb25zLmxlbmd0aDw9NTEyLCdOb25yb290UHJlcmVxdWlzaXRlc09ic2VydmF0aW9ucycpOwogZm9yKGNvbnN0IHJvdyBvZiByZXN1bHQub2JzZXJ2YXRpb25zKXtleGFjdChyb3csWydwYXRoJywncmVzb2x2ZWRQYXRoJywndHlwZScsJ21vZGUnLCd1aWQnLCdnaWQnXSk7bmVlZChjYW5vbmljYWwocm93LnBhdGgpJiZjYW5vbmljYWwocm93LnJlc29sdmVkUGF0aCkmJiFvYnNlcnZhdGlvbnMuaGFzKHJvdy5wYXRoKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNQYXRoJyk7b2JzZXJ2YXRpb25zLnNldChyb3cucGF0aCxyb3cpOwogIG5lZWQocm93LnVpZD09PTAmJnJvdy5naWQ9PT0wJiZOdW1iZXIuaXNTYWZlSW50ZWdlcihyb3cubW9kZSkmJnJvdy5tb2RlPj0wJiZyb3cubW9kZTw9NDA5NSYmKHJvdy5tb2RlJjBvNjAwMCk9PT0wJiYocm93LnR5cGU9PT0nc3ltbGluayd8fChyb3cubW9kZSYwbzAyMik9PT0wKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNQYXRoUGVybWlzc2lvbnMnKTsKICBjb25zdCBub2RlPXAubm9kZXMuZ2V0KHJvdy5wYXRoLnNsaWNlKDEpKT8/cC5ub2Rlcy5nZXQocm93LnJlc29sdmVkUGF0aC5zbGljZSgxKSk7CiAgaWYobm9kZSYmIW5vZGUuaW1wbGljaXQpe25lZWQobm9kZS50eXBlPT09cm93LnR5cGUsJ05vbnJvb3RQcmVyZXF1aXNpdGVzUGF0aFR5cGUnKTtmb3IoY29uc3QgayBvZiBbJ21vZGUnLCd1aWQnLCdnaWQnXSluZWVkKHJvd1trXT09PShub2RlLnBheD8uW2tdPT09dW5kZWZpbmVkP25vZGVba106TnVtYmVyKG5vZGUucGF4W2tdKSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzUGF0aE1ldGFkYXRhJyk7fWVsc2UgbmVlZChyb3cudHlwZT09PSdkaXJlY3RvcnknLCdOb25yb290UHJlcmVxdWlzaXRlc1BhdGhUeXBlJyk7CiB9CiBmb3IoY29uc3QgZiBvZiBwLmZpbGVzLnZhbHVlcygpKWZvcihjb25zdCBwYXRoIG9mIFtmLnBhdGgsZi5yZXNvbHZlZFBhdGgsLi4uZi5wYXJlbnRzLm1hcChyPT5yLnBhdGgpLC4uLmYuc3ltbGlua0NoYWluLm1hcChyPT5yLnBhdGgpXSluZWVkKG9ic2VydmF0aW9ucy5oYXMocGF0aCksJ05vbnJvb3RQcmVyZXF1aXNpdGVzUGF0aENvdmVyYWdlJyk7CiBuZWVkKG9ic2VydmF0aW9ucy5nZXQoJy8nKT8udHlwZT09PSdkaXJlY3RvcnknLCdOb25yb290UHJlcmVxdWlzaXRlc1Jvb3QnKTsKIHJldHVybiByZXN1bHQ7Cn0KCmV4cG9ydCBhc3luYyBmdW5jdGlvbiBjb2xsZWN0Tm9ucm9vdENvbnRyb2xQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnM9e30pewogY3VycmVudChvcHRpb25zKTtuZWVkKG9wdGlvbnMmJnR5cGVvZiBvcHRpb25zPT09J29iamVjdCcmJiFBcnJheS5pc0FycmF5KG9wdGlvbnMpJiZPYmplY3Qua2V5cyhvcHRpb25zKS5ldmVyeShrZXk9PlsnY29udHJvbFZlcmlmaWNhdGlvbicsJ3NvdXJjZUNvbnRleHQnLCdleHBlY3RlZCcsJ3NpZ25hbCcsJ2RlYWRsaW5lTXMnLCdiZWZvcmVEb2NrZXInLCdhc3NlcnRDdXJyZW50JywncmV0YWluT3JpZ2luYWxzJ10uaW5jbHVkZXMoa2V5KSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRmllbGRzJyk7CiBuZWVkKG9wdGlvbnMucmV0YWluT3JpZ2luYWxzPT09dW5kZWZpbmVkfHxvcHRpb25zLnJldGFpbk9yaWdpbmFscz09PXRydWUsJ05vbnJvb3RQcmVyZXF1aXNpdGVzT3JpZ2luYWxzJyk7CiBjb25zdCByZXN1bHQ9YXdhaXQgY29sbGVjdFByZXJlcXVpc2l0ZXModmFsdWUsb3B0aW9ucyxydW5Ob25yb290Q29udHJvbERvY2tlckNvbW1hbmQsdG1wZGlyKCkpO2N1cnJlbnQob3B0aW9ucyk7cmV0dXJuIHJlc3VsdDsKfQovKiogQ2FycmllciByZXVzZXMgdGhlIHNhbWUgYWN0dWFsIG5hdGl2ZSBjaGVja3Mgd2l0aG91dCBhbiBBY3R1YWxNYWluIG9yCiAqIGRlcGxveW1lbnQgY29udHJhY3QuIEl0cyBwcm9jZXNzIGRyaXZlciBhZG1pdHMgb25seSB0aGUgZml4ZWQgcHJvYmUgdmVyYnMuICovCmV4cG9ydCBhc3luYyBmdW5jdGlvbiBjb2xsZWN0Q2FycmllckJhc2VQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnM9e30pewogbmVlZChvcHRpb25zJiZ0eXBlb2Ygb3B0aW9ucz09PSdvYmplY3QnJiYhQXJyYXkuaXNBcnJheShvcHRpb25zKSYmT2JqZWN0LmtleXMob3B0aW9ucykuZXZlcnkoa2V5PT5bJ2NvbnRyb2xWZXJpZmljYXRpb24nLCdzb3VyY2VDb250ZXh0JywnZXhwZWN0ZWQnLCdzaWduYWwnLCdkZWFkbGluZU1zJywnbWV0YWRhdGFSZWFkcycsJ3RlbXBSb290JywnYmFzZUNhY2hlRGlyZWN0b3J5J10uaW5jbHVkZXMoa2V5KSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzRmllbGRzJyk7CiBuZWVkKHR5cGVvZiBvcHRpb25zLm1ldGFkYXRhUmVhZHM/LnJlc2VydmVMb2NhbD09PSdmdW5jdGlvbicmJnR5cGVvZiBvcHRpb25zLnRlbXBSb290PT09J3N0cmluZycmJnR5cGVvZiBvcHRpb25zLmJhc2VDYWNoZURpcmVjdG9yeT09PSdzdHJpbmcnLCdDYXJyaWVyUHJlcmVxdWlzaXRlc0J1ZGdldCcpOwogcmV0dXJuIGNvbGxlY3RDYXJyaWVyUHJlcmVxdWlzaXRlcyh2YWx1ZSxvcHRpb25zLG9wdGlvbnMuYmFzZUNhY2hlRGlyZWN0b3J5KTsKfQovKiogUnVuIHRoZSBzYW1lIHJlYWwgbmF0aXZlIGNoZWNrcyBhZ2FpbnN0IHRoZSBmaW5hbCBpbmRlcGVuZGVudGx5IHZlcmlmaWVkCiAqIGNhcnJpZXIuIFRoZSByZXR1cm5lZCBsaXZlIGhhbmRsZSBpcyBib3VuZCB0byB0aGF0IGdyYXBoL0ZTIGFuZCBjYW5ub3QgYmUKICogcmVwbGFjZWQgd2l0aCB0aGUgYmFzZSBwcm9iZSdzIGhhbmRsZSBvciB0cmFuc3BvcnRlZCBhcyBKU09OLiAqLwpleHBvcnQgYXN5bmMgZnVuY3Rpb24gY29sbGVjdENhcnJpZXJJbWFnZVByZXJlcXVpc2l0ZXModmFsdWUsb3B0aW9ucz17fSl7CiBuZWVkKG9wdGlvbnMmJnR5cGVvZiBvcHRpb25zPT09J29iamVjdCcmJiFBcnJheS5pc0FycmF5KG9wdGlvbnMpJiZPYmplY3Qua2V5cyhvcHRpb25zKS5ldmVyeShrZXk9PlsnY29udHJvbFZlcmlmaWNhdGlvbicsJ3NvdXJjZUNvbnRleHQnLCdleHBlY3RlZCcsJ3NpZ25hbCcsJ2RlYWRsaW5lTXMnLCdtZXRhZGF0YVJlYWRzJywndGVtcFJvb3QnLCdjYWNoZURpcmVjdG9yeSddLmluY2x1ZGVzKGtleSkpLCdOb25yb290UHJlcmVxdWlzaXRlc0ZpZWxkcycpOwogbmVlZCh0eXBlb2Ygb3B0aW9ucy5tZXRhZGF0YVJlYWRzPy5yZXNlcnZlTG9jYWw9PT0nZnVuY3Rpb24nJiZ0eXBlb2Ygb3B0aW9ucy50ZW1wUm9vdD09PSdzdHJpbmcnJiZ0eXBlb2Ygb3B0aW9ucy5jYWNoZURpcmVjdG9yeT09PSdzdHJpbmcnLCdDYXJyaWVyUHJlcmVxdWlzaXRlc0J1ZGdldCcpOwogcmVzZXJ2ZUNhcnJpZXJQcm9iZShvcHRpb25zKTsKIGNvbnN0IHByZXBhcmVkPWF3YWl0IHByZWZsaWdodCh2YWx1ZSxvcHRpb25zKSxjb25maWc9cHJlcGFyZWQuY29uZmlnLmNvbmZpZzsKIG5lZWQoY29uZmlnLlVzZXI9PT0nMTAwMDoxMDAwJyYmY29uZmlnLkVudi5pbmNsdWRlcygnSE9NRT0vdG1wJykmJmNvbmZpZy5FbnYuaW5jbHVkZXMoJ1BBVEg9L3Vzci9sb2NhbC9iaW46L3Vzci9iaW46L2JpbicpJiZjb25maWcuRW52LmluY2x1ZGVzKCdOT0RFX0VYVFJBX0NBX0NFUlRTPS9ib290c3RyYXAvZ2xvYmFsLWJ1bmRsZS5wZW0nKSYmIWNvbmZpZy5PbkJ1aWxkPy5sZW5ndGgsJ0NhcnJpZXJQcmVyZXF1aXNpdGVzUmVjaXBlJyk7CiBzYW1lKGNvbmZpZy5FbnRyeXBvaW50LFsnL2Jpbi9zZXRwcml2JywnLS1uby1uZXctcHJpdnMnLCctLScsJy91c3IvbG9jYWwvYmluL25vZGUnLCcvY2Fycmllci9ndWFyZC1maXJzdC5tanMnLCdhdWRpdC1vcmlnaW5hbC1yb290J10sJ0NhcnJpZXJQcmVyZXF1aXNpdGVzUmVjaXBlJyk7c2FtZShjb25maWcuQ21kPz9bXSxbXSwnQ2FycmllclByZXJlcXVpc2l0ZXNSZWNpcGUnKTsKIGNvbnN0IHVzYWdlPWltYWdlR3JhcGhTdGF0ZShwcmVwYXJlZC5ncmFwaCkuYnVkZ2V0LnVzYWdlKCk7CiBuZWVkKE51bWJlci5pc1NhZmVJbnRlZ2VyKHVzYWdlLnVuY29tcHJlc3NlZEJ5dGVzKSYmdXNhZ2UudW5jb21wcmVzc2VkQnl0ZXM+MCYmTnVtYmVyLmlzU2FmZUludGVnZXIodXNhZ2UuZnNFbnRyaWVzKSYmdXNhZ2UuZnNFbnRyaWVzPjAsJ0NhcnJpZXJQcmVyZXF1aXNpdGVzSW1wb3J0Qm91bmQnKTsKIC8vIEltcG9ydCBtYXRlcmlhbGl6YXRpb24gaXMgcHJlcGFpZCBiZWZvcmUgRG9ja2VyLCBpbmRlcGVuZGVudGx5IG9mIHRoZQogLy8gc3RyZWFtIGxvYWRlcidzIGFjdHVhbCBjaGFyZ2VkIHJlYWRzLiBObyB1bnVzZWQgd29yayBpcyByZWZ1bmRlZC4KIG9wdGlvbnMubWV0YWRhdGFSZWFkcy5yZXNlcnZlTG9jYWwoe2VjclJlcXVlc3RzOjAsaHR0cEJvZHlCeXRlczowLGxvZ2ljYWxCeXRlczoyKnVzYWdlLnVuY29tcHJlc3NlZEJ5dGVzLHVuY29tcHJlc3NlZEJ5dGVzOnVzYWdlLnVuY29tcHJlc3NlZEJ5dGVzLHByb2Nlc3NlZEVudHJpZXM6dXNhZ2UuZnNFbnRyaWVzfSk7CiByZXR1cm4gY29sbGVjdENhcnJpZXJQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnMsb3B0aW9ucy5jYWNoZURpcmVjdG9yeSxwcmVwYXJlZCk7Cn0KZnVuY3Rpb24gcmVzZXJ2ZUNhcnJpZXJQcm9iZShvcHRpb25zKXsKIG5lZWQocHJvY2Vzcy5wbGF0Zm9ybT09PSdsaW51eCcmJnByb2Nlc3MuYXJjaD09PSdhcm02NCcsJ0NhcnJpZXJQcmVyZXF1aXNpdGVzTmF0aXZlQXJtNjQnKTsKIG9wdGlvbnMubWV0YWRhdGFSZWFkcy5yZXNlcnZlTG9jYWwoe2VjclJlcXVlc3RzOjAsaHR0cEJvZHlCeXRlczowLGxvZ2ljYWxCeXRlczoxNjc3NzIxNisyKnNvdXJjZUJ5dGVzLmxlbmd0aCx1bmNvbXByZXNzZWRCeXRlczowLHByb2Nlc3NlZEVudHJpZXM6NDA5Nn0pOwp9CmFzeW5jIGZ1bmN0aW9uIGNvbGxlY3RDYXJyaWVyUHJlcmVxdWlzaXRlcyh2YWx1ZSxvcHRpb25zLGNhY2hlRGlyZWN0b3J5LHByZXBhcmVkKXsKIGlmKCFwcmVwYXJlZClyZXNlcnZlQ2FycmllclByb2JlKG9wdGlvbnMpOwogY29uc3Qge3J1bkNhcnJpZXJQcm9iZURvY2tlckNvbW1hbmR9PWF3YWl0IGltcG9ydCgnLi9wcm9kdWN0aW9uLW5vbnJvb3QtY2Fycmllci1wcm9iZS1zdXBlcnZpc29yLm1qcycpOwogY29uc3Qge2xvYWROb25yb290Q29udHJvbEltYWdlfT1hd2FpdCBpbXBvcnQoJy4vcHJvZHVjdGlvbi1ub25yb290LWNvbnRyb2wtZG9ja2VyLm1qcycpOwogbGV0IGxvYWRlZCxwcmltYXJ5OwogdHJ5ewogIGxvYWRlZD1hd2FpdCBsb2FkTm9ucm9vdENvbnRyb2xJbWFnZSh7Z3JhcGg6b3B0aW9ucy5jb250cm9sVmVyaWZpY2F0aW9uLmdyYXBoLGNhY2hlRGlyZWN0b3J5LG1ldGFkYXRhUmVhZHM6b3B0aW9ucy5tZXRhZGF0YVJlYWRzLHRlbXBSb290Om9wdGlvbnMudGVtcFJvb3Qsc2lnbmFsOm9wdGlvbnMuc2lnbmFsfSk7CiAgY29uc3QgaGFuZGxlPWF3YWl0IGNvbGxlY3RQcmVyZXF1aXNpdGVzKHZhbHVlLG9wdGlvbnMscnVuQ2FycmllclByb2JlRG9ja2VyQ29tbWFuZCxvcHRpb25zLnRlbXBSb290LHByZXBhcmVkKTsKICBhd2FpdCBsb2FkZWQuY2xvc2UoKTtsb2FkZWQ9dW5kZWZpbmVkO3JldHVybiBoYW5kbGU7CiB9Y2F0Y2goZSl7cHJpbWFyeT1lO3Rocm93IGU7fQogZmluYWxseXtpZihsb2FkZWQmJnByaW1hcnk/LmNvZGUhPT0nRUNMRUFOVVAnKWF3YWl0IGxvYWRlZC5jbG9zZSgpO30KfQpleHBvcnQgZnVuY3Rpb24gZ2V0Tm9ucm9vdE5hdGl2ZVByb2JlU291cmNlKCl7cmV0dXJuIE9iamVjdC5mcmVlemUoe2NvZGU6cHJvYmVDb2RlLHNoYTI1Njpwcm9iZUNvZGVIYXNofSk7fQphc3luYyBmdW5jdGlvbiBjb2xsZWN0UHJlcmVxdWlzaXRlcyh2YWx1ZSxvcHRpb25zLHJ1bkRvY2tlcix0ZW1wb3JhcnlSb290LHByZXBhcmVkKXsKIGN1cnJlbnQob3B0aW9ucyk7CiBjb25zdCBzdGFydGVkTXM9RGF0ZS5ub3coKSxkZWFkbGluZU1zPU1hdGgubWluKG9wdGlvbnMuZGVhZGxpbmVNcz8/c3RhcnRlZE1zKzEyMDAwMCxzdGFydGVkTXMrMTIwMDAwKTtuZWVkKE51bWJlci5pc1NhZmVJbnRlZ2VyKGRlYWRsaW5lTXMpJiZkZWFkbGluZU1zPnN0YXJ0ZWRNcywnTm9ucm9vdFByZXJlcXVpc2l0ZXNEZWFkbGluZScpOwogY29uc3QgcD1wcmVwYXJlZD8/YXdhaXQgcHJlZmxpZ2h0KHZhbHVlLG9wdGlvbnMpO2N1cnJlbnQob3B0aW9ucyk7Y29uc3Qgc29ja2V0PWF3YWl0IGxzdGF0KCcvdmFyL3J1bi9kb2NrZXIuc29jaycpO2N1cnJlbnQob3B0aW9ucyk7bmVlZChzb2NrZXQuaXNTb2NrZXQoKSwnTm9ucm9vdFByZXJlcXVpc2l0ZXNMb2NhbERvY2tlcicpOwogY29uc3QgZGlyZWN0b3J5PWF3YWl0IG1rZHRlbXAoam9pbih0ZW1wb3JhcnlSb290LCdtZW05LXByZXJlcXVpc2l0ZXMtJykpLG5hbWU9J21lbTktcHJlcmVxdWlzaXRlcy0nK3JhbmRvbUJ5dGVzKDE2KS50b1N0cmluZygnaGV4Jyksb3JpZ2luYWxDb21tYW5kcz1bXTtsZXQgaWQsYXR0ZW1wdGVkPWZhbHNlLHN0aWNreT1mYWxzZSxwcmltYXJ5LHJlY29yZDsKIGNvbnN0IHJ1bj1hc3luYyhzdGFnZSxhcmdzLGNsZWFudXA9ZmFsc2UpPT57CiAgaWYob3B0aW9ucy5iZWZvcmVEb2NrZXIhPT11bmRlZmluZWQpe25lZWQodHlwZW9mIG9wdGlvbnMuYmVmb3JlRG9ja2VyPT09J2Z1bmN0aW9uJyk7YXdhaXQgb3B0aW9ucy5iZWZvcmVEb2NrZXIoT2JqZWN0LmZyZWV6ZSh7c3RhZ2UsY29udGFpbmVySWQ6aWQsYXJnczpPYmplY3QuZnJlZXplKFsuLi5hcmdzXSl9KSk7Y3VycmVudChvcHRpb25zLGNsZWFudXApO30KICBpZighY2xlYW51cCl7Y29udHJvbEltYWdlR3JhcGhCaW5kaW5nKHAuZ3JhcGgpO25lZWQoRGF0ZS5ub3coKTxkZWFkbGluZU1zJiYhb3B0aW9ucy5zaWduYWw/LmFib3J0ZWQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRXhwaXJlZCcpO31pZihzdGFnZT09PSdjcmVhdGUnKWF0dGVtcHRlZD10cnVlOwogIHRyeXtjdXJyZW50KG9wdGlvbnMsY2xlYW51cCk7Y29uc3Qgc3RhcnRlZE1zPURhdGUubm93KCkscmVzdWx0PWF3YWl0IHJ1bkRvY2tlcihhcmdzLHtkaXJlY3RvcnksdGltZW91dE1zOmNsZWFudXA/MTAwMDA6TWF0aC5taW4oMzAwMDAsZGVhZGxpbmVNcy1EYXRlLm5vdygpKSxzaWduYWw6Y2xlYW51cD91bmRlZmluZWQ6b3B0aW9ucy5zaWduYWwsYXNzZXJ0Q3VycmVudDpvcHRpb25zLmFzc2VydEN1cnJlbnQsY2xlYW51cH0pO2N1cnJlbnQob3B0aW9ucyxjbGVhbnVwKTtpZihvcHRpb25zLnJldGFpbk9yaWdpbmFscyl7bmVlZChvcmlnaW5hbENvbW1hbmRzLmxlbmd0aDw4LCdOb25yb290UHJlcmVxdWlzaXRlc09yaWdpbmFscycpO29yaWdpbmFsQ29tbWFuZHMucHVzaCh7c3RhZ2UsYXJnczpbLi4uYXJnc10sY2xlYW51cCxzdGF0dXM6cmVzdWx0LnN0YXR1cyxzdGRvdXQ6cmVzdWx0LnN0ZG91dCxzdGRlcnI6cmVzdWx0LnN0ZGVycixzdGFydGVkTXMsY29tcGxldGVkTXM6RGF0ZS5ub3coKX0pO31yZXR1cm4gcmVzdWx0O31jYXRjaChlKXtpZihlLmNvZGU9PT0nRUNMRUFOVVAnKXN0aWNreT10cnVlO3Rocm93IGU7fQogfTsKIGNvbnN0IGNoZWNrZWQ9YXN5bmMoc3RhZ2UsYXJncyxjbGVhbnVwPWZhbHNlKT0+e2NvbnN0IHI9YXdhaXQgcnVuKHN0YWdlLGFyZ3MsY2xlYW51cCk7Y3VycmVudChvcHRpb25zLGNsZWFudXApO2NvbnN0IHByb2JlRmFpbHVyZT1zdGFnZT09PSdzdGFydCcmJi9eTm9ucm9vdFByZXJlcXVpc2l0ZXNQcm9iZVJlamVjdGVkOltBLVphLXowLTldezEsODB9XG4kLy50ZXN0KHIuc3RkZXJyKT9yLnN0ZGVyci50cmltKCk6J05vbnJvb3RQcmVyZXF1aXNpdGVzRG9ja2VyQ29tbWFuZCc7bmVlZChyLnN0YXR1cz09PTAscHJvYmVGYWlsdXJlKTtyZXR1cm4gcjt9OwogY29uc3QgaW5zcGVjdD1hc3luYyhzdGFnZSxhcmdzKT0+e2NvbnN0IHI9YXdhaXQgY2hlY2tlZChzdGFnZSxhcmdzKTtjdXJyZW50KG9wdGlvbnMpO3JldHVybiBwYXJzZU5vbnJvb3RKc29uKHIuc3Rkb3V0LHttYXhCeXRlczoxMDQ4NTc2fSk7fTsKIHRyeXsKICBjdXJyZW50KG9wdGlvbnMpO2NvbnN0IHJvb3RSYXc9YXdhaXQgaW5zcGVjdCgnaW5zcGVjdC1yb290JyxbJ2ltYWdlJywnaW5zcGVjdCcscC5iaW5kaW5nLnJvb3REaWdlc3RdKTtjdXJyZW50KG9wdGlvbnMpO2NvbnN0IHJvb3Q9Y2hlY2tJbWFnZShyb290UmF3LHApOwogIGNvbnN0IHBsYXRmb3JtUmF3PWF3YWl0IGluc3BlY3QoJ2luc3BlY3QtcGxhdGZvcm0nLFsnaW1hZ2UnLCdpbnNwZWN0JywnLS1wbGF0Zm9ybScsJ2xpbnV4L2FybTY0JyxwLmJpbmRpbmcucm9vdERpZ2VzdF0pO2N1cnJlbnQob3B0aW9ucyk7Y29uc3QgcGxhdGZvcm09Y2hlY2tJbWFnZShwbGF0Zm9ybVJhdyxwLHRydWUpOwogIGNvbnN0IGFyZ3M9WyctLW5vLW5ldy1wcml2cycsJy0tJywnL3Vzci9sb2NhbC9iaW4vbm9kZScsJy0taW5wdXQtdHlwZT1tb2R1bGUnLCctZScscHJvYmVDb2RlLCctLScsSlNPTi5zdHJpbmdpZnkocC5wYXRocyldOwogIGNvbnN0IGNyZWF0ZWQ9YXdhaXQgY2hlY2tlZCgnY3JlYXRlJyxbJ2NvbnRhaW5lcicsJ2NyZWF0ZScsJy0tcHVsbD1uZXZlcicsJy0tcGxhdGZvcm09bGludXgvYXJtNjQnLCctLW5ldHdvcms9bm9uZScsJy0tcmVhZC1vbmx5JywnLS11c2VyPTEwMDA6MTAwMCcsJy0tY2FwLWRyb3A9QUxMJywnLS1zZWN1cml0eS1vcHQ9bm8tbmV3LXByaXZpbGVnZXM6dHJ1ZScsJy0tcGlkcy1saW1pdD0zMicsJy0tbWVtb3J5PTI1Nm0nLCctLWNwdXM9MScsJy0tcmVzdGFydD1ubycsJy0tbm8taGVhbHRoY2hlY2snLCctLXRtcGZzJywnL3RtcDpydyxub3N1aWQsbm9kZXYsZXhlYyxzaXplPTEwNDg1NzYsdWlkPTEwMDAsZ2lkPTEwMDAsbW9kZT0wNzAwJywnLS1sYWJlbCcsJ21lbTktcHJlcmVxdWlzaXRlcy1wcm9iZT0nK25hbWUsJy0tbmFtZScsbmFtZSwnLS1lbnRyeXBvaW50JywnL2Jpbi9zZXRwcml2JyxwLmJpbmRpbmcucm9vdERpZ2VzdCwuLi5hcmdzXSk7CiAgY3VycmVudChvcHRpb25zKTtjb25zdCBjYW5kaWRhdGU9Y3JlYXRlZC5zdGRvdXQudHJpbSgpO25lZWQoL15bYS1mMC05XXs2NH0kLy50ZXN0KGNhbmRpZGF0ZSksJ05vbnJvb3RQcmVyZXF1aXNpdGVzQ29udGFpbmVySWQnKTtpZD1jYW5kaWRhdGU7CiAgY29uc3QgY29udGFpbmVyPXtpZCxuYW1lLGFyZ3N9LGJlZm9yZVJhdz1hd2FpdCBpbnNwZWN0KCdpbnNwZWN0LWNyZWF0ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdKTtjdXJyZW50KG9wdGlvbnMpO2NvbnN0IGJlZm9yZT1jaGVja0NvbnRhaW5lcihiZWZvcmVSYXcscCxjb250YWluZXIsZmFsc2UpOwogIGNvbnN0IG91dHB1dD1hd2FpdCBjaGVja2VkKCdzdGFydCcsWydjb250YWluZXInLCdzdGFydCcsJy0tYXR0YWNoJyxpZF0pO2N1cnJlbnQob3B0aW9ucyk7Y29uc3QgYWZ0ZXJSYXc9YXdhaXQgaW5zcGVjdCgnaW5zcGVjdC1leGl0ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdKTtjdXJyZW50KG9wdGlvbnMpO2NvbnN0IGFmdGVyPWNoZWNrQ29udGFpbmVyKGFmdGVyUmF3LHAsY29udGFpbmVyLHRydWUpLHJlc3VsdD12YWxpZGF0ZShvdXRwdXQuc3Rkb3V0LHApOwogIHJlY29yZD17dmVyc2lvbjoxLGtpbmQ6J21lYXN1cmVkLWNvbnRyb2wtcHJlcmVxdWlzaXRlcycsaW1hZ2U6cC5pbnB1dC5pbWFnZSxzb3VyY2VUcmVlOm9wdGlvbnMuZXhwZWN0ZWQuY2FuZGlkYXRlVHJlZSxzb3VyY2VDbG9zdXJlSGFzaDpoYXNoKHAuaW5wdXQuc291cmNlQ2xvc3VyZSksY29sbGVjdG9yQ29kZUhhc2gscHJvYmVDb2RlSGFzaCxuYXRpdmVQcm9iZUhhc2gsZ3JhcGhIYXNoOnAuYmluZGluZy5ncmFwaEhhc2gsZmlsZXN5c3RlbUhhc2g6aGFzaChwLmZzKSxzdGFydGVkTXMsCiAgIGNvbnRhaW5lcjp7aWQsbmFtZSxyb290SW5zcGVjdEhhc2g6aGFzaChyb290KSxwbGF0Zm9ybUluc3BlY3RIYXNoOmhhc2gocGxhdGZvcm0pLGNyZWF0ZWRJbnNwZWN0SGFzaDpoYXNoKGJlZm9yZSksZXhpdGVkSW5zcGVjdEhhc2g6aGFzaChhZnRlciksZXhpdENvZGU6YWZ0ZXIuU3RhdGUuRXhpdENvZGV9LHByb2JlOnJlc3VsdCxwcm9iZU91dHB1dDpvdXRwdXQuc3Rkb3V0LHByb2JlT3V0cHV0SGFzaDpzaGEob3V0cHV0LnN0ZG91dCl9OwogfWNhdGNoKGUpe3ByaW1hcnk9ZTt9CiB0cnl7CiAgaWYoaWQpe2NvbnN0IHJlbW92ZWQ9YXdhaXQgY2hlY2tlZCgncmVtb3ZlJyxbJ2NvbnRhaW5lcicsJ3JtJywnLS1mb3JjZScsJy0tdm9sdW1lcycsaWRdLHRydWUpO2N1cnJlbnQob3B0aW9ucyx0cnVlKTtjb25zdCBhYnNlbnQ9YXdhaXQgcnVuKCdpbnNwZWN0LXJlbW92ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdLHRydWUpO2N1cnJlbnQob3B0aW9ucyx0cnVlKTtuZWVkKGFic2VudC5zdGF0dXM9PT0xJiZuZXcgUmVnRXhwKCcoPzpObyBzdWNoIGNvbnRhaW5lcnxObyBzdWNoIG9iamVjdCk6ICcraWQrJyg/Olxcc3wkKScpLnRlc3QoYWJzZW50LnN0ZGVyciksJ0VDTEVBTlVQJyk7aWYocmVjb3JkKXJlY29yZC5yZW1vdmFsPXtjb250YWluZXJJZDppZCxyZW1vdmVFeGl0Q29kZTpyZW1vdmVkLnN0YXR1cyxhYnNlbmNlRXhpdENvZGU6YWJzZW50LnN0YXR1cyxhYnNlbmNlRXZpZGVuY2VIYXNoOnNoYShhYnNlbnQuc3RkZXJyKX07fQogIGVsc2UgaWYoYXR0ZW1wdGVkKXN0aWNreT10cnVlO25lZWQoIXN0aWNreSwnRUNMRUFOVVAnKTthd2FpdCBybShkaXJlY3Rvcnkse3JlY3Vyc2l2ZTp0cnVlLGZvcmNlOnRydWV9KTtjdXJyZW50KG9wdGlvbnMsdHJ1ZSk7CiB9Y2F0Y2h7dGhyb3cgT2JqZWN0LmFzc2lnbihjbGVhbnVwRXJyb3IoKSx7Y29udGFpbmVySWQ6aWQsY29udGFpbmVyTmFtZTpuYW1lLG9wZXJhdGlvbkRpcmVjdG9yeTpkaXJlY3Rvcnl9KTt9CiBpZihwcmltYXJ5KXtwcmltYXJ5LmNsZWFudXBDb25maXJtZWQ9dHJ1ZTt0aHJvdyBwcmltYXJ5O30KIGxldCBjYUJ5dGVzOwogdHJ5e2N1cnJlbnQob3B0aW9ucyk7Y29udHJvbEltYWdlR3JhcGhCaW5kaW5nKHAuZ3JhcGgpO25lZWQoRGF0ZS5ub3coKTxkZWFkbGluZU1zJiYhb3B0aW9ucy5zaWduYWw/LmFib3J0ZWQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRXhwaXJlZCcpOwogIGNhQnl0ZXM9cC5jYT9hd2FpdCByZWFkSW1hZ2VGaWxlc3lzdGVtRmlsZShwLmZpbGVzeXN0ZW0scC5jYS5wYXRoLHttYXhCeXRlczoxMDQ4NTc2fSk6bnVsbDsKICBjdXJyZW50KG9wdGlvbnMpOwogIG5lZWQoRGF0ZS5ub3coKTxkZWFkbGluZU1zJiYhb3B0aW9ucy5zaWduYWw/LmFib3J0ZWQsJ05vbnJvb3RQcmVyZXF1aXNpdGVzRXhwaXJlZCcpOwogfWNhdGNoKGUpe2UuY2xlYW51cENvbmZpcm1lZD10cnVlO3Rocm93IGU7fQogcmVjb3JkLmNvbXBsZXRlZE1zPURhdGUubm93KCk7cmVjb3JkLmNsZWFudXBDb25maXJtZWQ9dHJ1ZTsKIGNvbnN0IGhhbmRsZT1PYmplY3QuZnJlZXplKHtraW5kOidjb250cm9sLXByZXJlcXVpc2l0ZXMtY29udGV4dCd9KTtzdGF0ZXMuc2V0KGhhbmRsZSx7cCxyZWNvcmQ6Y29weU5vbnJvb3RKc29uKHJlY29yZCksY2FCeXRlcywuLi4ob3B0aW9ucy5yZXRhaW5PcmlnaW5hbHM/e29yaWdpbmFsQ29tbWFuZHN9Ont9KX0pO3JldHVybiBoYW5kbGU7Cn0KCi8qKiBSZXR1cm4gdHlwZWQgaW5wdXRzIGFuZCB0aGVpciBleGFjdCBhcmNoaXZlIGJ5dGVzIG9ubHkgZnJvbSBhIGxpdmUgaGFuZGxlLgogKiBUaGlzIGRvZXMgbm90IGNyZWF0ZSBndWFyZC10ZXN0LCBwb2xpY3ktcmV2aWV3IG9yIGRlcGxveW1lbnQgYXV0aG9yaXphdGlvbi4gKi8KZXhwb3J0IGZ1bmN0aW9uIGluc3BlY3ROb25yb290Q29udHJvbFByZXJlcXVpc2l0ZXMoaGFuZGxlLHtjb250cm9sVmVyaWZpY2F0aW9uLHNvdXJjZUNvbnRleHQsbm93PURhdGUubm93KCl9PXt9KXsKIGNvbnN0IHN0YXRlPXN0YXRlcy5nZXQoaGFuZGxlKTtuZWVkKHN0YXRlLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRleHRSZXF1aXJlZCcpO2NvbnN0IHtwLHJlY29yZDpyfT1zdGF0ZTsKIG5lZWQoY29udHJvbFZlcmlmaWNhdGlvbj8uZ3JhcGg9PT1wLmdyYXBoJiZjb250cm9sVmVyaWZpY2F0aW9uPy5maWxlc3lzdGVtPT09cC5maWxlc3lzdGVtJiZzb3VyY2VDb250ZXh0PT09cC5zb3VyY2VDb250ZXh0LCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRleHRCaW5kaW5nJyk7Y29udHJvbEltYWdlR3JhcGhCaW5kaW5nKHAuZ3JhcGgpOwogbmVlZChub3c+PXIuY29tcGxldGVkTXMmJm5vdy1yLmNvbXBsZXRlZE1zPD0zMDAwMDAsJ05vbnJvb3RQcmVyZXF1aXNpdGVzU3RhbGUnKTsKIHJldHVybiBkZXNjcmliZVByZXJlcXVpc2l0ZVJlY29yZChzdGF0ZSk7Cn0KZnVuY3Rpb24gZGVzY3JpYmVQcmVyZXF1aXNpdGVSZWNvcmQoc3RhdGUpewogY29uc3Qge3AscmVjb3JkOnJ9PXN0YXRlOwogY29uc3Qgb2JqZWN0cz1bXSxqc29uPXZhbHVlPT57Y29uc3QgcmF3PUJ1ZmZlci5mcm9tKEpTT04uc3RyaW5naWZ5KHZhbHVlKSsnXG4nKSxyZWY9e2J5dGVzSGFzaDpzaGEocmF3KSxjYW5vbmljYWxIYXNoOmhhc2godmFsdWUpLGJ5dGVzTGVuZ3RoOnJhdy5sZW5ndGh9O2lmKCFvYmplY3RzLnNvbWUobz0+by5yZWYuYnl0ZXNIYXNoPT09cmVmLmJ5dGVzSGFzaCkpb2JqZWN0cy5wdXNoKHtyZWYsYnl0ZXM6cmF3fSk7cmV0dXJuIHJlZjt9OwogY29uc3QgaW1hZ2U9aW1hZ2VPbmx5KHIuaW1hZ2UpLG5vZGU9cC5maWxlcy5nZXQoJy91c3IvbG9jYWwvYmluL25vZGUnKSxwcmltaXRpdmU9cC5maWxlcy5nZXQoJy9iaW4vc2V0cHJpdicpOwogY29uc3QgbGlicmFyaWVzPWM9Pmpzb24oe2ZpbGVzOlsuLi5uZXcgTWFwKGMuZmlsZXMubWFwKGY9Pntjb25zdCBmYWN0PXAuZmlsZXMuZ2V0KGYucGF0aCk7cmV0dXJuIFtmYWN0LnBhdGgse3BhdGg6ZmFjdC5wYXRoLHNoYTI1NjpmYWN0LnNoYTI1Nn1dO30pKS52YWx1ZXMoKV0uc29ydCgoYSxiKT0+YS5wYXRoLmxvY2FsZUNvbXBhcmUoYi5wYXRoKSl9KTsKIGNvbnN0IG5vZGVSdW50aW1lPWluc3BlY3ROb25yb290UmVjb3JkKCdOb2RlUnVudGltZVYxJyx7dmVyc2lvbjoxLGtpbmQ6J3Bpbm5lZC1ub2RlLXJ1bnRpbWUnLHZlcnNpb25TdHJpbmc6ci5wcm9iZS5ub2RlVmVyc2lvbixleGVjdXRhYmxlUGF0aDpub2RlLnBhdGgsZXhlY3V0YWJsZVNoYTI1Njpub2RlLnNoYTI1NixpbWFnZSxsb2FkZXJBbmROYXRpdmVMaWJyYXJpZXM6bGlicmFyaWVzKHIucHJvYmUubm9kZSksaW52ZW50b3J5Ompzb24oe2ltYWdlLGV4ZWN1dGFibGVQYXRoOm5vZGUucGF0aCxleGVjdXRhYmxlU2hhMjU2Om5vZGUuc2hhMjU2LGVsZjpyLnByb2JlLm5vZGUsbWFwcGVkOnIucHJvYmUubWFwcGVkLG9ic2VydmF0aW9uSGFzaDpoYXNoKHIpfSl9KTsKIGNvbnN0IHByaW1pdGl2ZUV2aWRlbmNlPWluc3BlY3ROb25yb290UmVjb3JkKCdQcmltaXRpdmVFdmlkZW5jZVYxJyx7dmVyc2lvbjoxLGtpbmQ6J3ZlcmlmaWVkLW5ucC1wcmltaXRpdmUnLGltYWdlLGludm9rZWRQYXRoOnByaW1pdGl2ZS5wYXRoLHJlc29sdmVkUGF0aDpwcmltaXRpdmUucmVzb2x2ZWRQYXRoLGZpbGVTaGEyNTY6cHJpbWl0aXZlLnNoYTI1Nixtb2RlOnByaW1pdGl2ZS5tb2RlLHVpZDpwcmltaXRpdmUudWlkLGdpZDpwcmltaXRpdmUuZ2lkLAogIHN5bWxpbmtDaGFpbjpqc29uKHByaW1pdGl2ZS5zeW1saW5rQ2hhaW4pLGxvYWRlckFuZExpYnJhcmllczpsaWJyYXJpZXMoci5wcm9iZS5wcmltaXRpdmUpLHByaXZpbGVnZU1ldGFkYXRhOmpzb24oe3NldHVpZDoocHJpbWl0aXZlLm1vZGUmMG80MDAwKSE9PTAsc2V0Z2lkOihwcmltaXRpdmUubW9kZSYwbzIwMDApIT09MCxmaWxlQ2FwYWJpbGl0aWVzOnByaW1pdGl2ZS5wcml2aWxlZ2VBdHRyaWJ1dGVzLmxlbmd0aCE9PTAsYWN0dWFsRmlsZTpwcmltaXRpdmV9KSwKICBmZWF0dXJlUHJvYmU6anNvbih7aW1hZ2UsZXhlY3V0YWJsZVNoYTI1NjpwcmltaXRpdmUuc2hhMjU2LG5vTmV3UHJpdnM6ci5wcm9iZS5pZGVudGl0eS5ub05ld1ByaXZzLGV4aXRDb2RlOnIuY29udGFpbmVyLmV4aXRDb2RlLGlkZW50aXR5OnIucHJvYmUuaWRlbnRpdHksb2JzZXJ2YXRpb25IYXNoOmhhc2gocil9KSwKICBpbmhlcml0YW5jZUFuZE5lZ2F0aXZlUHJvYmVzOmpzb24oe2ltYWdlLGV4ZWN1dGFibGVTaGEyNTY6cHJpbWl0aXZlLnNoYTI1NixwYXJlbnQ6ci5wcm9iZS5pZGVudGl0eSxjaGlsZDpyLnByb2JlLmNoaWxkLG1ldGhvZDonZml4ZWQtYWFyY2g2NC1rZXJuZWwtc3lzY2FsbHMnLG5hdGl2ZVByb2JlSGFzaCxrZXJuZWxSZXN1bHRzOnIucHJvYmUubmF0aXZlLHNldHVpZEJsb2NrZWQ6ci5wcm9iZS5uYXRpdmVbN109PT0tMSxzZXRnaWRCbG9ja2VkOnIucHJvYmUubmF0aXZlWzhdPT09LTEsY2xlYXJSZWplY3RlZDpyLnByb2JlLm5hdGl2ZVs1XT09PS0yMiYmci5wcm9iZS5uYXRpdmVbNl09PT0xJiZyLnByb2JlLm5hdGl2ZVsxM109PT0xLG9ic2VydmF0aW9uSGFzaDpoYXNoKHIpfSl9KTsKIGNvbnN0IG1ldGFkYXRhPXIucHJvYmUub2JzZXJ2YXRpb25zLmZpbHRlcihvPT5vLnR5cGU9PT0nZGlyZWN0b3J5JykubWFwKCh7cGF0aCx0eXBlLG1vZGUsdWlkLGdpZH0pPT4oe3BhdGgsdHlwZSxtb2RlLHVpZCxnaWR9KSk7CiBmb3IoY29uc3QgZiBvZiBwLmZpbGVzLnZhbHVlcygpKW1ldGFkYXRhLnB1c2goe3BhdGg6Zi5wYXRoLHR5cGU6J2ZpbGUnLG1vZGU6Zi5tb2RlLHVpZDpmLnVpZCxnaWQ6Zi5naWQsc2hhMjU2OmYuc2hhMjU2fSk7CiBjb25zdCBjYUJpbmRpbmdzPVtdOwogaWYocC5jYSl7Y29uc3QgZmlsZT17c2hhMjU2OnNoYShzdGF0ZS5jYUJ5dGVzKSxieXRlc0xlbmd0aDpzdGF0ZS5jYUJ5dGVzLmxlbmd0aH07b2JqZWN0cy5wdXNoKHtyZWY6ZmlsZSxieXRlczpCdWZmZXIuZnJvbShzdGF0ZS5jYUJ5dGVzKX0pO2NhQmluZGluZ3MucHVzaChpbnNwZWN0Tm9ucm9vdFJlY29yZCgnQ2FCaW5kaW5nVjEnLHtuYW1lOidOT0RFX0VYVFJBX0NBX0NFUlRTJyx2YWx1ZTpwLmNhLnBhdGgsZmlsZSxyZXNvbHZlZFBhdGg6cC5jYS5yZXNvbHZlZFBhdGgsbW9kZTpwLmNhLm1vZGUsdWlkOnAuY2EudWlkLGdpZDpwLmNhLmdpZCxwYXJlbnRQYXRoRXZpZGVuY2U6anNvbih7ZmlsZTpwLmNhLG9ic2VydmF0aW9uczpyLnByb2JlLm9ic2VydmF0aW9uc30pfSkpO30KIGNvbnN0IGVudmlyb25tZW50PWNvcHlOb25yb290SnNvbih7aW1hZ2VFbnZpcm9ubWVudDpwLmNvbmZpZy5jb25maWc/LkVudj8/W10sZmlsZXM6bWV0YWRhdGEsZXhwZWN0ZWRDYTpjYUJpbmRpbmdzLm1hcChjPT4oe3BhdGg6Yy52YWx1ZSxzaGEyNTY6Yy5maWxlLnNoYTI1Nn0pKSxjYUJpbmRpbmdzLGxvYWRlckFic2VuY2VzOmxvYWRlclBhdGhzLG9ic2VydmVkTXM6ci5jb21wbGV0ZWRNc30pOwogY29uc3QgcmVjb3JkUmVmPWpzb24ocik7CiByZXR1cm4ge3JlY29yZDpjb3B5Tm9ucm9vdEpzb24ocikscmVjb3JkUmVmLG5vZGVSdW50aW1lLHByaW1pdGl2ZUV2aWRlbmNlLGVudmlyb25tZW50LG9iamVjdHN9Owp9CgovKiogUmF3IHN1Y2Nlc3NmdWwgY29tbWFuZCBldmlkZW5jZSBmcm9tIHRoZSBzYW1lIGxpdmUgbmF0aXZlIGhhbmRsZSBvbmx5LiAqLwpleHBvcnQgZnVuY3Rpb24gaW5zcGVjdE5vbnJvb3RDb250cm9sUHJlcmVxdWlzaXRlT3JpZ2luYWxzKGhhbmRsZSxvcHRpb25zKXsKIGN1cnJlbnQob3B0aW9ucyk7aW5zcGVjdE5vbnJvb3RDb250cm9sUHJlcmVxdWlzaXRlcyhoYW5kbGUsb3B0aW9ucyk7Y29uc3Qgcz1zdGF0ZXMuZ2V0KGhhbmRsZSk7CiBuZWVkKEFycmF5LmlzQXJyYXkocy5vcmlnaW5hbENvbW1hbmRzKSYmcy5vcmlnaW5hbENvbW1hbmRzLmxlbmd0aD09PTgsJ05vbnJvb3RQcmVyZXF1aXNpdGVzT3JpZ2luYWxzUmVxdWlyZWQnKTsKIGNvbnN0IHJvd3M9cy5vcmlnaW5hbENvbW1hbmRzLm1hcChyPT4oey4uLnIsYXJnczpbLi4uci5hcmdzXX0pKTtjdXJyZW50KG9wdGlvbnMpO3JldHVybiByb3dzOwp9Cgpjb25zdCByZXBsYXllZFByZXJlcXVpc2l0ZXM9bmV3IFdlYWtNYXAoKTsKLyoqIFJlLWV2YWx1YXRlIGV2ZXJ5IHJlY29yZGVkIG5hdGl2ZSBjb21tYW5kIHVuZGVyIGN1cnJlbnQgZ3JhcGgvRlMvc291cmNlLgogKiBUaGlzIHByb2R1Y2VzIGEgZGlzdGluY3QgYXJjaGl2ZSB2ZXJpZmllciBoYW5kbGUsIG5ldmVyIGEgbmF0aXZlIGhhbmRsZS4gKi8KZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIHJlcGxheU5vbnJvb3RDb250cm9sUHJlcmVxdWlzaXRlUmVjb3JkKHtyZWNvcmQsY29tbWFuZHN9LG9wdGlvbnMpewogY3VycmVudChvcHRpb25zKTtuZWVkKHR5cGVvZiBvcHRpb25zLmFzc2VydEN1cnJlbnQ9PT0nZnVuY3Rpb24nLCdOb25yb290UHJlcmVxdWlzaXRlc1JlcGxheVBheWVyJyk7CiBjb25zdCByPWNvcHlOb25yb290SnNvbihyZWNvcmQpO3NhbWUoci5pbWFnZSxvcHRpb25zLmltYWdlLCdOb25yb290UHJlcmVxdWlzaXRlc1JlcGxheUltYWdlJyk7CiBjb25zdCBwPWF3YWl0IHByZWZsaWdodCh7aW1hZ2U6b3B0aW9ucy5pbWFnZSxzb3VyY2VDbG9zdXJlOm9wdGlvbnMuc291cmNlQ2xvc3VyZX0sey4uLm9wdGlvbnMsZXhwZWN0ZWQ6e2NhbmRpZGF0ZVRyZWU6b3B0aW9ucy5zb3VyY2VDb250ZXh0LnRyZWV9fSk7Y3VycmVudChvcHRpb25zKTsKIG5lZWQoci5zdGFydGVkTXM8PXIuY29tcGxldGVkTXMmJnIuY29tcGxldGVkTXMtci5zdGFydGVkTXM8PTEyMDAwMCYmci5jb21wbGV0ZWRNczw9b3B0aW9ucy5ub3cmJm9wdGlvbnMubm93LXIuY29tcGxldGVkTXM8PTMwMDAwMCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNTdGFsZScpOwogY29uc3QgY29tbWFuZD1pbnNwZWN0Tm9ucm9vdFJlY29yZGVkQ29tbWFuZHMoY29tbWFuZHMsWydpbnNwZWN0LXJvb3QnLCdpbnNwZWN0LXBsYXRmb3JtJywnY3JlYXRlJywnaW5zcGVjdC1jcmVhdGVkJywnc3RhcnQnLCdpbnNwZWN0LWV4aXRlZCcsJ3JlbW92ZScsJ2luc3BlY3QtcmVtb3ZlZCddLHIpOwogY29uc3QgcGFyc2U9cm93PT5wYXJzZU5vbnJvb3RKc29uKHJvdy5zdGRvdXQse21heEJ5dGVzOjEwNDg1NzZ9KTsKIGNvbnN0IHJvb3Q9Y2hlY2tJbWFnZShwYXJzZShjb21tYW5kKCdpbnNwZWN0LXJvb3QnLFsnaW1hZ2UnLCdpbnNwZWN0JyxwLmJpbmRpbmcucm9vdERpZ2VzdF0pKSxwKTsKIGNvbnN0IHBsYXRmb3JtPWNoZWNrSW1hZ2UocGFyc2UoY29tbWFuZCgnaW5zcGVjdC1wbGF0Zm9ybScsWydpbWFnZScsJ2luc3BlY3QnLCctLXBsYXRmb3JtJywnbGludXgvYXJtNjQnLHAuYmluZGluZy5yb290RGlnZXN0XSkpLHAsdHJ1ZSk7CiBjb25zdCB7aWQsbmFtZX09ci5jb250YWluZXI7bmVlZCgvXlthLWYwLTldezY0fSQvLnRlc3QoaWQpJiYvXm1lbTktcHJlcmVxdWlzaXRlcy1bYS1mMC05XXszMn0kLy50ZXN0KG5hbWUpLCdOb25yb290UHJlcmVxdWlzaXRlc0NvbnRhaW5lcklkJyk7CiBjb25zdCBhcmdzPVsnLS1uby1uZXctcHJpdnMnLCctLScsJy91c3IvbG9jYWwvYmluL25vZGUnLCctLWlucHV0LXR5cGU9bW9kdWxlJywnLWUnLHByb2JlQ29kZSwnLS0nLEpTT04uc3RyaW5naWZ5KHAucGF0aHMpXTsKIGNvbnN0IGNyZWF0ZT1jb21tYW5kKCdjcmVhdGUnLFsnY29udGFpbmVyJywnY3JlYXRlJywnLS1wdWxsPW5ldmVyJywnLS1wbGF0Zm9ybT1saW51eC9hcm02NCcsJy0tbmV0d29yaz1ub25lJywnLS1yZWFkLW9ubHknLCctLXVzZXI9MTAwMDoxMDAwJywnLS1jYXAtZHJvcD1BTEwnLCctLXNlY3VyaXR5LW9wdD1uby1uZXctcHJpdmlsZWdlczp0cnVlJywnLS1waWRzLWxpbWl0PTMyJywnLS1tZW1vcnk9MjU2bScsJy0tY3B1cz0xJywnLS1yZXN0YXJ0PW5vJywnLS1uby1oZWFsdGhjaGVjaycsJy0tdG1wZnMnLCcvdG1wOnJ3LG5vc3VpZCxub2RldixleGVjLHNpemU9MTA0ODU3Nix1aWQ9MTAwMCxnaWQ9MTAwMCxtb2RlPTA3MDAnLCctLWxhYmVsJywnbWVtOS1wcmVyZXF1aXNpdGVzLXByb2JlPScrbmFtZSwnLS1uYW1lJyxuYW1lLCctLWVudHJ5cG9pbnQnLCcvYmluL3NldHByaXYnLHAuYmluZGluZy5yb290RGlnZXN0LC4uLmFyZ3NdKTsKIG5lZWQoY3JlYXRlLnN0ZG91dC50cmltKCk9PT1pZCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNDb250YWluZXJJZCcpOwogY29uc3QgYmluZGluZz17aWQsbmFtZSxhcmdzfSxiZWZvcmU9Y2hlY2tDb250YWluZXIocGFyc2UoY29tbWFuZCgnaW5zcGVjdC1jcmVhdGVkJyxbJ2NvbnRhaW5lcicsJ2luc3BlY3QnLGlkXSkpLHAsYmluZGluZyxmYWxzZSk7CiBjb25zdCBvdXRwdXQ9Y29tbWFuZCgnc3RhcnQnLFsnY29udGFpbmVyJywnc3RhcnQnLCctLWF0dGFjaCcsaWRdKTsKIGNvbnN0IGFmdGVyPWNoZWNrQ29udGFpbmVyKHBhcnNlKGNvbW1hbmQoJ2luc3BlY3QtZXhpdGVkJyxbJ2NvbnRhaW5lcicsJ2luc3BlY3QnLGlkXSkpLHAsYmluZGluZyx0cnVlKSxyZXN1bHQ9dmFsaWRhdGUob3V0cHV0LnN0ZG91dCxwKTsKIGNvbnN0IHJlbW92ZWQ9Y29tbWFuZCgncmVtb3ZlJyxbJ2NvbnRhaW5lcicsJ3JtJywnLS1mb3JjZScsJy0tdm9sdW1lcycsaWRdKTsKIGNvbnN0IGFic2VudD1jb21tYW5kKCdpbnNwZWN0LXJlbW92ZWQnLFsnY29udGFpbmVyJywnaW5zcGVjdCcsaWRdLDEpOwogbmVlZChuZXcgUmVnRXhwKCcoPzpObyBzdWNoIGNvbnRhaW5lcnxObyBzdWNoIG9iamVjdCk6ICcraWQrJyg/Olxcc3wkKScpLnRlc3QoYWJzZW50LnN0ZGVyciksJ0VDTEVBTlVQJyk7CiBjb25zdCB3YW50ZWQ9e3ZlcnNpb246MSxraW5kOidtZWFzdXJlZC1jb250cm9sLXByZXJlcXVpc2l0ZXMnLGltYWdlOnAuaW5wdXQuaW1hZ2Usc291cmNlVHJlZTpvcHRpb25zLnNvdXJjZUNvbnRleHQudHJlZSxzb3VyY2VDbG9zdXJlSGFzaDpoYXNoKHAuaW5wdXQuc291cmNlQ2xvc3VyZSksY29sbGVjdG9yQ29kZUhhc2gscHJvYmVDb2RlSGFzaCxuYXRpdmVQcm9iZUhhc2gsZ3JhcGhIYXNoOnAuYmluZGluZy5ncmFwaEhhc2gsZmlsZXN5c3RlbUhhc2g6aGFzaChwLmZzKSxzdGFydGVkTXM6ci5zdGFydGVkTXMsCiAgY29udGFpbmVyOntpZCxuYW1lLHJvb3RJbnNwZWN0SGFzaDpoYXNoKHJvb3QpLHBsYXRmb3JtSW5zcGVjdEhhc2g6aGFzaChwbGF0Zm9ybSksY3JlYXRlZEluc3BlY3RIYXNoOmhhc2goYmVmb3JlKSxleGl0ZWRJbnNwZWN0SGFzaDpoYXNoKGFmdGVyKSxleGl0Q29kZTphZnRlci5TdGF0ZS5FeGl0Q29kZX0scHJvYmU6cmVzdWx0LHByb2JlT3V0cHV0Om91dHB1dC5zdGRvdXQscHJvYmVPdXRwdXRIYXNoOnNoYShvdXRwdXQuc3Rkb3V0KSwKICByZW1vdmFsOntjb250YWluZXJJZDppZCxyZW1vdmVFeGl0Q29kZTpyZW1vdmVkLnN0YXR1cyxhYnNlbmNlRXhpdENvZGU6YWJzZW50LnN0YXR1cyxhYnNlbmNlRXZpZGVuY2VIYXNoOnNoYShhYnNlbnQuc3RkZXJyKX0sY29tcGxldGVkTXM6ci5jb21wbGV0ZWRNcyxjbGVhbnVwQ29uZmlybWVkOnRydWV9Owogc2FtZShyLHdhbnRlZCwnTm9ucm9vdFByZXJlcXVpc2l0ZXNSZXBsYXlSZWNvcmQnKTsKIGNvbnN0IGNhQnl0ZXM9cC5jYT9hd2FpdCByZWFkSW1hZ2VGaWxlc3lzdGVtRmlsZShwLmZpbGVzeXN0ZW0scC5jYS5wYXRoLHttYXhCeXRlczoxMDQ4NTc2fSk6bnVsbDtjdXJyZW50KG9wdGlvbnMpOwogY29uc3QgaGFuZGxlPU9iamVjdC5mcmVlemUoe2tpbmQ6J3JlcGxheWVkLWNvbnRyb2wtcHJlcmVxdWlzaXRlcyd9KTtyZXBsYXllZFByZXJlcXVpc2l0ZXMuc2V0KGhhbmRsZSx7cCxyZWNvcmQ6d2FudGVkLGNhQnl0ZXMsYXNzZXJ0Q3VycmVudDpvcHRpb25zLmFzc2VydEN1cnJlbnR9KTtyZXR1cm4gaGFuZGxlOwp9CmV4cG9ydCBmdW5jdGlvbiBpbnNwZWN0UmVwbGF5ZWROb25yb290Q29udHJvbFByZXJlcXVpc2l0ZXMoaGFuZGxlLG9wdGlvbnMpewogY3VycmVudChvcHRpb25zKTtjb25zdCBzdGF0ZT1yZXBsYXllZFByZXJlcXVpc2l0ZXMuZ2V0KGhhbmRsZSk7bmVlZChzdGF0ZSYmc3RhdGUuYXNzZXJ0Q3VycmVudD09PW9wdGlvbnMuYXNzZXJ0Q3VycmVudCYmc3RhdGUucC5ncmFwaD09PW9wdGlvbnMuY29udHJvbFZlcmlmaWNhdGlvbj8uZ3JhcGgmJnN0YXRlLnAuZmlsZXN5c3RlbT09PW9wdGlvbnMuY29udHJvbFZlcmlmaWNhdGlvbj8uZmlsZXN5c3RlbSYmc3RhdGUucC5zb3VyY2VDb250ZXh0PT09b3B0aW9ucy5zb3VyY2VDb250ZXh0LCdOb25yb290UHJlcmVxdWlzaXRlc1JlcGxheVJlcXVpcmVkJyk7CiBjb25zdCByZXN1bHQ9ZGVzY3JpYmVQcmVyZXF1aXNpdGVSZWNvcmQoc3RhdGUpO2N1cnJlbnQob3B0aW9ucyk7cmV0dXJuIHJlc3VsdDsKfQo=", "base64");
 	collectorCodeHash = sha$3(sourceBytes);
 	need$5 = (ok, code = "NonrootPrerequisitesInvalid") => {
 		if (!ok) throw Object.assign(Error(code), {
@@ -154100,6 +154603,7 @@ var init_production_nonroot_control_prerequisites = __esmMin((() => {
 	need$5(probeSource?.startsWith("async function fixedProbe("), "NonrootPrerequisitesProbeSource");
 	probeCode = "(" + probeSource.trim() + ")(" + JSON.stringify(nativeBytes.toString("base64")) + ",JSON.parse(process.argv[1]))";
 	probeCodeHash = sha$3(probeCode);
+	replayedPrerequisites = /* @__PURE__ */ new WeakMap();
 }));
 //#endregion
 //#region scripts/lib/ci-carrier-derived-format.mjs
@@ -155025,20 +155529,20 @@ if __name__ == "__main__":
 * prepaid base has been read and probed. Supplied bytes remain untouched. */
 async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem, baseCacheDirectory, sourceContext, metadataReads, tempRoot, signal }) {
 	const supplied = inspectMaterializedCarrierContext(context), p = supplied.plan, t = p.template;
-	need$30(supplied.manifest.version === 2 && supplied.manifest.kind === "carrier-build-source-context" && supplied.runtimeManifest === null && !attempted$1.has(context), "CarrierDerivationContext");
-	need$30(metadataReads?.admission?.config?.grantHash && typeof metadataReads.reserveLocal === "function", "CarrierDerivationGrant");
+	need$31(supplied.manifest.version === 2 && supplied.manifest.kind === "carrier-build-source-context" && supplied.runtimeManifest === null && !attempted$1.has(context), "CarrierDerivationContext");
+	need$31(metadataReads?.admission?.config?.grantHash && typeof metadataReads.reserveLocal === "function", "CarrierDerivationGrant");
 	same$2(metadataReads.admission.config.plan, p, "CarrierDerivationGrant");
-	need$30(sourceContext?.tree === t.source.candidateTree && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierDerivationSource");
+	need$31(sourceContext?.tree === t.source.candidateTree && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierDerivationSource");
 	const { graphHash, ...base } = controlImageGraphBinding(baseGraph), filesystem = inspectImageFilesystemEvidence(baseFilesystem);
 	same$2(base, t.base, "CarrierDerivationBase");
-	need$30(filesystem.graphHash === graphHash && imageFilesystemVerificationKind(baseFilesystem) === "live-filesystem-evidence", "CarrierDerivationFilesystem");
+	need$31(filesystem.graphHash === graphHash && imageFilesystemVerificationKind(baseFilesystem) === "live-filesystem-evidence", "CarrierDerivationFilesystem");
 	assertImageFilesystemUncompressedLimit(baseFilesystem, t.bounds.uncompressedBytes);
 	assertImageFilesystemEntryLimit(baseFilesystem, t.bounds.processedEntries);
 	attempted$1.add(context);
 	await verifyMaterializedCarrierContext(context);
 	const check = () => {
 		signal?.throwIfAborted();
-		need$30(Date.now() < p.deadlineMs, "CarrierDerivationExpired");
+		need$31(Date.now() < p.deadlineMs, "CarrierDerivationExpired");
 		metadataReads.reserveLocal(zero$6());
 	};
 	const charge = (bytes) => {
@@ -155059,7 +155563,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 	let complete = false, unknown = false;
 	try {
 		const usage = imageGraphState(baseGraph).budget.usage();
-		need$30(Number.isSafeInteger(usage.uncompressedBytes) && usage.uncompressedBytes > 0 && usage.uncompressedBytes <= t.bounds.uncompressedBytes && Number.isSafeInteger(usage.fsEntries) && usage.fsEntries <= t.bounds.processedEntries, "CarrierDerivationBaseBounds");
+		need$31(Number.isSafeInteger(usage.uncompressedBytes) && usage.uncompressedBytes > 0 && usage.uncompressedBytes <= t.bounds.uncompressedBytes && Number.isSafeInteger(usage.fsEntries) && usage.fsEntries <= t.bounds.processedEntries, "CarrierDerivationBaseBounds");
 		metadataReads.reserveLocal({
 			...zero$6(),
 			logicalBytes: 2 * usage.uncompressedBytes,
@@ -155092,15 +155596,15 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			image: base,
 			sourceClosure: closure
 		}, options), native = inspectNonrootControlPrerequisites(handle, options);
-		need$30(native.record.cleanupConfirmed === true && native.record.container.exitCode === 0 && native.environment.caBindings.length === 1, "CarrierDerivationNative");
+		need$31(native.record.cleanupConfirmed === true && native.record.container.exitCode === 0 && native.environment.caBindings.length === 1, "CarrierDerivationNative");
 		const ca = native.environment.caBindings[0];
-		need$30(ca.value === "/bootstrap/global-bundle.pem" && ca.resolvedPath === ca.value, "CarrierDerivationCaPath");
+		need$31(ca.value === "/bootstrap/global-bundle.pem" && ca.resolvedPath === ca.value, "CarrierDerivationCaPath");
 		const caBytes = native.objects.find((row) => row.ref.sha256 === ca.file.sha256 && row.ref.bytesLength === ca.file.bytesLength)?.bytes;
-		need$30(caBytes instanceof Uint8Array && caBytes.length > 0 && caBytes.length <= 1048576 && sha$8(caBytes) === ca.file.sha256, "CarrierDerivationCaBytes");
+		need$31(caBytes instanceof Uint8Array && caBytes.length > 0 && caBytes.length <= 1048576 && sha$8(caBytes) === ca.file.sha256, "CarrierDerivationCaBytes");
 		const caText = new TextDecoder("utf-8", { fatal: true }).decode(caBytes), certificates = caText.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
-		need$30(certificates?.length > 0 && caText.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() === "", "CarrierDerivationPublicCa");
+		need$31(certificates?.length > 0 && caText.replace(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g, "").trim() === "", "CarrierDerivationPublicCa");
 		for (const cert of certificates) new X509Certificate(cert);
-		const record = freeze$2(await formatCarrierDerivedMaterial({
+		const record = freeze$3(await formatCarrierDerivedMaterial({
 			context,
 			grantHash: metadataReads.admission.config.grantHash,
 			baseGraph,
@@ -155110,11 +155614,11 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			metadataReads
 		}));
 		const manifestBytes = Buffer.from(record.files.find((f) => f.path === CARRIER_RUNTIME_MANIFEST_PATH).bytesBase64, "base64"), runtimeManifest = JSON.parse(manifestBytes);
-		need$30(manifestBytes.length <= 1048576 && manifestBytes.length + caBytes.length <= t.bounds.contextBytes && runtimeManifest.files.length + 2 <= t.bounds.contextFiles, "CarrierDerivedSize");
+		need$31(manifestBytes.length <= 1048576 && manifestBytes.length + caBytes.length <= t.bounds.contextBytes && runtimeManifest.files.length + 2 <= t.bounds.contextFiles, "CarrierDerivedSize");
 		const identities = /* @__PURE__ */ new Map();
 		for (const { path, bytesBase64 } of record.files) {
 			const bytes = Buffer.from(bytesBase64, "base64");
-			need$30(!supplied.manifest.files.some((row) => row.path === path), "CarrierSuppliedDerivedCollision");
+			need$31(!supplied.manifest.files.some((row) => row.path === path), "CarrierSuppliedDerivedCollision");
 			charge(bytes.length);
 			metadataReads.reserveLocal({
 				...zero$6(),
@@ -155131,7 +155635,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			identities.set(full, await lstat(full));
 		}
 		const recordBytes = Buffer.from(JSON.stringify(record));
-		need$30(recordBytes.length <= t.bounds.resultBytes, "CarrierDerivedRecordSize");
+		need$31(recordBytes.length <= t.bounds.resultBytes, "CarrierDerivedRecordSize");
 		charge(recordBytes.length);
 		const fd = await open(join(directory, "derivation.json"), "wx", 384);
 		try {
@@ -155153,7 +155657,7 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 			record,
 			recordStat: await lstat(join(directory, "derivation.json")),
 			directoryStat: await lstat(directory),
-			runtimeManifest: freeze$2(runtimeManifest),
+			runtimeManifest: freeze$3(runtimeManifest),
 			identities,
 			check,
 			charge,
@@ -155174,12 +155678,12 @@ async function deriveCarrierRuntimeMaterial({ context, baseGraph, baseFilesystem
 }
 async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseFilesystem, metadataReads } = {}) {
 	const s = states$1.get(handle);
-	need$30(s && !s.closed && s.context === context && s.baseGraph === baseGraph && s.baseFilesystem === baseFilesystem && s.metadataReads === metadataReads, "CarrierDerivedHandle");
+	need$31(s && !s.closed && s.context === context && s.baseGraph === baseGraph && s.baseFilesystem === baseFilesystem && s.metadataReads === metadataReads, "CarrierDerivedHandle");
 	s.check();
 	const root = await lstat(s.directory);
-	need$30(root.isDirectory() && root.dev === s.directoryStat.dev && root.ino === s.directoryStat.ino && root.uid === process.getuid() && (root.mode & 511) === 448 && await realpath(s.directory) === s.directory, "CarrierDerivedDirectory");
+	need$31(root.isDirectory() && root.dev === s.directoryStat.dev && root.ino === s.directoryStat.ino && root.uid === process.getuid() && (root.mode & 511) === 448 && await realpath(s.directory) === s.directory, "CarrierDerivedDirectory");
 	same$2((await readdir(s.directory)).sort(), ["derivation.json", "material"], "CarrierDerivedUnknownFile");
-	need$30(sameFile(s.recordStat, await lstat(join(s.directory, "derivation.json"))), "CarrierDerivedChanged");
+	need$31(sameFile(s.recordStat, await lstat(join(s.directory, "derivation.json"))), "CarrierDerivedChanged");
 	const expected = /* @__PURE__ */ new Set([
 		"rootfs",
 		"rootfs/carrier",
@@ -155188,10 +155692,10 @@ async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseF
 	]);
 	const walk = async (relative = "") => {
 		const directory = join(s.materialDirectory, relative), d = await lstat(directory);
-		need$30(d.isDirectory() && d.uid === process.getuid() && (d.mode & 511) === 448 && await realpath(directory) === directory, "CarrierDerivedDirectory");
+		need$31(d.isDirectory() && d.uid === process.getuid() && (d.mode & 511) === 448 && await realpath(directory) === directory, "CarrierDerivedDirectory");
 		for (const name of await readdir(directory)) {
 			const p = relative ? relative + "/" + name : name;
-			need$30(expected.has(p), "CarrierDerivedUnknownFile");
+			need$31(expected.has(p), "CarrierDerivedUnknownFile");
 			if ((await lstat(join(s.materialDirectory, p))).isDirectory()) await walk(p);
 		}
 	};
@@ -155200,10 +155704,10 @@ async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseF
 		const full = join(s.materialDirectory, row.path), before = s.identities.get(full), fd = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 		s.charge(row.bytesLength);
 		try {
-			need$30(sameFile(before, await fd.stat()) && sameFile(before, await lstat(full)) && before.nlink === 1, "CarrierDerivedChanged");
+			need$31(sameFile(before, await fd.stat()) && sameFile(before, await lstat(full)) && before.nlink === 1, "CarrierDerivedChanged");
 			const digest = createHash("sha256"), bytes = await fd.readFile();
 			digest.update(bytes);
-			need$30(bytes.length === row.bytesLength && digest.digest("hex") === row.sha256 && sameFile(before, await fd.stat()), "CarrierDerivedChanged");
+			need$31(bytes.length === row.bytesLength && digest.digest("hex") === row.sha256 && sameFile(before, await fd.stat()), "CarrierDerivedChanged");
 		} finally {
 			await fd.close();
 		}
@@ -155219,7 +155723,7 @@ async function inspectCarrierRuntimeMaterial(handle, { context, baseGraph, baseF
 }
 async function consumeCarrierRuntimeMaterial(handle, bindings) {
 	const s = states$1.get(handle);
-	need$30(s && !s.consumed, "CarrierDerivedConsumed");
+	need$31(s && !s.consumed, "CarrierDerivedConsumed");
 	s.consumed = true;
 	return inspectCarrierRuntimeMaterial(handle, bindings);
 }
@@ -155251,7 +155755,7 @@ var init_ci_carrier_derived = __esmMin((() => {
 		"ctimeMs"
 	];
 	sameFile = (a, b) => fileKeys.every((k) => a[k] === b[k]);
-	same$2 = (a, b, code) => need$30(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
+	same$2 = (a, b, code) => need$31(canaryEvidenceHash(a) === canaryEvidenceHash(b), code);
 	Object.freeze(["rootfs/carrier/manifest.json", "rootfs/bootstrap/global-bundle.pem"]);
 }));
 //#endregion
@@ -155261,7 +155765,7 @@ var init_ci_carrier_derived = __esmMin((() => {
 /** Last matching source-policy rule wins. No remote resolver, frontend,
 * registry credentials or daemon registry cache can substitute the OCI input. */
 function carrierBuildSourcePolicy(base, { derived = false } = {}) {
-	return freeze$2({ rules: [{
+	return freeze$3({ rules: [{
 		action: "DENY",
 		selector: { identifier: "*" }
 	}, ...[
@@ -155373,7 +155877,7 @@ function buildProcess({ directory, inputHash, deadlineMs, signal, collect }) {
 						"DockerDescendantSurvived",
 						"DockerSupervisionFault"
 					].includes(p.reason) && p.status === null !== (p.signal === null) && (p.status === null || Number.isInteger(p.status) && p.status >= 0 && p.status <= 255) && (p.signal === null || /^SIG[A-Z0-9]+$/.test(p.signal)), "CarrierBuildTermination");
-					proof = freeze$2(p);
+					proof = freeze$3(p);
 				}
 			} catch {
 				problem = true;
@@ -155752,7 +156256,7 @@ async function buildCarrierOffline({ context: handle, baseGraph, baseFilesystem,
 		if (derived) await inspectCarrierRuntimeMaterial(derivedHandle, derivedBindings);
 		await verified.cache.check();
 		check();
-		const outputHandle = Object.freeze({ kind: "carrier-offline-build" }), record = freeze$2({
+		const outputHandle = Object.freeze({ kind: "carrier-offline-build" }), record = freeze$3({
 			version: derived ? 2 : 1,
 			kind: "carrier-offline-build-evidence",
 			authority: false,
@@ -155817,7 +156321,7 @@ function inspectCarrierOfflineBuild(handle) {
 		record: b.record,
 		runtimeManifest: b.runtimeManifest,
 		...b.derivedRecord ? { derivedRecord: b.derivedRecord } : {},
-		metadata: freeze$2(structuredClone(b.metadata)),
+		metadata: freeze$3(structuredClone(b.metadata)),
 		metadataRaw: b.metadataRaw,
 		log: Buffer.from(b.log)
 	});
@@ -160327,11 +160831,11 @@ var init_esm = __esmMin((() => {
 function deriveCarrierSqlTestManifest(originalBytes, fixtureCa, { descriptorWork } = {}) {
 	const { hash, sha, same, copyNonrootJson, parseAcquisitionJson, JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS);
 	descriptorGuard(descriptorWork, originalBytes, fixtureCa);
-	need$30(originalBytes instanceof Uint8Array && fixtureCa instanceof Uint8Array && fixtureCa.length > 0 && fixtureCa.length <= 16384, "CarrierSqlOverlayBytes");
+	need$31(originalBytes instanceof Uint8Array && fixtureCa instanceof Uint8Array && fixtureCa.length > 0 && fixtureCa.length <= 16384, "CarrierSqlOverlayBytes");
 	const original = parseAcquisitionJson(originalBytes, 1048576), certificate = descriptorCertificate(descriptorWork, fixtureCa);
-	need$30(descriptorBufferFrom(descriptorWork, originalBytes).equals(descriptorBufferFrom(descriptorWork, JSON.stringify(original))), "CarrierSqlOriginalManifestEncoding");
-	need$30(descriptorCertificateOperation(descriptorWork, certificate, "selfIssued") && descriptorCertificateOperation(descriptorWork, certificate, "selfVerify") && /^CN=mem9-carrier-db-[a-f0-9]{32}$/.test(descriptorCertificateOperation(descriptorWork, certificate, "subject")), "CarrierSqlOverlayCertificate");
-	need$30(descriptorBufferString(descriptorWork, descriptorBufferFrom(descriptorWork, fixtureCa), "utf8").trim() === descriptorCertificateOperation(descriptorWork, certificate, "pem").trim(), "CarrierSqlOverlayCertificate");
+	need$31(descriptorBufferFrom(descriptorWork, originalBytes).equals(descriptorBufferFrom(descriptorWork, JSON.stringify(original))), "CarrierSqlOriginalManifestEncoding");
+	need$31(descriptorCertificateOperation(descriptorWork, certificate, "selfIssued") && descriptorCertificateOperation(descriptorWork, certificate, "selfVerify") && /^CN=mem9-carrier-db-[a-f0-9]{32}$/.test(descriptorCertificateOperation(descriptorWork, certificate, "subject")), "CarrierSqlOverlayCertificate");
+	need$31(descriptorBufferString(descriptorWork, descriptorBufferFrom(descriptorWork, fixtureCa), "utf8").trim() === descriptorCertificateOperation(descriptorWork, certificate, "pem").trim(), "CarrierSqlOverlayCertificate");
 	exact$9(original, [
 		"version",
 		"legacyCodeHash",
@@ -160343,10 +160847,10 @@ function deriveCarrierSqlTestManifest(originalBytes, fixtureCa, { descriptorWork
 		"files",
 		"caPath"
 	]);
-	need$30(original.version === 1 && original.caPath === CARRIER_SQL_MOUNTS[0] && Array.isArray(original.files), "CarrierSqlOverlayManifest");
+	need$31(original.version === 1 && original.caPath === CARRIER_SQL_MOUNTS[0] && Array.isArray(original.files), "CarrierSqlOverlayManifest");
 	descriptorGuard(descriptorWork, original);
 	const test = structuredClone(original), rows = descriptorPathFilter(descriptorWork, test.files, CARRIER_SQL_MOUNTS[0]);
-	need$30(rows.length === 1 && rows[0].type === "file" && rows[0].mode === 292, "CarrierSqlOverlayCa");
+	need$31(rows.length === 1 && rows[0].type === "file" && rows[0].mode === 292, "CarrierSqlOverlayCa");
 	rows[0].sha256 = sha(fixtureCa);
 	rows[0].bytes = fixtureCa.length;
 	return descriptorBufferFrom(descriptorWork, JSON.stringify(test));
@@ -160379,35 +160883,35 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 		"cases",
 		"cleanup"
 	]);
-	need$30(r.version === 2 && r.kind === "carrier-original-closure-tests" && r.templateHash === plan.templateHash && r.grantHash === binding.grantHash && r.contextHash === plan.context.sha256 && r.bindingHash === hash(binding), "CarrierSqlAcceptanceBinding");
+	need$31(r.version === 2 && r.kind === "carrier-original-closure-tests" && r.templateHash === plan.templateHash && r.grantHash === binding.grantHash && r.contextHash === plan.context.sha256 && r.bindingHash === hash(binding), "CarrierSqlAcceptanceBinding");
 	same(carrierCheckpointSelection(plan, binding, Object.fromEntries([
 		"nonce",
 		"scopeHash",
 		"artifactId",
 		"artifactDigest"
 	].map((k) => [k, claim[k]])), { descriptorWork }).claim, claim);
-	need$30(r.claimHash === hash(claim) && r.sourceRevision === plan.template.source.candidateRevision && r.sourceTree === plan.template.source.candidateTree, "CarrierSqlAcceptanceSource");
+	need$31(r.claimHash === hash(claim) && r.sourceRevision === plan.template.source.candidateRevision && r.sourceTree === plan.template.source.candidateTree, "CarrierSqlAcceptanceSource");
 	same(r.image, image);
-	need$30([
+	need$31([
 		"account",
 		"region",
 		"repositoryName"
 	].every((k) => r.image[k] === plan.template.scope[k]), "CarrierSqlAcceptanceImageScope");
 	exact$9(oldSource, ["revision", "tree"]);
-	need$30([oldSource.revision, oldSource.tree].every((s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s)), "CarrierSqlAcceptanceOldSource");
-	need$30(Number.isSafeInteger(r.startedMs) && Number.isSafeInteger(r.completedMs) && r.startedMs >= plan.issuedMs && r.completedMs >= r.startedMs && r.completedMs <= now && r.completedMs < plan.deadlineMs && r.deadlineMs === plan.deadlineMs, "CarrierSqlAcceptanceTime");
-	need$30(Array.isArray(v.objects) && v.objects.length <= 64, "CarrierSqlAcceptanceObjects");
+	need$31([oldSource.revision, oldSource.tree].every((s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s)), "CarrierSqlAcceptanceOldSource");
+	need$31(Number.isSafeInteger(r.startedMs) && Number.isSafeInteger(r.completedMs) && r.startedMs >= plan.issuedMs && r.completedMs >= r.startedMs && r.completedMs <= now && r.completedMs < plan.deadlineMs && r.deadlineMs === plan.deadlineMs, "CarrierSqlAcceptanceTime");
+	need$31(Array.isArray(v.objects) && v.objects.length <= 64, "CarrierSqlAcceptanceObjects");
 	const objects = /* @__PURE__ */ new Map();
 	let total = 0;
 	for (const row of v.objects) {
 		exact$9(row, ["ref", "bytesBase64"]);
 		exact$9(row.ref, ["sha256", "bytesLength"]);
-		need$30(hex$3(row.ref.sha256) && Number.isSafeInteger(row.ref.bytesLength) && row.ref.bytesLength >= 0 && row.ref.bytesLength <= 2097152 && typeof row.bytesBase64 === "string" && row.bytesBase64.length <= 4 * Math.ceil(row.ref.bytesLength / 3), "CarrierSqlAcceptanceObject");
+		need$31(hex$3(row.ref.sha256) && Number.isSafeInteger(row.ref.bytesLength) && row.ref.bytesLength >= 0 && row.ref.bytesLength <= 2097152 && typeof row.bytesBase64 === "string" && row.bytesBase64.length <= 4 * Math.ceil(row.ref.bytesLength / 3), "CarrierSqlAcceptanceObject");
 		const bytes = descriptorBufferFrom(descriptorWork, row.bytesBase64, "base64");
 		same(bytesRef(bytes, descriptorWork), row.ref);
-		need$30(descriptorBufferString(descriptorWork, bytes, "base64") === row.bytesBase64 && !objects.has(hash(row.ref)), "CarrierSqlAcceptanceObject");
+		need$31(descriptorBufferString(descriptorWork, bytes, "base64") === row.bytesBase64 && !objects.has(hash(row.ref)), "CarrierSqlAcceptanceObject");
 		total += bytes.length;
-		need$30(total <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
+		need$31(total <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
 		objects.set(hash(row.ref), {
 			ref: row.ref,
 			bytes
@@ -160415,13 +160919,13 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 	}
 	const used = /* @__PURE__ */ new Set(), read = (ref) => {
 		const key = hash(ref), row = objects.get(key);
-		need$30(row, "CarrierSqlAcceptanceMissingObject");
+		need$31(row, "CarrierSqlAcceptanceMissingObject");
 		used.add(key);
 		return row.bytes;
 	};
 	const original = read(r.originalManifest), test = read(r.testManifest), ca = read(r.fixtureCa);
-	need$30(originalManifest instanceof Uint8Array && original.equals(originalManifest) && sha(original) === r.originalManifestHash && sha(test) === r.testManifestHash, "CarrierSqlAcceptanceManifest");
-	need$30(deriveCarrierSqlTestManifest(original, ca, { descriptorWork }).equals(test), "CarrierSqlAcceptanceDelta");
+	need$31(originalManifest instanceof Uint8Array && original.equals(originalManifest) && sha(original) === r.originalManifestHash && sha(test) === r.testManifestHash, "CarrierSqlAcceptanceManifest");
+	need$31(deriveCarrierSqlTestManifest(original, ca, { descriptorWork }).equals(test), "CarrierSqlAcceptanceDelta");
 	const manifest = parseAcquisitionJson(original, 1048576), certificate = descriptorCertificate(descriptorWork, ca), f = r.fixture;
 	exact$9(f, [
 		"imageDigest",
@@ -160436,7 +160940,7 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 	]);
 	if (f.imageDigest === CARRIER_SQL_NOJIT_FIXTURE.rootDigest) {
 		exact$9(f.jit, ["setting", "source"]);
-		need$30(f.jit.setting === "off" && f.jit.source === "command line", "CarrierSqlJitSetting");
+		need$31(f.jit.setting === "off" && f.jit.source === "command line", "CarrierSqlJitSetting");
 	}
 	if (f.package) {
 		const p = f.package, t = plan.template.sqlFixture;
@@ -160456,12 +160960,12 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			"configDigest",
 			"attestationDigest",
 			"uncompressedBytes"
-		]) need$30(p[k] === t[k], "CarrierSqlPackageBinding");
-		need$30(Number.isSafeInteger(p.processedEntries) && p.processedEntries > 0 && p.processedEntries <= t.processedEntries, "CarrierSqlPackageBinding");
+		]) need$31(p[k] === t[k], "CarrierSqlPackageBinding");
+		need$31(Number.isSafeInteger(p.processedEntries) && p.processedEntries > 0 && p.processedEntries <= t.processedEntries, "CarrierSqlPackageBinding");
 		same(oldSource, t.oldSource);
 	}
-	need$30((f.imageDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || carrierSqlDerivedProfile(f.imageDigest)) && f.imageDigest === (f.package?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && id$2(f.containerId) && id$2(f.networkId) && hex$3(f.seederSourceHash) && hex$3(f.rootIdentity) && f.certificateHash === sha(descriptorCertificateOperation(descriptorWork, certificate, "raw")) && descriptorCertificateOperation(descriptorWork, certificate, "host", f.hostAlias) === f.hostAlias && descriptorCertificateOperation(descriptorWork, certificate, "ip", "127.0.0.1") === "127.0.0.1", "CarrierSqlAcceptanceFixture");
-	need$30(Array.isArray(r.cases) && r.cases.length === CARRIER_SQL_CASES.length, "CarrierSqlAcceptanceCases");
+	need$31((f.imageDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" || carrierSqlDerivedProfile(f.imageDigest)) && f.imageDigest === (f.package?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && id$2(f.containerId) && id$2(f.networkId) && hex$3(f.seederSourceHash) && hex$3(f.rootIdentity) && f.certificateHash === sha(descriptorCertificateOperation(descriptorWork, certificate, "raw")) && descriptorCertificateOperation(descriptorWork, certificate, "host", f.hostAlias) === f.hostAlias && descriptorCertificateOperation(descriptorWork, certificate, "ip", "127.0.0.1") === "127.0.0.1", "CarrierSqlAcceptanceFixture");
+	need$31(Array.isArray(r.cases) && r.cases.length === CARRIER_SQL_CASES.length, "CarrierSqlAcceptanceCases");
 	let last = r.startedMs;
 	const ids = /* @__PURE__ */ new Set();
 	for (const [i, c] of r.cases.entries()) {
@@ -160483,13 +160987,13 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			"cleanup",
 			...c.name === "untrusted-fixture-ca" ? ["tlsFailure"] : []
 		]);
-		need$30(c.name === CARRIER_SQL_CASES[i] && id$2(c.containerId) && !ids.has(c.containerId) && hex$3(c.commandHash), "CarrierSqlAcceptanceCase");
+		need$31(c.name === CARRIER_SQL_CASES[i] && id$2(c.containerId) && !ids.has(c.containerId) && hex$3(c.commandHash), "CarrierSqlAcceptanceCase");
 		ids.add(c.containerId);
 		same(c.image, r.image);
-		need$30(Number.isSafeInteger(c.startedMs) && Number.isSafeInteger(c.completedMs) && c.startedMs >= last && c.completedMs >= c.startedMs && c.completedMs - c.startedMs <= 17e4 && c.completedMs <= r.completedMs, "CarrierSqlAcceptanceCaseTime");
+		need$31(Number.isSafeInteger(c.startedMs) && Number.isSafeInteger(c.completedMs) && c.startedMs >= last && c.completedMs >= c.startedMs && c.completedMs - c.startedMs <= 17e4 && c.completedMs <= r.completedMs, "CarrierSqlAcceptanceCaseTime");
 		last = c.completedMs;
 		const inputBytes = read(c.inputBytes), stdout = descriptorBufferString(descriptorWork, read(c.stdout), "utf8"), stderr = descriptorBufferString(descriptorWork, read(c.stderr), "utf8");
-		need$30(inputBytes.length <= 32768, "CarrierSqlAcceptanceInput");
+		need$31(inputBytes.length <= 32768, "CarrierSqlAcceptanceInput");
 		exact$9(c.state, [
 			"Running",
 			"Pid",
@@ -160497,23 +161001,23 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			"OOMKilled",
 			"Status"
 		]);
-		need$30(c.state.Running === false && c.state.Pid === 0 && c.state.OOMKilled === false && c.state.Status === "exited" && c.state.ExitCode === c.exitCode, "CarrierSqlAcceptanceStopped");
+		need$31(c.state.Running === false && c.state.Pid === 0 && c.state.OOMKilled === false && c.state.Status === "exited" && c.state.ExitCode === c.exitCode, "CarrierSqlAcceptanceStopped");
 		exact$9(c.cleanup, [
 			"removed",
 			"absenceStatus",
 			"absenceHash"
 		]);
-		need$30(c.cleanup.removed === true && c.cleanup.absenceStatus === 1 && hex$3(c.cleanup.absenceHash), "CarrierSqlAcceptanceCleanup");
+		need$31(c.cleanup.removed === true && c.cleanup.absenceStatus === 1 && hex$3(c.cleanup.absenceHash), "CarrierSqlAcceptanceCleanup");
 		const tls = c.name === "untrusted-fixture-ca";
-		need$30(c.manifestHash === (tls ? r.originalManifestHash : r.testManifestHash), "CarrierSqlAcceptanceCaseManifest");
-		need$30(Array.isArray(c.mounts) && c.mounts.length === (tls ? 0 : 2), "CarrierSqlAcceptanceMounts");
+		need$31(c.manifestHash === (tls ? r.originalManifestHash : r.testManifestHash), "CarrierSqlAcceptanceCaseManifest");
+		need$31(Array.isArray(c.mounts) && c.mounts.length === (tls ? 0 : 2), "CarrierSqlAcceptanceMounts");
 		for (const [j, m] of c.mounts.entries()) {
 			exact$9(m, [
 				"destination",
 				"readOnly",
 				"source"
 			]);
-			need$30(m.destination === CARRIER_SQL_MOUNTS[j] && m.readOnly === true, "CarrierSqlAcceptanceMounts");
+			need$31(m.destination === CARRIER_SQL_MOUNTS[j] && m.readOnly === true, "CarrierSqlAcceptanceMounts");
 			const s = m.source;
 			exact$9(s, [
 				"path",
@@ -160528,19 +161032,19 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 				"ctimeNs",
 				"sha256"
 			]);
-			need$30(typeof s.path === "string" && /^\/[^\0]+\/mem9-carrier-sql-[A-Za-z0-9_-]+\/material\/(?:ca.pem|manifest.json)$/.test(s.path) && [
+			need$31(typeof s.path === "string" && /^\/[^\0]+\/mem9-carrier-sql-[A-Za-z0-9_-]+\/material\/(?:ca.pem|manifest.json)$/.test(s.path) && [
 				"dev",
 				"ino",
 				"mtimeNs",
 				"ctimeNs"
 			].every((k) => typeof s[k] === "string" && /^[0-9]+$/.test(s[k])) && s.uid === 0 && s.gid === 0 && s.mode === 292 && s.nlink === 1, "CarrierSqlAcceptanceMountSource");
 			const expected = j === 0 ? ca : test;
-			need$30(s.sha256 === sha(expected) && s.size === expected.length, "CarrierSqlAcceptanceMountSource");
+			need$31(s.sha256 === sha(expected) && s.size === expected.length, "CarrierSqlAcceptanceMountSource");
 		}
 		if (i === 0) {
-			need$30(c.exitCode === 0, "CarrierSqlAcceptancePositive");
+			need$31(c.exitCode === 0, "CarrierSqlAcceptancePositive");
 			const lines = descriptorSplit(descriptorWork, stdout.trimEnd(), "\n").map((line) => parseAcquisitionJson(descriptorBufferFrom(descriptorWork, line), 1048576));
-			need$30(lines.length === 4, "CarrierSqlAcceptancePositive");
+			need$31(lines.length === 4, "CarrierSqlAcceptancePositive");
 			const [before, legacy, supplement, after] = lines, input = parseAcquisitionJson(inputBytes, 32768);
 			same(input.deployed, {
 				revision: oldSource.revision,
@@ -160548,7 +161052,7 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 			});
 			for (const p of [before, after]) {
 				const who = p.identity;
-				need$30(p.event === "carrier_process_identity" && p.manifestHash === r.testManifestHash && p.inputHash === sha(inputBytes) && p.invocation === input.invocation && p.legacyCodeHash === manifest.legacyCodeHash && who?.noNewPrivs === 1 && who.executableDigest === manifest.runtime.nodeSha256 && who.pid === 1 && who.ppid === 0 && who.uid?.length === 4 && who.gid?.length === 4 && [
+				need$31(p.event === "carrier_process_identity" && p.manifestHash === r.testManifestHash && p.inputHash === sha(inputBytes) && p.invocation === input.invocation && p.legacyCodeHash === manifest.legacyCodeHash && who?.noNewPrivs === 1 && who.executableDigest === manifest.runtime.nodeSha256 && who.pid === 1 && who.ppid === 0 && who.uid?.length === 4 && who.gid?.length === 4 && [
 					...who.uid,
 					...who.gid,
 					...who.groups
@@ -160560,29 +161064,29 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 					"CapAmb"
 				].every((k) => who[k] === "0000000000000000"), "CarrierSqlAcceptancePositive");
 			}
-			need$30(before.phase === "before" && after.phase === "after" && after.identity.startTimeTicks === before.identity.startTimeTicks && legacy.event === "supersession_root_audit" && legacy.cleanupComplete === true && legacy.codeHash === manifest.legacyCodeHash && legacy.dependencyHash === manifest.dependencyHash && legacy.inputHash === sha(inputBytes) && legacy.rootHash === f.rootIdentity && supplement.event === "carrier_supplemental_audit" && supplement.cleanupComplete === true, "CarrierSqlAcceptancePositive");
+			need$31(before.phase === "before" && after.phase === "after" && after.identity.startTimeTicks === before.identity.startTimeTicks && legacy.event === "supersession_root_audit" && legacy.cleanupComplete === true && legacy.codeHash === manifest.legacyCodeHash && legacy.dependencyHash === manifest.dependencyHash && legacy.inputHash === sha(inputBytes) && legacy.rootHash === f.rootIdentity && supplement.event === "carrier_supplemental_audit" && supplement.cleanupComplete === true, "CarrierSqlAcceptancePositive");
 		} else {
-			need$30(c.exitCode === 1 && !stdout.includes("\"event\":\"supersession_root_audit\""), "CarrierSqlAcceptanceNegative");
+			need$31(c.exitCode === 1 && !stdout.includes("\"event\":\"supersession_root_audit\""), "CarrierSqlAcceptanceNegative");
 			const failure = parseAcquisitionJson(descriptorBufferFrom(descriptorWork, stderr.trim()), 1048576), guardCodes = {
 				"root-uid": "CarrierIdentity",
 				"missing-nnp": "CarrierPrivileges",
 				"changed-input-hash": "CarrierInputHash",
 				"wrong-encoding": "CarrierInputEncoding"
 			};
-			need$30(failure.event === "carrier_guard_rejected", "CarrierSqlAcceptanceNegative");
-			if (guardCodes[c.name]) need$30(failure.stage === "guard" && failure.code === guardCodes[c.name], "CarrierSqlAcceptanceNegative");
+			need$31(failure.event === "carrier_guard_rejected", "CarrierSqlAcceptanceNegative");
+			if (guardCodes[c.name]) need$31(failure.stage === "guard" && failure.code === guardCodes[c.name], "CarrierSqlAcceptanceNegative");
 			else {
 				const lines = descriptorSplit(descriptorWork, stdout.trimEnd(), "\n");
-				need$30(lines.length === 1 && failure.stage === "legacy", "CarrierSqlAcceptanceNegative");
+				need$31(lines.length === 1 && failure.stage === "legacy", "CarrierSqlAcceptanceNegative");
 				const before = parseAcquisitionJson(descriptorBufferFrom(descriptorWork, lines[0]), 1048576);
-				need$30(before.event === "carrier_process_identity" && before.phase === "before" && before.inputHash === sha(inputBytes) && before.manifestHash === c.manifestHash, "CarrierSqlAcceptanceNegative");
+				need$31(before.event === "carrier_process_identity" && before.phase === "before" && before.inputHash === sha(inputBytes) && before.manifestHash === c.manifestHash, "CarrierSqlAcceptanceNegative");
 			}
 		}
 		if (tls) {
 			const lines = descriptorSplit(descriptorWork, stdout.trimEnd(), "\n");
-			need$30(lines.length === 1, "CarrierSqlTlsGuard");
+			need$31(lines.length === 1, "CarrierSqlTlsGuard");
 			const before = parseAcquisitionJson(descriptorBufferFrom(descriptorWork, lines[0]), 1048576), failure = parseAcquisitionJson(descriptorBufferFrom(descriptorWork, stderr.trim()), 1048576);
-			need$30(before.event === "carrier_process_identity" && before.phase === "before" && before.manifestHash === r.originalManifestHash && before.inputHash === sha(inputBytes) && failure.event === "carrier_guard_rejected" && failure.stage === "legacy", "CarrierSqlTlsGuard");
+			need$31(before.event === "carrier_process_identity" && before.phase === "before" && before.manifestHash === r.originalManifestHash && before.inputHash === sha(inputBytes) && failure.event === "carrier_guard_rejected" && failure.stage === "legacy", "CarrierSqlTlsGuard");
 			const t = c.tlsFailure;
 			exact$9(t, [
 				"kind",
@@ -160591,8 +161095,8 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 				"peer",
 				"log"
 			]);
-			need$30(t.kind === "fixture-certificate-rejection" && t.fixtureContainerId === f.containerId && typeof t.sessionId === "string" && typeof t.peer === "string", "CarrierSqlTlsEvidence");
-			need$30(typeof c.networkAddress === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(c.networkAddress) && t.peer.startsWith(c.networkAddress + "("), "CarrierSqlTlsPeer");
+			need$31(t.kind === "fixture-certificate-rejection" && t.fixtureContainerId === f.containerId && typeof t.sessionId === "string" && typeof t.peer === "string", "CarrierSqlTlsEvidence");
+			need$31(typeof c.networkAddress === "string" && /^\d+\.\d+\.\d+\.\d+$/.test(c.networkAddress) && t.peer.startsWith(c.networkAddress + "("), "CarrierSqlTlsPeer");
 			verifyCarrierSqlTlsRejection(descriptorBufferString(descriptorWork, read(t.log), "utf8"), {
 				sessionId: t.sessionId,
 				peer: t.peer
@@ -160604,8 +161108,8 @@ function inspectCarrierSqlAcceptance(value, { plan: input, binding, claim, image
 		"networkRemoved",
 		"imageReleased"
 	]);
-	need$30(Object.values(r.cleanup).every((v) => v === true), "CarrierSqlAcceptanceCleanup");
-	need$30(used.size === objects.size && descriptorBufferByteLength(descriptorWork, JSON.stringify(v)) <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
+	need$31(Object.values(r.cleanup).every((v) => v === true), "CarrierSqlAcceptanceCleanup");
+	need$31(used.size === objects.size && descriptorBufferByteLength(descriptorWork, JSON.stringify(v)) <= plan.template.bounds.resultBytes, "CarrierSqlAcceptanceBytes");
 	return {
 		record: r,
 		objects: [...objects.values()]
@@ -160620,13 +161124,13 @@ function id$2(value) {
 function verifyCarrierSqlTlsRejection(raw, expected, clientFailure, { descriptorWork } = {}) {
 	const { hash, sha, same, copyNonrootJson, parseAcquisitionJson, JSON } = descriptorOperations(descriptorWork, DESCRIPTOR_BASE_OPERATIONS);
 	descriptorGuard(descriptorWork, raw, expected, clientFailure);
-	need$30(typeof raw === "string" && descriptorBufferByteLength(descriptorWork, raw) <= 1048576, "CarrierSqlTlsLog");
+	need$31(typeof raw === "string" && descriptorBufferByteLength(descriptorWork, raw) <= 1048576, "CarrierSqlTlsLog");
 	const rows = descriptorSplit(descriptorWork, raw.trim(), "\n").map((line) => /^mem9_fixture\|[^|]+\|([^|]+)\|[0-9]+\|([^|]+)\|(.*)$/.exec(line));
-	need$30(rows.every(Boolean), "CarrierSqlTlsLog");
+	need$31(rows.every(Boolean), "CarrierSqlTlsLog");
 	const connections = rows.filter((r) => r[3].includes("connection received:"));
-	need$30(connections.length === 1, "CarrierSqlTlsConnections");
+	need$31(connections.length === 1, "CarrierSqlTlsConnections");
 	const selected = connections[0];
-	need$30(rows.length === 2 && rows[0] === selected && rows.every((r) => r[1] === selected[1] && r[2] === selected[2]), "CarrierSqlTlsConnections");
+	need$31(rows.length === 2 && rows[0] === selected && rows.every((r) => r[1] === selected[1] && r[2] === selected[2]), "CarrierSqlTlsConnections");
 	let clientRejected = false;
 	if (clientFailure !== void 0) {
 		exact$9(clientFailure, [
@@ -160635,15 +161139,15 @@ function verifyCarrierSqlTlsRejection(raw, expected, clientFailure, { descriptor
 			"code",
 			...Object.hasOwn(clientFailure, "tlsErrorCode") ? ["tlsErrorCode"] : []
 		]);
-		need$30(clientFailure.event === "carrier_guard_rejected" && clientFailure.stage === "legacy" && ["CarrierRejected", "CarrierLegacyFailed"].includes(clientFailure.code), "CarrierSqlTlsClient");
+		need$31(clientFailure.event === "carrier_guard_rejected" && clientFailure.stage === "legacy" && ["CarrierRejected", "CarrierLegacyFailed"].includes(clientFailure.code), "CarrierSqlTlsClient");
 		if (Object.hasOwn(clientFailure, "tlsErrorCode")) {
-			need$30(clientFailure.tlsErrorCode === "DEPTH_ZERO_SELF_SIGNED_CERT", "CarrierSqlTlsClient");
+			need$31(clientFailure.tlsErrorCode === "DEPTH_ZERO_SELF_SIGNED_CERT", "CarrierSqlTlsClient");
 			clientRejected = true;
 		}
 	}
 	const rejection = rows.filter((r) => /could not accept SSL connection:.*(?:alert unknown ca|alert bad certificate|alert certificate unknown)/i.test(r[3]) || clientRejected && /could not accept SSL connection: EOF detected$/.test(r[3]));
-	need$30(rejection.length === 1, "CarrierSqlTlsCertificateRejection");
-	if (expected) need$30(expected.sessionId === selected[1] && expected.peer === selected[2], "CarrierSqlTlsConnections");
+	need$31(rejection.length === 1, "CarrierSqlTlsCertificateRejection");
+	if (expected) need$31(expected.sessionId === selected[1] && expected.peer === selected[2], "CarrierSqlTlsConnections");
 	return {
 		kind: "fixture-certificate-rejection",
 		sessionId: selected[1],
@@ -160667,7 +161171,7 @@ var init_ci_carrier_sql_acceptance_format = __esmMin((() => {
 		"changed-root-counters"
 	]);
 	CARRIER_SQL_MOUNTS = Object.freeze(["/bootstrap/global-bundle.pem", "/carrier/manifest.json"]);
-	same$1 = (a, b) => need$30(nonrootHash(a) === nonrootHash(b), "CarrierSqlAcceptanceBinding");
+	same$1 = (a, b) => need$31(nonrootHash(a) === nonrootHash(b), "CarrierSqlAcceptanceBinding");
 	hex$3 = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 	bytesRef = (bytes, descriptorWork) => {
 		descriptorGuard(descriptorWork, bytes);
@@ -174731,7 +175235,7 @@ function archiveIndex(limit) {
 	let position = 0, header = Buffer.alloc(0), remaining = 0, padding = 0, member, digest, zeros = 0, ended = false;
 	const complete = () => {
 		member.sha256 = digest.digest("hex");
-		if (member.name.startsWith("blobs/")) need$30(member.sha256 === member.name.slice(13), "CarrierPgBlobHash");
+		if (member.name.startsWith("blobs/")) need$31(member.sha256 === member.name.slice(13), "CarrierPgBlobHash");
 		files.set(member.name, {
 			offset: member.offset,
 			size: member.size,
@@ -174745,7 +175249,7 @@ function archiveIndex(limit) {
 			let at = 0;
 			while (at < chunk.length) {
 				if (ended) {
-					need$30(chunk.subarray(at).every((b) => b === 0), "CarrierPgTarTrailing");
+					need$31(chunk.subarray(at).every((b) => b === 0), "CarrierPgTarTrailing");
 					zeros += chunk.length - at;
 					position += chunk.length - at;
 					break;
@@ -174761,7 +175265,7 @@ function archiveIndex(limit) {
 				}
 				if (padding) {
 					const n = Math.min(padding, chunk.length - at);
-					need$30(chunk.subarray(at, at + n).every((b) => b === 0), "CarrierPgTarPadding");
+					need$31(chunk.subarray(at, at + n).every((b) => b === 0), "CarrierPgTarPadding");
 					padding -= n;
 					at += n;
 					position += n;
@@ -174780,12 +175284,12 @@ function archiveIndex(limit) {
 				}
 				let sum = 0;
 				for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : h[i];
-				need$30(sum === number(h.subarray(148, 156)), "CarrierPgTarChecksum");
+				need$31(sum === number(h.subarray(148, 156)), "CarrierPgTarChecksum");
 				const name = text(h.subarray(0, 100)), size = number(h.subarray(124, 136)), type = String.fromCharCode(h[156] || 48);
-				need$30(["ustar", "ustar "].includes(text(h.subarray(257, 263))) && text(h.subarray(345, 500)) === "" && text(h.subarray(157, 257)) === "" && !names.has(name) && names.size < 128, "CarrierPgTarHeader");
+				need$31(["ustar", "ustar "].includes(text(h.subarray(257, 263))) && text(h.subarray(345, 500)) === "" && text(h.subarray(157, 257)) === "" && !names.has(name) && names.size < 128, "CarrierPgTarHeader");
 				names.add(name);
 				if (type === "5") {
-					need$30([
+					need$31([
 						"blobs",
 						"blobs/",
 						"blobs/sha256",
@@ -174793,7 +175297,7 @@ function archiveIndex(limit) {
 					].includes(name) && size === 0, "CarrierPgDirectoryEntry");
 					continue;
 				}
-				need$30(type === "0" && /^(?:blobs\/sha256\/[a-f0-9]{64}|index\.json|manifest\.json|oci-layout)$/.test(name) && size > 0 && position + padded(size) <= limit, "CarrierPgTarMember");
+				need$31(type === "0" && /^(?:blobs\/sha256\/[a-f0-9]{64}|index\.json|manifest\.json|oci-layout)$/.test(name) && size > 0 && position + padded(size) <= limit, "CarrierPgTarMember");
 				member = {
 					name,
 					size,
@@ -174805,7 +175309,7 @@ function archiveIndex(limit) {
 			}
 		},
 		finish() {
-			need$30(ended && zeros >= 512 && !remaining && !padding && header.length === 0 && position === limit, "CarrierPgTarEnd");
+			need$31(ended && zeros >= 512 && !remaining && !padding && header.length === 0 && position === limit, "CarrierPgTarEnd");
 			return files;
 		}
 	};
@@ -174814,14 +175318,14 @@ async function materializeCarrierSqlPackage({ stream, consumer, tempRoot }) {
 	assertCarrierConsumer(consumer);
 	const f = consumer.admission.config.plan.template.sqlFixture;
 	assertCarrierSqlDatabasePin(f);
-	need$30(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierPgDirectory");
+	need$31(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierPgDirectory");
 	const directory = await mkdtemp(join(tempRoot, "mem9-carrier-sql-pg-")), path = join(directory, "fixture.oci.tar");
 	const fd = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 384), digest = createHash("sha256"), index = archiveIndex(f.archive.bytesLength);
 	let count = 0;
 	try {
 		for await (const chunk of stream) {
 			consumer.check();
-			need$30(chunk instanceof Uint8Array && (count += chunk.length) <= f.archive.bytesLength, "CarrierPgBytes");
+			need$31(chunk instanceof Uint8Array && (count += chunk.length) <= f.archive.bytesLength, "CarrierPgBytes");
 			consumer.reserveLocal({
 				...zero$6(),
 				logicalBytes: chunk.length
@@ -174831,11 +175335,11 @@ async function materializeCarrierSqlPackage({ stream, consumer, tempRoot }) {
 			let at = 0;
 			while (at < chunk.length) {
 				const r = await fd.write(chunk, at, chunk.length - at);
-				need$30(r.bytesWritten > 0, "CarrierPgWrite");
+				need$31(r.bytesWritten > 0, "CarrierPgWrite");
 				at += r.bytesWritten;
 			}
 		}
-		need$30(count === f.archive.bytesLength && digest.digest("hex") === f.archive.sha256, "CarrierPgHash");
+		need$31(count === f.archive.bytesLength && digest.digest("hex") === f.archive.sha256, "CarrierPgHash");
 		index.finish();
 		await fd.sync();
 	} catch (error) {
@@ -174866,24 +175370,24 @@ async function materializeCarrierSqlPackage({ stream, consumer, tempRoot }) {
 }
 function state(handle, consumer) {
 	const s = handles$1.get(handle);
-	need$30(s && !s.closed && s.consumer === consumer, "CarrierPgHandle");
+	need$31(s && !s.closed && s.consumer === consumer, "CarrierPgHandle");
 	assertCarrierConsumer(consumer);
 	return s;
 }
 async function current(s) {
 	s.consumer.check();
-	need$30(await realpath(s.path) === s.path && unchanged(s.identity, await lstat(s.path)) && s.identity.isFile() && s.identity.uid === process.getuid() && (s.identity.mode & 511) === 384 && s.identity.nlink === 1, "CarrierPgChanged");
+	need$31(await realpath(s.path) === s.path && unchanged(s.identity, await lstat(s.path)) && s.identity.isFile() && s.identity.uid === process.getuid() && (s.identity.mode & 511) === 384 && s.identity.nlink === 1, "CarrierPgChanged");
 }
 async function verifyCarrierSqlPackage(handle, { consumer }) {
 	const s = state(handle, consumer);
-	need$30(!s.verified && !s.consumed, "CarrierPgSpent");
+	need$31(!s.verified && !s.consumed, "CarrierPgSpent");
 	await current(s);
-	need$30(consumer.inspect().used.fixtureGet === 1 && consumer.inspect().events.at(-1)?.type === "complete", "CarrierPgDownloadIncomplete");
+	need$31(consumer.inspect().used.fixtureGet === 1 && consumer.inspect().events.at(-1)?.type === "complete", "CarrierPgDownloadIncomplete");
 	const fd = await open(s.path, constants.O_RDONLY | constants.O_NOFOLLOW), files = s.files, f = s.f, bounds = carrierSqlPackageReadBounds(f);
 	let readBytes = 0, layerReadBytes = 0, metadataReadBytes = 0;
 	const read = async (at, n, layer = false) => {
-		need$30(Number.isSafeInteger(n) && n >= 0 && n <= 1048576 && at + n <= f.archive.bytesLength, "CarrierPgRead");
-		need$30(layer ? layerReadBytes + n <= bounds.compressedLayerBytes : metadataReadBytes + n <= bounds.metadataReadBytes, "CarrierPgReadBudget");
+		need$31(Number.isSafeInteger(n) && n >= 0 && n <= 1048576 && at + n <= f.archive.bytesLength, "CarrierPgRead");
+		need$31(layer ? layerReadBytes + n <= bounds.compressedLayerBytes : metadataReadBytes + n <= bounds.metadataReadBytes, "CarrierPgReadBudget");
 		consumer.check();
 		consumer.reserveLocal({
 			...zero$6(),
@@ -174896,7 +175400,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 		let p = 0;
 		while (p < n) {
 			const r = await fd.read(b, p, n - p, at + p);
-			need$30(r.bytesRead > 0, "CarrierPgTruncated");
+			need$31(r.bytesRead > 0, "CarrierPgTruncated");
 			p += r.bytesRead;
 		}
 		return b;
@@ -174910,35 +175414,35 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 			digest.update(b);
 			yield b;
 		}
-		need$30(digest.digest("hex") === row.sha256, "CarrierPgStoredBlobHash");
+		need$31(digest.digest("hex") === row.sha256, "CarrierPgStoredBlobHash");
 	}
 	const body = async (name) => {
 		const r = files.get(name);
-		need$30(r && r.size <= 1048576, "CarrierPgMetadata");
+		need$31(r && r.size <= 1048576, "CarrierPgMetadata");
 		const bytes = await read(r.offset, r.size);
-		need$30(sha$8(bytes) === r.sha256, "CarrierPgStoredMetadataHash");
+		need$31(sha$8(bytes) === r.sha256, "CarrierPgStoredMetadataHash");
 		return bytes;
 	};
 	try {
 		const layout = json(await body("oci-layout")), index = json(await body("index.json"));
-		need$30(layout.imageLayoutVersion === "1.0.0" && index.schemaVersion === 2 && index.manifests?.length === 1 && index.manifests[0].digest === f.rootDigest, "CarrierPgIndex");
+		need$31(layout.imageLayoutVersion === "1.0.0" && index.schemaVersion === 2 && index.manifests?.length === 1 && index.manifests[0].digest === f.rootDigest, "CarrierPgIndex");
 		const root = json(await body("blobs/sha256/" + f.rootDigest.slice(7)));
-		need$30(root.mediaType === IMAGE_MEDIA.index && root.schemaVersion === 2 && Array.isArray(root.manifests) && root.manifests.length <= 16, "CarrierPgIndex");
+		need$31(root.mediaType === IMAGE_MEDIA.index && root.schemaVersion === 2 && Array.isArray(root.manifests) && root.manifests.length <= 16, "CarrierPgIndex");
 		const selected = root.manifests.filter((d) => d.platform?.os === "linux" && d.platform.architecture === "arm64"), att = root.manifests.filter((d) => d.annotations?.["vnd.docker.reference.digest"] === f.arm64Digest);
-		need$30(selected.length === 1 && selected[0].digest === f.arm64Digest && att.length === 1 && att[0].digest === f.attestationDigest && att[0].annotations["vnd.docker.reference.type"] === "attestation-manifest", "CarrierPgSelection");
+		need$31(selected.length === 1 && selected[0].digest === f.arm64Digest && att.length === 1 && att[0].digest === f.attestationDigest && att[0].annotations["vnd.docker.reference.type"] === "attestation-manifest", "CarrierPgSelection");
 		const nodes = /* @__PURE__ */ new Map(), manifests = /* @__PURE__ */ new Map();
 		const visit = async (d) => {
-			need$30(typeof d?.digest === "string" && /^sha256:[a-f0-9]{64}$/.test(d.digest) && Number.isSafeInteger(d.size) && d.size > 0, "CarrierPgDescriptor");
+			need$31(typeof d?.digest === "string" && /^sha256:[a-f0-9]{64}$/.test(d.digest) && Number.isSafeInteger(d.size) && d.size > 0, "CarrierPgDescriptor");
 			const row = files.get("blobs/sha256/" + d.digest.slice(7));
-			need$30(row?.size === d.size, "CarrierPgDescriptor");
+			need$31(row?.size === d.size, "CarrierPgDescriptor");
 			if (nodes.has(d.digest)) {
-				need$30(canaryEvidenceHash(nodes.get(d.digest)) === canaryEvidenceHash(d), "CarrierPgDescriptor");
+				need$31(canaryEvidenceHash(nodes.get(d.digest)) === canaryEvidenceHash(d), "CarrierPgDescriptor");
 				return;
 			}
 			nodes.set(d.digest, d);
 			if (d.mediaType === IMAGE_MEDIA.manifest) {
 				const m = json(await body("blobs/sha256/" + d.digest.slice(7)));
-				need$30(m.schemaVersion === 2 && m.mediaType === d.mediaType && Array.isArray(m.layers) && m.layers.length <= 64, "CarrierPgManifest");
+				need$31(m.schemaVersion === 2 && m.mediaType === d.mediaType && Array.isArray(m.layers) && m.layers.length <= 64, "CarrierPgManifest");
 				manifests.set(d.digest, m);
 				for (const child of [m.config, ...m.layers]) await visit(child);
 			}
@@ -174946,23 +175450,23 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 		await visit(selected[0]);
 		await visit(att[0]);
 		const expected = new Set([...nodes.keys(), f.rootDigest].map((d) => "blobs/sha256/" + d.slice(7)));
-		for (const name of files.keys()) if (name.startsWith("blobs/")) need$30(expected.has(name), "CarrierPgExtraBlob");
+		for (const name of files.keys()) if (name.startsWith("blobs/")) need$31(expected.has(name), "CarrierPgExtraBlob");
 		const main = manifests.get(f.arm64Digest), evidence = manifests.get(f.attestationDigest);
-		need$30(main.config.digest === f.configDigest, "CarrierPgConfig");
+		need$31(main.config.digest === f.configDigest, "CarrierPgConfig");
 		const config = json(await body("blobs/sha256/" + f.configDigest.slice(7)));
-		need$30(config.os === "linux" && config.architecture === "arm64" && config.rootfs?.type === "layers" && config.rootfs.diff_ids?.length === main.layers.length, "CarrierPgConfig");
+		need$31(config.os === "linux" && config.architecture === "arm64" && config.rootfs?.type === "layers" && config.rootfs.diff_ids?.length === main.layers.length, "CarrierPgConfig");
 		for (const d of evidence.layers) {
-			need$30(d.mediaType === IMAGE_MEDIA.attestation, "CarrierPgAttestation");
+			need$31(d.mediaType === IMAGE_MEDIA.attestation, "CarrierPgAttestation");
 			const payload = json(await body("blobs/sha256/" + d.digest.slice(7)));
-			need$30(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && payload.subject?.length > 0 && payload.subject.every((v) => v.digest?.sha256 === f.arm64Digest.slice(7)), "CarrierPgAttestation");
+			need$31(["https://in-toto.io/Statement/v0.1", "https://in-toto.io/Statement/v1"].includes(payload._type) && payload.subject?.length > 0 && payload.subject.every((v) => v.digest?.sha256 === f.arm64Digest.slice(7)), "CarrierPgAttestation");
 			const derived = carrierSqlDerivedProfile(f.rootDigest);
-			if (derived) need$30(evidence.layers.length === 1 && payload.predicateType === (derived.jit === "off" ? "urn:mem9:carrier-sql:offline-prune-nojit:v1" : "urn:mem9:carrier-sql:offline-prune:v1") && canaryEvidenceHash(payload.predicate) === derived.provenanceHash && payload.predicate.sourceRootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" && payload.predicate.recipeSha256 === derived.recipeHash, "CarrierPgDerivation");
+			if (derived) need$31(evidence.layers.length === 1 && payload.predicateType === (derived.jit === "off" ? "urn:mem9:carrier-sql:offline-prune-nojit:v1" : "urn:mem9:carrier-sql:offline-prune:v1") && canaryEvidenceHash(payload.predicate) === derived.provenanceHash && payload.predicate.sourceRootDigest === "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f" && payload.predicate.recipeSha256 === derived.recipeHash, "CarrierPgDerivation");
 		}
 		const docker = json(await body("manifest.json"));
-		need$30(docker.length === 1 && docker[0].Config === "blobs/sha256/" + f.configDigest.slice(7) && canaryEvidenceHash(docker[0].Layers) === canaryEvidenceHash(main.layers.map((d) => "blobs/sha256/" + d.digest.slice(7))) && (!docker[0].RepoTags || docker[0].RepoTags.length === 0), "CarrierPgDockerManifest");
+		need$31(docker.length === 1 && docker[0].Config === "blobs/sha256/" + f.configDigest.slice(7) && canaryEvidenceHash(docker[0].Layers) === canaryEvidenceHash(main.layers.map((d) => "blobs/sha256/" + d.digest.slice(7))) && (!docker[0].RepoTags || docker[0].RepoTags.length === 0), "CarrierPgDockerManifest");
 		let unpacked = 0, entries = 0;
 		for (const [i, d] of main.layers.entries()) {
-			need$30([
+			need$31([
 				IMAGE_MEDIA.gzip,
 				IMAGE_MEDIA.dockerGzip,
 				IMAGE_MEDIA.tar
@@ -174982,7 +175486,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 						uncompressedBytes: b.length
 					});
 					unpacked += b.length;
-					need$30(unpacked <= f.uncompressedBytes, "CarrierPgUncompressed");
+					need$31(unpacked <= f.uncompressedBytes, "CarrierPgUncompressed");
 					digest.update(b);
 					let at = 0;
 					while (at < b.length) {
@@ -174997,7 +175501,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 						at += n;
 						if (header.length === 512) {
 							if (!header.every((v) => v === 0)) {
-								need$30(++entries <= f.processedEntries, "CarrierPgEntries");
+								need$31(++entries <= f.processedEntries, "CarrierPgEntries");
 								consumer.reserveLocal({
 									...zero$6(),
 									processedEntries: 1
@@ -175008,13 +175512,13 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 						}
 					}
 				}
-				need$30(header.length === 0 && remaining === 0 && "sha256:" + digest.digest("hex") === config.rootfs.diff_ids[i], "CarrierPgDiffId");
+				need$31(header.length === 0 && remaining === 0 && "sha256:" + digest.digest("hex") === config.rootfs.diff_ids[i], "CarrierPgDiffId");
 			} finally {
 				input.destroy();
 				output.destroy();
 			}
 		}
-		need$30(unpacked === f.uncompressedBytes, "CarrierPgUncompressed");
+		need$31(unpacked === f.uncompressedBytes, "CarrierPgUncompressed");
 		await current(s);
 		Object.assign(s.io, {
 			verificationReadBytes: readBytes,
@@ -175040,7 +175544,7 @@ async function verifyCarrierSqlPackage(handle, { consumer }) {
 }
 async function consumeCarrierSqlPackage(handle, { consumer }) {
 	const s = state(handle, consumer);
-	need$30(s.verified && !s.consumed, "CarrierPgNotVerified");
+	need$31(s.verified && !s.consumed, "CarrierPgNotVerified");
 	await current(s);
 	s.consumed = true;
 	return Object.freeze({
@@ -175053,7 +175557,7 @@ async function consumeCarrierSqlPackage(handle, { consumer }) {
 }
 async function closeCarrierSqlPackage(handle, { consumer }) {
 	const s = handles$1.get(handle);
-	need$30(s && s.consumer === consumer, "CarrierPgHandle");
+	need$31(s && s.consumer === consumer, "CarrierPgHandle");
 	if (s.closed) return;
 	s.closed = true;
 	await rm(s.directory, { recursive: true });
@@ -175083,9 +175587,9 @@ var init_ci_carrier_sql_package = __esmMin((() => {
 	};
 	number = (b) => {
 		const s = text(b).trim();
-		need$30(/^[0-7]+$/.test(s), "CarrierPgTarNumber");
+		need$31(/^[0-7]+$/.test(s), "CarrierPgTarNumber");
 		const n = parseInt(s, 8);
-		need$30(Number.isSafeInteger(n) && n >= 0, "CarrierPgTarNumber");
+		need$31(Number.isSafeInteger(n) && n >= 0, "CarrierPgTarNumber");
 		return n;
 	};
 	json = (b) => parseAcquisitionJson(b, 1048576);
@@ -175097,7 +175601,7 @@ var init_ci_carrier_sql_package = __esmMin((() => {
 * configuration, ambient credentials, or authority-bearing result. */
 function runDocker(args, { directory, timeoutMs, signal, input }) {
 	const raw = Buffer.from(JSON.stringify(args)), source = supervisor(sha$8(raw)), outputLimit = carrierSqlDockerOutputLimit(args);
-	need$30(Buffer.byteLength(source) <= MAX.maxSupervisorBytes && raw.length <= MAX.maxDockerArgumentBytes && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 14e4 && (!input || args[0] === "cp" && args[1] === "-" && input instanceof Uint8Array && input.length <= MAX.maxFixtureCaBytes + MAX.maxManifestBytes + 3072), "CarrierSqlDockerInput");
+	need$31(Buffer.byteLength(source) <= MAX.maxSupervisorBytes && raw.length <= MAX.maxDockerArgumentBytes && Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 14e4 && (!input || args[0] === "cp" && args[1] === "-" && input instanceof Uint8Array && input.length <= MAX.maxFixtureCaBytes + MAX.maxManifestBytes + 3072), "CarrierSqlDockerInput");
 	return new Promise((resolvePromise, reject) => {
 		let child, closed = false, inputDone = !input, done = false, cancelled = false, problem = false, status, sig, timer, total = 0, ackBytes = 0;
 		const out = [], err = [], ack = [];
@@ -175118,7 +175622,7 @@ function runDocker(args, { directory, timeoutMs, signal, input }) {
 			try {
 				if (status === 0 && !sig) {
 					const p = parseAcquisitionJson(Buffer.concat(ack), 4096);
-					need$30(p.version === 1 && p.kind === "carrier-sql-fixture-subreaper-echild" && p.supervisorPid === child.pid && p.cleanupComplete === true && p.leaderEnded === true && Number.isSafeInteger(p.leaderPid) && p.leaderPid > 1 && Number.isSafeInteger(p.reaped) && p.reaped >= 1 && Number.isSafeInteger(p.killedDescendants) && p.killedDescendants >= 0 && p.killedDescendants < p.reaped && p.reason === null && p.signal === null && Number.isInteger(p.status) && p.status >= 0 && p.status <= 255, "CarrierSqlDockerTermination");
+					need$31(p.version === 1 && p.kind === "carrier-sql-fixture-subreaper-echild" && p.supervisorPid === child.pid && p.cleanupComplete === true && p.leaderEnded === true && Number.isSafeInteger(p.leaderPid) && p.leaderPid > 1 && Number.isSafeInteger(p.reaped) && p.reaped >= 1 && Number.isSafeInteger(p.killedDescendants) && p.killedDescendants >= 0 && p.killedDescendants < p.reaped && p.reason === null && p.signal === null && Number.isInteger(p.status) && p.status >= 0 && p.status <= 255, "CarrierSqlDockerTermination");
 					proof = p;
 				}
 			} catch {
@@ -175206,17 +175710,17 @@ function runDocker(args, { directory, timeoutMs, signal, input }) {
 	});
 }
 async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, signal, databasePackage } = {}) {
-	need$30(process.platform === "linux" && process.arch === "arm64", "CarrierSqlNativeArm64");
-	need$30(Number.isSafeInteger(deadlineMs) && deadlineMs > Date.now() + MAX.cleanupMs && typeof metadataReads?.reserveLocal === "function", "CarrierSqlFixtureBudget");
-	need$30(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierSqlFixtureDirectory");
+	need$31(process.platform === "linux" && process.arch === "arm64", "CarrierSqlNativeArm64");
+	need$31(Number.isSafeInteger(deadlineMs) && deadlineMs > Date.now() + MAX.cleanupMs && typeof metadataReads?.reserveLocal === "function", "CarrierSqlFixtureBudget");
+	need$31(typeof tempRoot === "string" && resolve(tempRoot) === tempRoot && await realpath(tempRoot) === tempRoot, "CarrierSqlFixtureDirectory");
 	const parent = await lstat(tempRoot);
-	need$30(parent.isDirectory() && parent.uid === process.getuid(), "CarrierSqlFixtureDirectory");
+	need$31(parent.isDirectory() && parent.uid === process.getuid(), "CarrierSqlFixtureDirectory");
 	const jitOff = Boolean(databasePackage && metadataReads.admission.config.plan.template.sqlFixture.rootDigest === CARRIER_SQL_NOJIT_FIXTURE.rootDigest), script = fixtureScript(jitOff);
 	let jitObservation;
 	const nonce = randomBytes(16).toString("hex"), name = "mem9-carrier-sql-" + nonce, hostAlias = "mem9-on-aws-prod-fixture.cluster-" + nonce + ".ap-northeast-1.rds.amazonaws.com";
 	const check = () => {
 		signal?.throwIfAborted();
-		need$30(Date.now() < deadlineMs - MAX.cleanupMs, "CarrierSqlFixtureExpired");
+		need$31(Date.now() < deadlineMs - MAX.cleanupMs, "CarrierSqlFixtureExpired");
 		metadataReads.reserveLocal(zero$6());
 	};
 	check();
@@ -175240,10 +175744,10 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		return p;
 	};
 	const docker = async (args, cleanup = false, input) => {
-		if (cleanup) need$30(++cleanupCalls <= cleanupLimit, "CarrierSqlCleanupBudget");
+		if (cleanup) need$31(++cleanupCalls <= cleanupLimit, "CarrierSqlCleanupBudget");
 		else {
 			check();
-			need$30(++normalCalls <= MAX.maxDockerCalls, "CarrierSqlDockerBudget");
+			need$31(++normalCalls <= MAX.maxDockerCalls, "CarrierSqlDockerBudget");
 			metadataReads.reserveLocal({
 				...zero$6(),
 				logicalBytes: Buffer.byteLength(supervisor(sha$8(JSON.stringify(args)))) + 2 * Buffer.byteLength(JSON.stringify(args)) + carrierSqlDockerOutputLimit(args) + MAX.maxDockerProofBytes + 2 * (input?.length ?? 0)
@@ -175261,7 +175765,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				action: args.slice(0, 2),
 				requestHash: sha$8(JSON.stringify(args))
 			}));
-			need$30(bytes.length <= MAX.maxIntentBytes, "CarrierSqlIntentBytes");
+			need$31(bytes.length <= MAX.maxIntentBytes, "CarrierSqlIntentBytes");
 			if (!cleanup) metadataReads.reserveLocal({
 				...zero$6(),
 				logicalBytes: bytes.length,
@@ -175300,16 +175804,16 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 	};
 	const checked = async (args) => {
 		const result = await docker(args);
-		need$30(result.status === 0, "CarrierSqlDockerCommand");
+		need$31(result.status === 0, "CarrierSqlDockerCommand");
 		return result.stdout.trim();
 	};
 	const object = async (args) => {
 		const rows = parse(await checked(args));
-		need$30(Array.isArray(rows) && rows.length === 1, "CarrierSqlDockerObject");
+		need$31(Array.isArray(rows) && rows.length === 1, "CarrierSqlDockerObject");
 		return rows[0];
 	};
 	const cleanupCase = async (caseId) => {
-		need$30(caseContainers.has(caseId) && !caseCleanupStarted.has(caseId), "CarrierSqlCaseCleanup");
+		need$31(caseContainers.has(caseId) && !caseCleanupStarted.has(caseId), "CarrierSqlCaseCleanup");
 		caseCleanupStarted.add(caseId);
 		const removed = await docker([
 			"container",
@@ -175322,7 +175826,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			"inspect",
 			caseId
 		], true);
-		need$30(removed.status === 0 && absent.status === 1 && new RegExp("(?:No such container|No such object): " + caseId + "(?:\\s|$)").test(absent.stderr), "CarrierSqlCaseCleanup");
+		need$31(removed.status === 0 && absent.status === 1 && new RegExp("(?:No such container|No such object): " + caseId + "(?:\\s|$)").test(absent.stderr), "CarrierSqlCaseCleanup");
 		caseContainers.delete(caseId);
 		return {
 			removed: true,
@@ -175365,13 +175869,13 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"--volumes",
 				container
 			], true);
-			need$30(removed.status === 0, "CarrierSqlContainerCleanup");
+			need$31(removed.status === 0, "CarrierSqlContainerCleanup");
 			const absent = await docker([
 				"container",
 				"inspect",
 				container
 			], true);
-			need$30(absent.status === 1 && new RegExp("(?:No such container|No such object): " + container + "(?:\\s|$)").test(absent.stderr), "CarrierSqlContainerCleanup");
+			need$31(absent.status === 1 && new RegExp("(?:No such container|No such object): " + container + "(?:\\s|$)").test(absent.stderr), "CarrierSqlContainerCleanup");
 		} catch (e) {
 			failures.push(e);
 		}
@@ -175381,13 +175885,13 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"rm",
 				network
 			], true);
-			need$30(removed.status === 0, "CarrierSqlNetworkCleanup");
+			need$31(removed.status === 0, "CarrierSqlNetworkCleanup");
 			const absent = await docker([
 				"network",
 				"inspect",
 				network
 			], true);
-			need$30(absent.status === 1 && absent.stderr.includes(network) && /not found|No such network/.test(absent.stderr), "CarrierSqlNetworkCleanup");
+			need$31(absent.status === 1 && absent.stderr.includes(network) && /not found|No such network/.test(absent.stderr), "CarrierSqlNetworkCleanup");
 		} catch (e) {
 			failures.push(e);
 		}
@@ -175401,7 +175905,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"inspect",
 				databaseTag
 			], true);
-			need$30(removed.status === 0 && absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCleanup");
+			need$31(removed.status === 0 && absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCleanup");
 		} catch (e) {
 			failures.push(e);
 		}
@@ -175429,7 +175933,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"inspect",
 				databaseTag
 			]);
-			need$30(absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCollision");
+			need$31(absent.status === 1 && absent.stderr.includes(databaseTag) && /No such image|No such object/.test(absent.stderr), "CarrierSqlImageCollision");
 			await source.check();
 			metadataReads.reserveLocal({
 				...zero$6(),
@@ -175444,14 +175948,14 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 				"--input",
 				source.path
 			]);
-			need$30(loaded.status === 0, "CarrierSqlImageLoad");
+			need$31(loaded.status === 0, "CarrierSqlImageLoad");
 			await source.check();
 			const actual = await object([
 				"image",
 				"inspect",
 				packageReceipt.rootDigest
 			]);
-			need$30(actual.Descriptor?.digest === packageReceipt.rootDigest && [packageReceipt.rootDigest, packageReceipt.configDigest].includes(actual.Id) && actual.Architecture === "arm64" && actual.Os === "linux" && canaryEvidenceHash(actual.RootFS?.Layers) === canaryEvidenceHash(source.diffIds), "CarrierSqlImportedImage");
+			need$31(actual.Descriptor?.digest === packageReceipt.rootDigest && [packageReceipt.rootDigest, packageReceipt.configDigest].includes(actual.Id) && actual.Architecture === "arm64" && actual.Os === "linux" && canaryEvidenceHash(actual.RootFS?.Layers) === canaryEvidenceHash(source.diffIds), "CarrierSqlImportedImage");
 			await checked([
 				"image",
 				"tag",
@@ -175466,20 +175970,20 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			"inspect",
 			databaseImage
 		]);
-		need$30(image.Os === "linux" && image.Architecture === "arm64" && image.Descriptor?.digest === (packageReceipt?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && (packageReceipt ? [packageReceipt.rootDigest, packageReceipt.configDigest].includes(image.Id) : image.RepoDigests?.includes(CARRIER_SQL_DATABASE_IMAGE)), "CarrierSqlCachedImage");
+		need$31(image.Os === "linux" && image.Architecture === "arm64" && image.Descriptor?.digest === (packageReceipt?.rootDigest ?? "sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f") && (packageReceipt ? [packageReceipt.rootDigest, packageReceipt.configDigest].includes(image.Id) : image.RepoDigests?.includes(CARRIER_SQL_DATABASE_IMAGE)), "CarrierSqlCachedImage");
 		network = await checked([
 			"network",
 			"create",
 			"--internal",
 			name
 		]);
-		need$30(id(network), "CarrierSqlNetworkId");
+		need$31(id(network), "CarrierSqlNetworkId");
 		const networkInfo = await object([
 			"network",
 			"inspect",
 			network
 		]);
-		need$30(networkInfo.Id === network && networkInfo.Name === name && networkInfo.Internal === true && networkInfo.Driver === "bridge" && Object.keys(networkInfo.Containers ?? {}).length === 0, "CarrierSqlNetwork");
+		need$31(networkInfo.Id === network && networkInfo.Name === name && networkInfo.Internal === true && networkInfo.Driver === "bridge" && Object.keys(networkInfo.Containers ?? {}).length === 0, "CarrierSqlNetwork");
 		metadataReads.reserveLocal({
 			...zero$6(),
 			logicalBytes: MAX.tmpfsBytes,
@@ -175528,19 +176032,19 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			"-ec",
 			script
 		]);
-		need$30(id(container), "CarrierSqlContainerId");
+		need$31(id(container), "CarrierSqlContainerId");
 		const inspect = async (running) => {
 			const v = await object([
 				"container",
 				"inspect",
 				container
 			]), h = v.HostConfig, c = v.Config, n = v.NetworkSettings;
-			need$30(v.Id === container && v.Name === "/" + name && c.Image === databaseImage && c.User === "999:999" && c.Entrypoint?.join() === "/bin/sh" && JSON.stringify(c.Cmd) === JSON.stringify(["-ec", script]), "CarrierSqlContainerBinding");
-			need$30(h.ReadonlyRootfs === true && h.Privileged === false && h.NetworkMode === network && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]) && h.PidsLimit === 128 && h.Memory === 536870912 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length, "CarrierSqlContainerIsolation");
-			need$30(canaryEvidenceHash(h.Tmpfs) === canaryEvidenceHash(tmpfs), "CarrierSqlTmpfsCapacity");
+			need$31(v.Id === container && v.Name === "/" + name && c.Image === databaseImage && c.User === "999:999" && c.Entrypoint?.join() === "/bin/sh" && JSON.stringify(c.Cmd) === JSON.stringify(["-ec", script]), "CarrierSqlContainerBinding");
+			need$31(h.ReadonlyRootfs === true && h.Privileged === false && h.NetworkMode === network && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]) && h.PidsLimit === 128 && h.Memory === 536870912 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length, "CarrierSqlContainerIsolation");
+			need$31(canaryEvidenceHash(h.Tmpfs) === canaryEvidenceHash(tmpfs), "CarrierSqlTmpfsCapacity");
 			const binds = v.Mounts.filter((m) => m.Type === "bind");
-			need$30(!h.Binds?.length && !h.Devices?.length && !h.VolumesFrom?.length && Object.keys(n.Networks ?? {}).length === 1 && Object.keys(n.Ports ?? {}).every((k) => n.Ports[k] === null) && binds.length === 1 && binds[0].Source === materialDirectory && binds[0].Destination === "/fixture-transfer" && binds[0].RW === true, "CarrierSqlContainerIsolation");
-			need$30(v.State.Running === running && (!running || v.State.Pid > 0), "CarrierSqlContainerState");
+			need$31(!h.Binds?.length && !h.Devices?.length && !h.VolumesFrom?.length && Object.keys(n.Networks ?? {}).length === 1 && Object.keys(n.Ports ?? {}).every((k) => n.Ports[k] === null) && binds.length === 1 && binds[0].Source === materialDirectory && binds[0].Destination === "/fixture-transfer" && binds[0].RW === true, "CarrierSqlContainerIsolation");
+			need$31(v.State.Running === running && (!running || v.State.Pid > 0), "CarrierSqlContainerState");
 			return v;
 		};
 		await inspect(false);
@@ -175553,7 +176057,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		let ready = false;
 		for (let i = 0; i < MAX.maxReadyAttempts; i++) {
 			check();
-			need$30(Date.now() < readyDeadline, "CarrierSqlDatabaseReady");
+			need$31(Date.now() < readyDeadline, "CarrierSqlDatabaseReady");
 			if ((await docker([
 				"exec",
 				container,
@@ -175569,19 +176073,19 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			await inspect(true);
 			await setTimeout$2(MAX.readyPollMs, void 0, { signal });
 		}
-		need$30(ready, "CarrierSqlDatabaseReady");
+		need$31(ready, "CarrierSqlDatabaseReady");
 		const fixtureCa = await checked([
 			"exec",
 			container,
 			"cat",
 			"/tmp/server.crt"
 		]);
-		need$30(Buffer.byteLength(fixtureCa) <= 16384, "CarrierSqlFixtureCertificate");
+		need$31(Buffer.byteLength(fixtureCa) <= 16384, "CarrierSqlFixtureCertificate");
 		certificate = new X509Certificate(fixtureCa);
-		need$30(certificate.subject === "CN=mem9-carrier-db-" + nonce && certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey) && certificate.checkHost(hostAlias) === hostAlias && certificate.checkHost("localhost") === "localhost" && certificate.checkIP("127.0.0.1") === "127.0.0.1", "CarrierSqlFixtureCertificate");
+		need$31(certificate.subject === "CN=mem9-carrier-db-" + nonce && certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey) && certificate.checkHost(hostAlias) === hostAlias && certificate.checkHost("localhost") === "localhost" && certificate.checkIP("127.0.0.1") === "127.0.0.1", "CarrierSqlFixtureCertificate");
 		const v = await inspect(true), entry = Object.values(v.NetworkSettings.Networks)[0];
 		address = entry.IPAddress;
-		need$30(isIPv4(address) && entry.NetworkID === network && entry.Aliases?.includes(hostAlias), "CarrierSqlFixtureAddress");
+		need$31(isIPv4(address) && entry.NetworkID === network && entry.Aliases?.includes(hostAlias), "CarrierSqlFixtureAddress");
 		const relayFailure = (e) => {
 			normalProblem ??= e;
 			for (const socket of sockets) socket.destroy();
@@ -175594,7 +176098,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			let peer;
 			try {
 				check();
-				need$30(!closing && !normalProblem && ++connections <= MAX.maxConnections && sockets.size < 2 * MAX.maxConcurrentConnections && socket.remoteAddress === "127.0.0.1", "CarrierSqlConnectionBudget");
+				need$31(!closing && !normalProblem && ++connections <= MAX.maxConnections && sockets.size < 2 * MAX.maxConcurrentConnections && socket.remoteAddress === "127.0.0.1", "CarrierSqlConnectionBudget");
 				peer = connect({
 					host: address,
 					port: 5432
@@ -175609,7 +176113,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 					s.on("data", (b) => {
 						try {
 							check();
-							need$30((relayBytes += b.length) <= MAX.maxRelayBytes, "CarrierSqlRelayBytes");
+							need$31((relayBytes += b.length) <= MAX.maxRelayBytes, "CarrierSqlRelayBytes");
 						} catch (e) {
 							relayFailure(e);
 						}
@@ -175628,15 +176132,15 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		});
 		const connect$1 = async (credential, database, options = {}) => {
 			check();
-			need$30(!closing && !normalProblem, "CarrierSqlFixtureClosed");
-			need$30(Object.keys(options).every((k) => ["signal", "deadlineMs"].includes(k)), "CarrierSqlConnectionOptions");
-			need$30(credential && Object.keys(credential).every((k) => [
+			need$31(!closing && !normalProblem, "CarrierSqlFixtureClosed");
+			need$31(Object.keys(options).every((k) => ["signal", "deadlineMs"].includes(k)), "CarrierSqlConnectionOptions");
+			need$31(credential && Object.keys(credential).every((k) => [
 				"username",
 				"password",
 				"salt"
 			].includes(k)) && /^[a-z][a-z0-9_]{0,62}$/.test(credential.username) && (["postgres", "runtime_credentials_test"].includes(database) || /^prod_workers_[a-f0-9]{32}$/.test(database)), "CarrierSqlConnectionInput");
 			const until = Math.min(deadlineMs - MAX.cleanupMs, options.deadlineMs ?? deadlineMs), abortSignal = options.signal ?? signal;
-			need$30(until > Date.now() && !abortSignal?.aborted, "CarrierSqlFixtureExpired");
+			need$31(until > Date.now() && !abortSignal?.aborted, "CarrierSqlFixtureExpired");
 			const client = new esm_default.Client({
 				host: "127.0.0.1",
 				port: relay.address().port,
@@ -175666,7 +176170,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			try {
 				await client.connect();
 				check();
-				need$30(!abortSignal?.aborted && client.connection.stream.encrypted && client.connection.stream.authorized && Buffer.from(client.connection.stream.getPeerCertificate().raw).equals(certificate.raw), "CarrierSqlFixtureTls");
+				need$31(!abortSignal?.aborted && client.connection.stream.encrypted && client.connection.stream.authorized && Buffer.from(client.connection.stream.getPeerCertificate().raw).equals(certificate.raw), "CarrierSqlFixtureTls");
 				return client;
 			} catch (e) {
 				await end(client);
@@ -175679,7 +176183,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 		root = await connect$1({ username: "postgres" }, "runtime_credentials_test");
 		if (jitOff) {
 			const observed = await root.query("SELECT setting,source FROM pg_settings WHERE name='jit'");
-			need$30(observed.rows.length === 1 && observed.rows[0].setting === "off" && observed.rows[0].source === "command line", "CarrierSqlJitSetting");
+			need$31(observed.rows.length === 1 && observed.rows[0].setting === "off" && observed.rows[0].source === "command line", "CarrierSqlJitSetting");
 			jitObservation = Object.freeze({ ...observed.rows[0] });
 		}
 		const handle = Object.freeze({ kind: "carrier-sql-fixture" });
@@ -175714,7 +176218,7 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 			},
 			check: () => {
 				check();
-				need$30(!closing && !normalProblem, "CarrierSqlFixtureClosed");
+				need$31(!closing && !normalProblem, "CarrierSqlFixtureClosed");
 			},
 			clients,
 			journal,
@@ -175747,14 +176251,14 @@ async function openCarrierSqlFixture({ tempRoot, metadataReads, deadlineMs, sign
 }
 async function closeCarrierSqlFixture(handle) {
 	const s = states.get(handle);
-	need$30(s, "CarrierSqlFixtureHandle");
+	need$31(s, "CarrierSqlFixtureHandle");
 	await s.close();
 }
 function twoFileTar(rows) {
 	const blocks = [];
 	for (const [name, bytes] of rows) {
 		const h = Buffer.alloc(512), oct = (v, at, n) => h.write(v.toString(8).padStart(n - 1, "0") + "\0", at, n);
-		need$30(["ca.pem", "manifest.json"].includes(name), "CarrierSqlTransferMember");
+		need$31(["ca.pem", "manifest.json"].includes(name), "CarrierSqlTransferMember");
 		h.write(name);
 		oct(292, 100, 8);
 		oct(0, 108, 8);
@@ -175793,13 +176297,13 @@ async function sourceFileProof(path, bytes, prior) {
 		ctimeNs: String(stat.ctimeNs),
 		sha256: sha$8(bytes)
 	};
-	if (prior) need$30(canaryEvidenceHash(prior) === canaryEvidenceHash(proof), "CarrierSqlOverlayChanged");
+	if (prior) need$31(canaryEvidenceHash(prior) === canaryEvidenceHash(proof), "CarrierSqlOverlayChanged");
 	const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 	try {
 		const read = await fd.readFile();
-		need$30(read.equals(bytes), "CarrierSqlOverlayChanged");
+		need$31(read.equals(bytes), "CarrierSqlOverlayChanged");
 		const after = await fd.stat({ bigint: true });
-		need$30(after.dev === stat.dev && after.ino === stat.ino && after.mtimeNs === stat.mtimeNs && after.ctimeNs === stat.ctimeNs, "CarrierSqlOverlayChanged");
+		need$31(after.dev === stat.dev && after.ino === stat.ino && after.mtimeNs === stat.mtimeNs && after.ctimeNs === stat.ctimeNs, "CarrierSqlOverlayChanged");
 	} finally {
 		await fd.close();
 	}
@@ -175808,18 +176312,18 @@ async function sourceFileProof(path, bytes, prior) {
 /** Only genuine verified build bytes may acquire this test-only overlay. */
 async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext, oldSource }) {
 	const s = states.get(handle);
-	need$30(s && !s.preparing, "CarrierSqlFixtureHandle");
+	need$31(s && !s.preparing, "CarrierSqlFixtureHandle");
 	s.check();
 	s.preparing = true;
 	const b = inspectCarrierOfflineBuild(built), { graphHash, ...image } = controlImageGraphBinding(b.graph);
-	need$30(sourceContext?.tree && oldSource && Object.keys(oldSource).sort().join() === "revision,tree" && Object.values(oldSource).every((v) => /^[a-f0-9]{40}$/.test(v)), "CarrierSqlOriginalSource");
+	need$31(sourceContext?.tree && oldSource && Object.keys(oldSource).sort().join() === "revision,tree" && Object.values(oldSource).every((v) => /^[a-f0-9]{40}$/.test(v)), "CarrierSqlOriginalSource");
 	const originalRow = b.derivedRecord?.files.find((f) => f.path === "rootfs/carrier/manifest.json");
-	need$30(originalRow?.bytesBase64, "CarrierSqlOriginalManifest");
+	need$31(originalRow?.bytesBase64, "CarrierSqlOriginalManifest");
 	const original = Buffer.from(originalRow.bytesBase64, "base64"), actual = inspectImageFilesystemFile(b.filesystem, "/carrier/manifest.json");
-	need$30(sha$8(original) === actual.sha256 && original.length === actual.size && original.length <= MAX.maxManifestBytes, "CarrierSqlOriginalManifest");
+	need$31(sha$8(original) === actual.sha256 && original.length === actual.size && original.length <= MAX.maxManifestBytes, "CarrierSqlOriginalManifest");
 	const ca = Buffer.from(s.fixtureCa), test = deriveCarrierSqlTestManifest(original, ca), archive = twoFileTar([["ca.pem", ca], ["manifest.json", test]]);
-	need$30(ca.length <= MAX.maxFixtureCaBytes && test.length <= MAX.maxManifestBytes, "CarrierSqlOverlayBytes");
-	need$30((await readdir(s.materialDirectory)).length === 0, "CarrierSqlOverlayDirectory");
+	need$31(ca.length <= MAX.maxFixtureCaBytes && test.length <= MAX.maxManifestBytes, "CarrierSqlOverlayBytes");
+	need$31((await readdir(s.materialDirectory)).length === 0, "CarrierSqlOverlayDirectory");
 	s.metadataReads.reserveLocal({
 		...zero$6(),
 		logicalBytes: original.length + 3 * (ca.length + test.length),
@@ -175830,17 +176334,17 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 		"-",
 		s.container + ":/fixture-transfer"
 	], false, archive);
-	need$30(copied.status === 0, "CarrierSqlOverlayTransfer");
+	need$31(copied.status === 0, "CarrierSqlOverlayTransfer");
 	const sources = [await sourceFileProof(join(s.materialDirectory, "ca.pem"), ca), await sourceFileProof(join(s.materialDirectory, "manifest.json"), test)];
 	const schemaRoot = join(s.directory, "source", "docker", "bootstrap") + "/";
 	const paths = controlSourcePaths(sourceContext).filter((p) => p.startsWith("docker/bootstrap/") && (p.endsWith(".sql") || p === "docker/bootstrap/schema-digest.sh"));
-	need$30(paths.length > 0 && paths.length <= MAX.maxSchemaFiles, "CarrierSqlSchemaClosure");
+	need$31(paths.length > 0 && paths.length <= MAX.maxSchemaFiles, "CarrierSqlSchemaClosure");
 	let schemaBytes = 0;
 	for (const path of paths) {
 		s.check();
 		const row = await readControlSourceFile(sourceContext, path);
 		schemaBytes += row.bytes.length;
-		need$30(schemaBytes <= MAX.maxSchemaBytes, "CarrierSqlSchemaBytes");
+		need$31(schemaBytes <= MAX.maxSchemaBytes, "CarrierSqlSchemaBytes");
 		s.metadataReads.reserveLocal({
 			...zero$6(),
 			logicalBytes: 10 * row.bytes.length,
@@ -175857,8 +176361,8 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 		});
 	}
 	const seederSource = await readControlSourceFile(sourceContext, "scripts/lib/ci-carrier-sql-state.mjs");
-	need$30(seederSource.bytes.length <= MAX.maxSeederSourceBytes, "CarrierSqlSeederBytes");
-	need$30(seederSource.bytes.equals(await readFile(new URL("./ci-carrier-sql-state.mjs", new URL("../../../../scripts/lib/ci-carrier-sql-fixture.mjs", import.meta.url).href))), "CarrierSqlSeederSource");
+	need$31(seederSource.bytes.length <= MAX.maxSeederSourceBytes, "CarrierSqlSeederBytes");
+	need$31(seederSource.bytes.equals(await readFile(new URL("./ci-carrier-sql-state.mjs", new URL("../../../../scripts/lib/ci-carrier-sql-fixture.mjs", import.meta.url).href))), "CarrierSqlSeederSource");
 	s.metadataReads.reserveLocal({
 		...zero$6(),
 		logicalBytes: 2 * seederSource.bytes.length
@@ -175871,7 +176375,7 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 		hostAlias: s.hostAlias,
 		deadlineMs: s.deadlineMs - MAX.cleanupMs
 	});
-	need$30(seed.parent.verification.changedRows === 10 && seed.parent.verification.receipts === 5, "CarrierSqlSeederRoot");
+	need$31(seed.parent.verification.changedRows === 10 && seed.parent.verification.receipts === 5, "CarrierSqlSeederRoot");
 	s.acceptance = {
 		built,
 		b,
@@ -175907,12 +176411,12 @@ async function prepareCarrierSqlAcceptanceFixture(handle, { built, sourceContext
 }
 async function executeCarrierSqlCase(handle, name) {
 	const s = states.get(handle), a = s?.acceptance;
-	need$30(a && !a.failed && name === CARRIER_SQL_CASES[a.cursor], "CarrierSqlCaseOrder");
+	need$31(a && !a.failed && name === CARRIER_SQL_CASES[a.cursor], "CarrierSqlCaseOrder");
 	s.check();
 	const ordinal = a.cursor++, startedMs = Date.now(), tls = name === "untrusted-fixture-ca";
 	let containerId, cleanup;
 	const b = inspectCarrierOfflineBuild(a.built);
-	need$30(b.record.rootDigest === a.image.rootDigest, "CarrierSqlImageChanged");
+	need$31(b.record.rootDigest === a.image.rootDigest, "CarrierSqlImageChanged");
 	const input = {
 		invocation: randomBytes(16).toString("hex"),
 		owner: s.nonce,
@@ -175934,7 +176438,7 @@ async function executeCarrierSqlCase(handle, name) {
 		}
 	};
 	const inputBytes = Buffer.from(JSON.stringify(input));
-	need$30(inputBytes.length <= MAX.maxCaseInputBytes, "CarrierSqlCaseInput");
+	need$31(inputBytes.length <= MAX.maxCaseInputBytes, "CarrierSqlCaseInput");
 	const credential = name === "wrong-database-role" ? a.seed.runtime : a.seed.administrator;
 	const env = {
 		MEM9_SUPERSESSION_ROOT_INPUT: deflateRawSync(inputBytes).toString("base64"),
@@ -175948,7 +176452,7 @@ async function executeCarrierSqlCase(handle, name) {
 	if (name === "changed-input-hash") env.MEM9_SUPERSESSION_ROOT_HASH = "0".repeat(64);
 	if (name === "wrong-encoding") env.MEM9_SUPERSESSION_ROOT_INPUT = "not-base64";
 	const envBytes = Buffer.from(Object.entries(env).map(([k, v]) => k + "=" + v + "\n").join("")), envPath = join(s.directory, "case-" + ordinal + ".env");
-	need$30(envBytes.length <= MAX.maxCaseEnvironmentBytes, "CarrierSqlCaseEnvironment");
+	need$31(envBytes.length <= MAX.maxCaseEnvironmentBytes, "CarrierSqlCaseEnvironment");
 	const security = carrierSqlCaseSecurityBytes({
 		runtimeFilesBytes: b.runtimeManifest.files.reduce((n, f) => n + f.bytes, 0),
 		originalSourceBytes: b.runtimeManifest.files.filter((f) => f.path.startsWith("/bootstrap/operator/") && !f.path.startsWith("/bootstrap/operator/node_modules/") && /\.(?:mjs|js)$/.test(f.path)).reduce((n, f) => n + f.bytes, 0),
@@ -176017,7 +176521,7 @@ async function executeCarrierSqlCase(handle, name) {
 			s.container
 		]);
 		containerId = await s.checked(args);
-		need$30(id(containerId), "CarrierSqlCaseId");
+		need$31(id(containerId), "CarrierSqlCaseId");
 		s.caseContainers.add(containerId);
 		const inspect = async (exited) => {
 			const v = await s.object([
@@ -176025,15 +176529,15 @@ async function executeCarrierSqlCase(handle, name) {
 				"inspect",
 				containerId
 			]), h = v.HostConfig, c = v.Config;
-			need$30(v.Id === containerId && c.Image === a.image.rootDigest && c.User === (name === "root-uid" ? "0:0" : "1000:1000") && [
+			need$31(v.Id === containerId && c.Image === a.image.rootDigest && c.User === (name === "root-uid" ? "0:0" : "1000:1000") && [
 				a.image.rootDigest,
 				a.image.arm64Digest,
 				a.image.configDigest
 			].includes(v.Image), "CarrierSqlCaseImage");
-			need$30(h.NetworkMode === "container:" + s.container && h.ReadonlyRootfs === true && !h.Privileged && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.PidsLimit === 32 && h.Memory === 268435456 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length && !h.Binds?.length && !h.VolumesFrom?.length && !h.Devices?.length && h.PidMode !== "host" && h.IpcMode !== "host", "CarrierSqlCaseIsolation");
-			need$30(!h.ExtraHosts?.length && (!exited || v.HostsPath === s.hostsPath), "CarrierSqlCaseNetwork");
-			need$30(name === "missing-nnp" ? !h.SecurityOpt?.length : h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]), "CarrierSqlCaseNnp");
-			need$30(JSON.stringify(c.Entrypoint) === JSON.stringify(name === "missing-nnp" ? ["/usr/local/bin/node"] : [
+			need$31(h.NetworkMode === "container:" + s.container && h.ReadonlyRootfs === true && !h.Privileged && h.CapDrop?.join() === "ALL" && !h.CapAdd?.length && h.PidsLimit === 32 && h.Memory === 268435456 && h.NanoCpus === 1e9 && !Object.keys(h.PortBindings ?? {}).length && !h.Binds?.length && !h.VolumesFrom?.length && !h.Devices?.length && h.PidMode !== "host" && h.IpcMode !== "host", "CarrierSqlCaseIsolation");
+			need$31(!h.ExtraHosts?.length && (!exited || v.HostsPath === s.hostsPath), "CarrierSqlCaseNetwork");
+			need$31(name === "missing-nnp" ? !h.SecurityOpt?.length : h.SecurityOpt?.length === 1 && ["no-new-privileges", "no-new-privileges:true"].includes(h.SecurityOpt[0]), "CarrierSqlCaseNnp");
+			need$31(JSON.stringify(c.Entrypoint) === JSON.stringify(name === "missing-nnp" ? ["/usr/local/bin/node"] : [
 				"/bin/setpriv",
 				"--no-new-privs",
 				"--",
@@ -176041,13 +176545,13 @@ async function executeCarrierSqlCase(handle, name) {
 				"/carrier/guard-first.mjs",
 				"audit-original-root"
 			]) && JSON.stringify(c.Cmd ?? []) === JSON.stringify(name === "missing-nnp" ? ["/carrier/guard-first.mjs", "audit-original-root"] : []), "CarrierSqlCaseCommand");
-			need$30(v.Mounts.length === mounts.length && mounts.every((m) => v.Mounts.some((x) => x.Type === "bind" && x.Source === m.source.path && x.Destination === m.destination && x.RW === false)), "CarrierSqlCaseMounts");
+			need$31(v.Mounts.length === mounts.length && mounts.every((m) => v.Mounts.some((x) => x.Type === "bind" && x.Source === m.source.path && x.Destination === m.destination && x.RW === false)), "CarrierSqlCaseMounts");
 			const actualEnv = Object.fromEntries(c.Env.map((e) => {
 				const at = e.indexOf("=");
 				return [e.slice(0, at), e.slice(at + 1)];
 			}));
-			need$30(Object.entries(env).every(([k, value]) => actualEnv[k] === value), "CarrierSqlCaseEnvironment");
-			need$30(v.State.Running === false && v.State.Status === (exited ? "exited" : "created") && (!exited || v.State.Pid === 0 && !v.State.OOMKilled), "CarrierSqlCaseState");
+			need$31(Object.entries(env).every(([k, value]) => actualEnv[k] === value), "CarrierSqlCaseEnvironment");
+			need$31(v.State.Running === false && v.State.Status === (exited ? "exited" : "created") && (!exited || v.State.Pid === 0 && !v.State.OOMKilled), "CarrierSqlCaseState");
 			return v;
 		};
 		await inspect(false);
@@ -176084,13 +176588,13 @@ async function executeCarrierSqlCase(handle, name) {
 				"logs",
 				s.container
 			]);
-			need$30(beforeLogs.status === 0 && afterLogs.status === 0 && afterLogs.stdout === beforeLogs.stdout && afterLogs.stderr.startsWith(beforeLogs.stderr), "CarrierSqlTlsLogScope");
+			need$31(beforeLogs.status === 0 && afterLogs.status === 0 && afterLogs.stdout === beforeLogs.stdout && afterLogs.stderr.startsWith(beforeLogs.stderr), "CarrierSqlTlsLogScope");
 			tlsLog = Buffer.from(afterLogs.stderr.slice(beforeLogs.stderr.length));
 			tlsFailure = {
 				...verifyCarrierSqlTlsRejection(tlsLog.toString(), void 0, parseAcquisitionJson(Buffer.from(output.stderr.trim()), 1048576)),
 				fixtureContainerId: s.container
 			};
-			need$30(tlsFailure.peer.startsWith("127.0.0.1("), "CarrierSqlTlsPeer");
+			need$31(tlsFailure.peer.startsWith("127.0.0.1("), "CarrierSqlTlsPeer");
 		}
 		for (const [i, m] of mounts.entries()) await sourceFileProof(m.source.path, i === 0 ? a.ca : a.test, m.source);
 		cleanup = await s.cleanupCase(containerId);
@@ -176134,7 +176638,7 @@ async function executeCarrierSqlCase(handle, name) {
 }
 async function closeCarrierSqlAcceptanceFixture(handle) {
 	const s = states.get(handle);
-	need$30(s?.acceptance, "CarrierSqlFixtureHandle");
+	need$31(s?.acceptance, "CarrierSqlFixtureHandle");
 	await s.acceptance.seed.close();
 }
 var CARRIER_SQL_DATABASE_IMAGE, states, MAX, tmpfs, fixtureScript, held, id, parse, first, last, supervisor;
@@ -176172,7 +176676,7 @@ var init_ci_carrier_sql_fixture = __esmMin((() => {
 	parse = (value) => parseAcquisitionJson(Buffer.from(value), MAX.maxDockerOutputBytes);
 	first = CARRIER_PROBE_SUPERVISOR_SOURCE.indexOf("\ndef valid_args(");
 	last = CARRIER_PROBE_SUPERVISOR_SOURCE.indexOf("\ndef main():");
-	need$30(first > 0 && last > first, "CarrierSqlSupervisorSource");
+	need$31(first > 0 && last > first, "CarrierSqlSupervisorSource");
 	supervisor = (hash) => [
 		CARRIER_PROBE_SUPERVISOR_SOURCE.slice(0, first),
 		"\ndef valid_args(args):\n    return isinstance(args, list) and hashlib.sha256(json.dumps(args, ensure_ascii=False, separators=(\",\", \":\")).encode(\"utf-8\")).hexdigest() == \"" + hash + "\"\n",
@@ -176202,7 +176706,7 @@ function inspectCarrierSqlRuntimeBudget(built) {
 		carrierUncompressedBytes: usage.uncompressedBytes,
 		carrierEntries: usage.fsEntries
 	};
-	return freeze$2({
+	return freeze$3({
 		inputs,
 		budget: carrierSqlRuntimeBudget(inputs)
 	});
@@ -176210,8 +176714,8 @@ function inspectCarrierSqlRuntimeBudget(built) {
 async function runCarrierSqlAcceptance({ built, context, derived, consumer, sourceContext, fixture, oldSource, signal }) {
 	assertCarrierConsumer(consumer);
 	const admission = consumer.admission, plan = admission.config.plan, b = inspectCarrierOfflineBuild(built);
-	need$30(!attempted.has(built) && b.record.templateHash === plan.templateHash && b.record.contextHash === plan.context.sha256 && sourceContext === admission.source.sourceContext, "CarrierSqlAcceptanceInputs");
-	need$30(context && derived && fixture && oldSource, "CarrierSqlAcceptanceDependencies");
+	need$31(!attempted.has(built) && b.record.templateHash === plan.templateHash && b.record.contextHash === plan.context.sha256 && sourceContext === admission.source.sourceContext, "CarrierSqlAcceptanceInputs");
+	need$31(context && derived && fixture && oldSource, "CarrierSqlAcceptanceDependencies");
 	assertImageFilesystemUncompressedLimit(b.filesystem, plan.template.bounds.uncompressedBytes);
 	assertImageFilesystemEntryLimit(b.filesystem, plan.template.bounds.processedEntries);
 	attempted.add(built);
@@ -176260,9 +176764,9 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 			tempRoot: consumer.directory,
 			signal
 		}, { beforeCommand({ args }) {
-			need$30(++loadCalls <= CARRIER_SQL_FIXTURE_LIMITS.maxCarrierLoadCalls && Buffer.byteLength(JSON.stringify(args)) <= CARRIER_SQL_FIXTURE_LIMITS.maxDockerArgumentBytes, "CarrierSqlLoadCommandBudget");
+			need$31(++loadCalls <= CARRIER_SQL_FIXTURE_LIMITS.maxCarrierLoadCalls && Buffer.byteLength(JSON.stringify(args)) <= CARRIER_SQL_FIXTURE_LIMITS.maxDockerArgumentBytes, "CarrierSqlLoadCommandBudget");
 		} });
-		need$30(loaded.io.logicalBytes <= runtime.budget.parts.carrierLoadFiles.logicalBytes, "CarrierSqlLoadByteBudget");
+		need$31(loaded.io.logicalBytes <= runtime.budget.parts.carrierLoadFiles.logicalBytes, "CarrierSqlLoadByteBudget");
 		const cases = [];
 		for (const name of CARRIER_SQL_CASES) {
 			signal?.throwIfAborted();
@@ -176331,7 +176835,7 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 		completed.set(handle, {
 			built,
 			consumer,
-			value: freeze$2(value)
+			value: freeze$3(value)
 		});
 		return handle;
 	} finally {
@@ -176356,7 +176860,7 @@ async function runCarrierSqlAcceptance({ built, context, derived, consumer, sour
 }
 function inspectCompletedCarrierSqlAcceptance(handle, { built, consumer }) {
 	const s = completed.get(handle);
-	need$30(s && s.built === built && s.consumer === consumer, "CarrierSqlAcceptanceHandle");
+	need$31(s && s.built === built && s.consumer === consumer, "CarrierSqlAcceptanceHandle");
 	assertCarrierConsumer(consumer);
 	return s.value;
 }
@@ -176381,11 +176885,11 @@ var init_ci_carrier_sql_acceptance = __esmMin((() => {
 * ledger, claim, credit, refund, replacement grant or extended deadline. */
 function openCarrierConsumer({ startup, config: input, env }) {
 	const config = inspectCarrierWorkerConfig(input), admission = consumeCarrierStartup(startup, config), p = config.plan, t = p.template, keys = carrierObjectKeys(t);
-	need$30(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierScanActorRequired");
+	need$31(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierScanActorRequired");
 	const aggregate = admission.local;
 	try {
 		const root = env.RUNNER_TEMP;
-		need$30(typeof root === "string" && resolve(root) === root && realpathSync(root) === root, "CarrierConsumerDirectory");
+		need$31(typeof root === "string" && resolve(root) === root && realpathSync(root) === root, "CarrierConsumerDirectory");
 		const directory = join(root, "mem9-carrier-consumer-" + nonrootHash({
 			grantHash: config.grantHash,
 			binding: admission.binding,
@@ -176403,13 +176907,13 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			digests: []
 		};
 		const checkJournal = () => {
-			need$30(!closed, "CarrierConsumerHeld");
+			need$31(!closed, "CarrierConsumerHeld");
 			const current = fstatSync(fd), named = lstatSync(path);
-			need$30(current.dev === identity.dev && current.ino === identity.ino && named.ino === identity.ino && named.dev === identity.dev && current.uid === process.getuid() && (current.mode & 511) === 384 && current.nlink === 1, "CarrierConsumerJournalChanged");
+			need$31(current.dev === identity.dev && current.ino === identity.ino && named.ino === identity.ino && named.dev === identity.dev && current.uid === process.getuid() && (current.mode & 511) === 384 && current.nlink === 1, "CarrierConsumerJournalChanged");
 		};
 		const check = () => {
 			aggregate?.checkNormal();
-			need$30(!closed && !held && Date.now() >= p.issuedMs && Date.now() < p.deadlineMs, "CarrierConsumerHeld");
+			need$31(!closed && !held && Date.now() >= p.issuedMs && Date.now() < p.deadlineMs, "CarrierConsumerHeld");
 			checkJournal();
 		};
 		const reserveLocal = (charge) => {
@@ -176421,8 +176925,8 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			}
 			check();
 			exact$9(charge, COUNTERS);
-			need$30(charge.ecrRequests === 0 && charge.httpBodyBytes === 0, "CarrierConsumerLocal");
-			for (const k of COUNTERS) need$30(Number.isSafeInteger(charge[k]) && charge[k] >= 0 && local[k] + charge[k] <= t.fundedLocal.ci[k], "CarrierConsumerLocalLimit");
+			need$31(charge.ecrRequests === 0 && charge.httpBodyBytes === 0, "CarrierConsumerLocal");
+			for (const k of COUNTERS) need$31(Number.isSafeInteger(charge[k]) && charge[k] >= 0 && local[k] + charge[k] <= t.fundedLocal.ci[k], "CarrierConsumerLocalLimit");
 			for (const k of COUNTERS) local[k] += charge[k];
 		};
 		const append = (type, data) => {
@@ -176439,7 +176943,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				type,
 				data
 			}, raw = Buffer.from(JSON.stringify(e) + "\n");
-			if (aggregate) need$30(raw.length <= 16384, "CarrierConsumerRecordSize");
+			if (aggregate) need$31(raw.length <= 16384, "CarrierConsumerRecordSize");
 			else reserveLocal({
 				...zero$6(),
 				logicalBytes: raw.length
@@ -176447,11 +176951,11 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			let at = 0;
 			while (at < raw.length) {
 				const n = writeSync(fd, raw, at, raw.length - at);
-				need$30(n > 0, "CarrierConsumerJournalWrite");
+				need$31(n > 0, "CarrierConsumerJournalWrite");
 				at += n;
 			}
 			fsyncSync(fd);
-			events.push(freeze$2(e));
+			events.push(freeze$3(e));
 			previous = nonrootHash(e);
 			return e;
 		};
@@ -176463,7 +176967,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			allocation: p.budget.ci
 		});
 		const scope = (q, base = false) => {
-			need$30(q.registryId === t.scope.account && q.repositoryName === (base ? t.base.repositoryName : t.scope.repositoryName), "CarrierConsumerRepository");
+			need$31(q.registryId === t.scope.account && q.repositoryName === (base ? t.base.repositoryName : t.scope.repositoryName), "CarrierConsumerRepository");
 		};
 		const register = (d) => {
 			const cost = imageDescriptorDataLocalBytes(d);
@@ -176473,7 +176977,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			});
 			const isManifest = manifests$1.has(d.mediaType), embedded = decodeImageDescriptorData(d, isManifest ? "manifest" : "blob");
 			const old = baseNodes.get(d.digest);
-			if (old?.size !== void 0) need$30(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseDescriptorConflict");
+			if (old?.size !== void 0) need$31(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseDescriptorConflict");
 			baseNodes.set(d.digest, {
 				digest: d.digest,
 				size: d.size,
@@ -176484,7 +176988,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				bytes += d.size ?? 0;
 				manifests$1.has(d.mediaType) || d.size === void 0 ? nm++ : nb++;
 			}
-			need$30(bytes <= t.bounds.compressedBytes && nm <= t.bounds.manifestNodes && nb <= t.bounds.blobNodes, "CarrierBaseGraphBound");
+			need$31(bytes <= t.bounds.compressedBytes && nm <= t.bounds.manifestNodes && nb <= t.bounds.blobNodes, "CarrierBaseGraphBound");
 			if (embedded !== void 0 && !isManifest) baseDone.add(d.digest);
 		};
 		const manifestResponse = (q, r) => {
@@ -176502,62 +177006,62 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				mediaType: image.imageManifestMediaType
 			}, doc = parseAcquisitionJson(bytes, IMAGE_TRANSITION_LIMITS.maxManifestBytes);
 			register(d);
-			need$30(doc.schemaVersion === 2 && doc.mediaType === d.mediaType, "CarrierBaseManifest");
+			need$31(doc.schemaVersion === 2 && doc.mediaType === d.mediaType, "CarrierBaseManifest");
 			if (indexes$1.has(d.mediaType)) {
-				need$30(Array.isArray(doc.manifests) && doc.manifests.length > 0, "CarrierBaseManifest");
+				need$31(Array.isArray(doc.manifests) && doc.manifests.length > 0, "CarrierBaseManifest");
 				for (const child of doc.manifests) register(child);
-				if (wanted === t.base.rootDigest) need$30(doc.manifests.filter((d) => d.digest === t.base.arm64Digest && d.platform?.os === "linux" && d.platform.architecture === "arm64").length === 1, "CarrierBaseArm64");
+				if (wanted === t.base.rootDigest) need$31(doc.manifests.filter((d) => d.digest === t.base.arm64Digest && d.platform?.os === "linux" && d.platform.architecture === "arm64").length === 1, "CarrierBaseArm64");
 			} else {
 				register(doc.config);
-				need$30(Array.isArray(doc.layers), "CarrierBaseManifest");
+				need$31(Array.isArray(doc.layers), "CarrierBaseManifest");
 				for (const child of doc.layers) register(child);
-				if (wanted === t.base.arm64Digest) need$30(doc.config.digest === t.base.configDigest, "CarrierBaseConfig");
+				if (wanted === t.base.arm64Digest) need$31(doc.config.digest === t.base.configDigest, "CarrierBaseConfig");
 			}
 			if (doc.subject) register(doc.subject);
 			baseDone.add(wanted);
 		};
 		const validate = (purpose, action, q) => {
 			const profile = t.profiles[purpose];
-			need$30(CARRIER_PROFILE_ACTIONS[purpose]?.[0] === "ci" && CARRIER_PROFILE_ACTIONS[purpose]?.[1] === action, "CarrierConsumerPurpose");
+			need$31(CARRIER_PROFILE_ACTIONS[purpose]?.[0] === "ci" && CARRIER_PROFILE_ACTIONS[purpose]?.[1] === action, "CarrierConsumerPurpose");
 			if (purpose === "assume") {
-				need$30(phase === "assume", "CarrierConsumerOrder");
+				need$31(phase === "assume", "CarrierConsumerOrder");
 				exact$9(q, [
 					"RoleArn",
 					"RoleSessionName",
 					"DurationSeconds",
 					"Policy"
 				]);
-				need$30(q.RoleArn === t.scope.previewRoleArn && q.DurationSeconds === 2700 && /^carrier-[0-9]+-[0-9]+-[a-f0-9]{16}$/.test(q.RoleSessionName) && typeof q.Policy === "string", "CarrierConsumerAssume");
+				need$31(q.RoleArn === t.scope.previewRoleArn && q.DurationSeconds === 2700 && /^carrier-[0-9]+-[0-9]+-[a-f0-9]{16}$/.test(q.RoleSessionName) && typeof q.Policy === "string", "CarrierConsumerAssume");
 			} else if (purpose === "ciIdentity") {
-				need$30(phase === "identity", "CarrierConsumerOrder");
+				need$31(phase === "identity", "CarrierConsumerOrder");
 				exact$9(q, []);
 			} else if (purpose === "grantGet" || purpose === "contextGet") {
-				need$30(purpose === "grantGet" ? phase === "grant" : phase === "context" && confirmed, "CarrierConsumerOrder");
+				need$31(purpose === "grantGet" ? phase === "grant" : phase === "context" && confirmed, "CarrierConsumerOrder");
 				exact$9(q, [
 					"Bucket",
 					"Key",
 					"ExpectedBucketOwner"
 				]);
-				need$30(q.Bucket === t.scope.bucket && q.Key === keys[purpose === "grantGet" ? "grant" : "context"] && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerObject");
+				need$31(q.Bucket === t.scope.bucket && q.Key === keys[purpose === "grantGet" ? "grant" : "context"] && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerObject");
 			} else if (purpose === "fixtureGet") {
-				need$30(phase === "base" && confirmed && !sqlAcceptance && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerFixtureOrder");
+				need$31(phase === "base" && confirmed && !sqlAcceptance && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerFixtureOrder");
 				exact$9(q, [
 					"Bucket",
 					"Key",
 					"ExpectedBucketOwner"
 				]);
-				need$30(q.Bucket === t.scope.bucket && q.Key === keys.fixture && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerFixtureScope");
+				need$31(q.Bucket === t.scope.bucket && q.Key === keys.fixture && q.ExpectedBucketOwner === t.scope.account, "CarrierConsumerFixtureScope");
 			} else if (purpose === "baseManifest") {
-				need$30(phase === "base" && confirmed, "CarrierConsumerOrder");
+				need$31(phase === "base" && confirmed, "CarrierConsumerOrder");
 				exact$9(q, [
 					"registryId",
 					"repositoryName",
 					"imageIds"
 				]);
 				scope(q, true);
-				need$30(q.imageIds?.length === 1 && Object.keys(q.imageIds[0]).join() === "imageDigest" && baseNodes.has(q.imageIds[0].imageDigest) && !baseDone.has(q.imageIds[0].imageDigest), "CarrierConsumerBaseManifest");
+				need$31(q.imageIds?.length === 1 && Object.keys(q.imageIds[0]).join() === "imageDigest" && baseNodes.has(q.imageIds[0].imageDigest) && !baseDone.has(q.imageIds[0].imageDigest), "CarrierConsumerBaseManifest");
 			} else if (purpose === "baseUrl") {
-				need$30(phase === "base", "CarrierConsumerOrder");
+				need$31(phase === "base", "CarrierConsumerOrder");
 				exact$9(q, [
 					"registryId",
 					"repositoryName",
@@ -176565,18 +177069,18 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				]);
 				scope(q, true);
 				const d = baseNodes.get(q.layerDigest);
-				need$30(d && d.size !== void 0 && !manifests$1.has(d.mediaType) && !baseUrls.has(d.digest) && !baseDone.has(d.digest), "CarrierConsumerBaseBlob");
+				need$31(d && d.size !== void 0 && !manifests$1.has(d.mediaType) && !baseUrls.has(d.digest) && !baseDone.has(d.digest), "CarrierConsumerBaseBlob");
 			} else if (purpose === "baseBlob") {
-				need$30(phase === "base", "CarrierConsumerOrder");
+				need$31(phase === "base", "CarrierConsumerOrder");
 				exact$9(q, ["repositoryName", "layerDigest"]);
-				need$30(q.repositoryName === t.base.repositoryName && baseUrls.has(q.layerDigest) && !baseDone.has(q.layerDigest), "CarrierConsumerBaseBlob");
+				need$31(q.repositoryName === t.base.repositoryName && baseUrls.has(q.layerDigest) && !baseDone.has(q.layerDigest), "CarrierConsumerBaseBlob");
 				const d = baseNodes.get(q.layerDigest), debit = carrierBlobDebit(p, "ci", blobUsage, d);
 				return {
 					caps: debit.caps,
 					blobDebit: debit
 				};
 			} else if (purpose === "availability") {
-				need$30(phase === "output", "CarrierConsumerOrder");
+				need$31(phase === "output", "CarrierConsumerOrder");
 				exact$9(q, [
 					"registryId",
 					"repositoryName",
@@ -176584,14 +177088,14 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				]);
 				scope(q);
 				const want = outputNodes.filter((d) => !manifests$1.has(d.mediaType)).slice(availabilityOffset, availabilityOffset + 100).map((d) => d.digest);
-				need$30(want.length > 0, "CarrierConsumerAvailability");
+				need$31(want.length > 0, "CarrierConsumerAvailability");
 				same(q.layerDigests, want, "CarrierConsumerAvailability");
 			} else if (purpose === "initiate") {
-				need$30(phase === "upload" && !activeUpload && missing.length > 0, "CarrierConsumerOrder");
+				need$31(phase === "upload" && !activeUpload && missing.length > 0, "CarrierConsumerOrder");
 				exact$9(q, ["registryId", "repositoryName"]);
 				scope(q);
 			} else if (purpose === "part") {
-				need$30(phase === "upload" && activeUpload, "CarrierConsumerOrder");
+				need$31(phase === "upload" && activeUpload, "CarrierConsumerOrder");
 				exact$9(q, [
 					"registryId",
 					"repositoryName",
@@ -176602,9 +177106,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				]);
 				scope(q);
 				const u = activeUpload;
-				need$30(q.uploadId === u.id && q.layerPartBlob instanceof Uint8Array && q.partFirstByte === u.offset && q.layerPartBlob.length === Math.min(IMAGE_TRANSITION_LIMITS.uploadPartBytes, u.descriptor.size - u.offset) && q.partLastByte === q.partFirstByte + q.layerPartBlob.length - 1, "CarrierConsumerUploadPart");
+				need$31(q.uploadId === u.id && q.layerPartBlob instanceof Uint8Array && q.partFirstByte === u.offset && q.layerPartBlob.length === Math.min(IMAGE_TRANSITION_LIMITS.uploadPartBytes, u.descriptor.size - u.offset) && q.partLastByte === q.partFirstByte + q.layerPartBlob.length - 1, "CarrierConsumerUploadPart");
 			} else if (purpose === "complete") {
-				need$30(phase === "upload" && activeUpload && activeUpload.offset === activeUpload.descriptor.size, "CarrierConsumerOrder");
+				need$31(phase === "upload" && activeUpload && activeUpload.offset === activeUpload.descriptor.size, "CarrierConsumerOrder");
 				exact$9(q, [
 					"registryId",
 					"repositoryName",
@@ -176612,9 +177116,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 					"layerDigests"
 				]);
 				scope(q);
-				need$30(q.uploadId === activeUpload.id && nonrootHash(q.layerDigests) === nonrootHash([activeUpload.descriptor.digest]) && "sha256:" + activeUpload.digest.digest("hex") === activeUpload.descriptor.digest, "CarrierConsumerUploadComplete");
+				need$31(q.uploadId === activeUpload.id && nonrootHash(q.layerDigests) === nonrootHash([activeUpload.descriptor.digest]) && "sha256:" + activeUpload.digest.digest("hex") === activeUpload.descriptor.digest, "CarrierConsumerUploadComplete");
 			} else if (purpose === "manifestPut") {
-				need$30(phase === "manifests", "CarrierConsumerOrder");
+				need$31(phase === "manifests", "CarrierConsumerOrder");
 				exact$9(q, [
 					"registryId",
 					"repositoryName",
@@ -176624,11 +177128,11 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				]);
 				scope(q);
 				const d = outputNodes.find((d) => d.digest === q.imageDigest);
-				need$30(d && manifests$1.has(d.mediaType) && !published.has(d.digest) && q.imageManifestMediaType === d.mediaType && typeof q.imageManifest === "string" && Buffer.byteLength(q.imageManifest) === d.size && "sha256:" + sha$8(q.imageManifest) === d.digest, "CarrierConsumerPutManifest");
+				need$31(d && manifests$1.has(d.mediaType) && !published.has(d.digest) && q.imageManifestMediaType === d.mediaType && typeof q.imageManifest === "string" && Buffer.byteLength(q.imageManifest) === d.size && "sha256:" + sha$8(q.imageManifest) === d.digest, "CarrierConsumerPutManifest");
 				const doc = parseAcquisitionJson(Buffer.from(q.imageManifest), IMAGE_TRANSITION_LIMITS.maxManifestBytes);
-				for (const child of indexes$1.has(d.mediaType) ? doc.manifests : [doc.config, ...doc.layers]) need$30(manifests$1.has(child.mediaType) ? published.has(child.digest) : available.has(child.digest) || uploaded.has(child.digest), "CarrierConsumerManifestOrder");
+				for (const child of indexes$1.has(d.mediaType) ? doc.manifests : [doc.config, ...doc.layers]) need$31(manifests$1.has(child.mediaType) ? published.has(child.digest) : available.has(child.digest) || uploaded.has(child.digest), "CarrierConsumerManifestOrder");
 			} else if (purpose === "resultPut") {
-				need$30(phase === "result" && preparedResult, "CarrierConsumerOrder");
+				need$31(phase === "result" && preparedResult, "CarrierConsumerOrder");
 				exact$9(q, [
 					"Bucket",
 					"Key",
@@ -176641,7 +177145,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 					"BucketKeyEnabled",
 					"ChecksumSHA256"
 				]);
-				need$30(q.Bucket === t.scope.bucket && q.Key === keys.result && q.ExpectedBucketOwner === t.scope.account && q.IfNoneMatch === "*" && q.ServerSideEncryption === "aws:kms" && q.SSEKMSKeyId === t.scope.kmsKeyArn && q.BucketKeyEnabled === true && q.ContentLength === preparedResult.length && sha$8(q.Body) === sha$8(preparedResult) && q.ChecksumSHA256 === Buffer.from(sha$8(preparedResult), "hex").toString("base64"), "CarrierConsumerResult");
+				need$31(q.Bucket === t.scope.bucket && q.Key === keys.result && q.ExpectedBucketOwner === t.scope.account && q.IfNoneMatch === "*" && q.ServerSideEncryption === "aws:kms" && q.SSEKMSKeyId === t.scope.kmsKeyArn && q.BucketKeyEnabled === true && q.ContentLength === preparedResult.length && sha$8(q.Body) === sha$8(preparedResult) && q.ChecksumSHA256 === Buffer.from(sha$8(preparedResult), "hex").toString("base64"), "CarrierConsumerResult");
 			} else throw Error("CarrierConsumerPurpose");
 			return { caps: {
 				requestBytes: profile.requestBytes,
@@ -176651,10 +177155,10 @@ function openCarrierConsumer({ startup, config: input, env }) {
 		};
 		async function beforeRequest(purpose, action, request) {
 			check();
-			need$30(!current, "CarrierConsumerSerial");
+			need$31(!current, "CarrierConsumerSerial");
 			if (aggregate) {
 				const profile = t.profiles[purpose];
-				need$30(profile && CARRIER_PROFILE_ACTIONS[purpose]?.[0] === "ci", "CarrierConsumerPurpose");
+				need$31(profile && CARRIER_PROFILE_ACTIONS[purpose]?.[0] === "ci", "CarrierConsumerPurpose");
 				const requestBytes = profile.requestBytes ?? 0, responseBytes = purpose === "baseBlob" ? 0 : profile.responseBytes;
 				reserveLocal({
 					...zero$6(),
@@ -176662,7 +177166,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				});
 			}
 			const q = structuredClone(request), allocated = validate(purpose, action, q), profile = t.profiles[purpose], n = (used[purpose] ?? 0) + 1;
-			need$30(n <= (profile.maxRequests ?? profile.count), "CarrierConsumerCalls");
+			need$31(n <= (profile.maxRequests ?? profile.count), "CarrierConsumerCalls");
 			used[purpose] = n;
 			if (allocated.blobDebit) blobUsage = allocated.blobDebit.usage;
 			const b = allocated.blobDebit;
@@ -176684,7 +177188,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			current = intent.sequence;
 			const guard = () => {
 				check();
-				need$30(!settled && current === intent.sequence, "CarrierConsumerReservation");
+				need$31(!settled && current === intent.sequence, "CarrierConsumerReservation");
 			};
 			const unknown = async () => {
 				if (settled) return;
@@ -176706,31 +177210,31 @@ function openCarrierConsumer({ startup, config: input, env }) {
 				finalGuard: guard,
 				charge(n) {
 					guard();
-					need$30(Number.isSafeInteger(n) && n >= 0, "CarrierConsumerCharge");
+					need$31(Number.isSafeInteger(n) && n >= 0, "CarrierConsumerCharge");
 					charged += n;
-					need$30(charged <= allocated.caps.requestBytes + allocated.caps.responseBytes, "CarrierConsumerWireLimit");
+					need$31(charged <= allocated.caps.requestBytes + allocated.caps.responseBytes, "CarrierConsumerWireLimit");
 				},
 				unknown,
 				async complete(r, responseHash) {
 					guard();
-					need$30(/^[a-f0-9]{64}$/.test(responseHash), "CarrierConsumerResponseHash");
+					need$31(/^[a-f0-9]{64}$/.test(responseHash), "CarrierConsumerResponseHash");
 					if (purpose === "assume") {
 						assumedArn = r.AssumedRoleUser?.Arn;
-						need$30(typeof assumedArn === "string" && assumedArn === "arn:aws:sts::" + t.scope.account + ":assumed-role/" + t.scope.previewRoleArn.split("/").at(-1) + "/" + q.RoleSessionName, "CarrierConsumerAssumedIdentity");
+						need$31(typeof assumedArn === "string" && assumedArn === "arn:aws:sts::" + t.scope.account + ":assumed-role/" + t.scope.previewRoleArn.split("/").at(-1) + "/" + q.RoleSessionName, "CarrierConsumerAssumedIdentity");
 						phase = "identity";
 					} else if (purpose === "ciIdentity") {
-						need$30(r.Account === t.scope.account && r.Arn === assumedArn, "CarrierConsumerIdentity");
+						need$31(r.Account === t.scope.account && r.Arn === assumedArn, "CarrierConsumerIdentity");
 						phase = "grant";
 					} else if (purpose === "grantGet" || purpose === "contextGet") {
-						need$30(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
+						need$31(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
 						if (purpose === "contextGet") {
-							need$30(r.ContentLength === p.context.bytesLength && responseHash === p.context.sha256, "CarrierConsumerContextHash");
+							need$31(r.ContentLength === p.context.bytesLength && responseHash === p.context.sha256, "CarrierConsumerContextHash");
 							phase = "base";
 						}
-					} else if (purpose === "fixtureGet") need$30(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true && r.ContentLength === t.sqlFixture.archive.bytesLength && responseHash === t.sqlFixture.archive.sha256, "CarrierConsumerFixtureResponse");
+					} else if (purpose === "fixtureGet") need$31(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true && r.ContentLength === t.sqlFixture.archive.bytesLength && responseHash === t.sqlFixture.archive.sha256, "CarrierConsumerFixtureResponse");
 					else if (purpose === "baseManifest") manifestResponse(q, r);
 					else if (purpose === "baseUrl") {
-						need$30(r.layerDigest === q.layerDigest, "CarrierConsumerUrlDigest");
+						need$31(r.layerDigest === q.layerDigest, "CarrierConsumerUrlDigest");
 						baseUrls.add(q.layerDigest);
 					} else if (purpose === "baseBlob") {
 						const d = baseNodes.get(q.layerDigest);
@@ -176739,17 +177243,17 @@ function openCarrierConsumer({ startup, config: input, env }) {
 							layerDigest: d.digest,
 							size: d.size
 						}, "CarrierConsumerBlobResponse");
-						need$30(responseHash === d.digest.slice(7), "CarrierConsumerBlobHash");
+						need$31(responseHash === d.digest.slice(7), "CarrierConsumerBlobHash");
 						baseDone.add(d.digest);
 					} else if (purpose === "availability") {
-						need$30(Array.isArray(r.layers) && Array.isArray(r.failures) && r.failures.length === 0 && r.layers.length === q.layerDigests.length, "CarrierConsumerAvailabilityResponse");
+						need$31(Array.isArray(r.layers) && Array.isArray(r.failures) && r.failures.length === 0 && r.layers.length === q.layerDigests.length, "CarrierConsumerAvailabilityResponse");
 						const seen = /* @__PURE__ */ new Set();
 						for (const row of r.layers) {
-							need$30(q.layerDigests.includes(row.layerDigest) && !seen.has(row.layerDigest) && ["AVAILABLE", "UNAVAILABLE"].includes(row.layerAvailability), "CarrierConsumerAvailabilityResponse");
+							need$31(q.layerDigests.includes(row.layerDigest) && !seen.has(row.layerDigest) && ["AVAILABLE", "UNAVAILABLE"].includes(row.layerAvailability), "CarrierConsumerAvailabilityResponse");
 							seen.add(row.layerDigest);
 							const d = outputNodes.find((d) => d.digest === row.layerDigest);
 							if (row.layerAvailability === "AVAILABLE") {
-								need$30(row.layerSize === d.size, "CarrierConsumerLayerSize");
+								need$31(row.layerSize === d.size, "CarrierConsumerLayerSize");
 								available.add(d.digest);
 							} else missing.push(d);
 						}
@@ -176759,7 +177263,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 							phase = missing.length ? "upload" : "manifests";
 						}
 					} else if (purpose === "initiate") {
-						need$30(r.repositoryName === q.repositoryName && r.registryId === q.registryId && /^[a-f0-9-]{36}$/i.test(r.uploadId ?? "") && !uploadIds.has(r.uploadId.toLowerCase()) && Number.isSafeInteger(r.partSize) && r.partSize >= IMAGE_TRANSITION_LIMITS.uploadPartBytes, "CarrierConsumerInitiateResponse");
+						need$31(r.repositoryName === q.repositoryName && r.registryId === q.registryId && /^[a-f0-9-]{36}$/i.test(r.uploadId ?? "") && !uploadIds.has(r.uploadId.toLowerCase()) && Number.isSafeInteger(r.partSize) && r.partSize >= IMAGE_TRANSITION_LIMITS.uploadPartBytes, "CarrierConsumerInitiateResponse");
 						uploadIds.add(r.uploadId.toLowerCase());
 						activeUpload = {
 							id: r.uploadId,
@@ -176768,21 +177272,21 @@ function openCarrierConsumer({ startup, config: input, env }) {
 							digest: createHash("sha256")
 						};
 					} else if (purpose === "part") {
-						need$30(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.lastByteReceived === q.partLastByte, "CarrierConsumerPartResponse");
+						need$31(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.lastByteReceived === q.partLastByte, "CarrierConsumerPartResponse");
 						activeUpload.digest.update(q.layerPartBlob);
 						activeUpload.offset += q.layerPartBlob.length;
 					} else if (purpose === "complete") {
-						need$30(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.layerDigest === activeUpload.descriptor.digest, "CarrierConsumerCompleteResponse");
+						need$31(r.repositoryName === q.repositoryName && r.registryId === q.registryId && r.uploadId === q.uploadId && r.layerDigest === activeUpload.descriptor.digest, "CarrierConsumerCompleteResponse");
 						uploaded.add(r.layerDigest);
 						missing.shift();
 						activeUpload = void 0;
 						if (!missing.length) phase = "manifests";
 					} else if (purpose === "manifestPut") {
-						need$30(r.image?.registryId === q.registryId && r.image?.repositoryName === q.repositoryName && r.image?.imageId?.imageDigest === q.imageDigest, "CarrierConsumerPutImageResponse");
+						need$31(r.image?.registryId === q.registryId && r.image?.repositoryName === q.repositoryName && r.image?.imageId?.imageDigest === q.imageDigest, "CarrierConsumerPutImageResponse");
 						published.add(q.imageDigest);
 						if (published.size === outputNodes.filter((d) => manifests$1.has(d.mediaType)).length) phase = "result";
 					} else if (purpose === "resultPut") {
-						need$30(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
+						need$31(r.ServerSideEncryption === "aws:kms" && r.SSEKMSKeyId === t.scope.kmsKeyArn && r.BucketKeyEnabled === true, "CarrierConsumerEncryption");
 						phase = "published";
 					}
 					wire.httpBodyBytes += charged;
@@ -176813,7 +177317,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			assertLocalStage(type, cost) {
 				check();
 				if (!aggregate) return;
-				need$30(["build", "sql"].includes(type) && Number.isSafeInteger(cost) && cost >= 0, "CarrierLocalStage");
+				need$31(["build", "sql"].includes(type) && Number.isSafeInteger(cost) && cost >= 0, "CarrierLocalStage");
 				if (cost + aggregate.policy.recordChargeBytes > aggregate.snapshot().normalRemaining) {
 					aggregate.hold();
 					throw Error("CarrierLocalStageUnavailable");
@@ -176826,7 +177330,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			},
 			confirmGrant(grant) {
 				check();
-				need$30(phase === "grant" && !current && !confirmed && used.grantGet === 1, "CarrierConsumerGrantOrder");
+				need$31(phase === "grant" && !current && !confirmed && used.grantGet === 1, "CarrierConsumerGrantOrder");
 				const verified = verifyCarrierBeforeCopyGrant(grant, {
 					...config,
 					now: Date.now()
@@ -176842,14 +177346,14 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			},
 			async bindSqlAcceptance(handle, built) {
 				check();
-				need$30(phase === "base" && !current && !output && !sqlAcceptance && used.fixtureGet === 1, "CarrierConsumerSqlOrder");
+				need$31(phase === "base" && !current && !output && !sqlAcceptance && used.fixtureGet === 1, "CarrierConsumerSqlOrder");
 				const { inspectCompletedCarrierSqlAcceptance } = await Promise.resolve().then(() => (init_ci_carrier_sql_acceptance(), ci_carrier_sql_acceptance_exports));
 				check();
 				const value = inspectCompletedCarrierSqlAcceptance(handle, {
 					built,
 					consumer: api
 				});
-				need$30(value.record.templateHash === p.templateHash && value.record.contextHash === p.context.sha256, "CarrierConsumerSqlBinding");
+				need$31(value.record.templateHash === p.templateHash && value.record.contextHash === p.context.sha256, "CarrierConsumerSqlBinding");
 				sqlAcceptance = value;
 				sqlBuilt = built;
 				append("sql-accepted", {
@@ -176859,9 +177363,9 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			},
 			bindBuilt(handle) {
 				check();
-				need$30(phase === "base" && !current && !output && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerBaseIncomplete");
+				need$31(phase === "base" && !current && !output && [...baseNodes.keys()].every((d) => baseDone.has(d)), "CarrierConsumerBaseIncomplete");
 				const built = inspectCarrierOfflineBuild(handle);
-				need$30(built.record.templateHash === config.templateHash && built.record.contextHash === p.context.sha256 && (!sqlAcceptance || sqlBuilt === handle), "CarrierConsumerBuildBinding");
+				need$31(built.record.templateHash === config.templateHash && built.record.contextHash === p.context.sha256 && (!sqlAcceptance || sqlBuilt === handle), "CarrierConsumerBuildBinding");
 				assertImageFilesystemUncompressedLimit(built.filesystem, t.bounds.uncompressedBytes);
 				assertImageFilesystemEntryLimit(built.filesystem, t.bounds.processedEntries);
 				output = built;
@@ -176875,7 +177379,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			},
 			prepareResult() {
 				check();
-				need$30(phase === "result" && !current && !preparedResult, "CarrierConsumerResultOrder");
+				need$31(phase === "result" && !current && !preparedResult, "CarrierConsumerResultOrder");
 				const { record, graph } = output;
 				const claim = carrierCheckpointSelection(p, admission.binding, Object.fromEntries([
 					"nonce",
@@ -176883,7 +177387,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 					"artifactId",
 					"artifactDigest"
 				].map((k) => [k, admission.receipt[k]]))).claim;
-				need$30(sqlAcceptance, "CarrierConsumerSqlRequired");
+				need$31(sqlAcceptance, "CarrierConsumerSqlRequired");
 				if (aggregate) reserveLocal({
 					...zero$6(),
 					logicalBytes: 8 * t.bounds.resultBytes
@@ -176914,7 +177418,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 					claim
 				});
 				preparedResult = Buffer.from(JSON.stringify(result));
-				need$30(preparedResult.length <= t.bounds.resultBytes, "CarrierConsumerResultSize");
+				need$31(preparedResult.length <= t.bounds.resultBytes, "CarrierConsumerResultSize");
 				if (!aggregate) reserveLocal({
 					...zero$6(),
 					logicalBytes: preparedResult.length
@@ -176923,7 +177427,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			},
 			async close({ cleanupConfirmed = false } = {}) {
 				if (closed) return;
-				need$30(!current, "CarrierConsumerActive");
+				need$31(!current, "CarrierConsumerActive");
 				try {
 					if (aggregate) {
 						await drainCarrierLocalCounter(admission.localCounter);
@@ -176937,7 +177441,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 			},
 			inspect() {
 				check();
-				return freeze$2({
+				return freeze$3({
 					phase,
 					local: { ...local },
 					wire: { ...wire },
@@ -176958,7 +177462,7 @@ function openCarrierConsumer({ startup, config: input, env }) {
 }
 function assertCarrierConsumer(value) {
 	const s = handles.get(value);
-	need$30(s, "CarrierConsumerHandle");
+	need$31(s, "CarrierConsumerHandle");
 	s.check();
 	return value;
 }
@@ -176986,7 +177490,7 @@ var init_ci_carrier_consumer = __esmMin((() => {
 		sha256: sha$8(v),
 		bytesLength: Buffer.byteLength(v)
 	} : v]));
-	same = (a, b, c) => need$30(nonrootHash(a) === nonrootHash(b), c);
+	same = (a, b, c) => need$31(nonrootHash(a) === nonrootHash(b), c);
 }));
 //#endregion
 //#region node_modules/@aws-sdk/client-sts/dist-cjs/index.js
@@ -178732,30 +179236,30 @@ function carrierSessionPolicy(plan) {
 		Version: "2012-10-17",
 		Statement
 	});
-	need$30(Buffer.byteLength(Policy) <= 2048, "CarrierSessionPolicySize");
+	need$31(Buffer.byteLength(Policy) <= 2048, "CarrierSessionPolicySize");
 	return Policy;
 }
 function oidcLocation(env) {
-	need$30(env.ACTIONS_ID_TOKEN_REQUEST_URL === process.env.ACTIONS_ID_TOKEN_REQUEST_URL && env.ACTIONS_ID_TOKEN_REQUEST_TOKEN === process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN, "CarrierOidcEnvironment");
+	need$31(env.ACTIONS_ID_TOKEN_REQUEST_URL === process.env.ACTIONS_ID_TOKEN_REQUEST_URL && env.ACTIONS_ID_TOKEN_REQUEST_TOKEN === process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN, "CarrierOidcEnvironment");
 	const u = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL), uuid = "[a-fA-F0-9-]{36}";
-	need$30(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && /^[a-z0-9-]+\.actions\.githubusercontent\.com$/.test(u.hostname) && new RegExp("^/[A-Za-z0-9_-]+/_apis/distributedtask/hubs/build/plans/" + uuid + "/jobs/" + uuid + "/idtoken$").test(u.pathname), "CarrierOidcEndpoint");
+	need$31(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && /^[a-z0-9-]+\.actions\.githubusercontent\.com$/.test(u.hostname) && new RegExp("^/[A-Za-z0-9_-]+/_apis/distributedtask/hubs/build/plans/" + uuid + "/jobs/" + uuid + "/idtoken$").test(u.pathname), "CarrierOidcEndpoint");
 	const ks = [...u.searchParams.keys()];
-	need$30(new Set(ks).size === ks.length && ks.every((k) => ["api-version", "audience"].includes(k)) && u.searchParams.get("api-version") === "2.0" && (!u.searchParams.has("audience") || u.searchParams.get("audience") === "sts.amazonaws.com"), "CarrierOidcEndpoint");
+	need$31(new Set(ks).size === ks.length && ks.every((k) => ["api-version", "audience"].includes(k)) && u.searchParams.get("api-version") === "2.0" && (!u.searchParams.has("audience") || u.searchParams.get("audience") === "sts.amazonaws.com"), "CarrierOidcEndpoint");
 	u.searchParams.set("audience", "sts.amazonaws.com");
 	return u;
 }
 function blobLocation(value, region) {
 	const u = new URL(value);
-	need$30(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && ["prod-" + region + "-starport-layer-bucket.s3." + region + ".amazonaws.com", "prod-" + region + "-starport-layer-bucket.s3-" + region + ".amazonaws.com"].includes(u.hostname), "CarrierBlobEndpoint");
+	need$31(u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash && ["prod-" + region + "-starport-layer-bucket.s3." + region + ".amazonaws.com", "prod-" + region + "-starport-layer-bucket.s3-" + region + ".amazonaws.com"].includes(u.hostname), "CarrierBlobEndpoint");
 	const q = u.searchParams, date = q.get("X-Amz-Date"), expiry = q.get("X-Amz-Expires");
-	need$30(new Set(q.keys()).size === [...q.keys()].length && q.get("X-Amz-Algorithm") === "AWS4-HMAC-SHA256" && /^\d{8}T\d{6}Z$/.test(date ?? "") && /^[1-9][0-9]*$/.test(expiry ?? "") && Number(expiry) <= 604800 && q.get("X-Amz-SignedHeaders") === "host" && /^[a-f0-9]{64}$/.test(q.get("X-Amz-Signature") ?? "") && q.get("X-Amz-Credential")?.endsWith("/" + date.slice(0, 8) + "/" + region + "/s3/aws4_request"), "CarrierBlobSignature");
+	need$31(new Set(q.keys()).size === [...q.keys()].length && q.get("X-Amz-Algorithm") === "AWS4-HMAC-SHA256" && /^\d{8}T\d{6}Z$/.test(date ?? "") && /^[1-9][0-9]*$/.test(expiry ?? "") && Number(expiry) <= 604800 && q.get("X-Amz-SignedHeaders") === "host" && /^[a-f0-9]{64}$/.test(q.get("X-Amz-Signature") ?? "") && q.get("X-Amz-Credential")?.endsWith("/" + date.slice(0, 8) + "/" + region + "/s3/aws4_request"), "CarrierBlobSignature");
 	const at = Date.parse(date.slice(0, 4) + "-" + date.slice(4, 6) + "-" + date.slice(6, 8) + "T" + date.slice(9, 11) + ":" + date.slice(11, 13) + ":" + date.slice(13, 15) + "Z");
-	need$30(at <= Date.now() + 3e4 && Date.now() < at + Number(expiry) * 1e3, "CarrierBlobExpired");
+	need$31(at <= Date.now() + 3e4 && Date.now() < at + Number(expiry) * 1e3, "CarrierBlobExpired");
 	return u;
 }
 function createCarrierTransport({ consumer, env }, seams = {}) {
 	assertCarrierConsumer(consumer);
-	need$30(Object.keys(seams).every((k) => k === "requestHandler" || k === "oidcLocation"), "CarrierTransportSeams");
+	need$31(Object.keys(seams).every((k) => k === "requestHandler" || k === "oidcLocation"), "CarrierTransportSeams");
 	const { config, binding } = consumer.admission, p = config.plan, t = p.template, q = t.scope, keys = carrierObjectKeys(t), agent = seams.requestHandler ? null : new Agent({
 		keepAlive: false,
 		maxSockets: 1,
@@ -178770,25 +179274,25 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 	const streams = /* @__PURE__ */ new Set(), downloads = /* @__PURE__ */ new Map(), clients = [], secretBuffers = /* @__PURE__ */ new Set();
 	const check = () => {
 		consumer.check();
-		need$30(!closed && !held && Date.now() < credentialDeadline, "CarrierTransportHeld");
+		need$31(!closed && !held && Date.now() < credentialDeadline, "CarrierTransportHeld");
 	};
 	const timeout = () => AbortSignal.timeout(Math.max(1, Math.min(3e4, p.deadlineMs - Date.now(), credentialDeadline - Date.now())));
 	async function exchange(request, options = {}) {
 		check();
 		const c = current;
-		need$30(c && !c.dispatched, "CarrierTransportReservation");
+		need$31(c && !c.dispatched, "CarrierTransportReservation");
 		const expected = c.service === "oidc" ? c.oidc.hostname : c.service === "blob" ? c.location.hostname : (c.service === "ecr" ? "api.ecr" : c.service) + "." + q.region + ".amazonaws.com";
-		need$30(request.protocol === "https:" && request.hostname === expected && !request.port, "CarrierTransportEndpoint");
-		need$30(request.path === (c.service === "oidc" ? c.oidc.pathname : c.service === "blob" ? c.location.pathname : c.service === "s3" ? "/" + q.bucket + "/" + c.key : "/"), "CarrierTransportPath");
-		need$30(request.method === (c.service === "oidc" || c.service === "blob" || c.action === "GetObject" ? "GET" : c.action === "PutObject" ? "PUT" : "POST"), "CarrierTransportMethod");
+		need$31(request.protocol === "https:" && request.hostname === expected && !request.port, "CarrierTransportEndpoint");
+		need$31(request.path === (c.service === "oidc" ? c.oidc.pathname : c.service === "blob" ? c.location.pathname : c.service === "s3" ? "/" + q.bucket + "/" + c.key : "/"), "CarrierTransportPath");
+		need$31(request.method === (c.service === "oidc" || c.service === "blob" || c.action === "GetObject" ? "GET" : c.action === "PutObject" ? "PUT" : "POST"), "CarrierTransportMethod");
 		if (c.service === "s3") {
-			need$30(request.headers["x-amz-expected-bucket-owner"] === q.account && Object.keys(request.query ?? {}).every((k) => k === "x-id"), "CarrierTransportS3Owner");
-			if (c.action === "PutObject") need$30(request.headers["if-none-match"] === "*" && request.headers["x-amz-server-side-encryption"] === "aws:kms" && request.headers["x-amz-server-side-encryption-aws-kms-key-id"] === q.kmsKeyArn && request.headers["x-amz-server-side-encryption-bucket-key-enabled"] === "true", "CarrierTransportS3Protection");
+			need$31(request.headers["x-amz-expected-bucket-owner"] === q.account && Object.keys(request.query ?? {}).every((k) => k === "x-id"), "CarrierTransportS3Owner");
+			if (c.action === "PutObject") need$31(request.headers["if-none-match"] === "*" && request.headers["x-amz-server-side-encryption"] === "aws:kms" && request.headers["x-amz-server-side-encryption-aws-kms-key-id"] === q.kmsKeyArn && request.headers["x-amz-server-side-encryption-bucket-key-enabled"] === "true", "CarrierTransportS3Protection");
 		}
-		if (c.service === "ecr") need$30(request.headers["x-amz-target"] === "AmazonEC2ContainerRegistry_V20150921." + c.action && Object.keys(request.query ?? {}).length === 0, "CarrierTransportEcrTarget");
+		if (c.service === "ecr") need$31(request.headers["x-amz-target"] === "AmazonEC2ContainerRegistry_V20150921." + c.action && Object.keys(request.query ?? {}).length === 0, "CarrierTransportEcrTarget");
 		const body = request.body === void 0 ? Buffer.alloc(0) : Buffer.from(request.body);
 		c.requestBytes += body.length;
-		need$30(c.requestBytes <= c.reservation.caps.requestBytes, "CarrierTransportRequestLimit");
+		need$31(c.requestBytes <= c.reservation.caps.requestBytes, "CarrierTransportRequestLimit");
 		c.reservation.finalGuard();
 		c.reservation.charge(body.length);
 		c.dispatched = true;
@@ -178796,7 +179300,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 			...options,
 			abortSignal: options.abortSignal ?? timeout()
 		})).response;
-		need$30(r && Number.isInteger(r.statusCode) && r.body instanceof Readable, "CarrierTransportResponse");
+		need$31(r && Number.isInteger(r.statusCode) && r.body instanceof Readable, "CarrierTransportResponse");
 		streams.add(r.body);
 		r.body.once("close", () => streams.delete(r.body));
 		const digest = createHash("sha256"), chunks = [];
@@ -178805,16 +179309,16 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 			try {
 				for await (const v of r.body) {
 					check();
-					need$30(v instanceof Uint8Array, "CarrierTransportBody");
+					need$31(v instanceof Uint8Array, "CarrierTransportBody");
 					const b = Buffer.from(v);
 					received += b.length;
 					c.responseBytes += b.length;
 					c.reservation.charge(b.length);
-					need$30(c.responseBytes <= c.reservation.caps.responseBytes, "CarrierTransportResponseLimit");
+					need$31(c.responseBytes <= c.reservation.caps.responseBytes, "CarrierTransportResponseLimit");
 					digest.update(b);
 					yield b;
 				}
-				if (r.headers?.["content-length"] !== void 0) need$30(/^(?:0|[1-9][0-9]*)$/.test(String(r.headers["content-length"])) && Number(r.headers["content-length"]) === received, "CarrierTransportLength");
+				if (r.headers?.["content-length"] !== void 0) need$31(/^(?:0|[1-9][0-9]*)$/.test(String(r.headers["content-length"])) && Number(r.headers["content-length"]) === received, "CarrierTransportLength");
 			} finally {
 				r.body.destroy();
 			}
@@ -178822,14 +179326,14 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 		try {
 			if (c.consume && r.statusCode === 200) c.consumed = await c.consume(stream);
 			else for await (const b of stream) {
-				need$30(received <= 33554432, "CarrierTransportMetadataLimit");
+				need$31(received <= 33554432, "CarrierTransportMetadataLimit");
 				chunks.push(b);
 			}
 		} finally {
 			await stream.return?.();
 		}
 		c.responseHash = digest.digest("hex");
-		need$30(r.statusCode === 200, "CarrierTransportHttp");
+		need$31(r.statusCode === 200, "CarrierTransportHttp");
 		c.status = 200;
 		const raw = Buffer.concat(chunks);
 		if (c.service === "ecr" || c.service === "oidc") c.raw = raw;
@@ -178845,7 +179349,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 		maxAttempts: 1,
 		credentials: async () => {
 			check();
-			need$30(credentials, "CarrierNoAmbientCredentials");
+			need$31(credentials, "CarrierNoAmbientCredentials");
 			return credentials;
 		},
 		requestHandler: {
@@ -178867,7 +179371,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 	clients.push(sts, s3);
 	async function call(purpose, service, action, input, send, { consume, key, location } = {}) {
 		check();
-		need$30(!current, "CarrierTransportSerial");
+		need$31(!current, "CarrierTransportSerial");
 		const request = structuredClone(input), reservation = await consumer.beforeRequest(purpose, action, request);
 		current = {
 			service,
@@ -178883,7 +179387,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 		const c = current;
 		try {
 			const result = await send(request, c);
-			need$30(c.status === 200 && c.responseHash, "CarrierTransportIncomplete");
+			need$31(c.status === 200 && c.responseHash, "CarrierTransportIncomplete");
 			await reservation.complete(Object.fromEntries(Object.entries(result).filter(([k]) => k !== "Body")), c.responseHash);
 			result.Body?.destroy();
 			return consume ? c.consumed : result;
@@ -178949,7 +179453,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 					}
 				}, { abortSignal: timeout() })).response.body.destroy();
 				const token = parseAcquisitionJson(c.raw, 131072);
-				need$30(typeof token.value === "string" && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token.value), "CarrierOidcToken");
+				need$31(typeof token.value === "string" && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token.value), "CarrierOidcToken");
 				c.service = "sts";
 				c.dispatched = false;
 				let response, command = new import_dist_cjs$1.AssumeRoleWithWebIdentityCommand({
@@ -178964,7 +179468,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 					c.raw?.fill(0);
 				}
 				const v = response.Credentials;
-				need$30(v && typeof v.AccessKeyId === "string" && /^ASIA[A-Z0-9]{16}$/.test(v.AccessKeyId) && typeof v.SecretAccessKey === "string" && v.SecretAccessKey.length === 40 && typeof v.SessionToken === "string" && v.SessionToken.length > 0 && v.Expiration instanceof Date && v.Expiration.getTime() >= p.deadlineMs && v.Expiration.getTime() <= Date.now() + 2705e3, "CarrierSessionCredentials");
+				need$31(v && typeof v.AccessKeyId === "string" && /^ASIA[A-Z0-9]{16}$/.test(v.AccessKeyId) && typeof v.SecretAccessKey === "string" && v.SecretAccessKey.length === 40 && typeof v.SessionToken === "string" && v.SessionToken.length > 0 && v.Expiration instanceof Date && v.Expiration.getTime() >= p.deadlineMs && v.Expiration.getTime() <= Date.now() + 2705e3, "CarrierSessionCredentials");
 				credentialDeadline = Math.min(p.deadlineMs, v.Expiration.getTime());
 				credentials = {
 					accessKeyId: v.AccessKeyId,
@@ -178987,7 +179491,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 				let n = 0;
 				for await (const b of stream) {
 					n += b.length;
-					need$30(n <= t.bounds.grantBytes, "CarrierGrantBytes");
+					need$31(n <= t.bounds.grantBytes, "CarrierGrantBytes");
 					all.push(b);
 				}
 				consumer.reserveLocal({
@@ -179017,7 +179521,7 @@ function createCarrierTransport({ consumer, env }, seams = {}) {
 				layerDigest: d.digest
 			})).downloadUrl, q.region);
 			downloads.set(d.digest, location);
-			need$30(downloads.has(d.digest), "CarrierBlobLocation");
+			need$31(downloads.has(d.digest), "CarrierBlobLocation");
 			downloads.delete(d.digest);
 			return call("baseBlob", "blob", "S3BlobGet", {
 				repositoryName: t.base.repositoryName,
@@ -179154,16 +179658,16 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 			for await (const b of stream) {
 				consumer.check();
 				count += b.length;
-				need$30(count <= d.size, "CarrierBaseSize");
+				need$31(count <= d.size, "CarrierBaseSize");
 				digest.update(b);
 				let at = 0;
 				while (at < b.length) {
 					const r = await fd.write(b, at, b.length - at);
-					need$30(r.bytesWritten > 0, "CarrierBaseWrite");
+					need$31(r.bytesWritten > 0, "CarrierBaseWrite");
 					at += r.bytesWritten;
 				}
 			}
-			need$30(count === d.size && "sha256:" + digest.digest("hex") === d.digest, "CarrierBaseDigest");
+			need$31(count === d.size && "sha256:" + digest.digest("hex") === d.digest, "CarrierBaseDigest");
 			await fd.sync();
 		} finally {
 			await fd.close();
@@ -179177,7 +179681,7 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 		});
 		const embedded = decodeImageDescriptorData(d, manifests.has(d.mediaType) ? "manifest" : "blob");
 		const old = nodes.get(d.digest);
-		if (old) need$30(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseConflict");
+		if (old) need$31(old.size === d.size && old.mediaType === d.mediaType, "CarrierBaseConflict");
 		nodes.set(d.digest, {
 			digest: d.digest,
 			size: d.size,
@@ -179188,7 +179692,7 @@ async function collectCarrierBase({ consumer, transport, tempRoot }) {
 	const visit = async (wanted) => {
 		consumer.check();
 		if (done.has(wanted.digest)) return;
-		need$30(!visiting.has(wanted.digest) && visiting.size <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "CarrierBaseCycle");
+		need$31(!visiting.has(wanted.digest) && visiting.size <= IMAGE_TRANSITION_LIMITS.maxGraphDepth, "CarrierBaseCycle");
 		visiting.add(wanted.digest);
 		const { image, raw } = normalizeImageDigestResponse(await transport.baseManifest(wanted), {
 			registryId: t.base.account,
@@ -179300,7 +179804,7 @@ async function publishBuilt({ built, consumer, transport }) {
 			});
 			offset += b.length;
 		}
-		need$30(offset === d.size, "CarrierUploadSize");
+		need$31(offset === d.size, "CarrierUploadSize");
 		await transport.complete({
 			uploadId: initiated.uploadId,
 			layerDigests: [d.digest]
@@ -179313,7 +179817,7 @@ async function publishBuilt({ built, consumer, transport }) {
 		let bytes = 0;
 		for await (const b of state.store.open(d)) {
 			bytes += b.length;
-			need$30(bytes <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "CarrierUploadManifest");
+			need$31(bytes <= IMAGE_TRANSITION_LIMITS.maxManifestBytes, "CarrierUploadManifest");
 			raw.push(b);
 		}
 		const body = Buffer.concat(raw, bytes), doc = parseAcquisitionJson(body, IMAGE_TRANSITION_LIMITS.maxManifestBytes);
@@ -179327,12 +179831,12 @@ async function publishBuilt({ built, consumer, transport }) {
 		done.add(d.digest);
 	};
 	await put(state.roots[0].root);
-	need$30(done.size === nodes.filter((d) => manifests.has(d.mediaType)).length, "CarrierPublicationIncomplete");
+	need$31(done.size === nodes.filter((d) => manifests.has(d.mediaType)).length, "CarrierPublicationIncomplete");
 	return image;
 }
 async function runCarrierBeforeCopy(env = process.env, seams = {}) {
-	need$30(process.platform === "linux" && process.arch === "arm64", "CarrierWorkerNativeArm64");
-	need$30(Object.keys(seams).every((k) => [
+	need$31(process.platform === "linux" && process.arch === "arm64", "CarrierWorkerNativeArm64");
+	need$31(Object.keys(seams).every((k) => [
 		"host",
 		"startup",
 		"transport"
@@ -179340,11 +179844,11 @@ async function runCarrierBeforeCopy(env = process.env, seams = {}) {
 	const config = inspectCarrierWorkerConfig(env.MEM9_CARRIER_WORKER_CONFIG);
 	assertCarrierSqlDatabasePin(config.plan.template.sqlFixture);
 	const pgLocal = carrierSqlFixtureBudget(config.plan.template).packageAndImportLocal.ci;
-	for (const [key, value] of Object.entries(pgLocal)) need$30(config.plan.template.fundedLocal.ci[key] >= value, "CarrierWorkerPgLocalBudget");
+	for (const [key, value] of Object.entries(pgLocal)) need$31(config.plan.template.fundedLocal.ci[key] >= value, "CarrierWorkerPgLocalBudget");
 	const runtimeFixed = carrierSqlRuntimeFixedBudget().total;
-	for (const key of Object.keys(pgLocal)) need$30(config.plan.template.fundedLocal.ci[key] >= pgLocal[key] + runtimeFixed[key], "CarrierWorkerSqlRuntimeBudget");
-	need$30(env.INPUT_GRANT_COMMITMENT === config.grantHash && env.INPUT_CONTEXT_COMMITMENT === config.plan.context.sha256, "CarrierDispatchCommitments");
-	need$30(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierOwnerScanRequired");
+	for (const key of Object.keys(pgLocal)) need$31(config.plan.template.fundedLocal.ci[key] >= pgLocal[key] + runtimeFixed[key], "CarrierWorkerSqlRuntimeBudget");
+	need$31(env.INPUT_GRANT_COMMITMENT === config.grantHash && env.INPUT_CONTEXT_COMMITMENT === config.plan.context.sha256, "CarrierDispatchCommitments");
+	need$31(CARRIER_PROFILE_ACTIONS.scan[0] === "owner", "CarrierOwnerScanRequired");
 	carrierSessionPolicy(config.plan);
 	let consumer, transport, context, base, derived, built, result, databasePackage, fixture, published = false, problem;
 	try {

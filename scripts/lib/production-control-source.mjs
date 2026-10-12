@@ -64,20 +64,21 @@ function copySources(text){
 /** Exact COPY expansion against the authenticated complete tree. This is the
  * declared recipe; the build launcher separately rejects untracked matches. */
 export async function describeControlCopyClosure(context){
- const state=contexts.get(context);need(state);const dockerfile=await readControlSourceFile(context,'docker/bootstrap/Dockerfile'),paths=new Set();
+ const state=contexts.get(context);need(state);const dockerfile=await readControlSourceFile(context,'docker/bootstrap/Dockerfile');assertControlSourceCurrent(context);const paths=new Set();
  for(const source of copySources(new TextDecoder('utf-8',{fatal:true}).decode(dockerfile.bytes))){
   const pattern=new RegExp('^'+source.split('*').map(RegExp.escape).join('[^/]*')+'$');
   const matches=[...state.files.keys()].filter(path=>source.endsWith('/')?path.startsWith(source):pattern.test(path));need(matches.length>0);
   for(const path of matches)paths.add(path);
  }
- const files=[];for(const path of [...paths].sort())files.push((await readControlSourceFile(context,path)).file);
+ const files=[];for(const path of [...paths].sort()){const file=await readControlSourceFile(context,path);assertControlSourceCurrent(context);files.push(file.file);}
  return inspectNonrootRecord('SourceClosureV1',{version:1,kind:'git-file-closure',tree:state.tree,files,closureHash:nonrootHash(files)});
 }
 
-export async function verifyControlSourceClosure(context,closure,{copyContext=false}={}){
+export async function verifyControlSourceClosure(context,closure,{copyContext=false,assertCurrent}={}){
+ checkCurrent(assertCurrent);assertControlSourceCurrent(context);
  const state=contexts.get(context);need(state);const checked=inspectNonrootRecord('SourceClosureV1',closure);need(checked.tree===state.tree);
- for(const file of checked.files)need(nonrootHash((await readControlSourceFile(context,file.path)).file)===nonrootHash(file));
- if(copyContext)need(nonrootHash(await describeControlCopyClosure(context))===nonrootHash(checked));
+ for(const file of checked.files){const read=await readControlSourceFile(context,file.path);checkCurrent(assertCurrent);assertControlSourceCurrent(context);need(nonrootHash(read.file)===nonrootHash(file));}
+ if(copyContext){const described=await describeControlCopyClosure(context);checkCurrent(assertCurrent);assertControlSourceCurrent(context);need(nonrootHash(described)===nonrootHash(checked));}
  return checked;
 }
 

@@ -1,6 +1,8 @@
 /** Fixed CONTROL runtime provider. The remote meter bounds work already paid
  * by the host before RunTask; delivery JSON grants no host credit/authority.
  * No alternate fetch, reader, clock, SDK, endpoint or credential callbacks. */
+import {describeObserverProviderFinalization} from './production-nonroot-observer-finalization-work.mjs';
+export {describeObserverProviderFinalization} from './production-nonroot-observer-finalization-work.mjs';
 import http from 'node:http';
 import https from 'node:https';
 import {SSMClient,GetParameterCommand} from '@aws-sdk/client-ssm';
@@ -177,12 +179,7 @@ export function chargeObserverRuntimeProcessing(handle,permit,logicalBytes){cons
 export function assertObserverRuntimeProcessing(handle,permit){const row=assertObserverRuntimeRequest(handle,permit);need(row.kind==='local','RuntimeProcessingKind');}
 export function finishObserverRuntimeProcessing(handle,permit,record){assertObserverRuntimeProcessing(handle,permit);return finishObserverRuntimeRequest(handle,permit,record);}
 export function observerRuntimeState(handle){const s=state(handle);need(s.finalizationReady&&++s.snapshotCalls<=8,'RuntimeSnapshotBound');return Object.freeze({purpose:OBSERVER_CONTROL_PURPOSE,owner:s.delivery.owner,operation:s.delivery.operation,caseName:s.delivery.caseName,sampleIndex:s.delivery.sampleIndex,captureId:s.delivery.captureId,manifestSha256:s.delivery.manifestSha256,payloadSha256:s.payloadSha256,account:s.delivery.account,region:s.delivery.region,clusterArn:s.delivery.clusterArn,taskRoleArn:s.delivery.taskRoleArn,nowMs:Date.now(),identity:structuredClone(s.identity),deliveryHash:hash(s.delivery),startedMs:s.delivery.startedMs,deadlineMs:s.delivery.deadlineMs,retained:structuredClone(s.retained),records:structuredClone(s.records),publicObjects:structuredClone(s.publicObjects)});}
-export function describeObserverProviderFinalization(delivery){
- const raw=delivery.allocation.slots.filter(r=>['runtime/container-metadata','runtime/task-metadata','source/jwks'].includes(r.id)).reduce((n,r)=>n+r.responseBytes,0);
- const snapshotBytes=262144+4*Math.ceil(raw/3)+65536+delivery.allocation.slots.length*4096;
- const logicalBytes=16*9*snapshotBytes+65536*delivery.allocation.slots.length;
- need(Number.isSafeInteger(logicalBytes),'RuntimeFinalizationQuote');return Object.freeze({authority:false,logicalBytes,maxSnapshots:8,snapshotBytes});
-}
+
 function settlePublicSource(handle,result){
  const p=assertObserverRuntimeRequest(handle,result.permit),s=state(handle),raw=result.raw;
  chargeObserverRuntimeRequest(handle,result.permit,local(16*raw.length+65536));

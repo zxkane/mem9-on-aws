@@ -5,13 +5,14 @@ import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {describeNonrootFinalizationBudget,createNonrootFinalizationPlan,nonrootFinalizationPrepaymentData,verifyNonrootFinalizationPlan,inspectNonrootFinalizationBudget,NONROOT_FINALIZATION_LIMITS} from './lib/production-nonroot-finalization-accounting.mjs';
 import {verifyNonrootCacheReadAccounting} from './lib/production-nonroot-cache.mjs';
 import {NONROOT_REMAINING_WORK_CAPS_V2,NONROOT_REMAINING_WORK_LIMITS_HASH_V2} from './lib/production-nonroot-budget-revision.mjs';
+import {NONROOT_ARCHIVE_CAPACITY_V2 as ARCHIVE_CAPACITY} from './lib/production-nonroot-archive-capacity.mjs';
 
 const zero=()=>({ecrRequests:0,logicalBytes:0,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0}),sha=b=>createHash('sha256').update(b).digest('hex');
 const revision={version:2,limitsHash:NONROOT_REMAINING_WORK_LIMITS_HASH_V2,envelopeHash:hash('complete envelope'),historyHeadHash:hash('immutable history')};
 function fixture({budgetVersion=2,startingLogicalBytes=0,localAllocationBytes}={}){
  const scope={copyOwner:'a'.repeat(32),account:'123456789012',region:'us-east-1',runtimeNonce:'b'.repeat(32),authorizationId:'c'.repeat(32),bucket:'example-finalization',kmsKeyArn:'arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',lockKey:'runtime-publication-locks/prod/witness.json',parameterProtection:{KeyId:'alias/aws/ssm',Tier:'Standard',DataType:'text'},sourceRevision:'d'.repeat(40),sourceTree:'e'.repeat(40),rootBindingHash:hash('root'),priorParameter:{version:1,valueHash:sha('prior protected value')}};
  const issuer={source:{provider:'instance-metadata',hash:hash('authenticated original source')},scope:{account:scope.account,personalAccount:'2'.repeat(12),region:scope.region,owner:scope.authorizationId,runtimeNonce:scope.runtimeNonce,anchorOwner:'f'.repeat(32),bucket:scope.bucket,ssmKeyArn:'arn:aws:kms:us-east-1:123456789012:key/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',s3KeyArn:scope.kmsKeyArn,parameterProtection:scope.parameterProtection}};
- const budget=budgetVersion===2?describeNonrootFinalizationBudget(scope,issuer):describeNonrootFinalizationBudget(scope,issuer,{version:budgetVersion,...(budgetVersion===4?{localAllocationBytes}:{})}),ledgerBinding={owner:scope.copyOwner,executionId:'f'.repeat(32),planHash:hash('COPY config'),publicationHash:hash('COPY publication')};
+ const budget=budgetVersion===2?describeNonrootFinalizationBudget(scope,issuer):describeNonrootFinalizationBudget(scope,issuer,{version:budgetVersion,...([4,5].includes(budgetVersion)?{localAllocationBytes}:{})}),ledgerBinding={owner:scope.copyOwner,executionId:'f'.repeat(32),planHash:hash('COPY config'),publicationHash:hash('COPY publication')};
  const copyReceipt={version:2,owner:scope.copyOwner,planHash:ledgerBinding.planHash,publicationHash:ledgerBinding.publicationHash,destinationReadback:{reads:[{repositoryName:'example',digest:'sha256:'+hash('blob'),size:1,mediaType:'application/octet-stream'}]}};
  const starting={...zero(),logicalBytes:startingLogicalBytes};
  const reserve={...budget.charge,logicalBytes:budget.charge.logicalBytes+1,uncompressedBytes:3,processedEntries:3},copyCheckpoint={binding:ledgerBinding,startingCounters:{...starting},counters:{...starting},remainingReservation:reserve,eventCount:1,lastEventHash:hash('COPY sealed'),active:0,sealed:true,budgetRevision:revision};
@@ -140,4 +141,22 @@ test('duplicate payment and payment after sealed event are rejected independentl
  const f=fixture(),copy=structuredClone(f.record),event=copy.events.at(-2);copy.events.splice(-1,0,{...structuredClone(event),sequence:event.sequence+1,previousHash:hash(event)});
  assert.throws(()=>verifyNonrootCacheReadAccounting(copy,f.options),/NonrootFinalizationPrepaymentOnce/);
  const after=structuredClone(f.record);after.events.push({...structuredClone(event),sequence:after.events.length+1,previousHash:hash(after.events.at(-1))});assert.throws(()=>verifyNonrootCacheReadAccounting(after,f.options),/NonrootCacheEventChain/);
+});
+
+test('v5 prepays larger archive transfers without enlarging historical credit',()=>{
+ const localAllocationBytes=3*1073741824,old=fixture({budgetVersion:4,localAllocationBytes}),next=fixture({budgetVersion:5,localAllocationBytes});
+ assert.equal(next.budget.archive.maximumBytes,ARCHIVE_CAPACITY.wireBytes);
+ assert.equal(next.budget.limits.objectBytes,33554432);
+ assert.equal(next.budget.archive.replacesDataArchiveWireBytes,33554432);
+ assert.equal(next.budget.charge.httpBodyBytes-old.budget.charge.httpBodyBytes,3*(ARCHIVE_CAPACITY.wireBytes-33554432));
+ assert.equal(next.budget.additionalAfterCopy.httpBodyBytes,next.budget.charge.httpBodyBytes-33554432);
+ assert.deepEqual(inspectNonrootFinalizationBudget(next.budget),next.budget);
+ const replay=verifyNonrootCacheReadAccounting(next.record,next.options);
+ assert.equal(replay.counters.httpBodyBytes,next.budget.charge.httpBodyBytes);
+ assert.equal(replay.counters.logicalBytes,localAllocationBytes+1);
+ assert.deepEqual(replay.remainingReservation,zero());
+ assert.throws(()=>verifyNonrootCacheReadAccounting(next.record,{...next.options,expectedFinalization:old.options.expectedFinalization}));
+ for(const mutate of [v=>v.archive.replacesDataArchiveWireBytes=134217728,v=>v.additionalAfterCopy.httpBodyBytes-=100663296,v=>v.charge.httpBodyBytes=old.budget.charge.httpBodyBytes]){
+  const bad=structuredClone(next.budget);mutate(bad);assert.throws(()=>inspectNonrootFinalizationBudget(bad));
+ }
 });

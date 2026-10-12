@@ -223,6 +223,31 @@ function controlGraph(binding,options){
  return readGraph(roots,{...options,side:'control'},pinned);
 }
 
+/** Fixed archive counterpart to the owned local cache reader. A prepaid
+ * budget still cannot enter either generic network-reader API. Historical
+ * object paths are never interpreted: only native archive refs are read. */
+export async function readArchivedControlImageGraph(binding,{archive,inventory,budget,metadataReads}){
+ validateControlBinding(binding);assertImageBudget(budget);
+ const prepaid=prepaidControlBudgets.get(budget);
+ need(prepaid&&prepaid.metadataReads===metadataReads&&!prepaid.used,'ControlCacheAcquisitionMismatch');prepaid.used=true;
+ const api=await import('./production-nonroot-archive.mjs');budget.check();
+ api.nonrootArchiveBindings(archive);const resolve=api.nonrootArchiveResolvers(archive);
+ need(inventory?.kind==='readonly-control-image-graph'&&Array.isArray(inventory.nodes),'NonrootControlCacheInventory');
+ const descriptors=new Map(inventory.nodes.map(d=>[d.digest,d]));need(descriptors.size===inventory.nodes.length,'NonrootControlCacheInventory');
+ const raw=async d=>{
+  budget.check();const expected=descriptors.get(d.digest);
+  need(expected&&expected.size===d.size&&expected.mediaType===d.mediaType,'NonrootControlCacheDescriptor');
+  budget.cacheRead(d.size);
+  const paid=metadataReads.reserveLocal({ecrRequests:0,httpBodyBytes:0,logicalBytes:32*d.size+16384,uncompressedBytes:0,processedEntries:0});
+  need(!paid||typeof paid.then!=='function','ControlCacheSynchronousReservationRequired');
+  const bytes=await resolve.resolveBytes({sha256:d.digest.slice(7),bytesLength:d.size});budget.check();return bytes;
+ };
+ const stream=async function*(d){const bytes=await raw(d);budget.check();for(let at=0;at<bytes.length;at+=65536){budget.check();yield bytes.subarray(at,Math.min(bytes.length,at+65536));}};
+ const store={open:stream,async put(d,chunks){let size=0;for await(const chunk of chunks){budget.check();size+=chunk.length;need(size<=d.size,'NonrootControlCacheSize');}budget.check();need(size===d.size,'NonrootControlCacheSize');}};
+ const graph=await controlGraph(binding,{budget,store,readManifest:({descriptor})=>raw(descriptor),readBlob:({descriptor})=>stream(descriptor)});budget.check();
+ need(hash(graph.inventory)===hash(inventory),'NonrootControlCacheGraphChanged');return graph;
+}
+
 /** The prepaid class has exactly this graph entry: an owned filesystem cache,
  * never caller-supplied network readers. Importing the fixed local opener here
  * avoids a module-initialization cycle; the ordinary graph API stays pure IO.
@@ -233,10 +258,10 @@ export async function readOwnedControlImageCache(binding,options={}){
  const prepaid=prepaidControlBudgets.get(budget);
  if(options.metadataReads!==undefined)need(prepaid?.metadataReads===options.metadataReads,'ControlCacheAcquisitionMismatch');
  if(prepaid){need(!prepaid.used,'ControlCacheBudgetConsumed');prepaid.used=true;}
- const {openOwnedNonrootControlCache}=await import('./production-nonroot-control-cache.mjs');
+ const {openOwnedNonrootControlCache}=await import('./production-nonroot-control-cache.mjs');budget.check();
  const cache=await openOwnedNonrootControlCache({...options,binding});
  try{
-  const graph=await controlGraph(binding,{budget,store:cache.store,readManifest:cache.readManifest,readBlob:cache.readBlob});
+  budget.check();const graph=await controlGraph(binding,{budget,store:cache.store,readManifest:cache.readManifest,readBlob:cache.readBlob});budget.check();
   need(hash(graph.inventory)===hash(options.inventory),'NonrootControlCacheGraphChanged');
   return {graph,cache};
  }catch(error){await cache.close();throw error;}
@@ -268,29 +293,29 @@ async function readGraph(roots,{readManifest,readBlob,source,store,budget,side},
  const manifestMap=new Map(),blobs=new Map(),descriptors=new Map(),visiting=new Set(),done=new Set(),origins=new Set(),edges=[],attestations=[],images=new Map(),readbacks=[];
  const register=d=>{const before=descriptors.get(d.digest);if(before)need(before.size===d.size&&before.mediaType===d.mediaType,'ImageDescriptorConflict');else descriptors.set(d.digest,{digest:d.digest,size:d.size,mediaType:d.mediaType});};
  const blob=async(repositoryName,d)=>{validateImageDescriptor(d,'blob');register(d);budget.blob(d);const key=repositoryName+'\0'+d.digest;if(origins.has(key))return;origins.add(key);
-  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)){budget.transfer(d.size);budget.call();}try{const input=await readBlob({repositoryName,descriptor:d,signal:budget.signal});let consumed=false;const checked=(async function*(){yield*verifyImageBytes(input,d,budget);consumed=true;})();if(!blobs.has(d.digest)){await store.put(d,checked);need(consumed,'ImageBlobNotConsumed');blobs.set(d.digest,{...descriptors.get(d.digest)});}else for await(const _ of checked){};readbacks.push({repositoryName,...descriptors.get(d.digest)});}finally{leave();}
+  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)){budget.transfer(d.size);budget.call();}try{const input=await readBlob({repositoryName,descriptor:d,signal:budget.signal});budget.check();let consumed=false;const checked=(async function*(){yield*verifyImageBytes(input,d,budget);budget.check();consumed=true;})();if(!blobs.has(d.digest)){await store.put(d,checked);budget.check();need(consumed,'ImageBlobNotConsumed');blobs.set(d.digest,{...descriptors.get(d.digest)});}else for await(const _ of checked){budget.check();}budget.check();readbacks.push({repositoryName,...descriptors.get(d.digest)});}finally{leave();}
  };
  const edge=(component,parent,d,kind,index)=>{validateImageDescriptor(d,manifests.has(d.mediaType)?'manifest':'blob');const row={component,parent,child:d.digest,kind,index};budget.edge(hash(row));edges.push(row);};
  const visit=async(root,d,depth)=>{
   need(depth<=L.maxGraphDepth,'ImageGraphDepth');validateImageDescriptor(d,'manifest');register(d);budget.manifest(d);
   const repositoryName=side==='control'?root.repositoryName:side==='source'?root.sourceRepository:root.destinationRepository,key=repositoryName+'\0'+d.digest;
   need(!visiting.has(key),'ImageGraphCycle');if(done.has(key))return;visiting.add(key);
-  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)){budget.transfer(d.size);budget.call();}let bytes;try{bytes=bytesOf(await readManifest({repositoryName,descriptor:d,signal:budget.signal}));need(bytes.length===d.size&&imageDigest(bytes)===d.digest,'ImageManifestDigest');}finally{leave();}
-  const document=await readImageJson(oneChunk(bytes),{maxBytes:L.maxManifestBytes,budget});need(record(document)&&document.schemaVersion===2&&document.mediaType===d.mediaType,'ImageManifestSchema');
+  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)){budget.transfer(d.size);budget.call();}let bytes;try{const received=await readManifest({repositoryName,descriptor:d,signal:budget.signal});budget.check();bytes=bytesOf(received);need(bytes.length===d.size&&imageDigest(bytes)===d.digest,'ImageManifestDigest');}finally{leave();}
+  const document=await readImageJson(oneChunk(bytes),{maxBytes:L.maxManifestBytes,budget});budget.check();need(record(document)&&document.schemaVersion===2&&document.mediaType===d.mediaType,'ImageManifestSchema');
   readbacks.push({repositoryName,...descriptors.get(d.digest)});
   const allowed=indexes.has(d.mediaType)?['schemaVersion','mediaType','manifests','annotations','subject','artifactType']:['schemaVersion','mediaType','config','layers','annotations','subject','artifactType'];need(Object.keys(document).every(k=>allowed.includes(k)),'ImageManifestFields');
-  if(!manifestMap.has(d.digest)){await store.put(d,oneChunk(bytes));manifestMap.set(d.digest,{...descriptors.get(d.digest),document});}
+  if(!manifestMap.has(d.digest)){await store.put(d,oneChunk(bytes));budget.check();manifestMap.set(d.digest,{...descriptors.get(d.digest),document});}
   if(indexes.has(d.mediaType)){
    need(Array.isArray(document.manifests)&&document.manifests.length>0&&document.manifests.length<=L.maxEdges,'ImageIndexChildren');
-   const children=new Set();for(const [index,child]of document.manifests.entries()){need(!children.has(child.digest),'ImageDuplicateManifestEdge');children.add(child.digest);edge(root.component,d.digest,child,'manifest',index);await visit(root,child,depth+1);}
+   const children=new Set();for(const [index,child]of document.manifests.entries()){need(!children.has(child.digest),'ImageDuplicateManifestEdge');children.add(child.digest);edge(root.component,d.digest,child,'manifest',index);await visit(root,child,depth+1);budget.check();}
    if(d.digest===root.root.digest)need(document.manifests.filter(c=>c.digest===root.arm64Digest&&c.platform?.os==='linux'&&c.platform.architecture==='arm64').length===1,'ImageArm64Selection');
   }else{
    need(Array.isArray(document.layers)&&document.layers.length<=L.maxBlobNodes&&configs.has(document.config?.mediaType),'ImageManifestConfig');
-   edge(root.component,d.digest,document.config,'config',0);await blob(repositoryName,document.config);
-   const config=await readImageJson(verifyImageBytes(store.open(document.config),document.config,budget),{maxBytes:L.maxConfigBytes,budget,fields:['architecture','os','rootfs']});need(record(config),'ImageConfigSchema');if(document.config.mediaType===IMAGE_MEDIA.emptyConfig)need(Object.keys(config).length===0,'ImageEmptyConfig');
+   edge(root.component,d.digest,document.config,'config',0);await blob(repositoryName,document.config);budget.check();
+   const config=await readImageJson(verifyImageBytes(store.open(document.config),document.config,budget),{maxBytes:L.maxConfigBytes,budget,fields:['architecture','os','rootfs']});budget.check();need(record(config),'ImageConfigSchema');if(document.config.mediaType===IMAGE_MEDIA.emptyConfig)need(Object.keys(config).length===0,'ImageEmptyConfig');
    let payloads=0;for(const [index,layer]of document.layers.entries()){
-    need(IMAGE_LAYER_MEDIA.includes(layer.mediaType)||layer.mediaType===IMAGE_MEDIA.attestation,'ImageLayerMedia');edge(root.component,d.digest,layer,'layer',index);await blob(repositoryName,layer);
-    if(layer.mediaType===IMAGE_MEDIA.attestation){payloads++;const payload=await readImageJson(verifyImageBytes(store.open(layer),layer,budget),{maxBytes:L.maxAttestationPayloadBytes,budget,fields:['_type','subject','predicateType']});
+    need(IMAGE_LAYER_MEDIA.includes(layer.mediaType)||layer.mediaType===IMAGE_MEDIA.attestation,'ImageLayerMedia');edge(root.component,d.digest,layer,'layer',index);await blob(repositoryName,layer);budget.check();
+    if(layer.mediaType===IMAGE_MEDIA.attestation){payloads++;const payload=await readImageJson(verifyImageBytes(store.open(layer),layer,budget),{maxBytes:L.maxAttestationPayloadBytes,budget,fields:['_type','subject','predicateType']});budget.check();
      need(['https://in-toto.io/Statement/v0.1','https://in-toto.io/Statement/v1'].includes(payload._type)&&Array.isArray(payload.subject)&&payload.subject.length>0&&payload.subject.every(s=>record(s)&&record(s.digest)&&Object.keys(s.digest).length===1&&s.digest.sha256===root.arm64Digest.slice(7)),'ImageAttestationSubject');
      attestations.push({component:root.component,manifestDigest:d.digest,payloadDigest:layer.digest,subjectDigest:root.arm64Digest,predicateType:payload.predicateType});
     }
@@ -299,10 +324,10 @@ async function readGraph(roots,{readManifest,readBlob,source,store,budget,side},
    else{need(config.os==='linux'&&['arm64','amd64'].includes(config.architecture)&&config.rootfs?.type==='layers'&&Array.isArray(config.rootfs.diff_ids)&&config.rootfs.diff_ids.length===document.layers.length&&config.rootfs.diff_ids.every(hexDigest),'ImageRuntimeConfig');}
    if(d.digest===root.arm64Digest){need(!payloads&&config.architecture==='arm64','ImageArm64Config');images.set(root.component,{manifest:descriptors.get(d.digest),config:document.config,layers:document.layers,diffIds:config.rootfs.diff_ids});}
   }
-  if(document.subject){need(document.subject.digest===root.arm64Digest,'ImageArtifactSubject');edge(root.component,d.digest,document.subject,'subject',0);await visit(root,document.subject,depth+1);}
+  if(document.subject){need(document.subject.digest===root.arm64Digest,'ImageArtifactSubject');edge(root.component,d.digest,document.subject,'subject',0);await visit(root,document.subject,depth+1);budget.check();}
   visiting.delete(key);done.add(key);
  };
- for(const root of roots)await visit(root,root.root,0);
+ for(const root of roots){await visit(root,root.root,0);budget.check();}
  need(images.size===(controlBinding?1:3),'ImageMissingArm64');
  if(controlBinding)need(images.get('bootstrap')?.config.digest===controlBinding.configDigest,'ControlImageConfigBinding');
  const inventory=freeze({version:1,...(controlBinding?{kind:'readonly-control-image-graph'}:{}),limitsHash:IMAGE_TRANSITION_LIMITS_HASH,roots:structuredClone(roots),nodes:[...descriptors.values()].sort((a,b)=>a.digest.localeCompare(b.digest)),edges:edges.sort((a,b)=>hash(a).localeCompare(hash(b))),attestations:attestations.sort((a,b)=>hash(a).localeCompare(hash(b)))});

@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import {gzipSync} from 'node:zlib';
 import {inspectObserverControlDelivery,encodeObserverControlDelivery,decodeObserverControlDelivery,bindObserverControlOverrides,assertObserverControlOverrides,OBSERVER_RUNTIME_SLOTS,observerZeroCounter,observerBytesHash as sha,observerDataHash as hash} from './lib/production-nonroot-observer-delivery.mjs';
 import {describeObserverProviderFinalization} from './lib/production-nonroot-observer-runtime-provider.mjs';
+import {describeObserverProviderFinalization as pureFinalization} from './lib/production-nonroot-observer-finalization-work.mjs';
+import * as routeProtocol from './lib/production-nonroot-observer-route-protocol.mjs';
+import * as routeRuntime from './lib/production-nonroot-observer-route-probe.mjs';
+import {compileObserverControlSlots} from './lib/production-nonroot-observer-control-slots.mjs';
 
 /** Complete prospective delivery, with all roles/refs/21 work slots and
  * distinct full-length hashes. Synthetic DATA, never a runtime capability. */
@@ -20,6 +24,28 @@ export function completeDelivery(){
  return {version:1,kind:'fixed-observer-control-delivery',owner,operation,stage,caseName,sampleIndex:1023,captureId:sha('capture').slice(0,32),sourceTree:sha('source').slice(0,40),manifestSha256:sha('guard-manifest'),inputHash:sha('bound-input'),account,region,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/mem9-on-aws-${stage}-Cluster-original-bound-network-LongId01`,taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-${stage}-fixed-original-control-route-purpose:127`,taskDefinitionHash:sha('definition'),taskRoleArn:`arn:aws:iam::${account}:role/mem9-on-aws/${stage}/original-observer-control-registered-read-runtime`,containerName:'consolidation-worker',controlImage:{rootDigest:'sha256:'+sha('root'),arm64Digest:'sha256:'+sha('arm'),configDigest:'sha256:'+sha('config')},startedMs:1900000000000,deadlineMs:1900000100000,allocation:{id:caseName+'/control-runtime/1023',quoteHash:sha('quote'),charge,slots},route:{privateOrigin:`http://mnemo.mem9-${stage}.local:8080`,gatewayUrl:'https://original-bound-gateway.gateway.example.com/mcp',jobId:'00000000-0000-4000-8000-000000000001',identityHash:sha('principal'),issuer:'https://identity.example.com/issuer',audience:'original-read-audience',transportIssuer:'gateway-target',tokenEndpoint:'https://identity.example.com/oauth2/token',jwksUri:'https://identity.example.com/issuer/.well-known/jwks.json',registryHash:sha(registry)},credentialBindings,registry};
 }
 const originalOverrides=()=>({cpu:'1024',memory:'2048',taskRoleArn:'arn:aws:iam::123456789012:role/mem9-on-aws/pr-273/original-observer-control-registered-read-runtime',executionRoleArn:'arn:aws:iam::123456789012:role/original-bound-execution-role',containerOverrides:[{name:'consolidation-worker',command:[],environment:[{name:'STAGE',value:'pr-273'},{name:'NODE_EXTRA_CA_CERTS',value:'/bootstrap/global-bundle.pem'}]},{name:'original-extra-container',environment:[{name:'UNCHANGED_ORIGINAL_CONFIG',value:'source-bound-value'}]}]});
+test('native runtime and portable replay share the same protocol and pricing functions',()=>{
+ assert.equal(describeObserverProviderFinalization,pureFinalization);
+ for(const [name,value]of Object.entries(routeRuntime))if(name!=='runObserverRouteProbe')assert.equal(value,routeProtocol[name],name);
+ const input=completeDelivery(),before=structuredClone(input),compiled=compileObserverControlSlots(input);
+ assert.deepEqual(input,before);assert.deepEqual(compileObserverControlSlots(compiled.delivery),compiled);
+ // These values describe this public synthetic fixture, not a live quote.
+ assert.deepEqual(compiled.charge,{ecrRequests:0,logicalBytes:1729144368,httpBodyBytes:12861440,uncompressedBytes:0,processedEntries:0});
+ assert.equal(hash(compiled.delivery.allocation),'84e8d1b229702fc4aa207bd95ea9eb38bab157be5941fcdc3b41577abd488a23');
+ assert.deepEqual(pureFinalization(input),{authority:false,logicalBytes:664928256,maxSnapshots:8,snapshotBytes:4608000});
+});
+test('portable quote preserves every route, completion charge and rejected-event allowance',()=>{
+ const input=completeDelivery(),quote=routeProtocol.describeObserverRouteProbeWork(input);
+ assert.deepEqual(quote,routeRuntime.describeObserverRouteProbeWork(input));
+ assert.equal(quote.context.charge.logicalBytes,25780224);assert.equal(quote.output.charge.logicalBytes,541392896);
+ assert.equal(quote.preProvider.logicalBytes,16842752);assert.equal(quote.requests,6);
+ assert.deepEqual(quote.slots.map(row=>row.id),routeRuntime.OBSERVER_ROUTE_SLOTS);
+ for(const row of quote.slots){assert.equal(row.processingLocal,102907904);assert.equal(row.finishLocal,65536);assert.equal(row.charge.logicalBytes,102973440);}
+ assert.equal(routeProtocol.describeObserverRouteEventWork().logicalBytes,4097*16384);
+ for(const change of [v=>v.allocation.slots.pop(),v=>v.route.gatewayUrl='https://127.0.0.1/mcp',v=>v.allocation.slots.find(s=>s.id==='private-auth').requestBytes=0]){
+  const bad=completeDelivery();change(bad);assert.throws(()=>routeProtocol.describeObserverRouteProbeWork(bad));
+ }
+});
 test('complete real-sized delivery exceeds raw override limit and fits whole gzip delivery without omissions',()=>{
  const value=completeDelivery(),raw=JSON.stringify(value);assert.ok(raw.length>8192);assert.equal(value.allocation.slots.length,21);
  const encoded=encodeObserverControlDelivery(value),base=originalOverrides(),before=structuredClone(base),overrides=bindObserverControlOverrides(base,value.containerName,encoded),checked=assertObserverControlOverrides(overrides,value.containerName,encoded.wireSha256);

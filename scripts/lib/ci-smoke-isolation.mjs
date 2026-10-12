@@ -308,8 +308,13 @@ export async function ciSmokeSourceClosure(context,roots){
    Object.fromEntries(Object.entries(value).filter(([k,v])=>!ignored.has(k)&&v!==undefined).map(([k,v])=>[k,shape(v)])):value;
   return hash(JSON.parse(JSON.stringify(shape(body))));
  };
- const modulePath=(from,specifier)=>{
+ const modulePath=(from,specifier,imageGuard=false)=>{
   need(typeof specifier==='string','CiSmokeDynamicImport');
+  // A source inventory also reaches the two native image consumers as DATA.
+  // This is the same fixed image-only import recognized by the observer
+  // source verifier. It is not resolved or executed on the host; the native
+  // image guard and the bundle's builtin-only external gate remain intact.
+  if(imageGuard){need(specifier==='/bootstrap/nonroot-dispatch.mjs','CiSmokeExternalCode');return null;}
   if(!specifier.startsWith('.')){
    // Only Node builtins and ordinary package specifiers are external leaves.
    // Inline/file URLs and package-import aliases can hide executable local
@@ -334,6 +339,20 @@ export async function ciSmokeSourceClosure(context,roots){
   };
   if(/\.(?:mjs|cjs|js|ts|mts|cts|tsx|jsx)$/.test(path)){
    const ast=parseJavaScript(source,{sourceType:'module',plugins:[...(/\.(?:ts|mts|cts|tsx)$/.test(path)?['typescript']:[]),...(/\.[jt]sx$/.test(path)?['jsx']:[])]});
+   const imageFunction=path==='scripts/lib/production-nonroot-observer-control-context.mjs'?'openObserverControlContext':
+    path==='scripts/lib/production-nonroot-observer-runtime-provider.mjs'?'openObserverRuntimeProvider':null;
+   const imageGuards=new Set();
+   const collectImageGuards=(node,scope)=>{
+    if(!node||typeof node!=='object')return;
+    if(['FunctionDeclaration','FunctionExpression','ArrowFunctionExpression','ObjectMethod','ClassMethod'].includes(node.type))scope=node.type==='FunctionDeclaration'?node.id?.name:null;
+    const call=node.type==='VariableDeclarator'&&node.init?.type==='AwaitExpression'?node.init.argument:null;
+    if(imageFunction&&scope===imageFunction&&call?.type==='CallExpression'&&call.callee?.type==='Import'&&call.arguments.length===1&&call.arguments[0]?.type==='StringLiteral'&&call.arguments[0].value==='/bootstrap/nonroot-dispatch.mjs'){
+     const properties=node.id?.type==='ObjectPattern'?node.id.properties:[];
+     need(properties.length===1&&properties[0].type==='ObjectProperty'&&!properties[0].computed&&properties[0].key?.name==='requireGuardedObserverInvocation'&&properties[0].value?.type==='Identifier'&&properties[0].value.name==='requireGuardedObserverInvocation'&&imageGuards.size===0,'CiSmokeImageGuardImport');
+     imageGuards.add(call);
+    }
+    for(const [key,value]of Object.entries(node))if(!['loc','start','end','extra'].includes(key))Array.isArray(value)?value.forEach(child=>collectImageGuards(child,scope)):collectImageGuards(value,scope);
+   };if(imageFunction)collectImageGuards(ast,null);
    const fixedRegionLoader=path===regionLoader&&shapeHash(ast.program.body)==='0f24b8dec9c9f35e9e621792d6dae3e317956866988e37372cfc4d42415ae690';
    if(path===regionLoader)need(fixedRegionLoader,'CiSmokeRegionLoaderShape');
    const fixedRegionCli=path==='scripts/resolve-application-region.mjs'&&shapeHash(ast.program.body)==='5fffdd2b64f1c81dccc55faf6dd87441dfda2e04b85bdfa685f6a9a176cf72d7';
@@ -345,7 +364,7 @@ export async function ciSmokeSourceClosure(context,roots){
    const collectResolverImports=node=>{
     if(!node||typeof node!=='object')return;
     const call=node.type==='VariableDeclarator'&&node.init?.type==='AwaitExpression'?node.init.argument:null;
-    if(call?.type==='CallExpression'&&call.callee?.type==='Import'&&call.arguments[0]?.type==='StringLiteral'&&modulePath(path,call.arguments[0].value)===regionLoader){
+    if(call?.type==='CallExpression'&&call.callee?.type==='Import'&&call.arguments[0]?.type==='StringLiteral'&&modulePath(path,call.arguments[0].value,imageGuards.has(call))===regionLoader){
      need(node.id.type==='ObjectPattern'&&node.id.properties.length===1,'CiSmokeRegionLoaderInvocation');
      const property=node.id.properties[0];need(property.type==='ObjectProperty'&&!property.computed&&property.key?.name==='resolveApplicationRegion'&&property.value?.type==='Identifier','CiSmokeRegionLoaderInvocation');
      resolverNames.add(property.value.name);resolverImports.add(call);resolverDeclarations.add(property.key);resolverDeclarations.add(property.value);
@@ -361,7 +380,7 @@ export async function ciSmokeSourceClosure(context,roots){
       // grant the exception to another file or to any other computed import.
       need(node.arguments.length===1&&node.arguments[0].type==='MemberExpression'&&node.arguments[0].object?.name==='configUrl'&&node.arguments[0].property?.name==='href','CiSmokeDynamicImport');
       queue('sst.config.ts');
-     }else{need(node.arguments.length===1&&node.arguments[0].type==='StringLiteral','CiSmokeDynamicImport');const imported=enqueue(node.arguments[0].value);if(imported===regionLoader)need(resolverImports.has(node),'CiSmokeRegionLoaderInvocation');}
+     }else{need(node.arguments.length===1&&node.arguments[0].type==='StringLiteral','CiSmokeDynamicImport');const imported=imageGuards.has(node)?modulePath(path,node.arguments[0].value,true):enqueue(node.arguments[0].value);if(imported===regionLoader)need(resolverImports.has(node),'CiSmokeRegionLoaderInvocation');}
     }
     if(node.type==='CallExpression'&&node.callee?.type==='Identifier'&&node.callee.name==='require'){need(node.arguments.length===1&&node.arguments[0].type==='StringLiteral','CiSmokeDynamicImport');need(enqueue(node.arguments[0].value)!==regionLoader,'CiSmokeRegionLoaderInvocation');}
     if(node.type==='TSImportType'){need(node.argument?.type==='StringLiteral','CiSmokeDynamicImport');enqueue(node.argument.value);}

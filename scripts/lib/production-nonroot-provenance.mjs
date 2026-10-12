@@ -15,6 +15,10 @@ import {completeProductionControlCompositionBuildCapture,inspectProductionContro
 import {extractProductionControlCompositionCommitment} from './production-control-composition-reader.mjs';
 import {types} from 'node:util';
 import {describeCompositionRegionLoaderWork} from './production-control-composition-region-loader.mjs';
+import {assertNonrootControlCurrent} from './production-nonroot-control-current.mjs';
+import {verifyNonrootDeploymentRehearsal,finishNonrootRehearsalBinding} from './production-nonroot-rehearsal-join.mjs';
+
+const sourceResumed=(options,value)=>{assertNonrootControlCurrent(options);return value;};
 
 const need=(ok,code='NonrootProvenanceInvalid')=>{if(!ok)throw Error(code);};
 const exact=(value,keys)=>need(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.slice().sort().join(),'NonrootProvenanceFields');
@@ -57,17 +61,18 @@ function expectedMain(contract,expected){
  need(expected.actualMainExpected,'NonrootMainExpected');same(selected,expected.actualMainExpected);return selected;
 }
 async function sourceClosure(value,tree,options,sourceContext,copyContext=false){
- const c=await verifyControlSourceClosure(sourceContext,value,{copyContext});need(c.tree===tree,'NonrootBuildSourceTree');
- for(const f of c.files)await readNonrootEvidence(f.blob,options,false);
+ const c=sourceResumed(options,await verifyControlSourceClosure(sourceContext,value,{copyContext,assertCurrent:options?.assertCurrent}));need(c.tree===tree,'NonrootBuildSourceTree');
+ for(const f of c.files)sourceResumed(options,await readNonrootEvidence(f.blob,options,false));
  return c;
 }
-async function jsonBytes(ref,options){return parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(await readNonrootEvidence(ref,options,false)));}
+async function jsonBytes(ref,options){return parseNonrootJson(new TextDecoder('utf-8',{fatal:true}).decode(sourceResumed(options,await readNonrootEvidence(ref,options,false))));}
 
-async function localSourceClosure(context,roots,{guard=false,allowedBuiltins=[]}={}){
+async function localSourceClosure(context,roots,{guard=false,allowedBuiltins=[],assertCurrent}={}){
+ const options={assertCurrent};assertNonrootControlCurrent(options);
  const seen=new Map();
  async function visit(path){
   if(seen.has(path))return;need(seen.size<1000,'NonrootSourceClosureLimit');
-  const {file,bytes}=await readControlSourceFile(context,path);seen.set(path,file);
+  const {file,bytes}=sourceResumed(options,await readControlSourceFile(context,path));seen.set(path,file);
   const source=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
   need(/\.(?:mjs|js|ts)$/.test(path),'NonrootPreparationLanguageUnsupported');
   const ast=parseSource(source,{sourceType:'unambiguous',createImportExpressions:true,plugins:path.endsWith('.ts')?['typescript']:[]});
@@ -100,9 +105,9 @@ async function localSourceClosure(context,roots,{guard=false,allowedBuiltins=[]}
    if(!guard&&node.type==='StringLiteral'&&/^(?:scripts\/|\.\.?\/)[A-Za-z0-9_./-]+\.(?:mjs|js|ts|sh)$/.test(node.value))dependencies.add(node.value.startsWith('scripts/')?node.value:posix.normalize(posix.join(posix.dirname(path),node.value)));
    for(const [key,value]of Object.entries(node)){if(['loc','start','end','extra','comments','tokens'].includes(key))continue;if(Array.isArray(value))value.forEach(child=>walk(child,node));else if(value&&typeof value==='object')walk(value,node);}
   };
-  walk(ast);for(const dep of [...dependencies].sort())await visit(dep);
+  walk(ast);for(const dep of [...dependencies].sort())sourceResumed(options,await visit(dep));
  }
- for(const path of [...new Set(roots)].sort())await visit(path);
+ for(const path of [...new Set(roots)].sort())sourceResumed(options,await visit(path));
  const files=[...seen.values()].sort((a,b)=>a.path.localeCompare(b.path));return {version:1,kind:'git-file-closure',tree:context.tree,files,closureHash:hash(files)};
 }
 
@@ -129,23 +134,24 @@ function preparationReferences(path,bytes){
 /** Source description only. The verifier separately binds job to the complete
  * authenticated workflow; a matching action name alone is never a closure. */
 export async function describeNonrootControlPreparation(context,job,options){
- if(job?.steps?.some(s=>s.uses==='./.github/actions/control-composition'))return describeProductionControlCompositionPreparation(context,job,options);
+ assertNonrootControlCurrent(options);
+ if(job?.steps?.some(s=>s.uses==='./.github/actions/control-composition'))return sourceResumed(options,await describeProductionControlCompositionPreparation(context,job,options));
  need(job&&Array.isArray(job.steps),'NonrootWorkflowSource');const roots=new Set();let gate=false;
  for(const step of job.steps){
   if(typeof step.uses==='string'&&step.uses.startsWith('./')){
    need(step.uses==='./'+posix.dirname(CI_SMOKE_GATE_ACTION_PATH),'NonrootLocalBuildActionUnsupported');
-   const action=await readControlSourceFile(context,CI_SMOKE_GATE_ACTION_PATH),doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(action.bytes),{uniqueKeys:true});
+   const action=sourceResumed(options,await readControlSourceFile(context,CI_SMOKE_GATE_ACTION_PATH)),doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(action.bytes),{uniqueKeys:true});
    need(doc.errors.length===0&&doc.warnings.length===0,'NonrootWorkflowSource');
    const paths=verifyCiSmokeGateAction(step,doc.toJS({maxAliasCount:0}));roots.add(paths.actionPath);roots.add(paths.entryPath);gate=true;
   }
   if(typeof step.run==='string')for(const m of step.run.matchAll(/\bscripts\/[A-Za-z0-9_./-]+\.(?:mjs|js|ts|sh)\b/g))roots.add(m[0]);
  }
- if(!gate)return localSourceClosure(context,[...roots]);
+ if(!gate)return sourceResumed(options,await localSourceClosure(context,[...roots],options));
  const files=new Map();
  while(true){
-  need(roots.size<=1000,'NonrootSourceClosureLimit');const pins=await ciSmokeSourceClosure(context,[...roots]);need(pins.length<=1000,'NonrootSourceClosureLimit');let added=false;
+  need(roots.size<=1000,'NonrootSourceClosureLimit');const pins=sourceResumed(options,await ciSmokeSourceClosure(context,[...roots]));need(pins.length<=1000,'NonrootSourceClosureLimit');let added=false;
   for(const pin of pins){
-   if(files.has(pin.path))continue;const found=await readControlSourceFile(context,pin.path);files.set(pin.path,found.file);
+   if(files.has(pin.path))continue;const found=sourceResumed(options,await readControlSourceFile(context,pin.path));files.set(pin.path,found.file);
    for(const path of preparationReferences(pin.path,found.bytes))if(!roots.has(path)){roots.add(path);added=true;}
   }
   if(!added)break;
@@ -157,29 +163,30 @@ export async function describeNonrootControlPreparation(context,job,options){
  * producer additionally checks its actual working directory for untracked or
  * changed build-context inputs immediately before Docker consumes it. */
 export async function verifyNonrootControlSource(value,options){
+ assertNonrootControlCurrent(options);
  const contract=inspectProductionControlBuildContract(value),context=options?.expected?.sourceContext;
  need(context,'NonrootSourceVerificationRequired');const paths=controlSourcePaths(context);
  need(context.tree===contract.candidate.tree,'NonrootBuildSourceTree');
- if(contract.artifactPolicyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH)await assertNonrootControlScanPolicy(contract,context);
- const workflow=await readControlSourceFile(context,contract.workflow.path);same(workflow.file,contract.workflow.sourceFile);
+ if(contract.artifactPolicyHash===CONTROL_ZERO_FINDINGS_POLICY_HASH)sourceResumed(options,await assertNonrootControlScanPolicy(contract,context));
+ const workflow=sourceResumed(options,await readControlSourceFile(context,contract.workflow.path));same(workflow.file,contract.workflow.sourceFile);
  const doc=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(workflow.bytes),{uniqueKeys:true});need(doc.errors.length===0,'NonrootWorkflowSource');
- const job=doc.toJS()?.jobs?.[contract.workflow.jobKey];need(job&&Array.isArray(job.steps),'NonrootWorkflowSource');same(job,await jsonBytes(contract.workflow.jobSource,options));
+ const job=doc.toJS()?.jobs?.[contract.workflow.jobKey];need(job&&Array.isArray(job.steps),'NonrootWorkflowSource');same(job,sourceResumed(options,await jsonBytes(contract.workflow.jobSource,options)));
  if(contract.version===2){
   inspectProductionControlCompositionRecipe(contract.recipe);
   const steps=job.steps.filter(s=>s.id===contract.workflow.buildStepId);need(steps.length===1,'NonrootControlBuildStep');
-  const action=await readControlSourceFile(context,contract.recipe.invocation.actionPath),yaml=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(action.bytes),{uniqueKeys:true});
+  const action=sourceResumed(options,await readControlSourceFile(context,contract.recipe.invocation.actionPath)),yaml=parseDocument(new TextDecoder('utf-8',{fatal:true}).decode(action.bytes),{uniqueKeys:true});
   need(yaml.errors.length===0&&yaml.warnings.length===0,'NonrootWorkflowSource');
   verifyProductionControlCompositionAction(steps[0],yaml.toJS({maxAliasCount:0}));same(action.file,contract.recipe.invocation.actionSource);
  }
  else need(!job.steps.some(s=>s.uses==='./.github/actions/control-composition'),'NonrootControlRecipeVersion');
- const dockerfile=await readControlSourceFile(context,contract.recipe.dockerfilePath);same(dockerfile.file,contract.recipe.dockerfile);
- await sourceClosure(contract.recipe.context,context.tree,options,context,true);
- const ignores=await readNonrootEvidence(contract.recipe.ignoreFiles,options),ignorePaths=['.dockerignore','docker/bootstrap/Dockerfile.dockerignore'];
+ const dockerfile=sourceResumed(options,await readControlSourceFile(context,contract.recipe.dockerfilePath));same(dockerfile.file,contract.recipe.dockerfile);
+ sourceResumed(options,await sourceClosure(contract.recipe.context,context.tree,options,context,true));
+ const ignores=sourceResumed(options,await readNonrootEvidence(contract.recipe.ignoreFiles,options)),ignorePaths=['.dockerignore','docker/bootstrap/Dockerfile.dockerignore'];
  need(Array.isArray(ignores)&&ignores.length===2&&new Set(ignores.map(r=>r.path)).size===2,'NonrootControlIgnoreFiles');
- for(const path of ignorePaths){const row=ignores.find(r=>r.path===path);need(row,'NonrootControlIgnoreFiles');if(paths.includes(path))same(row,(await readControlSourceFile(context,path)).file);else{exact(row,['path','absent']);need(row.absent===true,'NonrootControlIgnoreFiles');}}
- const preparation=await describeNonrootControlPreparation(context,job,contract.version===2?{expectedBundle:contract.recipe.invocation.bundle}:undefined);same(preparation,contract.recipe.preparation);
- const guard=await localSourceClosure(context,['docker/bootstrap/nonroot-dispatch.mjs'],{guard:true,allowedBuiltins:contract.guardImportPolicy.allowedBuiltins});same(guard,contract.guardSource);same(guard,contract.guardImportPolicy.guardSource);
- await sourceClosure(contract.recipe.preparation,context.tree,options,context);await sourceClosure(contract.guardSource,context.tree,options,context);
+ for(const path of ignorePaths){const row=ignores.find(r=>r.path===path);need(row,'NonrootControlIgnoreFiles');if(paths.includes(path))same(row,(sourceResumed(options,await readControlSourceFile(context,path))).file);else{exact(row,['path','absent']);need(row.absent===true,'NonrootControlIgnoreFiles');}}
+ const preparation=sourceResumed(options,await describeNonrootControlPreparation(context,job,{...options,...(contract.version===2?{expectedBundle:contract.recipe.invocation.bundle}:{})}));same(preparation,contract.recipe.preparation);
+ const guard=sourceResumed(options,await localSourceClosure(context,['docker/bootstrap/nonroot-dispatch.mjs'],{guard:true,allowedBuiltins:contract.guardImportPolicy.allowedBuiltins,assertCurrent:options?.assertCurrent}));same(guard,contract.guardSource);same(guard,contract.guardImportPolicy.guardSource);
+ sourceResumed(options,await sourceClosure(contract.recipe.preparation,context.tree,options,context));sourceResumed(options,await sourceClosure(contract.guardSource,context.tree,options,context));
  return copyNonrootJson({tree:context.tree,contractHash:hash(contract),copyClosureHash:hash(contract.recipe.context),preparationHash:hash(preparation),guardSourceHash:hash(guard),ignoreFilesHash:hash(ignores)});
 }
 
@@ -366,6 +373,7 @@ export async function verifyNonrootDeploymentSource(value,options){
  const taskPlan=inspectNonrootRecord('TaskPlanV2',expected.taskPlan),contract=inspectProductionControlBuildContract(expected.contract);
  same(taskPlan.deployedControlBuildContract,contract);same(taskPlan.controlLaunches,contract.launchTemplates);
  const build=await verifyNonrootDeployedControlBuild(record.deployedControlBuild,{...options,expected:{...expected,sourceContext}});same(record.actualMain,record.deployedControlBuild.actualMain);
+ const rehearsal=contract.version===2?sourceResumed(options,await verifyNonrootDeploymentRehearsal({record,taskPlan,contract,controlVerification:options.controlVerification,sourceContext,archive:options.archive,proofArchive:options.proofArchive,rehearsalVerification:options.rehearsalVerification,metadataReads:options.metadataReads})):undefined;
  need(record.checkedMs>=record.deployedControlBuild.completedMs,'NonrootDeploymentTime');
  const resolved=inspectNonrootRecord('ResolvedTaskPlanV1',await readNonrootEvidence(record.resolvedTaskPlan,options));
  need(resolved.taskPlanHash===hash(taskPlan)&&resolved.deployedControlBuildHash===build.deployedControlBuildHash,'NonrootResolvedTaskPlanBinding');
@@ -381,5 +389,5 @@ export async function verifyNonrootDeploymentSource(value,options){
  }
  const fallback=taskPlan.tasks.filter(t=>t.taskKey==='fallback');need(fallback.length===1&&fallback[0].disposition==='retain'&&fallback[0].invocation==='deny','NonrootFallbackBinding');
  const retained=await readNonrootEvidence(fallback[0].beforeDefinition,options);need(hash(retained)===fallback[0].unchangedBindingHash,'NonrootFallbackBinding');
- return copyNonrootJson({...build,deploymentSourceHash:hash(record),resolvedTaskPlanHash:hash(resolved),taskPlanHash:hash(taskPlan),descriptorHash:record.descriptorHash,parameterVersion:record.parameterVersion,proofHash:record.proofHash,registrations,retainedFallback:fallback[0]});
+ return copyNonrootJson({...build,deploymentSourceHash:hash(record),resolvedTaskPlanHash:hash(resolved),taskPlanHash:hash(taskPlan),descriptorHash:record.descriptorHash,parameterVersion:record.parameterVersion,proofHash:record.proofHash,registrations,retainedFallback:fallback[0],...(rehearsal?{rehearsalBridge:finishNonrootRehearsalBinding(rehearsal,{record,contract,taskPlan,registrations})}:{})});
 }

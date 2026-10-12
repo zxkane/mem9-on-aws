@@ -1,3 +1,4 @@
+import {NONROOT_ARCHIVE_CAPACITY_V2 as ARCHIVE_CAPACITY,NONROOT_LEGACY_ARCHIVE_CREDIT_BYTES} from './production-nonroot-archive-capacity.mjs';
 /** Closed remaining-work publisher accounting. Pure data validation only;
  * neither a budget nor a replay result can create publication authority. */
 import {NONROOT_LIMITS,copyNonrootJson,nonrootHash as hash} from './production-nonroot-contracts.mjs';
@@ -10,23 +11,41 @@ export const NONROOT_FINALIZATION_LIMITS=freeze({normalWireBytes:128*MiB,unknown
  counts:{'s3.GetObject':192,'s3.PutObject':32,'s3.DeleteObject':1,'ssm.GetParameters':32,'ssm.PutParameter':1,'sts.GetCallerIdentity':8},
  issuerLocalBytes:32*MiB,issuerCleanupLocalBytes:4*MiB});
 const limitsV3=freeze({...NONROOT_FINALIZATION_LIMITS,localBytes:2048*MiB});
+export const NONROOT_FINALIZATION_ARCHIVE_LIMITS_V5=freeze({archiveBytes:ARCHIVE_CAPACITY.wireBytes,normalWireBytes:NONROOT_FINALIZATION_LIMITS.normalWireBytes+3*(ARCHIVE_CAPACITY.wireBytes-NONROOT_LEGACY_ARCHIVE_CREDIT_BYTES)});
 /** Closed source policies. V4 accepts only a prospective LOCAL amount;
  * all other limits and every previously issued allocation remain fixed. */
 export function nonrootFinalizationLimits(version=2,localAllocationBytes){
- need(version===2||version===3||version===4,'FinalizationBudgetVersion');
- if(version!==4){need(localAllocationBytes===undefined,'FinalizationAllocationVersion');return version===2?NONROOT_FINALIZATION_LIMITS:limitsV3;}
+ need(version===2||version===3||version===4||version===5,'FinalizationBudgetVersion');
+ if(version!==4&&version!==5){need(localAllocationBytes===undefined,'FinalizationAllocationVersion');return version===2?NONROOT_FINALIZATION_LIMITS:limitsV3;}
  // A prospective suballocation, never authority to enlarge an issued token.
  // The complete original envelope and native ledger still protect all other
  // obligations under the unchanged global Counter ceilings before payment.
  need(Number.isSafeInteger(localAllocationBytes)&&localAllocationBytes>limitsV3.localBytes&&localAllocationBytes<=NONROOT_REMAINING_WORK_CAPS_V2.logicalBytes,'FinalizationLocalAllocation');
- return freeze({...NONROOT_FINALIZATION_LIMITS,localBytes:localAllocationBytes});
+ // One conditional write and at most two positive archive reads. The old
+ // COPY credit remains fixed; each larger transfer is prepaid prospectively.
+ return freeze({...NONROOT_FINALIZATION_LIMITS,localBytes:localAllocationBytes,...(version===5?NONROOT_FINALIZATION_ARCHIVE_LIMITS_V5:{})});
 }
 const scopeKeys=['copyOwner','account','region','runtimeNonce','authorizationId','bucket','kmsKeyArn','lockKey','parameterProtection','sourceRevision','sourceTree','rootBindingHash','priorParameter'];
 const key=(v,s)=>typeof v==='string'&&new RegExp('^arn:aws:kms:'+s.region+':'+s.account+':key/(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|mrk-[a-f0-9]{32})$').test(v);
 
+/** A prospective allocation INSIDE the original finalization prepayment.
+ * LOCAL shares the existing pool; additional decompression/entry counters
+ * enter its original five-counter debit before seal. This grants no network
+ * calls, changes no global/per-image limit and cannot alter an issued plan. */
+export function inspectNonrootFinalizationReplay(value,limits){
+ exact(value,['geometryHash','charge']);need(hex(value.geometryHash),'FinalizationReplayGeometry');
+ const charge=value.charge;exact(charge,Object.keys(zero()));
+ for(const k of Object.keys(zero()))need(Number.isSafeInteger(charge[k])&&charge[k]>=0&&charge[k]<=NONROOT_REMAINING_WORK_CAPS_V2[k],'FinalizationReplayCharge');
+ need(charge.ecrRequests===0&&charge.httpBodyBytes===0&&charge.logicalBytes<=limits.localBytes-limits.cleanupLocalBytes,'FinalizationReplayCharge');
+ return freeze(copyNonrootJson(value));
+}
+
 export function describeNonrootFinalizationBudget(scope,issuer,options={version:2}){
- const {version}=options;exact(options,version===4?['version','localAllocationBytes']:['version']);
+ const {version}=options,hasReplay=Object.hasOwn(options,'rehearsalReplay');
+ exact(options,[...([4,5].includes(version)?['version','localAllocationBytes']:['version']),...(hasReplay?['rehearsalReplay']:[])]);
+ need(!hasReplay||version===5,'FinalizationReplayVersion');
  const L=nonrootFinalizationLimits(version,options.localAllocationBytes);
+ const rehearsalReplay=hasReplay?inspectNonrootFinalizationReplay(options.rehearsalReplay,L):undefined;
  exact(scope,scopeKeys);const s=copyNonrootJson(scope);
  need(hex(s.copyOwner,32)&&hex(s.authorizationId,32)&&hex(s.runtimeNonce,32)&&hex(s.sourceRevision,40)&&hex(s.sourceTree,40)&&hex(s.rootBindingHash),'FinalizationScope');
  need(/^\d{12}$/.test(s.account)&&/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(s.region)&&/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(s.bucket)&&key(s.kmsKeyArn,s),'FinalizationScope');
@@ -42,15 +61,16 @@ export function describeNonrootFinalizationBudget(scope,issuer,options={version:
  const operations=[...(issuer.source.provider==='instance-metadata'?[row('ImdsV2Token',0,4096),row('ImdsV2Credentials',0,65536)]:[]),row('GetCallerIdentity',16384,16384),row('AssumeRole',16384,262144),row('GetCallerIdentity',16384,16384)];
  const issuers={...copyNonrootJson(issuer),modes:['supersession-publisher-read','supersession-publisher-write'],durationSeconds:3600,operations,
   normalWireBytes:2*operations.reduce((n,r)=>n+r.requestBytes+r.responseBytes,0),localBytes:L.issuerLocalBytes,cleanupLocalBytes:L.issuerCleanupLocalBytes,sharesPublisherUnknown:true};
- const charge={...zero(),logicalBytes:L.localBytes,httpBodyBytes:L.normalWireBytes+L.unknownBytes},prefix=`data-authorizations/${s.runtimeNonce}/${s.authorizationId}/`;
- return freeze({version,kind:'remaining-finalization-publisher-budget',...(version===4?{localAllocationBytes:options.localAllocationBytes}:{}),scope:s,issuers,parameterName:'/mem9-on-aws/prod/consolidation-runtime/data-release',prefix,limits:L,charge,
-  additionalAfterCopy:{...charge,httpBodyBytes:charge.httpBodyBytes-L.objectBytes},
-  archive:{key:prefix+'nonroot-proof-archive.json',maximumBytes:L.objectBytes,replacesDataArchiveWireBytes:L.objectBytes,source:'same-original-complete-nonroot-archive'},
+ const charge={...zero(),logicalBytes:L.localBytes,httpBodyBytes:L.normalWireBytes+L.unknownBytes,...(rehearsalReplay?{uncompressedBytes:rehearsalReplay.charge.uncompressedBytes,processedEntries:rehearsalReplay.charge.processedEntries}:{})},prefix=`data-authorizations/${s.runtimeNonce}/${s.authorizationId}/`;
+ return freeze({version,kind:'remaining-finalization-publisher-budget',...([4,5].includes(version)?{localAllocationBytes:options.localAllocationBytes}:{}),scope:s,issuers,parameterName:'/mem9-on-aws/prod/consolidation-runtime/data-release',prefix,limits:L,charge,
+  additionalAfterCopy:{...charge,httpBodyBytes:charge.httpBodyBytes-NONROOT_LEGACY_ARCHIVE_CREDIT_BYTES},
+  archive:{key:prefix+'nonroot-proof-archive.json',maximumBytes:L.archiveBytes??L.objectBytes,replacesDataArchiveWireBytes:NONROOT_LEGACY_ARCHIVE_CREDIT_BYTES,source:'same-original-complete-nonroot-archive'},
+  ...(rehearsalReplay?{rehearsalReplay}:{}),
   semantics:'prepaid quota, not observed usage; source, STS and publisher share one wire pool and unknown lane; unused quota is forfeited'});
 }
 export function inspectNonrootFinalizationBudget(value){
- need(value?.version===2||value?.version===3||value?.version===4,'FinalizationBudgetVersion');
- const result=describeNonrootFinalizationBudget(value.scope,{source:value.issuers?.source,scope:value.issuers?.scope},{version:value.version,...(value.version===4?{localAllocationBytes:value.localAllocationBytes}:{})});same(value,result,'FinalizationBudgetChanged');return result;
+ need(value?.version===2||value?.version===3||value?.version===4||value?.version===5,'FinalizationBudgetVersion');
+ const result=describeNonrootFinalizationBudget(value.scope,{source:value.issuers?.source,scope:value.issuers?.scope},{version:value.version,...([4,5].includes(value.version)?{localAllocationBytes:value.localAllocationBytes}:{}),...(Object.hasOwn(value,'rehearsalReplay')?{rehearsalReplay:value.rehearsalReplay}:{})});same(value,result,'FinalizationBudgetChanged');return result;
 }
 
 export function createNonrootFinalizationPlan({budget,ledgerBinding,ledgerStartHash,copyCheckpointHash,archiveManifestHash,budgetRevision,deadlineMs}){

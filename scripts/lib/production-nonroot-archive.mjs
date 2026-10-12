@@ -1,3 +1,4 @@
+import {nonrootArchiveCapacityForVersion} from './production-nonroot-archive-capacity.mjs';
 import {createHash} from 'node:crypto';
 import {nonrootHash as hash,parseNonrootJson,inspectNonrootRecord,NONROOT_LIMITS} from './production-nonroot-contracts.mjs';
 import {validateSupersessionLineage} from './production-data-supersession.mjs';
@@ -25,8 +26,9 @@ function context(state){const value=Object.freeze({kind:'nonroot-evidence-archiv
 /** Verifies an independently pinned inventory, not its authority. readObject is
  * supplied by trusted code and receives only a validated fixed-owner basename.
  * It is never selected by a JSON field, remote path, URL or account override. */
-export function createNonrootEvidenceArchive(rawManifest,{expectedManifestHash,readObject}={}){
+export function createNonrootEvidenceArchive(rawManifest,{expectedManifestHash,readObject,wireVersion=1}={}){
  need(hex(expectedManifestHash)&&typeof readObject==='function','NonrootArchivePinRequired');
+ const capacity=nonrootArchiveCapacityForVersion(wireVersion);
  const {raw,value:manifest}=decode(typeof rawManifest==='string'?Buffer.from(rawManifest):rawManifest,MAX_MANIFEST_BYTES);
  inspectNonrootRecord('ArchiveManifestV2',manifest);
  need(exact(manifest,['version','kind','owner','files'])&&manifest.version===2&&manifest.kind==='nonroot-proof-archive'&&/^[a-f0-9]{32}$/.test(manifest.owner)&&Array.isArray(manifest.files)&&manifest.files.length>0,'NonrootArchiveManifest');
@@ -42,7 +44,7 @@ export function createNonrootEvidenceArchive(rawManifest,{expectedManifestHash,r
    const key=row.purpose+'\0'+row.ref.canonicalHash;need(!byCanonical.has(key),'NonrootArchiveAmbiguousCommitment');byCanonical.set(key,row);
   }
  }
- return context({kind:'evidence-integrity',manifest:freeze(manifest),manifestText:raw.toString('utf8'),manifestHash:expectedManifestHash,manifestRef:freeze({bytesHash:sha(raw),canonicalHash:expectedManifestHash,bytesLength:raw.length}),byName,byCanonical,readObject,used:new Set()});
+ return context({kind:'evidence-integrity',capacity,manifest:freeze(manifest),manifestText:raw.toString('utf8'),manifestHash:expectedManifestHash,manifestRef:freeze({bytesHash:sha(raw),canonicalHash:expectedManifestHash,bytesLength:raw.length}),byName,byCanonical,readObject,used:new Set()});
 }
 
 function options(value){need(record(value)&&Object.keys(value).every(k=>['purpose','kind'].includes(k))&&purposes.has(value.purpose)&&(value.kind===undefined||typeof value.kind==='string'&&value.kind.length>0&&value.kind.length<=256),'NonrootArchiveReadOptions');}
@@ -88,6 +90,7 @@ export function nonrootArchiveBindings(archive){
 
 /** Original frozen inventory only; selecting rows never reads object bodies. */
 export function nonrootArchiveInventory(archive){return get(archive).manifest;}
+export function nonrootArchiveCapacity(archive){return get(archive).capacity;}
 
 /** Byte-preserving resolver pair for the shared runtime/launch verifiers. A
  * reference must select one inventory entry even when no purpose is supplied.
@@ -162,27 +165,59 @@ export async function authenticateNonrootArchive(archive,{parameter,operation},e
 /** The wire form carries bytes, never a verifier or a restored authority flag. */
 export async function exportNonrootArchive(archive){
  const s=get(archive),objects=[];
+ if(s.capacity.version===2){
+  let rawBytes=0,wireBytes=128+6*s.manifestRef.bytesLength;
+  for(const row of s.manifest.files){rawBytes+=row.ref.bytesLength;wireBytes+=JSON.stringify(row.name).length+24+4*Math.ceil(row.ref.bytesLength/3);}
+  need(rawBytes<=s.capacity.rawBytes&&wireBytes<=s.capacity.wireBytes,'NonrootArchiveWireLimit');
+ }
  for(const row of s.manifest.files){
   const raw=await read(s,row,{purpose:row.purpose},true);
   // Body validation and this encoder resume in different await frames.
   if(s.assertCurrent){const checked=s.assertCurrent();if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});fail('NonrootArchiveSynchronousGuard');}need(checked===undefined,'NonrootArchiveSynchronousGuard');}
   objects.push({name:row.name,base64:raw.toString('base64')});
  }
- return {version:1,kind:'nonroot-evidence-bytes',manifest:s.manifestText,objects};
+ return {version:s.capacity.version,kind:'nonroot-evidence-bytes',manifest:s.manifestText,objects};
 }
 export function importNonrootArchive(value,{expectedManifestHash}){
- need(exact(value,['version','kind','manifest','objects'])&&value.version===1&&value.kind==='nonroot-evidence-bytes'&&typeof value.manifest==='string'&&Array.isArray(value.objects),'NonrootArchiveWire');
+ need(exact(value,['version','kind','manifest','objects'])&&[1,2].includes(value.version)&&value.kind==='nonroot-evidence-bytes'&&typeof value.manifest==='string'&&Array.isArray(value.objects),'NonrootArchiveWire');
+ const capacity=nonrootArchiveCapacityForVersion(value.version);
+ need(Buffer.byteLength(value.manifest)<=MAX_MANIFEST_BYTES&&value.objects.length<=20000,'NonrootArchiveWireLimit');
+ let wireBytes=value.version===2?Buffer.byteLength(JSON.stringify({version:value.version,kind:value.kind,manifest:value.manifest,objects:[]})):0;
  const objects=new Map();let total=0;
  for(const row of value.objects){
   need(exact(row,['name','base64'])&&typeof row.name==='string'&&typeof row.base64==='string'&&!objects.has(row.name),'NonrootArchiveWire');
+  if(value.version===2){need(row.name.length<=78,'NonrootArchiveName');wireBytes+=Buffer.byteLength(JSON.stringify({name:row.name,base64:''}))+row.base64.length+(objects.size?1:0);need(wireBytes<=capacity.wireBytes,'NonrootArchiveWireLimit');}
   // Bound allocation before decoding. Re-encoding checks alphabet, padding
   // and unused pad bits without a repeated-group regexp that overflows the
   // JavaScript regexp stack on legitimate multi-megabyte source evidence.
-  need(row.base64.length<=Math.ceil((32*1024*1024-total)/3)*4,'NonrootArchiveWireLimit');
+  need(row.base64.length<=Math.ceil((capacity.rawBytes-total)/3)*4,'NonrootArchiveWireLimit');
   need(row.base64.length%4===0,'NonrootArchiveWire');
-  const size=Buffer.byteLength(row.base64,'base64');total+=size;need(size<=MAX_BUFFERED_BYTES&&total<=32*1024*1024,'NonrootArchiveWireLimit');
+  const size=Buffer.byteLength(row.base64,'base64');total+=size;need(size<=MAX_BUFFERED_BYTES&&total<=capacity.rawBytes,'NonrootArchiveWireLimit');
   const raw=Buffer.from(row.base64,'base64');need(raw.toString('base64')===row.base64,'NonrootArchiveWire');objects.set(row.name,raw);
  }
- const archive=createNonrootEvidenceArchive(value.manifest,{expectedManifestHash,readObject:async name=>objects.get(name)}),s=get(archive);
+ const archive=createNonrootEvidenceArchive(value.manifest,{expectedManifestHash,wireVersion:value.version,readObject:async name=>objects.get(name)}),s=get(archive);
  need(objects.size===s.byName.size&&[...objects.keys()].every(name=>s.byName.has(name)),'NonrootArchiveWireInventory');return archive;
+}
+
+/** Additive v2 processing on the caller's existing payer. This does not
+ * replace member verification or create a reusable credit. */
+export function prepayNonrootArchiveExtension(archive,reader){
+ const s=get(archive),capacity=s.capacity;
+ if(capacity.version===1)return {capacity,archive,check(){},snapshot(){}};
+ need(typeof reader?.reserveLocal==='function','NonrootArchiveExtensionBudget');
+ const reserve=reader.reserveLocal.bind(reader);
+ const pay=n=>{need(Number.isSafeInteger(n)&&n>=0,'NonrootArchiveExtensionBudget');const result=reserve({ecrRequests:0,logicalBytes:n,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0});if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});fail('NonrootArchiveSynchronousPayment');}};
+ const check=()=>{const result=s.assertCurrent?.();if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});fail('NonrootArchiveSynchronousGuard');}need(result===undefined,'NonrootArchiveSynchronousGuard');pay(0);};
+ check();pay(4096*(s.manifest.files.length+1));
+ const raw=s.manifest.files.reduce((n,r)=>n+r.ref.bytesLength,0),manifest=s.manifestRef.bytesLength;
+ let wire=128+6*manifest;for(const r of s.manifest.files)wire+=r.name.length+26+4*Math.ceil(r.ref.bytesLength/3);
+ need(raw<=capacity.rawBytes&&wire<=capacity.wireBytes,'NonrootArchiveWireLimit');
+ pay(8*(raw+manifest)+4*wire);
+ const guarded=context({...s,assertCurrent:check,used:new Set(s.used)});
+ return {capacity,archive:guarded,check,snapshot(rawBytes,entries){
+  // A refused snapshot can reach the existing20000-row guard before its
+  // manifest byte guard; include that complete prefix before construction.
+  check();const manifestUpper=128+336*entries;
+  pay(4*rawBytes+32*manifestUpper+4096*entries);
+ }};
 }

@@ -98,8 +98,88 @@ async function scans(input,predecessor,phase,now){
  for(const name of COMPONENTS){need(positions.get(name)===pages[name].length);const f=result.scans[name].findings;need(new Set(f.map(x=>hash(x))).size===f.length);for(const finding of f)need(new Set(finding.attributes.map(a=>a.key)).size===finding.attributes.length);}
  return result;
 }
+function fullFindingPolicyParts({old,preview,vendors,priorPolicy,priorPolicyHash}){
+ for(const v of [old,preview]){
+  need(exact(v,['version','observedMs','scans','securityEvidenceHash'])&&v.version===1&&exact(v.scans,COMPONENTS)&&hash(v.scans)===v.securityEvidenceHash);
+  for(const c of COMPONENTS)need(Array.isArray(v.scans[c].findings)&&v.scans[c].findings.length<=LIMITS.maxFindingsPerComponent);
+ }
+ need(exact(priorPolicy,['version','kind','schema','policySources','requiredControls','rules','fixed','open'])&&priorPolicy.version===1&&priorPolicy.kind==='image-security-policy'&&priorPolicy.schema==='ecr-basic-full-findings-v1'&&hex(priorPolicyHash)&&hash(priorPolicy)===priorPolicyHash);
+ need(Array.isArray(priorPolicy.open)&&priorPolicy.open.length===4&&Array.isArray(priorPolicy.policySources)&&priorPolicy.policySources.length>0&&Array.isArray(priorPolicy.requiredControls)&&priorPolicy.requiredControls.length>0);
+ const priorOpen=new Set();
+ for(const d of priorPolicy.open){
+  need(exact(d,['component','findingHash','package','packageVersion','cve','vendorHash','disposition','controls'])&&['llm-proxy','qwen3-embed'].includes(d.component)&&hex(d.findingHash)&&hex(d.vendorHash)&&d.disposition==='OPEN_UNCHANGED_REQUIRED_CONTROLS_SATISFIED'&&same(d.controls,priorPolicy.requiredControls));
+  const key=d.component+'\0'+d.findingHash;need(!priorOpen.has(key));priorOpen.add(key);
+ }
+ const key=(cve,pkg,version,suite,status)=>JSON.stringify([cve,pkg,version,suite,status]),byVendor=new Map();
+ need(Array.isArray(vendors));
+ for(const v of vendors){
+  const k=key(v.cve,v.package,v.packageVersion,v.suite,v.status);need(!byVendor.has(k));byVendor.set(k,v);
+ }
+ const vendor=(cve,pkg,version,suite,status)=>{const v=byVendor.get(key(cve,pkg,version,suite,status));need(v);return v;};
+ const rules=Object.fromEntries(COMPONENTS.map(c=>[c,{oldHash:hash(old.scans[c].findings),targetHash:hash(preview.scans[c].findings)}]));
+ need(rules['llm-proxy'].targetHash===rules['qwen3-embed'].targetHash);
+ const rows=[];
+ for(const component of ['llm-proxy','qwen3-embed']){
+  const findings=preview.scans[component].findings;need(findings.length>0&&rules[component].oldHash===rules[component].targetHash);
+  const seen=new Set();
+  for(const f of findings){
+   need(['HIGH','MEDIUM','LOW'].includes(f.severity)&&Array.isArray(f.attributes)&&new Set(f.attributes.map(a=>a.key)).size===f.attributes.length);
+   const a=Object.fromEntries(f.attributes.map(x=>[x.key,x.value])),findingHash=hash(f);need(!seen.has(findingHash));seen.add(findingHash);
+   const v=vendor(f.name,a.package_name,a.package_version,'trixie','unfixed');
+   rows.push({component,findingHash,severity:f.severity,package:a.package_name,packageVersion:a.package_version,cve:f.name,vendorHash:hash(v)});
+  }
+ }
+ rows.sort((a,b)=>(a.component+'\0'+a.findingHash).localeCompare(b.component+'\0'+b.findingHash));
+ const oldFixed=old.scans['mnemo-server'].findings,previous=priorPolicy.fixed;
+ need(exact(previous,['component','findingHash','package','oldVersion','targetVersion','cve','vendorHash'])&&previous.component==='mnemo-server'&&previous.package==='zlib'&&oldFixed.length===1&&preview.scans['mnemo-server'].findings.length===0&&oldFixed[0].severity==='HIGH');
+ const a=Object.fromEntries(oldFixed[0].attributes.map(x=>[x.key,x.value]));need(a.package_name==='zlib'&&a.package_version===previous.oldVersion&&oldFixed[0].name===previous.cve);
+ const fixed={...previous,findingHash:hash(oldFixed[0]),vendorHash:hash(vendor(previous.cve,'zlib',previous.targetVersion,'alpine','fixed'))};
+ const history={policy:priorPolicy,policyHash:priorPolicyHash,entries:priorPolicy.open.map(d=>{
+  const v=vendor(d.cve,d.package,d.packageVersion,'trixie','unfixed');
+  const current=rows.filter(r=>r.component===d.component&&r.cve===d.cve&&r.package===d.package&&r.packageVersion===d.packageVersion);need(current.length<=1);
+  return {priorEntryHash:hash(d),currentFindingHash:current[0]?.findingHash??null,currentVendorHash:hash(v),disposition:'OPEN_UNRESOLVED'};
+ })};
+ return {rules,fixed,rows,history};
+}
+function fullFindingReviewScope(parts,vendors,baseControls){
+ need(Array.isArray(baseControls)&&baseControls.length>0);
+ return {version:1,kind:'full-findings-applicability',rulesHash:hash(parts.rules),fixedHash:hash(parts.fixed),vendorSetHash:hash(vendors),historyHash:hash(parts.history),baseControlsHash:hash(baseControls),findings:parts.rows.map(r=>({component:r.component,findingHash:r.findingHash,severity:r.severity,vendorHash:r.vendorHash}))};
+}
+function verifyFullFindingApplicability(p,parts,vendors){
+ need(exact(p.applicability,['control','scope']));const {control,scope}=p.applicability;
+ need(exact(control,['clause','policySourceHash','evidenceHash'])&&hash(scope)===control.evidenceHash);
+ const matching=p.requiredControls.filter(c=>same(c,control));need(matching.length===1);
+ const base=p.requiredControls.filter(c=>!same(c,control));need(same(scope,fullFindingReviewScope(parts,vendors,base)));
+ // Retain the original policy-source texts, including its security baseline.
+ // Current applicability is a new canonical evidence binding, not inheritance
+ // of the previous catalogue's control decision.
+ for(const source of parts.history.policy.policySources)need(p.policySources.some(s=>same(s,source)));
+}
+/** Produces DATA for the owner's existing clause/evidence review. It never
+ * creates that review, a timestamp, a control decision or execution authority.
+ * The resulting bytes are bound through bindBuildControls' canonical mode. */
+export function imageTransitionFullFindingReviewScope(input){
+ json(input);need(exact(input,['old','preview','vendors','priorPolicy','priorPolicyHash','baseControls']));
+ return freeze(fullFindingReviewScope(fullFindingPolicyParts(input),input.vendors,input.baseControls));
+}
+/** Versioned construction after the original reviewed control binder has bound
+ * the exact full-finding review scope. expected priorPolicyHash is supplied by
+ * the original caller, not derived from an untrusted replacement history.
+ * Actual destination/COPY/filesystem and final owner review remain mandatory
+ * in the original full-proof verifier; this pure constructor grants nothing. */
+export function buildFullFindingsArtifactPolicy(input){
+ json(input);need(exact(input,['old','preview','vendors','priorPolicy','priorPolicyHash','controls','applicability','now']));
+ const {controls,vendors,now}=input;need(controls.authority===false&&Array.isArray(controls.policySources)&&controls.policySources.length>0&&Array.isArray(controls.requiredControls)&&controls.requiredControls.length>0);
+ const sources=new Set();for(const s of controls.policySources){need(exact(s,['path','text'])&&typeof s.path==='string'&&typeof s.text==='string');need(!sources.has(s.path));sources.add(s.path);}
+ const hashes=new Set(controls.policySources.map(s=>sha(s.text))),clauses=new Set();
+ for(const c of controls.requiredControls){need(exact(c,['clause','policySourceHash','evidenceHash'])&&typeof c.clause==='string'&&c.clause.length>0&&hashes.has(c.policySourceHash)&&hex(c.evidenceHash));const k=c.clause+'\0'+c.policySourceHash;need(!clauses.has(k));clauses.add(k);}
+ for(const v of vendors){need(exact(v,['version','cve','package','suite','packageVersion','status','observedMs','source','rawText','rawHash'])&&v.version===1&&/^CVE-[0-9]{4}-[0-9]{4,}$/.test(v.cve)&&['fixed','unfixed'].includes(v.status)&&typeof v.source==='string'&&v.source.startsWith('https://')&&typeof v.rawText==='string'&&sha(v.rawText)===v.rawHash);checkedTime(v.observedMs,now);}
+ checkedTime(input.old.observedMs,now);checkedTime(input.preview.observedMs,now);
+ const parts=fullFindingPolicyParts(input),p={version:2,kind:'image-security-policy',schema:'ecr-basic-full-findings-v2',policySources:controls.policySources,requiredControls:controls.requiredControls,rules:parts.rules,fixed:parts.fixed,open:parts.rows.map(r=>({...r,disposition:'OPEN_UNCHANGED_REQUIRED_CONTROLS_SATISFIED',controls:controls.requiredControls})),history:parts.history,applicability:input.applicability};
+ verifyFullFindingApplicability(p,parts,vendors);return freeze(structuredClone(p));
+}
 function policyEvidence(input,normalized,now){
- const p=input.policy;need(exact(p,['version','kind','schema','policySources','requiredControls','rules','fixed','open'])&&p.version===1&&p.kind==='image-security-policy'&&p.schema==='ecr-basic-full-findings-v1');
+ const p=input.policy,v2=p?.version===2;need(exact(p,['version','kind','schema','policySources','requiredControls','rules','fixed','open',...(v2?['history','applicability']:[])])&&p.version===(v2?2:1)&&p.kind==='image-security-policy'&&p.schema===(v2?'ecr-basic-full-findings-v2':'ecr-basic-full-findings-v1'));
  need(Array.isArray(p.policySources)&&p.policySources.length>0&&Array.isArray(p.requiredControls)&&p.requiredControls.length>0&&exact(p.rules,COMPONENTS));
  const policyHashes=new Set();for(const s of p.policySources){need(exact(s,['path','text'])&&typeof s.path==='string'&&typeof s.text==='string');policyHashes.add(sha(s.text));}
  need(new Set(p.policySources.map(s=>s.path)).size===p.policySources.length);
@@ -116,6 +196,12 @@ function policyEvidence(input,normalized,now){
  const vendor=vendors.get(fixed.vendorHash);need(vendor&&vendor.status==='fixed'&&vendor.suite==='alpine'&&vendor.cve===fixed.cve&&vendor.package===fixed.package&&vendor.packageVersion===fixed.targetVersion);
  const fs=input.filesystem;need(exact(fs,['version','kind','imageDigest','graphHash','path','databaseText','databaseHash'])&&fs.version===1&&fs.kind==='effective-apk-database'&&fs.imageDigest===input.images['mnemo-server'].arm64Digest&&fs.graphHash===hash(input.graph)&&fs.path==='/lib/apk/db/installed'&&typeof fs.databaseText==='string'&&Buffer.byteLength(fs.databaseText)<=LIMITS.maxPackageDatabaseBytes&&sha(fs.databaseText)===fs.databaseHash);
  const packages=fs.databaseText.trim().split(/\n\s*\n/).map(block=>block.split('\n')),zlib=packages.filter(lines=>lines.includes('P:zlib'));need(zlib.length===1&&zlib[0].filter(l=>l.startsWith('P:')).length===1&&zlib[0].filter(l=>l.startsWith('V:')).length===1&&zlib[0].includes('V:'+fixed.targetVersion));
+ if(v2){
+  const parts=fullFindingPolicyParts({old:normalized.old,preview:normalized.preview,vendors:input.vendors,priorPolicy:p.history.policy,priorPolicyHash:p.history.policyHash});
+  need(same(p.rules,parts.rules)&&same(p.fixed,parts.fixed)&&same(p.history,parts.history));
+  need(same(p.open,parts.rows.map(r=>({...r,disposition:'OPEN_UNCHANGED_REQUIRED_CONTROLS_SATISFIED',controls:p.requiredControls}))));
+  verifyFullFindingApplicability(p,parts,input.vendors);return;
+ }
  need(Array.isArray(p.open)&&p.open.length===4&&p.rules['llm-proxy'].targetHash===p.rules['qwen3-embed'].targetHash);const remaining=new Map();for(const name of COMPONENTS.filter(n=>n!=='mnemo-server')){need(p.rules[name].oldHash===p.rules[name].targetHash&&normalized.destination.scans[name].findings.length===2);for(const f of normalized.destination.scans[name].findings)remaining.set(name+'\0'+hash(f),f);}
  need(p.open.length===remaining.size);for(const d of p.open){need(exact(d,['component','findingHash','package','packageVersion','cve','vendorHash','disposition','controls'])&&d.disposition==='OPEN_UNCHANGED_REQUIRED_CONTROLS_SATISFIED'&&same(d.controls,p.requiredControls));const key=d.component+'\0'+d.findingHash,f=remaining.get(key),v=vendors.get(d.vendorHash);need(f&&f.name===d.cve&&f.severity==='HIGH'&&v&&v.status==='unfixed'&&v.suite==='trixie'&&v.cve===d.cve&&v.package===d.package&&v.packageVersion===d.packageVersion);const a=Object.fromEntries(f.attributes.map(x=>[x.key,x.value]));need(a.package_name===d.package&&a.package_version===d.packageVersion);remaining.delete(key);}
  need(remaining.size===0);

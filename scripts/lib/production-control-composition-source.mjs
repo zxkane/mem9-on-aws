@@ -3,19 +3,21 @@
 import {posix} from 'node:path';
 import {canaryEvidenceHash as filesystemHash} from './production-canary-verification.mjs';
 import {nonrootHash as hash} from './production-nonroot-contracts.mjs';
-import {controlSourcePaths,readControlSourceFile,describeControlCopyClosure} from './production-control-source.mjs';
+import {assertControlSourceCurrent,controlSourcePaths,readControlSourceFile,describeControlCopyClosure} from './production-control-source.mjs';
 import {inspectImageFilesystemEntries,inspectImageFilesystemEvidence,imageFilesystemVerificationKind} from './production-image-filesystem.mjs';
 import {compositionNeed as need,inspectProductionControlCopyRows} from './production-control-composition.mjs';
+import {assertNonrootControlCurrent} from './production-nonroot-control-current.mjs';
 
-export async function describeProductionControlCopyManifest({sourceContext,baseFilesystem,charge=()=>{}}){
+export async function describeProductionControlCopyManifest({sourceContext,baseFilesystem,charge=()=>{},assertCurrent}){
+ const resume=value=>{assertNonrootControlCurrent({assertCurrent});assertControlSourceCurrent(sourceContext);return value;};resume();
  need(imageFilesystemVerificationKind(baseFilesystem)==='live-filesystem-evidence','ControlCompositionLiveFilesystem');
  const fs=inspectImageFilesystemEvidence(baseFilesystem),entries=inspectImageFilesystemEntries(baseFilesystem);
  need(filesystemHash(entries)===fs.entriesHash,'ControlCompositionFilesystemChanged');
  const byPath=new Map(entries.map(e=>[e.path,e])),paths=controlSourcePaths(sourceContext);
  // This original reader authenticates complete tree membership and the exact
  // Dockerfile COPY closure. It rejects unsupported ADD/flags/source syntax.
- const closure=await describeControlCopyClosure(sourceContext);
- const dockerfile=await readControlSourceFile(sourceContext,'docker/bootstrap/Dockerfile');
+ const closure=resume(await describeControlCopyClosure(sourceContext));
+ const dockerfile=resume(await readControlSourceFile(sourceContext,'docker/bootstrap/Dockerfile'));
  const text=new TextDecoder('utf-8',{fatal:true}).decode(dockerfile.bytes),pairs=[];
  for(const raw of text.split(/\r?\n/)){
   const line=raw.trim();if(!/^COPY\b/.test(line))continue;

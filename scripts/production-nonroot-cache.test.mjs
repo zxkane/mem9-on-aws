@@ -1,13 +1,18 @@
-import {describe,it,expect} from 'vitest';
+import {describe,it,expect,vi,afterEach} from 'vitest';
 import {createHash} from 'node:crypto';
-import {graphFixture} from './production-image.fixture.mjs';
+import {graphFixture,tar} from './production-image.fixture.mjs';
 import {readImageGraph,verifyImageGraphCopies,inspectImageCopyVerification,createImageBudget,IMAGE_MEDIA} from './lib/production-image-graph.mjs';
 import {inspectImageFilesystem,inspectImageFilesystemEvidence} from './lib/production-image-filesystem.mjs';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
 import {verifyNonrootArtifactCache,inspectNonrootArtifactCacheVerification} from './lib/production-nonroot-cache.mjs';
+import {nonrootArtifactCacheMaterial} from './lib/production-nonroot-cache.mjs';
+import {nonrootArchiveFixture} from './production-nonroot.fixture.mjs';
+import {inspectImageFilesystemFile} from './lib/production-image-filesystem.mjs';
+import {resolveImageFilesystemFile} from './lib/production-image-filesystem-resolver.mjs';
+import {openNonrootLiveDataFacts,inspectNonrootDataFacts,readNonrootDataFileFact,readNonrootDataImageFact,readNonrootDataFilesystemEvidence,sealNonrootDataFactsProjection} from './lib/production-nonroot-proof.mjs';
 
-export async function cacheFixture(){
- const f=graphFixture({packageDatabaseText:'P:zlib\nV:1.3.2-r1\nA:aarch64\n\n'}),now=Date.now(),account='123456789012',region='us-west-2';
+export async function cacheFixture({graph}={}){
+ const f=graph??graphFixture({packageDatabaseText:'P:zlib\nV:1.3.2-r1\nA:aarch64\n\n'}),now=Date.now(),account='123456789012',region='us-west-2';
  for(const root of f.roots){root.sourceRepository='mem9-on-aws/preview/'+root.component;root.destinationRepository='mem9-on-aws/'+root.component;root.targetTag='mem9-example';}
  const source=await readImageGraph(f.roots,f),destination=await readImageGraph(f.roots,{...f,side:'destination'});
  const copied=inspectImageCopyVerification(verifyImageGraphCopies(source,destination,{account,region}));
@@ -77,5 +82,79 @@ describe('completed destination cache material verification',()=>{
   const f=await cacheFixture();
   const measureFilesystem=defect==='missing'?undefined:defect==='skipped'?async()=>({}):async(_component,_usage,run)=>{await run();return run();};
   await expect(verifyNonrootArtifactCache(f.input,{expected:f.expected,cache:f.cache,budget:f.budget,readCopyRecord:f.readCopyRecord,measureFilesystem})).rejects.toThrow();
+ });
+});
+
+describe('native cache DATA facts',()=>{
+ afterEach(()=>vi.restoreAllMocks());
+ function payer(){
+  let used=0,closed=false;
+  const work=Object.freeze({assertCurrent(){if(closed)throw Error('SyntheticWorkClosed');},chargeLocal(n){expect(Number.isSafeInteger(n)&&n>=0).toBe(true);used+=n;}});
+  return {work,used:()=>used,close(){closed=true;}};
+ }
+ async function live(graph){
+  const f=await cacheFixture({graph});
+  const cacheVerification=await verifyNonrootArtifactCache(f.input,{expected:f.expected,cache:f.cache,budget:f.budget,readCopyRecord:f.readCopyRecord,measureFilesystem:f.measureFilesystem});
+  const owner=f.input.cacheCustody.owner,a=nonrootArchiveFixture(owner);a.json({kind:'synthetic-cache-input'});
+  const images=Object.fromEntries(f.input.freshDestinationMetadata.repositories.map(row=>[row.component,{rootDigest:row.root.request.imageIds[0].imageDigest,arm64Digest:row.arm64.request.imageIds[0].imageDigest,configDigest:row.config.digest}]));
+  const input={cacheVerification,archive:a.archive(),verifierClosure:f.input.verifierClosure,metadata:f.input.freshDestinationMetadata,expected:{owner,sourceTree:f.input.verifierClosure.tree,images}};
+  return {input,native:nonrootArtifactCacheMaterial(cacheVerification),absence:'/__observer_missing_'+owner};
+ }
+ it('retains requested native rows and parents as detached DATA without a filesystem brand',async()=>{
+  const f=await live(),p=payer(),handle=openNonrootLiveDataFacts(f.input,p);
+  expect(handle.requireAbsent('llm-proxy',f.absence)).toBeUndefined();
+  for(const [component,image]of Object.entries(f.input.expected.images)){
+   const path='/app/'+component,native=f.native.filesystem[component];
+   expect(readNonrootDataFileFact(handle,{component,path,image},p)).toEqual(inspectImageFilesystemFile(native,path));
+   const config=readNonrootDataImageFact(handle,{component,image},p);expect(config.config.architecture).toBe('arm64');
+   config.config.architecture='changed-copy';expect(readNonrootDataImageFact(handle,{component,image},p).config.architecture).toBe('arm64');
+   expect(readNonrootDataFilesystemEvidence(handle,{component,image},p)).toEqual(inspectImageFilesystemEvidence(native));
+  }
+  expect(()=>inspectImageFilesystemFile(handle,'/app/llm-proxy')).toThrow('ImageFilesystemContextRequired');
+  const projection=sealNonrootDataFactsProjection(handle,p);
+  for(const [component,paths]of Object.entries(projection.requested))for(const path of paths){
+   expect(resolveImageFilesystemFile(projection.paths[component],path)).toEqual(inspectImageFilesystemFile(f.native.filesystem[component],path));
+   expect(projection.paths[component].some(row=>row.path==='app')).toBe(true);
+  }
+  expect(()=>inspectNonrootDataFacts(handle,p)).toThrow('NonrootDataFactsSealed');expect(p.used()).toBeGreaterThan(0);
+ });
+ it('rejects serialized cache handles, changed source/image bindings and a different work identity',async()=>{
+  const f=await live(),p=payer();
+  expect(()=>openNonrootLiveDataFacts({...f.input,cacheVerification:structuredClone(f.input.cacheVerification)},p)).toThrow('NonrootCacheContextRequired');
+  expect(()=>openNonrootLiveDataFacts({...f.input,expected:{...f.input.expected,sourceTree:'f'.repeat(40)}},p)).toThrow('NonrootDataFactsSourceBinding');
+  const h=openNonrootLiveDataFacts(f.input,p),component='llm-proxy',image=f.input.expected.images[component];
+  expect(()=>readNonrootDataImageFact(h,{component,image:{...image,configDigest:'sha256:'+'f'.repeat(64)}},p)).toThrow('NonrootDataFactsImageBinding');
+  expect(()=>inspectNonrootDataFacts(h,payer())).toThrow('NonrootDataFactsContextRequired');
+  p.close();expect(()=>inspectNonrootDataFacts(h,p)).toThrow('SyntheticWorkClosed');
+ });
+ it('cannot seal an omitted absence or a partial projection after a missing file',async()=>{
+  const f=await live(),p=payer(),h=openNonrootLiveDataFacts(f.input,p),component='llm-proxy';
+  expect(()=>sealNonrootDataFactsProjection(h,p)).toThrow('NonrootDataAbsenceRequired');
+  h.requireAbsent(component,f.absence);
+  expect(()=>readNonrootDataFileFact(h,{component,path:'/missing',image:f.input.expected.images[component]},p)).toThrow();
+  expect(()=>sealNonrootDataFactsProjection(h,p)).toThrow('NonrootDataFactsHeld');
+ });
+ it('checks the complete native filesystem for the fixed absence, even without a positive lookup',async()=>{
+  const graph=graphFixture({packageDatabaseText:'P:zlib\nV:1.3.2-r1\nA:aarch64\n\n'}),root=graph.roots.find(r=>r.component==='llm-proxy');
+  const missing='__observer_missing_'+'a'.repeat(32);
+  const layer=graph.put(tar([{path:'app/llm-proxy',body:'synthetic program'},{path:missing,body:'synthetic collision'}]),IMAGE_MEDIA.tar);
+  const config=graph.put({architecture:'arm64',os:'linux',rootfs:{type:'layers',diff_ids:[layer.digest]}},IMAGE_MEDIA.config);
+  const arm=graph.put({schemaVersion:2,mediaType:IMAGE_MEDIA.manifest,config,layers:[layer]},IMAGE_MEDIA.manifest);
+  root.root=graph.put({schemaVersion:2,mediaType:IMAGE_MEDIA.index,manifests:[{...arm,platform:{os:'linux',architecture:'arm64'}}]},IMAGE_MEDIA.index);root.arm64Digest=arm.digest;
+  const f=await live(graph),p=payer(),h=openNonrootLiveDataFacts(f.input,p);
+  expect(()=>h.requireAbsent('llm-proxy',f.absence)).toThrow('ImageObserverPathPresent');
+  expect(()=>sealNonrootDataFactsProjection(h,p)).toThrow('NonrootDataFactsHeld');
+ });
+ it.each([['mnemo-server','derived'],['llm-proxy','other']])('limits absence to the fixed component/path: %s %s',async(component,kind)=>{
+  const f=await live(),p=payer(),h=openNonrootLiveDataFacts(f.input,p);
+  expect(()=>h.requireAbsent(component,kind==='derived'?f.absence:'/other')).toThrow('NonrootDataAbsenceScope');
+ });
+ it('requires synchronous undefined work assertions and an immutable absence facade',async()=>{
+  const f=await live();let asynchronous=false;
+  const work=Object.freeze({assertCurrent(){if(asynchronous)return Promise.reject(Error('SyntheticAsyncWork'));},chargeLocal(){}});
+  const h=openNonrootLiveDataFacts(f.input,{work});expect(h.requireAbsent('llm-proxy',f.absence)).toBeUndefined();
+  expect(()=>{h.requireAbsent=()=>true;}).toThrow(TypeError);
+  asynchronous=true;expect(()=>h.requireAbsent('llm-proxy',f.absence)).toThrow('ObserverReplaySynchronousWork');
+  await Promise.resolve();
  });
 });

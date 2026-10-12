@@ -9,6 +9,11 @@ import {inspectNonrootDigestOnlyCopy,nonrootArtifactCacheMaterial,verifyNonrootC
 import {inspectCommittedNonrootBudgetEnvelope} from './production-nonroot-budget-revision.mjs';
 import {dataLaunchPolicy,controlLaunchPolicy,validateNonrootEnvironment,verifyCarrierRunTaskBinding,verifyDataRuntimePathEvidence} from './production-nonroot-launch.mjs';
 import {NONROOT_DEPLOYED_CONTROL_IMAGE_SLOT,verifyNonrootDeploymentSource} from './production-nonroot-provenance.mjs';
+import {assertNonrootRehearsalBinding} from './production-nonroot-rehearsal-binding.mjs';
+import {assertNonrootControlCurrent} from './production-nonroot-control-current.mjs';
+import {bindObserverReplayWork} from './production-nonroot-observer-archive-reader.mjs';
+import {measureNonrootDataFacts,copyNonrootDataFacts} from './production-nonroot-data-facts-work.mjs';
+import {resolveImageFilesystemFile} from './production-image-filesystem-resolver.mjs';
 import {inspectNonrootRuntimeIdentity} from './production-nonroot-runtime.mjs';
 import {verifyNonrootControlRuntimeObservation} from './production-nonroot-observation.mjs';
 import {inspectDataRelease} from './production-data-release.mjs';
@@ -16,7 +21,7 @@ import {verifyCanaryMaterialTransition} from './production-canary-material-trans
 import {verifyLegacyCanaryMaterial} from './production-canary-material-integrity.mjs';
 import {inspectCanaryCompatibility} from './production-canary-compatibility.mjs';
 import {inspectImageCopyVerification,validateImageCopyEvidence,imageGraphState} from './production-image-graph.mjs';
-import {inspectImageFilesystemEvidence,inspectImageFilesystemEntries,inspectImageFilesystemFile,imageFilesystemVerificationKind,imageFilesystemProof} from './production-image-filesystem.mjs';
+import {inspectImageFilesystemEvidence,inspectImageFilesystemEntries,inspectImageFilesystemFile,inspectImageFilesystemFileProjection,assertImageFilesystemObserverPathAbsent,imageFilesystemVerificationKind,imageFilesystemProof} from './production-image-filesystem.mjs';
 import {verifyImageTransitionArtifactSecurity} from './production-image-transition-proof.mjs';
 import {describeDataBuildInputs} from './production-data-build-inputs.mjs';
 import {verifyDataReleaseArtifact} from './production-data-evidence.mjs';
@@ -302,7 +307,12 @@ async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expected
   r.compositionPackDescriptors(v.readAccounting,accountingRecord,proof.taskPlan.deployedControlBuildContract);
   same(await r.json(proof.historicalCopy.cumulativeBudget),copyCheckpoint,'NonrootCacheOriginalBudget');
  }
- const fs=await r.json(v.filesystem),paths=await r.json(v.pathPermissions),primitives=await r.json(v.primitiveEvidence),configs=await r.json(v.imageConfigs);
+ const fs=await r.json(v.filesystem),pathDocument=await r.json(v.pathPermissions),primitives=await r.json(v.primitiveEvidence),configs=await r.json(v.imageConfigs);
+ let paths=pathDocument,absent;
+ if(pathDocument.version===2){
+  exact(pathDocument,['version','kind','paths','absent']);need(pathDocument.kind==='nonroot-data-path-facts','NonrootDataPathFacts');
+  absent=[{component:'llm-proxy',path:'/__observer_missing_'+proof.predeploymentAudit.preauditPermit.owner}];same(pathDocument.absent,absent,'NonrootDataAbsenceScope');paths=pathDocument.paths;
+ }
  exact(fs,['version','evidence','filesystem']);need(fs.version===1);exact(fs.evidence,COMPONENTS);exact(paths,COMPONENTS);exact(primitives,COMPONENTS);exact(configs,COMPONENTS);
  let copy;
  if(!archiveBinding&&!cached){copy=inspectImageCopyVerification(evidence.graphVerification);need(copy.kind==='live-copy-evidence','NonrootLiveArtifactRequired');same({version:1,graphHash:copy.graphHash,summary:copy.summary,inventory:copy.inventory,destinationReadback:copy.destinationReadback},receipt);exact(evidence.filesystemVerification,COMPONENTS);}
@@ -310,7 +320,7 @@ async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expected
  for(const name of COMPONENTS){
   const image=proof.dataOrigin.images[name],e=fs.evidence[name];
   need(e.component===name&&e.graphHash===receipt.summary.inventoryHash&&e.rootDigest===image.rootDigest&&e.arm64Digest===image.arm64Digest,'NonrootFilesystemBinding');
-  if(!archiveBinding){const handle=cached?cacheMaterial.filesystem[name]:evidence.filesystemVerification[name];need(imageFilesystemVerificationKind(handle)==='live-filesystem-evidence','NonrootLiveArtifactRequired');same(inspectImageFilesystemEvidence(handle),e);const actual=new Map(inspectImageFilesystemEntries(handle,processing?.filesystem).map(p=>[p.path,p]));for(const path of paths[name]){need(actual.has(path.path),'NonrootImagePathMissing');same(actual.get(path.path),path,'NonrootImagePathChanged');}}
+  if(!archiveBinding){const handle=cached?cacheMaterial.filesystem[name]:evidence.filesystemVerification[name];need(imageFilesystemVerificationKind(handle)==='live-filesystem-evidence','NonrootLiveArtifactRequired');same(inspectImageFilesystemEvidence(handle),e);const actual=new Map(inspectImageFilesystemEntries(handle,processing?.filesystem).map(p=>[p.path,p]));for(const path of paths[name]){need(actual.has(path.path),'NonrootImagePathMissing');same(actual.get(path.path),path,'NonrootImagePathChanged');}if(absent&&name==='llm-proxy')need(!actual.has(absent[0].path.slice(1)),'NonrootDataAbsenceFalse');}
   need(Array.isArray(paths[name])&&paths[name].length>0&&new Set(paths[name].map(p=>p.path)).size===paths[name].length,'NonrootImagePaths');
   const primitive=inspectNonrootRecord('PrimitiveEvidenceV1',primitives[name]);same(primitive.image,image);need(primitive.invokedPath===(name==='mnemo-server'?'/bin/setpriv':'/usr/bin/setpriv'),'NonrootPrimitivePath');
   const actual=pathRecord(paths[name],primitive.invokedPath);need(actual.resolvedPath===primitive.resolvedPath&&actual.row.type==='file'&&actual.row.mode===493&&actual.row.uid===0&&actual.row.gid===0&&actual.row.content.sha256===primitive.fileSha256,'NonrootPrimitiveBytes');same(actual.links,await r.json(primitive.symlinkChain));
@@ -331,7 +341,7 @@ async function artifacts(proof,evidence,r,predecessor,at,archiveBinding,expected
   else same(imageFilesystemProof(evidence.filesystemVerification['mnemo-server'],evidence.graphVerification,{path:'/lib/apk/db/installed'}),fs.filesystem);
  }
  need(fs.evidence['mnemo-server'].packages.some(p=>p.name==='zlib'&&p.version===security.policy.fixed.targetVersion&&p.databaseSha256===fs.filesystem.databaseHash),'NonrootPackageVersion');
- return {receipt,paths,primitives,imageConfigs,security,checked,...(cached?{copyCheckpoint,readAccounting}:{})};
+ return {receipt,paths,primitives,imageConfigs,filesystemEvidence:fs.evidence,security,checked,...(absent?{absent}:{}),...(cached?{copyCheckpoint,readAccounting}:{})};
 }
 
 async function audit(proof,value,r,archive,at){
@@ -450,6 +460,113 @@ export function nonrootTransitionContextBindings(context){
   ...(s.review?{reviewHash:hash(s.review),review:s.review}:{}),...(s.deployment?{deploymentSourceHash:s.deployment.deploymentSourceHash,resolvedTaskPlanHash:s.deployment.resolvedTaskPlanHash,projectionHash:hash(s.deployment.registrations)}:{})});
 }
 
+// Stored only in the existing proof WeakMap. These handles expose DATA facts;
+// they are never graph/filesystem contexts or deployment authority.
+export const NONROOT_DATA_FACTS_ENTRY_LOCAL=16*4194304;
+function factsPay(paid,n){paid.debit(n);paid.current();}
+function factsExpected(value,paid){
+ const v=copyNonrootDataFacts(value,paid);exact(v,['owner','sourceTree','images']);
+ need(hex(v.owner,32)&&hex(v.sourceTree,40),'NonrootDataFactsExpected');inspectNonrootRecord('ImageSet',v.images);return v;
+}
+function factsState(handle,work){
+ const s=states.get(handle);need(s?.contextKind==='data-facts'&&s.work===work,'NonrootDataFactsContextRequired');
+ s.paid.current();need(!s.sealed,'NonrootDataFactsSealed');need(!s.failed,'NonrootDataFactsHeld');s.originalCurrent();return s;
+}
+function factsHandle(state){
+ const handle=Object.freeze({kind:'nonroot-data-facts',requireAbsent(component,path){
+  const value=assertNonrootDataPathAbsent(handle,{component,path,image:state.binding.images[component]},{work:state.work});
+  if(value&&typeof value.then==='function'){Promise.resolve(value).catch(()=>{});need(false,'NonrootDataAbsenceSynchronous');}
+  need(value===undefined,'NonrootDataAbsenceSynchronous');
+ }});states.set(handle,{contextKind:'data-facts',...state,sealed:false,failed:false,absenceConfirmed:false,
+  requested:Object.fromEntries(COMPONENTS.map(c=>[c,new Set()])),rows:Object.fromEntries(COMPONENTS.map(c=>[c,new Map()]))});return handle;
+}
+/** Initial after-COPY facts derive only from genuine cache/FS state. The
+ * original verifier closure and metadata must equal that native binding.
+ * No full-FS array is exported, serialized or restored from DATA. */
+export function openNonrootLiveDataFacts({cacheVerification,verifierClosure,metadata,archive,expected},{work}){
+ const paid=bindObserverReplayWork(work);factsPay(paid,NONROOT_DATA_FACTS_ENTRY_LOCAL);
+ const e=factsExpected(expected,paid),m=nonrootArtifactCacheMaterial(cacheVerification),b=m.binding,a=nonrootArchiveBindings(archive);
+ need(a.owner===e.owner&&b.copyCheckpoint.binding.owner===e.owner,'NonrootDataFactsCacheBinding');const inventoryHash=hash(b.inventory);
+ const verifier=copyNonrootDataFacts(verifierClosure,paid),md=copyNonrootDataFacts(metadata,paid);
+ need(verifier.tree===e.sourceTree&&hash(verifier)===b.verifierClosureHash&&hash(md)===b.freshDestinationMetadataHash,'NonrootDataFactsSourceBinding');
+ const graph=imageGraphState(m.graph),configs={},filesystemEvidence={};
+ for(const component of COMPONENTS){
+  const fs=m.filesystem[component],f=inspectImageFilesystemEvidence(fs),image=e.images[component],g=graph.images.get(component);
+  need(imageFilesystemVerificationKind(fs)==='live-filesystem-evidence'&&f.component===component&&f.graphHash===inventoryHash&&f.rootDigest===image.rootDigest&&f.arm64Digest===image.arm64Digest&&g.config.digest===image.configDigest,'NonrootDataFactsImageBinding');
+  filesystemEvidence[component]=f;
+  const rows=md.repositories.filter(r=>r.component===component);need(rows.length===1,'NonrootDataFactsImageBinding');
+  const encoded=rows[0].config.bytesBase64;need(typeof encoded==='string','NonrootDataFactsConfig');factsPay(paid,32*encoded.length+65536);
+  const raw=Buffer.from(encoded,'base64');need(raw.toString('base64')===encoded&&'sha256:'+sha(raw)===image.configDigest&&rows[0].config.digest===image.configDigest,'NonrootDataFactsConfig');
+  configs[component]=parseNonrootJson(raw.toString('utf8'));
+ }
+ const binding={kind:'live-cache-data-facts',authority:false,...e,inventoryHash,archiveManifestHash:a.manifestHash,verifierClosureHash:b.verifierClosureHash,cacheCustodyHash:b.cacheCustodyHash};
+ // Each lookup still enters the genuine native FS accessor. Its immutable
+ // origin binding was checked above; only the current original caller pays.
+ return factsHandle({work,paid,binding,configs,filesystemEvidence,filesystem:m.filesystem,originalCurrent(){paid.current();}});
+}
+/** A new authenticated, fully verified published-proof context must exist
+ * first. Only its already validated facts are exposed, under current payer
+ * and admission checks; no historical collector/runtime handle is revived. */
+export function openNonrootPublishedDataFacts(context,{archive,parameter,expected},{work}){
+ const workPaid=bindObserverReplayWork(work);factsPay(workPaid,NONROOT_DATA_FACTS_ENTRY_LOCAL);
+ const e=factsExpected(expected,workPaid),s=get(context),a=nonrootArchiveBindings(archive),original=nonrootArchiveBindings(s.archive);
+ need(s.origin==='archive'&&s.verificationMode==='admission'&&['authorization','deployment'].includes(s.contextKind)&&s.review&&original.kind==='published-archive','NonrootPublishedDataFactsRequired');
+ need(a.manifestHash===original.manifestHash&&a.owner===e.owner&&s.pins.owner===e.owner&&s.proof.deploymentControl.tree===e.sourceTree,'NonrootDataFactsProofBinding');
+ same(Object.fromEntries(COMPONENTS.map(c=>[c,Object.fromEntries(['rootDigest','arm64Digest','configDigest'].map(k=>[k,s.proof.dataOrigin.images[c][k]]))])),e.images,'NonrootDataFactsImageBinding');
+ const p=inspectNonrootRecord('ParameterCaptureV1',copyNonrootDataFacts(parameter,workPaid)),data=parseNonrootJson(p.Value);
+ need(p.Version===s.parameter.Version+1&&p.Name===s.parameter.Name&&p.ARN===s.parameter.ARN,'NonrootDataFactsParameter');
+ const openedMs=Date.now();assertNonrootDataRelease(context,{current:data,controlSourceTree:e.sourceTree,now:openedMs});
+ const deadline=Math.min(nonrootAdmissionDeadline(context),data.expiresMs);
+ // Reuse every original admission deadline for this immutable proof context.
+ // No provider/deployment gate is replaced by this readonly DATA lifetime.
+ const originalCurrent=()=>{workPaid.current();const now=Date.now();need(get(context)===s&&now>=openedMs&&now<deadline,'NonrootDataFactsExpired');};originalCurrent();
+ // The same original work pays every debit. Its lifetime alone cannot cover
+ // this proof's shorter admission; retain both checks inside each paid copy.
+ const paid=Object.freeze({current:originalCurrent,debit(n){originalCurrent();workPaid.debit(n);originalCurrent();}});
+ const projected=copyNonrootDataFacts(s.artifact.paths,paid),configs=copyNonrootDataFacts(s.artifact.imageConfigs,paid);
+ const state={work,paid,binding:{kind:'published-proof-data-facts',authority:false,...e,inventoryHash:hash(s.artifact.receipt.inventory),proofHash:s.proofHash,archiveManifestHash:a.manifestHash,parameterVersion:p.Version,verifierClosureHash:s.proof.artifactReverification.verifierClosure.canonicalHash},projected,configs,filesystemEvidence:copyNonrootDataFacts(s.artifact.filesystemEvidence,paid),committedAbsent:s.artifact.absent?copyNonrootDataFacts(s.artifact.absent,paid):[],originalCurrent};
+ originalCurrent();const handle=factsHandle(state);originalCurrent();return handle;
+}
+export function assertNonrootDataPathAbsent(handle,{component,path,image},{work}){
+ const s=factsState(handle,work);try{
+  factsPay(s.paid,65536);need(component==='llm-proxy'&&path==='/__observer_missing_'+s.binding.owner,'NonrootDataAbsenceScope');same(image,s.binding.images[component],'NonrootDataFactsImageBinding');
+  if(s.filesystem)assertImageFilesystemObserverPathAbsent(s.filesystem[component],path,{beforeRead(entries){s.originalCurrent();const g=measureNonrootDataFacts(entries,s.paid);factsPay(s.paid,8*g.bytes+32*g.nodes);}});
+  else need(s.committedAbsent.length===1&&s.committedAbsent[0].component===component&&s.committedAbsent[0].path===path,'NonrootDataAbsenceNotCommitted');
+  s.originalCurrent();s.absenceConfirmed=true;
+ }catch(error){s.failed=true;throw error;}
+}
+export function inspectNonrootDataFacts(handle,{work}){const s=factsState(handle,work);return copyNonrootDataFacts(s.binding,s.paid);}
+export function readNonrootDataImageFact(handle,{component,image},{work}){
+ const s=factsState(handle,work);factsPay(s.paid,65536);need(COMPONENTS.includes(component),'NonrootDataFactsComponent');same(image,s.binding.images[component],'NonrootDataFactsImageBinding');
+ return copyNonrootDataFacts({image:s.binding.images[component],config:s.configs[component]},s.paid);
+}
+export function readNonrootDataFilesystemEvidence(handle,{component,image},{work}){
+ const s=factsState(handle,work);factsPay(s.paid,65536);need(COMPONENTS.includes(component),'NonrootDataFactsComponent');same(image,s.binding.images[component],'NonrootDataFactsImageBinding');
+ return copyNonrootDataFacts(s.filesystemEvidence[component],s.paid);
+}
+export function readNonrootDataFileFact(handle,{component,path,image},{work}){
+ const s=factsState(handle,work);try{factsPay(s.paid,65536);need(COMPONENTS.includes(component),'NonrootDataFactsComponent');same(image,s.binding.images[component],'NonrootDataFactsImageBinding');
+ let fact,rows;
+ const beforeRead=entries=>{s.originalCurrent();const g=measureNonrootDataFacts(entries,s.paid);factsPay(s.paid,8*g.bytes+32*g.nodes);};
+ if(s.filesystem){
+  const out=inspectImageFilesystemFileProjection(s.filesystem[component],path,{beforeRead});fact=out.fact;rows=out.rows;
+ }else{
+  beforeRead(s.projected[component]);const used=new Map();
+  fact=resolveImageFilesystemFile(s.projected[component],path,{onRead(name,node){used.set(name,{path:name,...node});}});rows=[...used.values()];
+ }
+ s.originalCurrent();
+ for(const row of rows){const old=s.rows[component].get(row.path);if(old)same(old,row,'NonrootDataFactsRowChanged');else s.rows[component].set(row.path,copyNonrootDataFacts(row,s.paid));}
+ s.requested[component].add(path);return copyNonrootDataFacts(fact,s.paid);
+ }catch(error){s.failed=true;throw error;}
+}
+/** Freeze the actual used union before original pathPermissions publication.
+ * Future lookups require a new genuine caller context; no silent extension. */
+export function sealNonrootDataFactsProjection(handle,{work}){
+ const s=factsState(handle,work);need(s.filesystem,'NonrootLiveDataProjectionRequired');need(s.absenceConfirmed,'NonrootDataAbsenceRequired');factsPay(s.paid,NONROOT_DATA_FACTS_ENTRY_LOCAL);
+ const paths={},requested={};for(const c of COMPONENTS){paths[c]=[...s.rows[c].values()].sort((a,b)=>a.path.localeCompare(b.path));requested[c]=[...s.requested[c]].sort();}
+ const absent=[{component:'llm-proxy',path:'/__observer_missing_'+s.binding.owner}],result=copyNonrootDataFacts({binding:s.binding,paths,requested,absent},s.paid);s.originalCurrent();s.sealed=true;return result;
+}
+
 function finalReview(state,value,now,mode){
  const review=inspectNonrootRecord('FinalReviewV2',value),p=state.proof,b=nonrootTransitionContextBindings(branded(state));
  const expected={proofHash:state.proofHash,designReviewHash:p.designReview.canonicalHash,sourceEvidenceHash:p.deploymentControl.sourceEvidence.canonicalHash,controlSourceTree:p.deploymentControl.tree,dataOriginSourceEvidenceHash:p.dataOrigin.sourceEvidence.canonicalHash,copyAdoptionHash:hash(p.historicalCopy),artifactReverificationHash:hash(p.artifactReverification),taskPlanHash:hash(p.taskPlan),carrierBuildHash:hash(p.taskPlan.carrierBuild),permissionsHash:hash(p.taskPlan.permissions),availabilityRehearsalHash:hash(p.taskPlan.overlap.rehearsal),policySourcesHash:p.policySources.canonicalHash,artifactSecurityHash:p.artifactSecurity.canonicalHash,oldRootAuditHash:hash(p.predeploymentAudit),predecessorHash:b.predecessorHash};
@@ -523,8 +640,53 @@ async function freshPhase(state,value,evidence,parameter,deploymentSource,now){
 
 function assertDeploymentCurrent(state,now){
  need(state.contextKind==='deployment'&&state.verificationMode==='admission'&&state.review&&state.phaseEvidence&&positive(now),'NonrootDeploymentContextRequired');
+ assertNonrootRehearsalBinding(state.deployment.rehearsalBridge,{record:state.deploymentRecord,contract:state.proof.taskPlan.deployedControlBuildContract,taskPlan:state.proof.taskPlan,registrations:state.deployment.registrations});
  need(now>=state.review.reviewedMs&&now<state.data.expiresMs&&now<state.review.expiresMs&&now<state.phaseEvidence.expiresMs&&now<state.audited.review.expiresMs&&now<state.deploymentObservationDeadline,'NonrootDeploymentExpired');
  time(state.phaseEvidence.observedMs,now);time(state.deploymentRecord.checkedMs,now);
+}
+
+/** Bind before the root audit in this SAME existing authorization state.
+ * A caller cannot supply a completed comparison or serialized bridge flag. */
+export async function bindNonrootPreRootBridge(context,{parameter,deploymentSource,evidence,now=Date.now()}){
+ const s=get(context),bindings=nonrootAuthorizationBindings(context),contract=s.proof.taskPlan.deployedControlBuildContract;
+ const selected=inspectNonrootRecord('ParameterCaptureV1',parameter),data=parseNonrootJson(selected.Value);
+ assertNonrootDataRelease(context,{current:data,controlSourceTree:s.proof.deploymentControl.tree,now});
+ need(selected.Version===bindings.parameterVersion,'NonrootPreRootParameter');
+ const metadataReads=evidence?.metadataReads;
+ if(contract.version===2)need(typeof metadataReads?.assertCurrent==='function','NonrootRehearsalOriginalPayer');
+ const check=()=>assertNonrootControlCurrent(metadataReads);check();
+ // Clear an older stamp BEFORE any asynchronous work. Failure cannot leave
+ // a previously accepted source/recipe available to another root request.
+ delete s.preRootBridge;
+ const record=inspectNonrootRecord('DeploymentSourceRecordV2',deploymentSource);
+ const verified=await verifyNonrootDeploymentSource(record,{...nonrootArchiveResolvers(evidence.archive),archive:evidence.archive,proofArchive:s.archive,now,metadataReads,assertCurrent:check,
+  controlVerification:{graph:evidence.controlGraph,filesystem:evidence.controlFilesystemVerification},runtimeObservation:evidence.runtimeObservation,
+  rehearsalVerification:evidence.rehearsalVerification,
+  expected:{descriptorHash:hash(data),proofHash:s.proofHash,parameterVersion:selected.Version,taskPlan:s.proof.taskPlan,contract,sourceContext:evidence.sourceContext,
+   actualMainExpected:{repository:s.source.source.repository,prNumber:s.source.source.prNumber,candidateRevision:s.proof.deploymentControl.revision,candidateTree:s.proof.deploymentControl.tree,baseRevision:s.proof.deploymentControl.baseRevision}}});
+ check();assertNonrootRehearsalBinding(verified.rehearsalBridge,{record,contract,taskPlan:s.proof.taskPlan,registrations:verified.registrations});
+ let observationDeadline=Number.MAX_SAFE_INTEGER;
+ if(contract.version===2){
+  const ref=record.deployedControlBuild.scan.artifactReview;
+  metadataReads.reserveLocal({ecrRequests:0,httpBodyBytes:0,logicalBytes:32*ref.bytesLength,uncompressedBytes:0,processedEntries:0});check();
+  const reviewRaw=await nonrootArchiveResolvers(evidence.archive).resolveJson(ref);check();
+  const review=parseNonrootJson(Buffer.from(reviewRaw).toString('utf8'));need(hash(review)===ref.canonicalHash,'NonrootPreRootReview');
+  const at=Date.now(),runtime=verifyNonrootControlRuntimeObservation(evidence.runtimeObservation,record.deployedControlBuild,{controlVerification:{graph:evidence.controlGraph,filesystem:evidence.controlFilesystemVerification},now:at});
+  observationDeadline=Math.min(review.expiresMs,record.checkedMs+L.maxArtifactObservationAgeMs,record.deployedControlBuild.scan.observedMs+L.maxArtifactObservationAgeMs,runtime.completedMs+L.maxArtifactObservationAgeMs,...record.deployedControlBuild.resolvedLaunches.map(l=>l.environment.checkedMs+L.maxArtifactObservationAgeMs));
+  need(positive(observationDeadline)&&at<observationDeadline,'NonrootPreRootExpired');
+ }
+ s.preRootBridge={parameterHash:hash(selected),record:copyNonrootJson(record),verified:copyNonrootJson(verified),observationDeadline};
+ return verified;
+}
+export function assertNonrootPreRootBridge(context,{parameter,deploymentSource,now=Date.now()}){
+ const s=get(context);nonrootAuthorizationBindings(context);
+ const contract=s.proof.taskPlan.deployedControlBuildContract;
+ if(contract.version===1)return;
+ const b=s.preRootBridge;need(b&&b.parameterHash===hash(parameter)&&hash(b.record)===hash(deploymentSource),'NonrootPreRootBridgeRequired');
+ need(positive(b.observationDeadline)&&now<b.observationDeadline,'NonrootPreRootExpired');
+ assertNonrootDataRelease(context,{current:parseNonrootJson(parameter.Value),controlSourceTree:s.proof.deploymentControl.tree,now});
+ time(b.record.checkedMs,now);
+ assertNonrootRehearsalBinding(b.verified.rehearsalBridge,{record:b.record,contract,taskPlan:s.proof.taskPlan,registrations:b.verified.registrations});
 }
 
 export function nonrootDeploymentPhaseEvidence(context,{phase,now=Date.now()}={}){
@@ -541,12 +703,15 @@ export async function bindNonrootDeploymentContext(context,{parameter,deployment
  const s=get(context);nonrootAuthorizationBindings(context);const capture=inspectParameter(parameter,s.proof.root),data=descriptor(s,parseNonrootJson(capture.Value),s.review,now,'admission');
  need(capture.Version===s.parameter.Version+1&&capture.Name===s.parameter.Name&&capture.ARN===s.parameter.ARN,'NonrootParameterVersion');
  const archive=evidence?.archive;nonrootArchiveBindings(archive);
- const options={...nonrootArchiveResolvers(archive),now,
+ const options={...nonrootArchiveResolvers(archive),archive,proofArchive:s.archive,now,
   metadataReads:evidence.metadataReads,
+  assertCurrent:evidence.metadataReads?.assertCurrent,rehearsalVerification:evidence.rehearsalVerification,
   controlVerification:{graph:evidence.controlGraph,filesystem:evidence.controlFilesystemVerification},runtimeObservation:evidence.runtimeObservation,
   expected:{descriptorHash:hash(data),proofHash:s.proofHash,parameterVersion:capture.Version,taskPlan:s.proof.taskPlan,contract:s.proof.taskPlan.deployedControlBuildContract,sourceContext:evidence.sourceContext,
    actualMainExpected:{repository:s.source.source.repository,prNumber:s.source.source.prNumber,candidateRevision:s.proof.deploymentControl.revision,candidateTree:s.proof.deploymentControl.tree,baseRevision:s.proof.deploymentControl.baseRevision}}};
  const record=inspectNonrootRecord('DeploymentSourceRecordV2',deploymentSource),deployed=await verifyNonrootDeploymentSource(record,options);
+ assertNonrootControlCurrent(options);
+ assertNonrootRehearsalBinding(deployed.rehearsalBridge,{record,contract:s.proof.taskPlan.deployedControlBuildContract,taskPlan:s.proof.taskPlan,registrations:deployed.registrations});
  const runtime=verifyNonrootControlRuntimeObservation(evidence.runtimeObservation,record.deployedControlBuild,options);
  const controlBytes=verifyControlRuntimeBytes(record.deployedControlBuild,evidence);
  const target=evidence.targetObservation;need(target&&positive(target.observedMs),'NonrootRegistryObservationRequired');time(target.observedMs,now);exact(target.artifacts,COMPONENTS);

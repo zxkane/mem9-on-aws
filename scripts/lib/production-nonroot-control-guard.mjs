@@ -10,12 +10,13 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {copyNonrootJson,parseNonrootJson,inspectNonrootRecord,nonrootHash as hash} from './production-nonroot-contracts.mjs';
-import {inspectNonrootControlPrerequisites,runNonrootControlDockerCommand} from './production-nonroot-control-prerequisites.mjs';
+import {inspectNonrootControlPrerequisites,inspectReplayedNonrootControlPrerequisites,runNonrootControlDockerCommand} from './production-nonroot-control-prerequisites.mjs';
 import {controlImageGraphBinding,imageGraphState,readImageJson} from './production-image-graph.mjs';
 import {inspectImageFilesystemEntries,inspectImageFilesystemFile,readImageFilesystemFile} from './production-image-filesystem.mjs';
 import {readControlSourceFile,verifyControlSourceClosure} from './production-control-source.mjs';
 import {verifyNonrootActualMain} from './production-nonroot-provenance.mjs';
 import {inspectGuardManifest} from '../../docker/bootstrap/nonroot-files.mjs';
+import {assertNonrootControlCurrent as current,inspectNonrootRecordedCommands} from './production-nonroot-control-current.mjs';
 
 const states=new WeakMap(),sha=b=>createHash('sha256').update(b).digest('hex');
 const need=(v,code='NonrootGuardCaptureInvalid')=>{if(!v)throw Object.assign(Error(code),{code,hold:true});};
@@ -28,32 +29,45 @@ const trusted=new Map([...guardPaths,...appPaths].map(path=>[path,readFileSync(n
 const purposes={bootstrap:'bootstrap-runtime-verify',control:'consolidation-control',promotion:'consolidation-promote',provision:'denied-provision',transition:'denied-transition'};
 const cleanupError=()=>Object.assign(Error('ECLEANUP'),{code:'ECLEANUP',hold:true,cleanupConfirmed:false});
 
-async function prepare(value,options){
- const v=copyNonrootJson(value);exact(v,['contract','actualMain','resolvedLaunches']);
- const expected=copyNonrootJson(options.expected);exact(expected,['contractHash','actualMainHash','resolvedLaunchesHash']);
- same(hash(v.contract),expected.contractHash);same(hash(v.actualMain),expected.actualMainHash);same(hash(v.resolvedLaunches),expected.resolvedLaunchesHash);
- const contract=inspectProductionControlBuildContract(v.contract),main=inspectNonrootRecord('ActualMainV1',v.actualMain);
- const prerequisites=inspectNonrootControlPrerequisites(options.prerequisites,{controlVerification:options.controlVerification,sourceContext:options.sourceContext});
+async function prepare(value,options,rehearsal,archived=false){
+ current(options);const v=copyNonrootJson(value);exact(v,['contract',rehearsal?'origin':'actualMain','resolvedLaunches']);
+ const expected=copyNonrootJson(options.expected);exact(expected,['contractHash',rehearsal?'originHash':'actualMainHash','resolvedLaunchesHash']);
+ same(hash(v.contract),expected.contractHash);same(hash(v[rehearsal?'origin':'actualMain']),expected[rehearsal?'originHash':'actualMainHash']);same(hash(v.resolvedLaunches),expected.resolvedLaunchesHash);
+ const contract=inspectProductionControlBuildContract(v.contract),main=rehearsal?null:inspectNonrootRecord('ActualMainV1',v.actualMain);
+ const prerequisites=archived?inspectReplayedNonrootControlPrerequisites(options.prerequisites,options):inspectNonrootControlPrerequisites(options.prerequisites,{controlVerification:options.controlVerification,sourceContext:options.sourceContext});
  const {graph,filesystem}=options.controlVerification,binding=controlImageGraphBinding(graph),{graphHash,...image}=binding;
  same(prerequisites.record.image,image);same(prerequisites.record.sourceClosureHash,hash(contract.guardSource));
- same(contract.output,{account:image.account,region:image.region,repositoryName:image.repositoryName});
- await verifyNonrootActualMain(main,{...options,expected:{repository:contract.repository,prNumber:contract.prNumber,candidateRevision:contract.candidate.revision,candidateTree:contract.candidate.tree,baseRevision:contract.candidate.baseRevision}});
- need(main.mainTree===options.sourceContext?.tree,'NonrootGuardCaptureSource');await verifyControlSourceClosure(options.sourceContext,contract.guardSource);
- const self=await readControlSourceFile(options.sourceContext,sourcePath);need(self.file.sha256===collectorCodeHash&&self.bytes.equals(collectorBytes),'NonrootGuardCaptureCollectorSource');
+ let sourceRevision,sourceTree;
+ if(rehearsal){
+  // This lane measures intrinsic guard behavior. The fixed D caller owns
+  // acquisition authentication; these plain origin bytes grant nothing.
+  const o=v.origin,selection=o.selection;
+  need(o.version===1&&o.kind==='original-A-authenticated-custody'&&o.authority===false&&selection,'NonrootGuardRehearsalOrigin');
+  need(image.repositoryName==='mem9-on-aws/preview/bootstrap'&&image.account===contract.output.account&&image.region===contract.output.region,'NonrootGuardRehearsalScope');
+  same(selection.bootstrap,image);need(selection.repository===contract.repository&&selection.head===contract.candidate.revision&&selection.tree===contract.candidate.tree&&/^[a-f0-9]{40}$/.test(selection.buildRevision),'NonrootGuardRehearsalSource');
+  need(o.acquisition?.manifestRef?.sha256===o.manifestHash,'NonrootGuardRehearsalAcquisition');
+  sourceRevision=selection.head;sourceTree=selection.tree;
+ }else{
+  same(contract.output,{account:image.account,region:image.region,repositoryName:image.repositoryName});
+  await verifyNonrootActualMain(main,{...options,expected:{repository:contract.repository,prNumber:contract.prNumber,candidateRevision:contract.candidate.revision,candidateTree:contract.candidate.tree,baseRevision:contract.candidate.baseRevision}});current(options);
+  sourceRevision=main.mainRevision;sourceTree=main.mainTree;
+ }
+ need(sourceTree===options.sourceContext?.tree,'NonrootGuardCaptureSource');await verifyControlSourceClosure(options.sourceContext,contract.guardSource);current(options);
+ const self=await readControlSourceFile(options.sourceContext,sourcePath);current(options);need(self.file.sha256===collectorCodeHash&&self.bytes.equals(collectorBytes),'NonrootGuardCaptureCollectorSource');
  const matched=[];
  for(const [path,raw]of trusted){
-  const source=await readControlSourceFile(options.sourceContext,path),imagePath=path.startsWith('docker/bootstrap/')?'/bootstrap/'+path.slice('docker/bootstrap/'.length):'/bootstrap/operator/'+path;
+  const source=await readControlSourceFile(options.sourceContext,path);current(options);const imagePath=path.startsWith('docker/bootstrap/')?'/bootstrap/'+path.slice('docker/bootstrap/'.length):'/bootstrap/operator/'+path;
   need(source.bytes.equals(raw),'NonrootGuardCaptureReviewedSource');const file=inspectImageFilesystemFile(filesystem,imagePath);
   need(file.sha256===sha(raw)&&file.size===raw.length&&file.uid===0&&file.gid===0&&(file.mode&0o6022)===0,'NonrootGuardCaptureOriginalModule');
   if(guardPaths.includes(path))need(contract.guardSource.files.some(f=>f.path===path&&f.sha256===file.sha256),'NonrootGuardCaptureClosure');
   matched.push({path,imagePath,sha256:file.sha256});
  }
- const manifestBytes=await readImageFilesystemFile(filesystem,'/bootstrap/nonroot-manifest.json',{maxBytes:8388608}),manifest=inspectGuardManifest(manifestBytes.toString('utf8'));
+ const manifestBytes=await readImageFilesystemFile(filesystem,'/bootstrap/nonroot-manifest.json',{maxBytes:8388608});current(options);const manifest=inspectGuardManifest(manifestBytes.toString('utf8'));
  const wanted=inspectImageFilesystemEntries(filesystem).filter(e=>e.path.startsWith('bootstrap/')&&e.path!=='bootstrap/nonroot-manifest.json'&&e.type!=='directory').map(e=>'/'+e.path).sort();
  same(manifest.files.map(f=>f.path).sort(),wanted,'NonrootGuardCaptureManifestCoverage');
  for(const file of matched){const row=manifest.files.find(r=>r.path===file.imagePath);need(row?.sha256===file.sha256,'NonrootGuardCaptureManifestBinding');}
  const node=inspectImageFilesystemFile(filesystem,'/usr/local/bin/node');need(manifest.node.sha256===node.sha256&&manifest.node.size===node.size,'NonrootGuardCaptureManifestBinding');
- const state=imageGraphState(graph),descriptor=state.images.get('bootstrap').config,config=await readImageJson(state.store.open(descriptor),{maxBytes:8388608,budget:state.budget});
+ const state=imageGraphState(graph),descriptor=state.images.get('bootstrap').config,config=await readImageJson(state.store.open(descriptor),{maxBytes:8388608,budget:state.budget});current(options);
  same(config.config?.Env??[],prerequisites.environment.imageEnvironment);need(!Object.keys(config.config?.Volumes??{}).length,'NonrootGuardCaptureVolumes');
  need(Array.isArray(v.resolvedLaunches)&&v.resolvedLaunches.length===5,'NonrootGuardCaptureLaunches');const seen=new Set();
  for(const raw of v.resolvedLaunches){const l=inspectNonrootRecord('ResolvedControlLaunchV1',raw),purpose=purposes[l.taskKey];
@@ -63,7 +77,7 @@ async function prepare(value,options){
   need(l.guardClosureHash===hash(contract.guardSource),'NonrootGuardCaptureClosure');
   if(!purpose.startsWith('denied')){const path=l.taskKey==='bootstrap'?'/bootstrap/operator/scripts/runtime-bootstrap.mjs':'/bootstrap/operator/scripts/production-consolidation-operator.mjs';need(l.originalModule.present&&l.originalModule.value===path&&l.originalModuleSha256.present&&l.originalModuleSha256.value===inspectImageFilesystemFile(filesystem,path).sha256,'NonrootGuardCaptureOriginalModule');}
  }
- return {v,contract,main,graph,filesystem,image,config,manifestHash:sha(manifestBytes),matched,sourceContext:options.sourceContext};
+ return {v,contract,main,rehearsal,sourceRevision,sourceTree,graph,filesystem,image,config,manifestHash:sha(manifestBytes),matched,sourceContext:options.sourceContext};
 }
 
 function testEnvironment(taskKey,deadlineMs){
@@ -103,28 +117,37 @@ function checkEvents(text,p,launch){
 }
 
 export async function collectNonrootControlGuardTests(value,options){
- need(options&&typeof options==='object'&&!Array.isArray(options)&&Object.keys(options).every(key=>['expected','controlVerification','sourceContext','prerequisites','resolveJson','resolveBytes','deadlineMs','signal','beforeDocker'].includes(key)),'NonrootGuardCaptureFields');
+ const result=await collectGuardTests(value,options,false);current(options);return result;
+}
+export async function collectNonrootRehearsalGuardTests(value,options){
+ need(typeof options?.assertCurrent==='function','NonrootGuardRehearsalPayer');
+ const result=await collectGuardTests(value,options,true);current(options);return result;
+}
+async function collectGuardTests(value,options,rehearsal){
+ current(options);
+ need(options&&typeof options==='object'&&!Array.isArray(options)&&Object.keys(options).every(key=>['expected','controlVerification','sourceContext','prerequisites','resolveJson','resolveBytes','deadlineMs','signal','beforeDocker','assertCurrent','retainOriginals'].includes(key)),'NonrootGuardCaptureFields');
  need(options.beforeDocker===undefined||typeof options.beforeDocker==='function','NonrootGuardCaptureFields');
- const startedMs=Date.now(),deadlineMs=Math.min(options.deadlineMs??startedMs+180000,startedMs+180000),p=await prepare(value,options),cases=[];
+ need(options.retainOriginals===undefined||options.retainOriginals===true,'NonrootGuardOriginals');
+ const startedMs=Date.now(),deadlineMs=Math.min(options.deadlineMs??startedMs+180000,startedMs+180000),p=await prepare(value,options,rehearsal);current(options);const cases=[],originalCommands=[];
  need(Number.isSafeInteger(deadlineMs)&&Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootGuardCaptureExpired');
  const directory=await mkdtemp(join(tmpdir(),'mem9-control-guard-'));let held=false;
- try{for(const launch of p.v.resolvedLaunches){
+ try{current(options);for(const launch of p.v.resolvedLaunches){
   const name='mem9-guard-test-'+randomBytes(16).toString('hex');let id,attempted=false,sticky=false,primary,record;
   const run=async(stage,args,cleanup=false)=>{
-   if(options.beforeDocker){await options.beforeDocker(Object.freeze({stage,taskKey:launch.taskKey,containerId:id,args:Object.freeze([...args])}));}
+   if(options.beforeDocker){await options.beforeDocker(Object.freeze({stage,taskKey:launch.taskKey,containerId:id,args:Object.freeze([...args])}));current(options,cleanup);}
    if(!cleanup){controlImageGraphBinding(p.graph);need(Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootGuardCaptureExpired');}if(stage==='create')attempted=true;
-   try{return await runNonrootControlDockerCommand(args,{directory,timeoutMs:cleanup?10000:Math.min(30000,deadlineMs-Date.now()),signal:cleanup?undefined:options.signal});}catch(e){if(e.code==='ECLEANUP')sticky=true;throw e;}
+   try{current(options,cleanup);const startedMs=Date.now(),result=await runNonrootControlDockerCommand(args,{directory,timeoutMs:cleanup?10000:Math.min(30000,deadlineMs-Date.now()),signal:cleanup?undefined:options.signal,assertCurrent:options.assertCurrent,cleanup});current(options,cleanup);if(options.retainOriginals){need(originalCommands.length<35,'NonrootGuardOriginals');originalCommands.push({taskKey:launch.taskKey,stage,args:[...args],cleanup,status:result.status,stdout:result.stdout,stderr:result.stderr,startedMs,completedMs:Date.now()});}return result;}catch(e){if(e.code==='ECLEANUP')sticky=true;throw e;}
   };
-  const checked=async(stage,args,cleanup=false)=>{const r=await run(stage,args,cleanup);need(r.status===0,'NonrootGuardCaptureDockerCommand');return r;};
-  const inspect=async(stage,args)=>parseNonrootJson((await checked(stage,args)).stdout,{maxBytes:1048576});
+  const checked=async(stage,args,cleanup=false)=>{const r=await run(stage,args,cleanup);current(options,cleanup);need(r.status===0,'NonrootGuardCaptureDockerCommand');return r;};
+  const inspect=async(stage,args)=>{const r=await checked(stage,args);current(options);return parseNonrootJson(r.stdout,{maxBytes:1048576});};
   try{
-   const root=checkImage(await inspect('inspect-image',['image','inspect',p.image.rootDigest]),p),route=testEnvironment(launch.taskKey,Math.min(deadlineMs,Date.now()+60000));
+   const rootRaw=await inspect('inspect-image',['image','inspect',p.image.rootDigest]);current(options);const root=checkImage(rootRaw,p),route=testEnvironment(launch.taskKey,Math.min(deadlineMs,Date.now()+60000));
    const args=launch.entryPoint.slice(1),environment=[...(p.config.config?.Env??[]),...Object.entries(route).map(([k,v])=>k+'='+v)],envArgs=Object.entries(route).flatMap(([k,v])=>['--env',k+'='+v]);
    const result=await checked('create',['container','create','--pull=never','--platform=linux/arm64','--network=none','--read-only','--user=1000:1000','--cap-drop=ALL','--security-opt=no-new-privileges:true','--pids-limit=32','--memory=256m','--cpus=1','--restart=no','--no-healthcheck','--label','mem9-guard-test='+name,'--name',name,'--entrypoint','/bin/setpriv',...envArgs,p.image.rootDigest,...args]);
-   need(/^[a-f0-9]{64}$/.test(result.stdout.trim()),'NonrootGuardCaptureContainerId');id=result.stdout.trim();const container={id,name,args,environment};
-   const before=checkContainer(await inspect('inspect-created',['container','inspect',id]),p,container,false),started=Date.now();
-   const out=await run('start',['container','start','--attach',id]);need(out.status===1&&out.stderr==='', 'NonrootGuardCaptureExpectedRejection');
-   const after=checkContainer(await inspect('inspect-exited',['container','inspect',id]),p,container,true),checkedEvents=checkEvents(out.stdout,p,launch);
+   current(options);need(/^[a-f0-9]{64}$/.test(result.stdout.trim()),'NonrootGuardCaptureContainerId');id=result.stdout.trim();const container={id,name,args,environment};
+   const beforeRaw=await inspect('inspect-created',['container','inspect',id]);current(options);const before=checkContainer(beforeRaw,p,container,false),started=Date.now();
+   const out=await run('start',['container','start','--attach',id]);current(options);need(out.status===1&&out.stderr==='', 'NonrootGuardCaptureExpectedRejection');
+   const afterRaw=await inspect('inspect-exited',['container','inspect',id]);current(options);const after=checkContainer(afterRaw,p,container,true),checkedEvents=checkEvents(out.stdout,p,launch);
    // The fixed, source-authenticated guard imports only its reviewed helpers
    // before this first event. These helpers read identity, routing and image
    // bytes, never credential values. No credential env/file is supplied here.
@@ -133,22 +156,88 @@ export async function collectNonrootControlGuardTests(value,options){
    record={taskKey:launch.taskKey,launchHash:hash(launch),purpose:purposes[launch.taskKey],environment:route,imageInspectHash:hash(root),createdInspectHash:hash(before),exitedInspectHash:hash(after),stdout:out.stdout,stdoutHash:sha(out.stdout),exitCode:after.State.ExitCode,events:checkedEvents.events,applicationReached:checkedEvents.applicationReached,credentialAccessBeforeGuard,startedMs:started,completedMs:Date.now()};
   }catch(e){primary=e;}
   try{
-   if(id){await checked('remove',['container','rm','--force','--volumes',id],true);const absent=await run('inspect-removed',['container','inspect',id],true);need(absent.status===1&&new RegExp('(?:No such container|No such object): '+id+'(?:\\s|$)').test(absent.stderr),'ECLEANUP');if(record)record.cleanup={containerId:id,confirmed:true,absenceHash:sha(absent.stderr)};}
+   if(id){await checked('remove',['container','rm','--force','--volumes',id],true);current(options,true);const absent=await run('inspect-removed',['container','inspect',id],true);current(options,true);need(absent.status===1&&new RegExp('(?:No such container|No such object): '+id+'(?:\\s|$)').test(absent.stderr),'ECLEANUP');if(record)record.cleanup={containerId:id,confirmed:true,absenceHash:sha(absent.stderr)};}
    else if(attempted)sticky=true;need(!sticky,'ECLEANUP');
   }catch{held=true;throw Object.assign(cleanupError(),{containerId:id,containerName:name,operationDirectory:directory});}
   if(primary){primary.cleanupConfirmed=true;throw primary;}cases.push(record);
- }}finally{if(!held)await rm(directory,{recursive:true,force:true});}
+ }}finally{if(!held){await rm(directory,{recursive:true,force:true});current(options,true);}}
+ current(options);
  need(Date.now()<deadlineMs&&!options.signal?.aborted,'NonrootGuardCaptureExpired');
- const completedMs=Date.now(),guardTests=copyNonrootJson({version:1,kind:'control-guard-test-evidence',image:p.image,sourceRevision:p.main.mainRevision,sourceTree:p.main.mainTree,guardSourceHash:hash(p.contract.guardSource),contractHash:hash(p.contract),testContractHash:p.contract.guardTestContract.canonicalHash,
+ const completedMs=Date.now(),guardTests=copyNonrootJson({version:1,kind:rehearsal?'rehearsal-A-guard-test-evidence':'control-guard-test-evidence',image:p.image,sourceRevision:p.sourceRevision,sourceTree:p.sourceTree,guardSourceHash:hash(p.contract.guardSource),contractHash:hash(p.contract),testContractHash:p.contract.guardTestContract.canonicalHash,
   launches:cases.map(c=>({taskKey:c.taskKey,launchHash:c.launchHash,purpose:c.purpose,result:'pass',applicationReached:c.applicationReached,credentialAccessBeforeGuard:c.credentialAccessBeforeGuard})),completedMs});
- const record=copyNonrootJson({version:1,kind:'isolated-original-control-guard-tests',collectorCodeHash,contractHash:hash(p.contract),actualMainHash:hash(p.main),resolvedLaunchesHash:hash(p.v.resolvedLaunches),credentialOrderingBasis:{kind:'fixed-guard-source-and-event-order',matchedSources:p.matched},startedMs,completedMs,cases});
- const handle=Object.freeze({kind:'control-guard-tests-context'});states.set(handle,{p,guardTests,record});return handle;
+ const record=copyNonrootJson({version:1,kind:rehearsal?'isolated-original-A-guard-tests':'isolated-original-control-guard-tests',collectorCodeHash,contractHash:hash(p.contract),...(rehearsal?{originHash:hash(p.v.origin)}:{actualMainHash:hash(p.main)}),resolvedLaunchesHash:hash(p.v.resolvedLaunches),credentialOrderingBasis:{kind:'fixed-guard-source-and-event-order',matchedSources:p.matched},startedMs,completedMs,cases});
+ const handle=Object.freeze({kind:'control-guard-tests-context'});states.set(handle,{p,guardTests,record,...(options.retainOriginals?{originalCommands}:{})});return handle;
 }
 
-export function inspectNonrootControlGuardTests(handle,{controlVerification,sourceContext,now=Date.now()}={}){
- const state=states.get(handle);need(state,'NonrootGuardCaptureContextRequired');
+export function inspectNonrootControlGuardTests(handle,options={}){return inspectGuardTests(handle,options,false);}
+export function inspectNonrootRehearsalGuardTests(handle,options={}){return inspectGuardTests(handle,options,true);}
+function inspectGuardTests(handle,options,rehearsal){
+ current(options);const {controlVerification,sourceContext,now=Date.now()}=options;
+ const state=states.get(handle);need(state&&state.p.rehearsal===rehearsal,'NonrootGuardCaptureContextRequired');
  need(state.p.graph===controlVerification?.graph&&state.p.filesystem===controlVerification?.filesystem&&state.p.sourceContext===sourceContext,'NonrootGuardCaptureContextBinding');controlImageGraphBinding(state.p.graph);
  need(now>=state.record.completedMs&&now-state.record.completedMs<=300000,'NonrootGuardCaptureStale');
  const objects=[state.guardTests,state.record].map(value=>{const bytes=Buffer.from(JSON.stringify(value)+'\n');return {ref:{bytesHash:sha(bytes),canonicalHash:hash(value),bytesLength:bytes.length},bytes};});
  return {guardTests:copyNonrootJson(state.guardTests),record:copyNonrootJson(state.record),guardTestsRef:objects[0].ref,recordRef:objects[1].ref,objects};
+}
+
+/** Original outputs are DATA; only the existing native handle can expose them. */
+export function inspectNonrootRehearsalGuardOriginals(handle,options){
+ current(options);inspectNonrootRehearsalGuardTests(handle,options);const s=states.get(handle);
+ need(Array.isArray(s.originalCommands)&&s.originalCommands.length===35,'NonrootGuardOriginalsRequired');
+ const rows=s.originalCommands.map(r=>({...r,args:[...r.args]}));current(options);return rows;
+}
+
+/** The native collector finishes each case's cleanup before starting the
+ * next case. This is a command-DATA predicate, not a native capability. */
+export function inspectNonrootRehearsalGuardSequence(commands,record){
+ need(Array.isArray(commands)&&commands.length===35,'NonrootGuardOriginalsRequired');
+ const groups=[];let previousCleanupMs=record.startedMs;
+ for(let i=0;i<5;i++){
+  const rows=commands.slice(i*7,(i+1)*7);
+  const command=inspectNonrootRecordedCommands(rows,['inspect-image','create','inspect-created','start','inspect-exited','remove','inspect-removed'],{startedMs:previousCleanupMs,completedMs:record.completedMs});
+  previousCleanupMs=rows.at(-1).completedMs;groups.push({rows,command});
+ }
+ return groups;
+}
+
+/** Re-evaluate original command and event evidence. The native collector's
+ * handle is never created by this read-only historical verifier. */
+export async function replayNonrootRehearsalGuardRecord({record,commands,value},options){
+ current(options);need(typeof options.assertCurrent==='function','NonrootGuardReplayPayer');
+ const r=copyNonrootJson(record),p=await prepare(value,options,true,true);current(options);
+ need(r.startedMs<=r.completedMs&&r.completedMs-r.startedMs<=180000&&r.completedMs<=options.now&&options.now-r.completedMs<=300000,'NonrootGuardCaptureStale');
+ need(r.cases.length===5&&commands.length===35,'NonrootGuardOriginalsRequired');const cases=[],groups=inspectNonrootRehearsalGuardSequence(commands,r);
+ for(const [i,launch]of p.v.resolvedLaunches.entries()){
+  current(options);const old=r.cases[i],{rows,command}=groups[i];need(old.taskKey===launch.taskKey&&rows.every(row=>row.taskKey===launch.taskKey),'NonrootGuardReplayTask');
+  const parse=row=>parseNonrootJson(row.stdout,{maxBytes:1048576}),root=checkImage(parse(command('inspect-image',['image','inspect',p.image.rootDigest])),p);
+  const id=old.cleanup?.containerId;need(/^[a-f0-9]{64}$/.test(id),'NonrootGuardCaptureContainerId');
+  const created=parse(rows[2]),name=created?.[0]?.Name?.slice(1);need(/^mem9-guard-test-[a-f0-9]{32}$/.test(name),'NonrootGuardCaptureContainerId');
+  const route=old.environment;need(route.MEM9_STAGE==='prod','NonrootGuardReplayEnvironment');
+  if(launch.taskKey==='bootstrap')same(route,{MEM9_STAGE:'prod',MEM9_BOOTSTRAP_OPERATION:'runtime-verify',MEM9_RUNTIME_BOOTSTRAP_VERSION:'1'},'NonrootGuardReplayEnvironment');
+  else if(['control','promotion'].includes(launch.taskKey)){
+   exact(route,['MEM9_STAGE','MEM9_PRODUCTION_WORKER_OPERATOR','MEM9_PRODUCTION_CONSOLIDATION_REQUEST']);
+   const operation=launch.taskKey==='control'?'status':'promote',request=parseNonrootJson(route.MEM9_PRODUCTION_CONSOLIDATION_REQUEST);exact(request,['operation','invocation','deadline']);
+   need(route.MEM9_PRODUCTION_WORKER_OPERATOR===(launch.taskKey==='control'?'control':'promotion')&&request.operation===operation&&/^[a-f0-9]{32}$/.test(request.invocation)&&Number.isSafeInteger(request.deadline)&&request.deadline>=rows[1].startedMs&&request.deadline<=rows[1].startedMs+60000&&request.deadline<=r.startedMs+180000,'NonrootGuardReplayEnvironment');
+   need(JSON.stringify({operation,invocation:request.invocation,deadline:request.deadline})===route.MEM9_PRODUCTION_CONSOLIDATION_REQUEST,'NonrootGuardReplayEnvironment');
+  }else same(route,{MEM9_STAGE:'prod'},'NonrootGuardReplayEnvironment');
+  // The containing archive JSON is canonical. Restore original generator
+  // key order before comparing the command's ordered environment arguments.
+  const ordered={MEM9_STAGE:'prod'};
+  if(launch.taskKey==='bootstrap')Object.assign(ordered,{MEM9_BOOTSTRAP_OPERATION:'runtime-verify',MEM9_RUNTIME_BOOTSTRAP_VERSION:'1'});
+  else if(['control','promotion'].includes(launch.taskKey))Object.assign(ordered,{MEM9_PRODUCTION_WORKER_OPERATOR:route.MEM9_PRODUCTION_WORKER_OPERATOR,MEM9_PRODUCTION_CONSOLIDATION_REQUEST:route.MEM9_PRODUCTION_CONSOLIDATION_REQUEST});
+  const args=launch.entryPoint.slice(1),environment=[...(p.config.config?.Env??[]),...Object.entries(ordered).map(([k,v])=>k+'='+v)],envArgs=Object.entries(ordered).flatMap(([k,v])=>['--env',k+'='+v]);
+  const creation=command('create',['container','create','--pull=never','--platform=linux/arm64','--network=none','--read-only','--user=1000:1000','--cap-drop=ALL','--security-opt=no-new-privileges:true','--pids-limit=32','--memory=256m','--cpus=1','--restart=no','--no-healthcheck','--label','mem9-guard-test='+name,'--name',name,'--entrypoint','/bin/setpriv',...envArgs,p.image.rootDigest,...args]);need(creation.stdout.trim()===id,'NonrootGuardCaptureContainerId');
+  const container={id,name,args,environment},before=checkContainer(parse(command('inspect-created',['container','inspect',id])),p,container,false);
+  const out=command('start',['container','start','--attach',id],1);need(out.stderr==='','NonrootGuardCaptureExpectedRejection');
+  const after=checkContainer(parse(command('inspect-exited',['container','inspect',id])),p,container,true),checkedEvents=checkEvents(out.stdout,p,launch);
+  const credentialAccessBeforeGuard=checkedEvents.events.findIndex(e=>e.event==='nonroot_guard')!==0;need(!credentialAccessBeforeGuard,'NonrootGuardCaptureOrder');
+  command('remove',['container','rm','--force','--volumes',id]);const absent=command('inspect-removed',['container','inspect',id],1);
+  need(new RegExp('(?:No such container|No such object): '+id+'(?:\\s|$)').test(absent.stderr),'ECLEANUP');
+  need(old.startedMs>=rows[2].completedMs&&old.startedMs<=rows[3].startedMs&&old.completedMs>=rows[4].completedMs&&old.completedMs<=rows[5].startedMs,'NonrootGuardReplayClock');
+  cases.push({taskKey:launch.taskKey,launchHash:hash(launch),purpose:purposes[launch.taskKey],environment:route,imageInspectHash:hash(root),createdInspectHash:hash(before),exitedInspectHash:hash(after),stdout:out.stdout,stdoutHash:sha(out.stdout),exitCode:after.State.ExitCode,events:checkedEvents.events,applicationReached:checkedEvents.applicationReached,credentialAccessBeforeGuard,startedMs:old.startedMs,completedMs:old.completedMs,cleanup:{containerId:id,confirmed:true,absenceHash:sha(absent.stderr)}});
+ }
+ const wanted={version:1,kind:'isolated-original-A-guard-tests',collectorCodeHash,contractHash:hash(p.contract),originHash:hash(p.v.origin),resolvedLaunchesHash:hash(p.v.resolvedLaunches),credentialOrderingBasis:{kind:'fixed-guard-source-and-event-order',matchedSources:p.matched},startedMs:r.startedMs,completedMs:r.completedMs,cases};
+ same(r,wanted,'NonrootGuardReplayRecord');
+ const guardTests={version:1,kind:'rehearsal-A-guard-test-evidence',image:p.image,sourceRevision:p.sourceRevision,sourceTree:p.sourceTree,guardSourceHash:hash(p.contract.guardSource),contractHash:hash(p.contract),testContractHash:p.contract.guardTestContract.canonicalHash,launches:cases.map(c=>({taskKey:c.taskKey,launchHash:c.launchHash,purpose:c.purpose,result:'pass',applicationReached:c.applicationReached,credentialAccessBeforeGuard:c.credentialAccessBeforeGuard})),completedMs:r.completedMs};
+ current(options);return {record:copyNonrootJson(wanted),guardTests:copyNonrootJson(guardTests)};
 }

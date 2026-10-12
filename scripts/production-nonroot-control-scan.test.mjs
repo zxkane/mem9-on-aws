@@ -173,3 +173,21 @@ it.skipIf(process.env.MEM9_NONROOT_CONTAINER_TEST!=='1')('verifies produced scan
   expect(x.events.filter(e=>e[0]==='http')).toHaveLength(1);
  }finally{x?.reader.close();await docker.close();}
 },120000);
+
+it('extends an aggregate v2 archive above32MiB without changing scan policy or member bytes',async()=>{
+ const x=fixture();try{
+  const api=await import('./lib/production-nonroot-archive.mjs');
+  const wire=await api.exportNonrootArchive(x.input.archive),manifest=JSON.parse(wire.manifest),objects=new Map(wire.objects.map(row=>[row.name,Buffer.from(row.base64,'base64')]));
+  for(const [n,size]of [[31,17*1048576],[32,16*1048576]]){
+   const raw=Buffer.alloc(size,n),sha256=createHash('sha256').update(raw).digest('hex'),name='sha256-'+sha256+'.bin';
+   manifest.files.push({name,purpose:'source',encoding:'bytes',ref:{sha256,bytesLength:size}});objects.set(name,raw);
+  }
+  x.input.archive=api.createNonrootEvidenceArchive(JSON.stringify(manifest),{wireVersion:2,expectedManifestHash:hash(manifest),readObject:async name=>objects.get(name)});
+  const result=await x.collect();expect(api.nonrootArchiveCapacity(result.archive).version).toBe(2);
+  const output=await api.exportNonrootArchive(result.archive);expect(output.version).toBe(2);
+  for(const row of manifest.files)expect(output.objects.find(r=>r.name===row.name).base64).toBe(objects.get(row.name).toString('base64'));
+  expect(x.events.filter(e=>e[0]==='http')).toHaveLength(1);
+  expect(x.events.filter(e=>e[0]==='local').some(e=>e[1].logicalBytes>128*1048576)).toBe(true);
+  expect(P.maxEvidenceBytes).toBe(33554432);expect(P.maxPageBytes).toBe(8388608);
+ }finally{x.reader.close();}
+});

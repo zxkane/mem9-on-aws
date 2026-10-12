@@ -38,6 +38,7 @@ const expectedCopies = {
       "scripts/lib/production-canary-paused-audit.mjs",
       "scripts/lib/production-nonroot-contracts.mjs",
       "scripts/lib/production-nonroot-runtime.mjs",
+      "scripts/lib/production-nonroot-control-current.mjs",
       "scripts/lib/production-nonroot-launch.mjs",
       "scripts/lib/nonroot-preview-source.mjs",
       "scripts/lib/production-canary-verification.mjs",
@@ -97,13 +98,16 @@ const expectedCopies = {
       "scripts/lib/production-continuation-publication.mjs",
       "scripts/lib/production-continuation-absence.mjs",
       "scripts/lib/production-nonroot-local-work.mjs",
+      "scripts/lib/production-nonroot-archive-capacity.mjs",
       "scripts/lib/ci-smoke-acquisition-format.mjs",
       "scripts/lib/ci-smoke-evidence.mjs",
       "scripts/lib/production-nonroot-budget-revision.mjs",
       "scripts/lib/production-nonroot-observer-control-context.mjs",
       "scripts/lib/production-nonroot-observer-delivery.mjs",
       "scripts/lib/production-nonroot-observer-route-probe.mjs",
-      "scripts/lib/production-nonroot-observer-runtime-provider.mjs"
+      "scripts/lib/production-nonroot-observer-runtime-provider.mjs",
+      "scripts/lib/production-nonroot-observer-route-protocol.mjs",
+      "scripts/lib/production-nonroot-observer-finalization-work.mjs"
     ],
     "/bootstrap/operator/infra/gateway/": [
       "infra/gateway/namespace-auth.mjs"
