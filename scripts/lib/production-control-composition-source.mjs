@@ -1,6 +1,7 @@
 /** Complete COPY expansion against the original native Git tree and the
  * authenticated image filesystem. No image execution or guessed members. */
 import {posix} from 'node:path';
+import {canaryEvidenceHash as filesystemHash} from './production-canary-verification.mjs';
 import {nonrootHash as hash} from './production-nonroot-contracts.mjs';
 import {controlSourcePaths,readControlSourceFile,describeControlCopyClosure} from './production-control-source.mjs';
 import {inspectImageFilesystemEntries,inspectImageFilesystemEvidence,imageFilesystemVerificationKind} from './production-image-filesystem.mjs';
@@ -9,7 +10,7 @@ import {compositionNeed as need,inspectProductionControlCopyRows} from './produc
 export async function describeProductionControlCopyManifest({sourceContext,baseFilesystem,charge=()=>{}}){
  need(imageFilesystemVerificationKind(baseFilesystem)==='live-filesystem-evidence','ControlCompositionLiveFilesystem');
  const fs=inspectImageFilesystemEvidence(baseFilesystem),entries=inspectImageFilesystemEntries(baseFilesystem);
- need(hash(entries)===fs.entriesHash,'ControlCompositionFilesystemChanged');
+ need(filesystemHash(entries)===fs.entriesHash,'ControlCompositionFilesystemChanged');
  const byPath=new Map(entries.map(e=>[e.path,e])),paths=controlSourcePaths(sourceContext);
  // This original reader authenticates complete tree membership and the exact
  // Dockerfile COPY closure. It rejects unsupported ADD/flags/source syntax.

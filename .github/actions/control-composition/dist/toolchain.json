@@ -15907,8 +15907,8 @@
     },
     {
       "path": "scripts/lib/production-control-composition-source.mjs",
-      "sha256": "b0067605056ab15afbf000f66ab91609602421f759b00317934ec0aa830cbf1a",
-      "bytesLength": 4429
+      "sha256": "190b994fbc96615ba1f3b733cc462e18ea334cc3c52ded47feb4e1e2d9dd29c1",
+      "bytesLength": 4530
     },
     {
       "path": "scripts/lib/production-control-composition-transport.mjs",
@@ -16633,7 +16633,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "c5f9e969945a256f6a75da31ae47f04ac547b74a78df6c3120a1bc77687835ab",
-    "bytesLength": 6495371
+    "sha256": "da16d16e9035e26ad9e95882147a3c0d4fc4134e4a543d071118939c787a8cad",
+    "bytesLength": 6495416
   }
 }
