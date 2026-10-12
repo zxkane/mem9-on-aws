@@ -28,7 +28,8 @@ vi.mock('node:fs',()=>({
  },
  fstatSync(fd){const r=model.fds.get(fd).row;return {dev:1,ino:r.inode,size:r.bytes.length,mode:0o100755,uid:0,gid:0,mtimeMs:1,ctimeMs:1,isFile:()=>true};},
 }));
-import {collectNodeObservationEpisode,nodeObservationCollectorSource} from './lib/production-nonroot-observation-collector.mjs';
+import {collectNodeObservationEpisode,nodeObservationCollectorSource,collectWorkerObservationEpisode,nodeWorkerObservationCollectorSource} from './lib/production-nonroot-observation-collector.mjs';
+import {nonrootHash} from './lib/production-nonroot-contracts.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
 const kernel=['Uid:\t1000 1000 1000 1000','Gid:\t1000 1000 1000 1000','Groups:\t1000',...['Inh','Prm','Eff','Bnd','Amb'].map(k=>'Cap'+k+':\t0000000000000000'),'NoNewPrivs:\t1'].join('\n')+'\n';
 const row=(extra={})=>({ppid:1,ticks:100,executable:'/usr/local/bin/node',bytes:Buffer.from('synthetic resident node'),inode:40,cmdline:'node\0/app/scripts/consolidation-worker.mjs\0',status:kernel,...extra});
@@ -144,4 +145,58 @@ test('frozen wall clock cannot create unquoted polling beyond the original limit
 });
 test('missing, zero, fractional or infinite poll limit rejects before proc reads',()=>{
  for(const pollLimit of [undefined,0,1.5,Infinity])expect(()=>collectNodeObservationEpisode({...input(),pollLimit})).toThrow();expect(model.opens).toEqual([]);
+});
+function relativeInput(episodeIndex=0,execAnchor=null){
+ const plan={version:2,kind:'bounded-data-observation',clock:'observed-worker-exec',owner:'a'.repeat(32),operation:'b'.repeat(32),launchNonce:'c'.repeat(32),sourceTree:'d'.repeat(40),role:'planner',image:{rootDigest:'sha256:'+'1'.repeat(64),arm64Digest:'sha256:'+'2'.repeat(64),configDigest:'sha256:'+'3'.repeat(64)},startedMs:1000,latestArmMs:1100,observationEndMs:2000,deadlineMs:2200,armingLimitMs:25,cleanupReserveMs:200,episodes:[{index:0,offsetMs:20,durationMs:20,sampleEveryMs:10},{index:1,offsetMs:80,durationMs:20,sampleEveryMs:10}],limits:{readBytes:268435456,rawBytes:1048576,initialProcesses:128,finalProcesses:128,combinedIdentities:256}};
+ return {plan,planHash:nonrootHash(plan),episodeIndex,parentPid:41,parentStartTimeTicks:100,observerStartTimeTicks:200,mainExecutable:'/usr/local/bin/node',mainCmdlineHashes:input().mainCmdlineHashes,execAnchor,pollLimit:1000};
+}
+async function relativeCollect(spec=relativeInput()){
+ const settled=collectWorkerObservationEpisode(spec).then(value=>({value}),error=>({error}));await vi.runAllTimersAsync();const result=await settled;if(result.error)throw result.error;return result.value;
+}
+test('relative collection captures one verified executable anchor and reuses it for later episodes',async()=>{
+ const first=await relativeCollect(),second=await relativeCollect(relativeInput(1,first.execAnchor));
+ expect(first.version).toBe(2);expect(first.execAnchor).toMatchObject({startedMs:1000,observedMs:1000,parentPid:41,parentStartTimeTicks:100,observerPid:process.pid,observerStartTimeTicks:200});
+ expect(first.snapshots.map(s=>s.startedMs)).toEqual([1020,1030,1040]);expect(second.snapshots.map(s=>s.startedMs)).toEqual([1080,1090,1100]);
+ expect(second.execAnchor).toEqual(first.execAnchor);expect(second.execAnchor.observedMs).toBeLessThan(second.initial.startedMs);
+ expect(first.collectorResources).toEqual({heldImageFiles:0,childProcesses:0});expect(second.collectorResources).toEqual(first.collectorResources);
+});
+test('a shifted first executable observation shifts sampling without changing the absolute cutoff',async()=>{
+ vi.setSystemTime(1250);const spec=relativeInput(),value=await relativeCollect(spec);
+ expect(value.execAnchor.observedMs).toBe(1250);expect(value.requestedStartMs).toBe(1270);expect(value.requestedEndMs).toBe(1290);expect(spec.plan.observationEndMs).toBe(2000);
+});
+test('anchor time follows full executable hashing and stability verification, without backdating',async()=>{
+ let shifted=false;model.hook=path=>{if(!shifted&&path==='/proc/41/exe'){shifted=true;vi.setSystemTime(1100);}};
+ const value=await relativeCollect();expect(value.execAnchor.startedMs).toBe(1000);expect(value.execAnchor.observedMs).toBe(1100);expect(value.initial.startedMs).toBe(1100);expect(value.requestedStartMs).toBe(1120);
+});
+test('slow initial collection fails instead of moving the observed anchor or scheduled samples',async()=>{
+ let shifted=false;model.hook=path=>{if(!shifted&&path==='/proc/41/status'&&model.reads.get(path)>Buffer.byteLength(kernel)){shifted=true;vi.setSystemTime(1030);}};
+ await expect(relativeCollect()).rejects.toThrow('DataObservationEpisodeLate');expect(shifted).toBe(true);
+});
+test('hashing that exhausts the original remainder fails and closes its image descriptors',async()=>{
+ let shifted=false;model.hook=path=>{if(!shifted&&path==='/proc/41/exe'){shifted=true;vi.setSystemTime(1990);}};
+ await expect(relativeCollect()).rejects.toThrow('WorkerObservationRemainder');
+});
+test('first episode cannot accept a supplied anchor or later episode omit its original anchor',async()=>{
+ const first=await relativeCollect();model.opens=[];
+ expect(()=>collectWorkerObservationEpisode({...relativeInput(),execAnchor:first.execAnchor})).toThrow('WorkerObservationCollectorInput');
+ expect(()=>collectWorkerObservationEpisode(relativeInput(1))).toThrow('WorkerObservationCollectorInput');expect(model.opens).toEqual([]);
+});
+test('later executable replacement rejects even with the same path and bytes',async()=>{
+ const first=await relativeCollect();model.processes.get(41).inode++;
+ await expect(relativeCollect(relativeInput(1,first.execAnchor))).rejects.toThrow('WorkerExecAnchorBinding');
+});
+test('a changed observer process cannot continue the original worker anchor',async()=>{
+ const first=await relativeCollect();model.processes.get(process.pid).ticks++;
+ await expect(relativeCollect(relativeInput(1,first.execAnchor))).rejects.toThrow('WorkerExecObserverChanged');
+});
+test('a worker that exits before the last required sample leaves no successful episode',async()=>{
+ setTimeout(()=>model.processes.delete(41),31);await expect(relativeCollect()).rejects.toThrow();
+});
+test('relative collection preserves security rejection and finite poll accounting',async()=>{
+ model.processes.get(41).status=kernel.replace('NoNewPrivs:\t1','NoNewPrivs:\t0');await expect(relativeCollect()).rejects.toThrow('DataObservationMainSecurity');
+ model.processes.get(41).status=kernel;vi.spyOn(Date,'now').mockReturnValue(1000);await expect(relativeCollect({...relativeInput(),pollLimit:3})).rejects.toThrow('DataObservationPollBound');
+});
+test('serialized relative collector loads in native Node with only its fixed dependencies',()=>{
+ const r=spawnSync(process.execPath,['--input-type=module','-e',nodeWorkerObservationCollectorSource()+'\nprocess.stdout.write(typeof collectWorkerObservationEpisode)'],{env:{},encoding:'utf8',timeout:5000});
+ expect(r.error).toBeUndefined();expect(r.status,r.stderr).toBe(0);expect(r.stdout).toBe('function');
 });

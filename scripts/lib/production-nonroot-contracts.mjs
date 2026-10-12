@@ -200,6 +200,33 @@ define('DataObservationPlanV1',{
   previous=end;total+=Math.ceil(e.durationMs/e.sampleEveryMs)+1;need(Number.isSafeInteger(total));
  }
 });
+// A relative worker schedule retains absolute admission and cleanup bounds.
+// No runtime timestamp is accepted as part of the prospective plan.
+define('DataObservationPlanV2',{
+ version:literal(2),kind:literal('bounded-data-observation'),clock:literal('observed-worker-exec'),owner:N,operation:N,launchNonce:N,sourceTree:G,
+ role:oneOf('planner','executor'),image:IMG,startedMs:MS,latestArmMs:MS,observationEndMs:MS,deadlineMs:MS,
+ armingLimitMs:integer(1,30000),cleanupReserveMs:P,
+ episodes:array(object({index:Z,offsetMs:Z,durationMs:P,sampleEveryMs:P}),1,1000),
+ limits:object({readBytes:literal(268435456),rawBytes:literal(1048576),initialProcesses:literal(128),finalProcesses:literal(128),combinedIdentities:literal(256)}),
+},v=>{
+ need(v.startedMs<=v.latestArmMs&&v.latestArmMs<v.observationEndMs&&v.observationEndMs<v.deadlineMs);
+ need(Number.isSafeInteger(v.observationEndMs+v.cleanupReserveMs)&&v.observationEndMs+v.cleanupReserveMs<=v.deadlineMs);
+ need(Number.isSafeInteger(v.latestArmMs+v.armingLimitMs)&&v.latestArmMs+v.armingLimitMs<v.observationEndMs);
+ let previous=0,total=0;
+ for(const [index,e]of v.episodes.entries()){
+  const end=e.offsetMs+e.durationMs;
+  need(e.index===index&&Number.isSafeInteger(end)&&e.offsetMs>=previous&&end<v.observationEndMs-v.startedMs&&e.sampleEveryMs<=e.durationMs);
+  previous=end;total+=Math.ceil(e.durationMs/e.sampleEveryMs)+1;need(Number.isSafeInteger(total));
+ }
+});
+define('WorkerExecAnchorV1',{
+ version:literal(1),kind:literal('observed-worker-exec'),planHash:H,role:oneOf('planner','executor'),launchNonce:N,
+ observerPid:P,observerStartTimeTicks:P,parentPid:P,parentStartTimeTicks:P,startedMs:MS,observedMs:MS,
+ main:object({pid:P,ppid:Z,startTimeTicks:P,executablePath:literal('/usr/local/bin/node'),executableDigest:D,cmdlineHash:H,
+  uid:v=>equal(v,[1000,1000,1000,1000]),gid:v=>equal(v,[1000,1000,1000,1000]),groups:union(v=>equal(v,[]),v=>equal(v,[1000])),noNewPrivs:literal(1),
+  ...Object.fromEntries(['Inh','Prm','Eff','Bnd','Amb'].map(k=>['cap'+k,literal('0000000000000000')])),
+  file:object({mode:integer(0,4095),uid:literal(0),gid:literal(0),device:pattern(/^(0|[1-9][0-9]*)$/),inode:pattern(/^(0|[1-9][0-9]*)$/)})}),
+},v=>{need(v.startedMs<=v.observedMs&&v.main.pid===v.parentPid&&v.main.startTimeTicks===v.parentStartTimeTicks&&(v.main.file.mode&0o6022)===0);});
 const purposes=['bootstrap-runtime-verify','consolidation-control','consolidation-promote','denied-provision','denied-transition','bootstrap-runtime-bootstrap','bootstrap-admin-probe','bootstrap-admin-probe-cleanup','preview-fixture-setup','preview-fixture-pause','preview-fixture-verify-planned','preview-fixture-verify-executed','preview-fixture-verify-repeated','post-runtime-fixture','canary-fixture','bootstrap-schema-seed'];
 define('ControlLaunchTemplateV1',{version:literal(1),kind:literal('guard-first-control-launch'),taskKey:KEY,containerName:S,purpose:oneOf(...purposes),entryPoint:ARGV,command:array(S,0,0),dispatcherPath:literal('/bootstrap/nonroot-dispatch.mjs'),dispatcherSha256:H,guardClosure:JSON_REF,originalModule:ref('PresenceString'),originalModuleSha256:ref('PresenceString'),originalArgv:ARGV,permittedOperations:array(S,0,64),primitiveContract:JSON_REF,buildContractKey:literal('deployed-bootstrap')},
  v=>equal(v.entryPoint,['/bin/setpriv','--no-new-privs','--',CONTROL_NODE,v.dispatcherPath,v.purpose]));

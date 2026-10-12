@@ -1,7 +1,7 @@
 import {observerSessionPurposes,observerProviderPurpose,observerCleanupPurpose} from './production-nonroot-observer-sessions.mjs';
 import {inspectObserverTopologyPlan} from './production-nonroot-observer-topology.mjs';
 import {OBSERVER_ACCOUNTING_V3,OBSERVER_ACCOUNTING_LOCAL,OBSERVER_RESOURCE_READS,OBSERVER_RESOURCE_READ_LOCAL,observerAccountingJournalRecords,observerCaseVersion,inspectObserverAccounting,observerBackendAdmissionId,observerBackendAdmissionWork,observerVerificationCaptures} from './production-nonroot-observer-accounting.mjs';
-import {OBSERVER_WORKER_BIND_LOCAL,observerNeedsWorkerJob,observerWorkerJobLocal} from './production-nonroot-observer-worker-job.mjs';
+import {OBSERVER_WORKER_BIND_LOCAL,observerNeedsWorkerJob,observerWorkerJobLocal,observerWorkerAnchorLocal} from './production-nonroot-observer-worker-job.mjs';
 /** Portable original observer plan and quote arithmetic. Every identity,
  * pathname and generated catalog arrives as authenticated caller DATA. This
  * module does not read paths, load source, create owners or dispatch providers.
@@ -173,15 +173,16 @@ function limits(g){
  need(g.rawPageBytes<=33554432&&g.logPolls<=1024&&g.logPages<=100&&g.logEvents<=1000000&&g.maxMessageBytes<=1048576&&g.captures<=1000,'ObserverLogGeometry');
  return g;
 }
-function quoteObserverLogPages(input,workerJob=false){
+function quoteObserverLogPages(input,workerJob=false,observationVersion=1){
  need(typeof workerJob==='boolean','ObserverWorkerJobSelector');
+ need((observationVersion===1||observationVersion===2)&&(observationVersion!==2||workerJob),'ObserverWorkerObservationVersion');
  const g=limits(input),pages=g.logPolls*g.logPages,bytes=pages*g.rawPageBytes;
  // Page UTF8/duplicate-key parse/canonical walk, secret screening, event and
  // provenance hashing, original/normalized frame copies, decoder scan and
  // base64/hash work. Finish owns every full 1MiB capture allocation/hash,
  // 514 retained parts and worst-case capture ordering comparisons.
  const maxGuardCalls=3*pages+4,guardLocal=maxGuardCalls*16384;
- const logicalBytes=(workerJob?observerWorkerJobLocal(g):0)+guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
+ const logicalBytes=(workerJob?observerWorkerJobLocal(g):0)+(observationVersion===2?observerWorkerAnchorLocal(g.captures):0)+guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
  need(Number.isSafeInteger(logicalBytes),'ObserverLogQuoteOverflow');
  return {logicalBytes,pages,rawBytes:bytes,captures:g.captures,maxGuardCalls,guardLocal};
 }
@@ -343,7 +344,8 @@ function inspectObserverPlan(p){
  for(const r of g.roles){
   const backend=['llm-proxy','qwen3-embed','mnemo-server'].includes(r.role),scoped=observerCaseVersion(p);
   const numeric=['inputBytes','compiledBytes','expandedBytes','compressedBytes','bootstrapBytes','files','fileBytes','episodes','snapshots','polls',...(p.version===3&&backend?[]:['executions']),...(scoped?['filesystemLookupLocal','targetContainerBytes']:[])];
-  exact(r,['role',...numeric,...(scoped?['caseName','planHash','compiledHash']:[]),...(p.version===3?['executionScope']:[]),...(p.version===3&&!backend?['completionLogTimes']:[])]);
+  exact(r,['role',...numeric,...(scoped?['caseName','planHash','compiledHash']:[]),...(p.version===3?['executionScope']:[]),...(p.version===3&&!backend?['completionLogTimes']:[]),...(Object.hasOwn(r,'observationVersion')?['observationVersion']:[])]);
+  if(Object.hasOwn(r,'observationVersion'))need(p.version===3&&['planner','executor'].includes(r.role)&&r.observationVersion===2,'ObserverWorkerObservationVersion');
   if(p.version===3&&!backend)need(Array.isArray(r.completionLogTimes)&&r.completionLogTimes.length===g.logPolls&&r.completionLogTimes.every((t,i)=>integer(t,p.startedMs,p.deadlineMs-p.cleanupReserveMs)&&(!i||t>r.completionLogTimes[i-1])),'ObserverWorkerLogSchedule');
   for(const k of numeric)positive(r[k]);need(r.files<=256&&r.episodes<=1000&&(p.version===3&&backend||r.executions<=10000),'ObserverRoleGeometry');
   if(scoped)need(OBSERVER_CASES.includes(r.caseName)&&h(r.planHash)&&h(r.compiledHash),'ObserverCaseGeometryBinding');
@@ -420,7 +422,7 @@ function buildObserverOperation(input,snapshot){
   const framingLocal=16*frames+r.episodes*1048576*(r.role==='mnemo-server'?514:3);
   const busyboxGuard=r.role==='mnemo-server'?r.episodes*514*100*(4097+4096+256):0;
   if(p.version===3&&r.executionScope==='autonomous-service'){const work=observerBackendAdmissionWork(p,p.cases.find(c=>c.name===r.caseName));addRow(observerBackendAdmissionId(r),local(work.logicalBytes),{role:r.role,caseName:r.caseName,planHash:r.planHash,accounting:'host-observed-task-attribution'});}
-  else for(let i=0;i<r.executions;i++)addRow(observerLaunchId(p,r,i),local(loaderLocal+gateLocal+rawLocal+procCopies+polling+framingLocal+busyboxGuard+(observerNeedsWorkerJob(p,r.role)?OBSERVER_WORKER_BIND_LOCAL:0)),{role:r.role,...(observerCaseVersion(p)?{caseName:r.caseName,planHash:r.planHash}: {})});
+  else for(let i=0;i<r.executions;i++)addRow(observerLaunchId(p,r,i),local(loaderLocal+gateLocal+rawLocal+procCopies+polling+framingLocal+busyboxGuard+(observerNeedsWorkerJob(p,r.role)?OBSERVER_WORKER_BIND_LOCAL:0)+(r.observationVersion===2?observerWorkerAnchorLocal(r.episodes,r.snapshots):0)),{role:r.role,...(observerCaseVersion(p)?{caseName:r.caseName,planHash:r.planHash}: {})});
  }
  const sourcePass=g.sourcePassLocal;
  const call=(id,action,{cleanup=false,requestBytes=16384,responseBytes=g.rawPageBytes}={})=>{
@@ -468,12 +470,14 @@ function buildObserverOperation(input,snapshot){
   }
   if(key==='post-liveness-regression')call(key+'/fault-stop','StopTask');
   for(const role of c.runtimeRoles){
-   const captures=observerCaseGeometry(p,c.name,role).episodes;
-   const workerJob=observerNeedsWorkerJob(p,role),pageWork=quoteObserverLogPages({...Object.fromEntries(['rawPageBytes','logPolls','logPages','logEvents','maxMessageBytes'].map(k=>[k,g[k]])),captures},workerJob),bindingLocal=workerJob?OBSERVER_WORKER_BIND_LOCAL:0;
+   const roleGeometry=observerCaseGeometry(p,c.name,role),captures=roleGeometry.episodes;
+   const workerJob=observerNeedsWorkerJob(p,role),pageWork=quoteObserverLogPages({...Object.fromEntries(['rawPageBytes','logPolls','logPages','logEvents','maxMessageBytes'].map(k=>[k,g[k]])),captures},workerJob,roleGeometry.observationVersion??1),bindingLocal=workerJob?OBSERVER_WORKER_BIND_LOCAL:0;
    // Acquisition and independent proof replay each pay the complete parser
    // and decoder; provider raw-copy work is separate from both.
    addRow(key+'/log-work/'+role,local(pageWork.logicalBytes+bindingLocal+8*pageWork.rawBytes));
-   logReplayLocal+=pageWork.logicalBytes+bindingLocal;
+   // Proof replay pays its own anchor/episode/snapshot joins, independently
+   // of launch and log parsing; the current archive reader must debit this.
+   logReplayLocal+=pageWork.logicalBytes+bindingLocal+(roleGeometry.observationVersion===2?observerWorkerAnchorLocal(captures,roleGeometry.snapshots):0);
    for(let poll=0;poll<g.logPolls;poll++)for(let page=0;page<g.logPages;page++)call(key+'/log/'+role+'/'+poll+'/'+page,'FilterLogEvents');
   }
   call(key+'/delete-service','DeleteService',{cleanup:true});

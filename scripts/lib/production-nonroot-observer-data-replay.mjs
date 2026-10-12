@@ -1,4 +1,5 @@
 import {observerCaseVersion} from './production-nonroot-observer-accounting.mjs';
+import {observerCaseGeometry} from './production-nonroot-observer-case-bindings.mjs';
 /** Replay all original DATA log pages and process episodes. This returns
  * checked DATA only; no task, collector, old owner or FS handle is revived. */
 import {need,exact,hash,sha,immutable} from './production-nonroot-engineering-json.mjs';
@@ -8,7 +9,7 @@ import {inspectBusyboxObservationEpisode} from './production-nonroot-observation
 import {inspectArchivedNodeObserverEpisode,inspectArchivedObserverProcess as row} from './production-nonroot-observer-data-episode.mjs';
 import {createObserverLogPageReplay,quoteObserverLogPages} from './production-nonroot-observer-data-logs.mjs';
 import {decodeArchivedObserverProviderResponse} from './production-nonroot-observer-provider-codec.mjs';
-import {OBSERVER_WORKER_BIND_LOCAL,observerNeedsWorkerJob,observerLogCompletionMs,observerWorkerLogTimes,inspectObserverWorkerRequest,bindObserverWorkerTask,verifyObserverWorkerLifecycle} from './production-nonroot-observer-worker-job.mjs';
+import {OBSERVER_WORKER_BIND_LOCAL,observerWorkerAnchorLocal,observerNeedsWorkerJob,observerLogCompletionMs,observerWorkerLogTimes,inspectObserverWorkerRequest,bindObserverWorkerTask,verifyObserverWorkerLifecycle} from './production-nonroot-observer-worker-job.mjs';
 
 const command=argv=>sha(Buffer.from(argv.join('\0')+'\0'));
 
@@ -35,7 +36,14 @@ export async function replayNonrootArchivedData(record,{reader,source,casePlan,d
  const group=options['awslogs-group'],stream=options['awslogs-stream-prefix']+'/'+container.name+'/'+task.taskArn.split('/').at(-1);
  need(capture.stream===stream&&plan.scope.logGroupArns.includes('arn:aws:logs:'+plan.scope.region+':'+plan.scope.account+':log-group:'+group),'ObserverLogGroup');
  const geometry={...Object.fromEntries(['rawPageBytes','logPolls','logPages','logEvents','maxMessageBytes'].map(k=>[k,plan.geometry[k]])),captures:contract.plan.episodes.length};
- const workerJob=observerNeedsWorkerJob(plan,capture.role),quoted=quoteObserverLogPages(geometry,workerJob);reader.paid.debit(quoted.logicalBytes+(workerJob?OBSERVER_WORKER_BIND_LOCAL:0));reader.current();
+ const workerJob=observerNeedsWorkerJob(plan,capture.role),quoted=quoteObserverLogPages(geometry,workerJob,contract.plan.version);
+ let anchorJoinLocal=0;
+ if(contract.plan.version===2){
+  const g=observerCaseGeometry(plan,capture.caseName,capture.role);
+  need(workerJob&&g.observationVersion===2&&g.episodes===contract.plan.episodes.length&&g.snapshots===contract.snapshotCount,'ObserverObservationVersion');
+  anchorJoinLocal=observerWorkerAnchorLocal(g.episodes,g.snapshots);
+ }
+ reader.paid.debit(quoted.logicalBytes+(workerJob?OBSERVER_WORKER_BIND_LOCAL:0)+anchorJoinLocal);reader.current();
  let worker,workerStoppedMs;const workerEpisodes=[];
  if(workerJob){
   need(workerRun,'ObserverWorkerOriginalRequest');
@@ -115,7 +123,7 @@ export async function replayNonrootArchivedData(record,{reader,source,casePlan,d
   need(hash(coverageValue)===hash({main:decoded.main.pid+':'+decoded.main.startTimeTicks,health:decoded.health?decoded.health.pid+':'+decoded.health.startTimeTicks:null,observer:decoded.observer.pid+':'+decoded.observer.startTimeTicks,initial:decoded.snapshots[0].processes.map(p=>p.pid+':'+p.startTimeTicks),final:decoded.snapshots.at(-1).processes.map(p=>p.pid+':'+p.startTimeTicks),observerRetirementObserved:false}),'ObserverArchivedDataCoverage');
   const identity={version:2,kind:'application-process-identity',phase:'preview',taskKey:['planner','executor'].includes(capture.role)?capture.role:'backend',account:plan.scope.account,region:plan.scope.region,taskArn:capture.taskArn,taskDefinitionArn:capture.definitionArn,containerName:contract.target.name,runtimeId:capture.runtimeId,image:contract.plan.image,registrationHash:capture.definitionHash,launchContractHash:hash(contract),sourceBindingHash:hash(plan.source),collectorCodeHash:contract.delivery.sourceHash,artifactBinding:{kind:'artifact-test',image:contract.plan.image,...v.input.artifactOrigin,launchTemplateHash:hash(contract)},sessionBinding:samples,startedMs:decoded.startedMs,completedMs:decoded.completedMs,application:app,trustedLaunch:trusted,managed:[],samples,coverage,result:'pass'};
   inspectNonrootRuntimeIdentity(identity,{now:recordedMs,expected:{phase:'preview',taskArn:capture.taskArn,taskDefinitionArn:capture.definitionArn,runtimeId:capture.runtimeId,image:contract.plan.image,registrationHash:capture.definitionHash,launchContractHash:hash(contract),sourceBindingHash:hash(plan.source),trustedLaunch:trusted,managed:[]}});
-  const output={identity,main:decoded.main,health:decoded.health};need(hash(output)===hash(originalOutput),'ObserverArchivedDataOutputChanged');outputs.push(output);if(worker)workerEpisodes.push({index,snapshots:decoded.snapshots,main:decoded.main});
+  const output={identity,main:decoded.main,health:decoded.health};need(hash(output)===hash(originalOutput),'ObserverArchivedDataOutputChanged');outputs.push(output);if(worker)workerEpisodes.push({index,snapshots:decoded.snapshots,main:decoded.main,...(decoded.execAnchor?{execAnchor:decoded.execAnchor,anchorHash:decoded.anchorHash,requiredStartMs:decoded.requiredStartMs,requiredEndMs:decoded.requiredEndMs}: {})});
  }
  const job=worker?verifyObserverWorkerLifecycle(worker,replayed.workerTerminal,workerEpisodes):null;
  reader.current();return immutable({authority:false,capture,outputs,...(job?{workerJob:{role:capture.role,dispatchMs:worker.dispatchMs,finishedMs:job.completionMs,collectedMs}}: {})});

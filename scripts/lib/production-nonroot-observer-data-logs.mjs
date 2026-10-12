@@ -2,7 +2,7 @@
  * the same parser; neither END nor this result creates runtime authority.
  * The owner must prepay quoteObserverLogPages before construction/reading. */
 import {createHash} from 'node:crypto';
-import {createObserverWorkerTerminalReplay,observerWorkerJobLocal} from './production-nonroot-observer-worker-job.mjs';
+import {createObserverWorkerTerminalReplay,observerWorkerJobLocal,observerWorkerAnchorLocal} from './production-nonroot-observer-worker-job.mjs';
 import {need,exact,hash,sha} from './production-nonroot-engineering-json.mjs';
 import {parseAcquisitionJson} from './ci-smoke-acquisition-format.mjs';
 import {createObservationFrameDecoder} from './production-nonroot-observation-frames.mjs';
@@ -15,21 +15,24 @@ function limits(g){
  need(g.rawPageBytes<=33554432&&g.logPolls<=1024&&g.logPages<=100&&g.logEvents<=1000000&&g.maxMessageBytes<=1048576&&g.captures<=1000,'ObserverLogGeometry');
  return g;
 }
-export function quoteObserverLogPages(input,workerJob=false){
+export function quoteObserverLogPages(input,workerJob=false,observationVersion=1){
  need(typeof workerJob==='boolean','ObserverWorkerJobSelector');
+ need((observationVersion===1||observationVersion===2)&&(observationVersion!==2||workerJob),'ObserverWorkerObservationVersion');
  const g=limits(input),pages=g.logPolls*g.logPages,bytes=pages*g.rawPageBytes;
  // Page UTF8/duplicate-key parse/canonical walk, secret screening, event and
  // provenance hashing, original/normalized frame copies, decoder scan and
  // base64/hash work. Finish owns every full 1MiB capture allocation/hash,
  // 514 retained parts and worst-case capture ordering comparisons.
  const maxGuardCalls=3*pages+4,guardLocal=maxGuardCalls*16384;
- const logicalBytes=(workerJob?observerWorkerJobLocal(g):0)+guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
+ const logicalBytes=(workerJob?observerWorkerJobLocal(g):0)+(observationVersion===2?observerWorkerAnchorLocal(g.captures):0)+guardLocal+8192+128*bytes+g.logEvents*8192+g.captures*(16*1048576+514*4096)+g.captures*g.captures*256;
  need(Number.isSafeInteger(logicalBytes),'ObserverLogQuoteOverflow');
  return {logicalBytes,pages,rawBytes:bytes,captures:g.captures,maxGuardCalls,guardLocal};
 }
 export function createObserverLogPageReplay({binding,stream,group,startedMs,endMs,geometry,worker}){
- const g=structuredClone(limits(geometry)),quote=quoteObserverLogPages(g,!!worker);
+ const g=structuredClone(limits(geometry));
  const workerReplay=worker?createObserverWorkerTerminalReplay(worker):null;
+ // The terminal constructor validates borrowed data before reading its version.
+ const quote=quoteObserverLogPages(g,!!worker,worker?.observationVersion??1);
  need(/^[a-f0-9]{64}$/.test(binding)&&typeof stream==='string'&&stream.length>0&&stream.length<=512&&typeof group==='string'&&group.length>0&&group.length<=512&&positive(startedMs)&&Number.isSafeInteger(endMs)&&endMs>startedMs,'ObserverLogDescriptor');
  const decoder=createObservationFrameDecoder({bindings:[binding],maxCaptures:g.captures,maxInputBytes:quote.rawBytes+2*g.logEvents});
  const events=new Map(),tokens=new Set(),nonFrameHash=createHash('sha256');

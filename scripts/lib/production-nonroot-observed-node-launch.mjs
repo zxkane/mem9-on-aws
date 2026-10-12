@@ -2,9 +2,9 @@
  * registration approval or evidence that a task has run. */
 import {copyNonrootJson,nonrootHash} from './production-nonroot-contracts.mjs';
 import {dataLaunchPolicy} from './production-nonroot-launch.mjs';
-import {inspectDataObservationPlan,describeDataObservationSchedule} from './production-nonroot-data-observer.mjs';
+import {inspectDataObservationPlan,describeDataObservationSchedule,describeDataObservationGeometry} from './production-nonroot-data-observer.mjs';
 import {inspectObservationGateFiles,nodeObservationCommonGateSource} from './production-nonroot-observation-gate.mjs';
-import {nodeObservationCollectorSource} from './production-nonroot-observation-collector.mjs';
+import {nodeObservationCollectorSource,nodeWorkerObservationCollectorSource} from './production-nonroot-observation-collector.mjs';
 import {observationNodeOutputSource} from './production-nonroot-observation-node-output.mjs';
 import {createHash} from 'node:crypto';
 import {gzipSync} from 'node:zlib';
@@ -75,6 +75,36 @@ function observerEntry(primitives,gate,collect,write,spec){
  // Only a commitment is retained; application command/environment bytes are
  // never emitted. collect() subsequently checks actual executable identity.
  function fslessExe(read,pid,wanted,hash){return hash(read('/proc/'+pid+'/cmdline',16384))===wanted;}
+}
+
+// Separate serialized factory: changing this worker path cannot change the
+// legacy absolute observer program carried by existing compiled records.
+function workerObserverEntry(primitives,gate,collect,write,spec){
+ return async function observe(){
+  const {need,hash,read,identity,pause,send}=primitives;
+  const [parentText,startText,armText]=process.argv.slice(2),parentPid=Number(parentText),parentStartTimeTicks=Number(startText),armingDeadlineMs=Number(armText);
+  need([parentPid,parentStartTimeTicks,armingDeadlineMs].every(n=>Number.isSafeInteger(n)&&n>0)&&armingDeadlineMs<=spec.plan.latestArmMs+spec.plan.armingLimitMs,'DataObservationArmInput');
+  const parent=()=>need(identity(parentPid).ticks===parentStartTimeTicks,'DataObservationParentChanged');
+  while(process.ppid!==1){need(Date.now()<armingDeadlineMs,'DataObservationArmExpired');parent();await pause();}
+  await gate(spec.files);parent();need(Date.now()<armingDeadlineMs,'DataObservationArmExpired');
+  const self=identity(process.pid);await send('A|'+self.pid+'|'+self.ticks+'|'+spec.plan.launchNonce+'\n',armingDeadlineMs);
+  const latestExecMs=spec.plan.observationEndMs-spec.schedule.lastEndOffsetMs;
+  for(;;){
+   parent();need(Date.now()<latestExecMs,'WorkerObservationRemainder');
+   if(hash(read('/proc/'+parentPid+'/cmdline',16384))===spec.mainCmdlineHash)break;
+   await pause();
+  }
+  let execAnchor=null,anchorHash;
+  for(const episode of spec.plan.episodes){
+   const raw=await collect({plan:spec.plan,planHash:spec.schedule.planHash,episodeIndex:episode.index,parentPid,parentStartTimeTicks,observerStartTimeTicks:self.ticks,
+    mainExecutable:'/usr/local/bin/node',mainCmdlineHashes:[spec.mainCmdlineHash],execAnchor,pollLimit:spec.plan.observationEndMs-spec.plan.startedMs});
+   const current=hash(Buffer.from(JSON.stringify(raw.execAnchor)));
+   if(execAnchor===null){execAnchor=raw.execAnchor;anchorHash=current;}
+   else need(current===anchorHash,'WorkerExecAnchorChanged');
+   const bytes=Buffer.from(JSON.stringify({...raw,launch:{observerStartTimeTicks:self.ticks,armingDeadlineMs}})),capture=hash(Buffer.from(JSON.stringify({nonce:spec.plan.launchNonce,pid:self.pid,ticks:self.ticks,episode:episode.index}))).slice(0,32);
+   await write({fd:2,stdoutFd:1,binding:spec.binding,capture,bytes,deadlineMs:spec.plan.observationEndMs});
+  }
+ };
 }
 
 function relayEntry(cp,primitives,spec,observerSource){
@@ -184,8 +214,9 @@ function prepareObservedNodeDataLaunch(input){
  const value=copyNonrootJson(input),need=(v,c)=>{if(!v)throw Error(c);};
  need(value&&Object.keys(value).sort().join()==='files,original,plan','DataObservationLaunchInput');
  const plan=inspectDataObservationPlan(value.plan);need(plan.role!=='mnemo-server','DataObservationNodeRole');
- const files=inspectObservationGateFiles(value.files),normal=dataLaunchPolicy(plan.role,value.original),schedule=describeDataObservationSchedule(plan);
- need(schedule.episodes.at(-1).completedMs<plan.observationEndMs,'DataObservationEmissionWindow');
+ const relative=plan.version===2;
+ const files=inspectObservationGateFiles(value.files),normal=dataLaunchPolicy(plan.role,value.original),schedule=relative?describeDataObservationGeometry(plan):describeDataObservationSchedule(plan);
+ need(relative?plan.startedMs+schedule.lastEndOffsetMs<plan.observationEndMs:schedule.episodes.at(-1).completedMs<plan.observationEndMs,'DataObservationEmissionWindow');
  need(typeof normal.image==='string'&&normal.image.endsWith('@'+plan.image.rootDigest),'DataObservationLaunchImage');
  need(normal.linuxParameters?.initProcessEnabled===true,'DataObservationInitRequired');
  const argv=[...normal.entryPoint.slice(3),...(normal.command??[])];
@@ -196,16 +227,16 @@ function prepareObservedNodeDataLaunch(input){
  if(['llm-proxy','qwen3-embed'].includes(plan.role))need(health?.[0]==='CMD'&&health[4]==='node'&&files.some(f=>f.path==='/app/healthcheck.mjs'),'DataObservationHealthSource');
  const spec={plan,files,schedule,argv,mainCmdlineHash:sha(Buffer.from(argv.join('\0')+'\0')),healthHashes:health?[sha(Buffer.from(health.slice(4).join('\0')+'\0'))]:[]};
  spec.binding=nonrootHash({planHash:schedule.planHash,normal,files});
- const source=sharedSource(plan.deadlineMs-plan.startedMs)+nodeObservationCommonGateSource()+'\n'+nodeObservationCollectorSource()+'\n'+observationNodeOutputSource()+
+ const source=sharedSource(plan.deadlineMs-plan.startedMs)+nodeObservationCommonGateSource()+'\n'+(relative?nodeWorkerObservationCollectorSource():nodeObservationCollectorSource())+'\n'+observationNodeOutputSource()+
   `\nconst sourceBootstrap=(${Function.prototype.toString.call(fixedPackedBootstrap)});
-const observe=(${Function.prototype.toString.call(observerEntry)});
+const observe=(${Function.prototype.toString.call(relative?workerObserverEntry:observerEntry)});
 const relay=(${Function.prototype.toString.call(relayEntry)});
 const coordinate=(${Function.prototype.toString.call(coordinatorEntry)});
 const spec=${encode(spec)};
 export async function runPackedObservation(descriptor){
  const bootstrap=sourceBootstrap(descriptor);
  if(process.execArgv.length!==3||process.execArgv[0]!=='--input-type=module'||process.execArgv[1]!=='-e'||process.execArgv[2]!==bootstrap)throw Error('DataObservationSourceInvocation');
- if(process.argv[1]==='observer')return observe(lifecycle,fixedNodeObservationCommonGate,collectNodeObservationEpisode,writeNodeObservationFrames,spec)();
+ if(process.argv[1]==='observer')return observe(lifecycle,fixedNodeObservationCommonGate,${relative?'collectWorkerObservationEpisode':'collectNodeObservationEpisode'},writeNodeObservationFrames,spec)();
  if(process.argv[1]==='relay')return relay(lifecycleChild,lifecycle,spec,bootstrap)();
  if(process.argv.length!==1)throw Error('DataObservationSourceMode');
  return coordinate(lifecycleChild,lifecycle,fixedNodeObservationCommonGate,spec,bootstrap)();
@@ -214,7 +245,7 @@ export async function runPackedObservation(descriptor){
  const target={...normal,entryPoint:[...normal.entryPoint.slice(0,3),'/usr/local/bin/node','--input-type=module','-e',packed.bootstrap],command:[]};
  const contract=copyNonrootJson({version:2,kind:'observed-node-data-launch',plan,normal,target,binding:spec.binding,sourceHash:packed.binding.bootstrapHash,
   sourceBytes:packed.binding.bootstrapBytes,observerSourceHash:packed.binding.sourceHash,relaySourceHash:packed.binding.sourceHash,
-  delivery:{kind:'fixed-gzip-source-v1',...packed.binding,processes:['coordinator','relay','observer'],maximumInvocations:3},snapshotCount:schedule.snapshotCount+schedule.episodes.length});
+  delivery:{kind:'fixed-gzip-source-v1',...packed.binding,processes:['coordinator','relay','observer'],maximumInvocations:3},snapshotCount:schedule.snapshotCount+plan.episodes.length});
  return {contract,spec,relay:packed.bootstrap};
 }
 export function compileObservedNodeDataLaunch(input){return prepareObservedNodeDataLaunch(input).contract;}

@@ -632,6 +632,99 @@ var init_production_nonroot_contracts = __esmMin((() => {
 			need$36(Number.isSafeInteger(total));
 		}
 	});
+	define$1("DataObservationPlanV2", {
+		version: literal$1(2),
+		kind: literal$1("bounded-data-observation"),
+		clock: literal$1("observed-worker-exec"),
+		owner: N$1,
+		operation: N$1,
+		launchNonce: N$1,
+		sourceTree: G$1,
+		role: oneOf$1("planner", "executor"),
+		image: IMG,
+		startedMs: MS,
+		latestArmMs: MS,
+		observationEndMs: MS,
+		deadlineMs: MS,
+		armingLimitMs: integer$3(1, 3e4),
+		cleanupReserveMs: P$2,
+		episodes: array$2(object$3({
+			index: Z,
+			offsetMs: Z,
+			durationMs: P$2,
+			sampleEveryMs: P$2
+		}), 1, 1e3),
+		limits: object$3({
+			readBytes: literal$1(268435456),
+			rawBytes: literal$1(1048576),
+			initialProcesses: literal$1(128),
+			finalProcesses: literal$1(128),
+			combinedIdentities: literal$1(256)
+		})
+	}, (v) => {
+		need$36(v.startedMs <= v.latestArmMs && v.latestArmMs < v.observationEndMs && v.observationEndMs < v.deadlineMs);
+		need$36(Number.isSafeInteger(v.observationEndMs + v.cleanupReserveMs) && v.observationEndMs + v.cleanupReserveMs <= v.deadlineMs);
+		need$36(Number.isSafeInteger(v.latestArmMs + v.armingLimitMs) && v.latestArmMs + v.armingLimitMs < v.observationEndMs);
+		let previous = 0, total = 0;
+		for (const [index, e] of v.episodes.entries()) {
+			const end = e.offsetMs + e.durationMs;
+			need$36(e.index === index && Number.isSafeInteger(end) && e.offsetMs >= previous && end < v.observationEndMs - v.startedMs && e.sampleEveryMs <= e.durationMs);
+			previous = end;
+			total += Math.ceil(e.durationMs / e.sampleEveryMs) + 1;
+			need$36(Number.isSafeInteger(total));
+		}
+	});
+	define$1("WorkerExecAnchorV1", {
+		version: literal$1(1),
+		kind: literal$1("observed-worker-exec"),
+		planHash: H$1,
+		role: oneOf$1("planner", "executor"),
+		launchNonce: N$1,
+		observerPid: P$2,
+		observerStartTimeTicks: P$2,
+		parentPid: P$2,
+		parentStartTimeTicks: P$2,
+		startedMs: MS,
+		observedMs: MS,
+		main: object$3({
+			pid: P$2,
+			ppid: Z,
+			startTimeTicks: P$2,
+			executablePath: literal$1("/usr/local/bin/node"),
+			executableDigest: D$1,
+			cmdlineHash: H$1,
+			uid: (v) => equal$1(v, [
+				1e3,
+				1e3,
+				1e3,
+				1e3
+			]),
+			gid: (v) => equal$1(v, [
+				1e3,
+				1e3,
+				1e3,
+				1e3
+			]),
+			groups: union((v) => equal$1(v, []), (v) => equal$1(v, [1e3])),
+			noNewPrivs: literal$1(1),
+			...Object.fromEntries([
+				"Inh",
+				"Prm",
+				"Eff",
+				"Bnd",
+				"Amb"
+			].map((k) => ["cap" + k, literal$1("0000000000000000")])),
+			file: object$3({
+				mode: integer$3(0, 4095),
+				uid: literal$1(0),
+				gid: literal$1(0),
+				device: pattern$1(/^(0|[1-9][0-9]*)$/),
+				inode: pattern$1(/^(0|[1-9][0-9]*)$/)
+			})
+		})
+	}, (v) => {
+		need$36(v.startedMs <= v.observedMs && v.main.pid === v.parentPid && v.main.startTimeTicks === v.parentStartTimeTicks && (v.main.file.mode & 3090) === 0);
+	});
 	define$1("ControlLaunchTemplateV1", {
 		version: literal$1(1),
 		kind: literal$1("guard-first-control-launch"),

@@ -2,10 +2,19 @@
  * DATA predicates, not provider authentication or continuous-utilization proof.
  * Native/archive callers authenticate full task/request/source/log originals. */
 import {need,exact,hash,sha,canonical,immutable,json} from './production-nonroot-engineering-json.mjs';
+import {WORKER_EXEC_ANCHOR_MAX_BYTES,resolveWorkerObservationSchedule} from './production-nonroot-data-observer.mjs';
 const roles=['planner','executor'];
 const integer=(n,min=0,max=Number.MAX_SAFE_INTEGER)=>Number.isSafeInteger(n)&&n>=min&&n<=max;
 const command=argv=>sha(Buffer.from(argv.join('\0')+'\0'));
 export const OBSERVER_WORKER_BIND_LOCAL=16*33554432;
+/** Extra bounded traversals of retained anchors, fixed episode descriptors,
+ * and sampled identity joins. Existing proc and full raw-frame byte ceilings
+ * still cover the original reads and framing; this allowance is additive. */
+export function observerWorkerAnchorLocal(episodes,snapshots=0){
+ need(integer(episodes,1,1000)&&integer(snapshots,0),'ObserverWorkerAnchorWork');
+ const value=64*WORKER_EXEC_ANCHOR_MAX_BYTES*episodes+65536*(episodes+1)+8192*snapshots;
+ need(integer(value,1),'ObserverWorkerAnchorWork');return value;
+}
 export const observerNeedsWorkerJob=(plan,role)=>plan.version===3&&roles.includes(role);
 export const observerWorkerInvocation=(plan,caseName,role)=>hash({owner:plan.owner,operation:plan.operation,id:caseName+'/run-'+role}).slice(0,32);
 export const observerLogCompletionMs=(plan,observation)=>observerNeedsWorkerJob(plan,observation.role)?observation.deadlineMs:observation.observationEndMs;
@@ -83,7 +92,9 @@ export function inspectObserverWorkerRequest({plan,caseName,role,contract,defini
  need(['node','/usr/local/bin/node'].includes(normalArgv[0])&&normalArgv[1]==='/app/scripts/consolidation-worker.mjs','ObserverWorkerOriginalProgram');
  return immutable({version:1,kind:'original-observer-worker-expectation',owner:plan.owner,operation:plan.operation,caseName,role,stage:c.stage,invocation:env.MEM9_WORKER_INVOCATION,
   generation:env.MEM9_WORKER_GENERATION,requestHash:hash(request),definitionHash:hash(definition),definitionArn:request.taskDefinition,containerName:container.name,sourceBinding:contract.binding,planHash:hash(p),
-  mainCmdlineHash:command(normalArgv),startedMs:p.startedMs,latestArmMs:p.latestArmMs,observationEndMs:p.observationEndMs,completionMs:p.deadlineMs,requiredStartMs:Math.min(...p.episodes.map(e=>p.startedMs+e.offsetMs)),requiredEndMs:Math.max(...p.episodes.map(e=>p.startedMs+e.offsetMs+e.durationMs)),episodes:p.episodes.length});
+  mainCmdlineHash:command(normalArgv),startedMs:p.startedMs,latestArmMs:p.latestArmMs,observationEndMs:p.observationEndMs,completionMs:p.deadlineMs,
+  ...(p.version===2?{observationVersion:2,observationPlan:p,requiredStartOffsetMs:Math.min(...p.episodes.map(e=>e.offsetMs)),requiredEndOffsetMs:Math.max(...p.episodes.map(e=>e.offsetMs+e.durationMs))}:
+   {requiredStartMs:Math.min(...p.episodes.map(e=>p.startedMs+e.offsetMs)),requiredEndMs:Math.max(...p.episodes.map(e=>p.startedMs+e.offsetMs+e.durationMs))}),episodes:p.episodes.length});
 }
 export function bindObserverWorkerTask(expected,{task,request,dispatchMs}){
  need(hash(request)===expected.requestHash&&integer(dispatchMs,expected.startedMs,expected.latestArmMs-1),'ObserverWorkerDispatchWindow');
@@ -122,10 +133,27 @@ export function createObserverWorkerTerminalReplay(expected){
  * episodes. It deliberately does not infer business start from report.startedMs. */
 export function verifyObserverWorkerLifecycle(expected,terminal,episodes){
  need(Array.isArray(episodes)&&episodes.length===expected.episodes,'ObserverWorkerLifecycleEpisodes');
+ need(expected.observationVersion===undefined||expected.observationVersion===2,'ObserverWorkerObservationVersion');
+ const relative=expected.observationVersion===2;
+ let schedule,anchorHash,requiredStartMs=expected.requiredStartMs,requiredEndMs=expected.requiredEndMs;
+ if(relative){
+  need(hash(expected.observationPlan)===expected.planHash,'ObserverWorkerObservationPlan');
+  const anchor=episodes[0]?.execAnchor;
+  schedule=resolveWorkerObservationSchedule(expected.observationPlan,anchor);anchorHash=schedule.anchorHash;
+  need(integer(expected.dispatchMs,expected.startedMs,expected.observationPlan.latestArmMs-1)&&anchor.startedMs>=expected.dispatchMs,'ObserverWorkerExecBeforeDispatch');
+  need(anchor.main.cmdlineHash===expected.mainCmdlineHash,'ObserverWorkerLifecycleIdentity');
+  requiredStartMs=anchor.observedMs+expected.requiredStartOffsetMs;requiredEndMs=anchor.observedMs+expected.requiredEndOffsetMs;
+  need(requiredStartMs===schedule.episodes[0].startedMs&&requiredEndMs===schedule.episodes.at(-1).completedMs,'ObserverWorkerLifecycleWindow');
+ }
  const seen=new Set();let identity=null,samples=0,first=Infinity,last=0;
  for(const e of episodes){
   need(integer(e.index,0,expected.episodes-1)&&!seen.has(e.index),'ObserverWorkerLifecycleEpisodes');seen.add(e.index);
   need(Array.isArray(e.snapshots)&&e.snapshots.length>0&&e.main,'ObserverWorkerLifecycleSamples');
+  if(relative){
+   const window=schedule.episodes[e.index];
+   need(e.anchorHash===anchorHash&&hash(e.execAnchor)===anchorHash&&hash(e.main)===hash(e.execAnchor.main),'ObserverWorkerLifecycleAnchor');
+   need(e.requiredStartMs===window.startedMs&&e.requiredEndMs===window.completedMs,'ObserverWorkerLifecycleWindow');
+  }
   const key=e.main.pid+':'+e.main.startTimeTicks;if(identity===null)identity=key;else need(key===identity,'ObserverWorkerLifecycleRestart');
   for(const s of e.snapshots){
    const main=s.processes.find(p=>p.pid===e.main.pid&&p.startTimeTicks===e.main.startTimeTicks);
@@ -136,6 +164,6 @@ export function verifyObserverWorkerLifecycle(expected,terminal,episodes){
  }
  // The initial proc snapshot can precede main() during Node startup. The
  // fixed planned episode begins later; its original interval is the join.
- need(terminal.report.startedMs<=expected.requiredStartMs&&terminal.report.finishedMs>=last&&terminal.report.finishedMs>=expected.requiredEndMs,'ObserverWorkerLifecycleTerminalJoin');
- return immutable({authority:false,kind:'verified-original-worker-job-data',taskArn:expected.taskArn,runtimeId:expected.runtimeId,requestHash:expected.requestHash,definitionHash:expected.definitionHash,sourceBinding:expected.sourceBinding,stage:expected.stage,role:expected.role,invocation:expected.invocation,processIdentity:identity,samples,firstSampleMs:first,lastSampleMs:last,terminalHash:hash(terminal),progress:expected.role==='planner'?terminal.report.classified:terminal.report.changedRows,completionMs:terminal.report.finishedMs,coverage:'original-sampled-lifecycle'});
+ need(terminal.report.startedMs<=requiredStartMs&&terminal.report.finishedMs>=last&&terminal.report.finishedMs>=requiredEndMs,'ObserverWorkerLifecycleTerminalJoin');
+ return immutable({authority:false,kind:'verified-original-worker-job-data',taskArn:expected.taskArn,runtimeId:expected.runtimeId,requestHash:expected.requestHash,definitionHash:expected.definitionHash,sourceBinding:expected.sourceBinding,stage:expected.stage,role:expected.role,invocation:expected.invocation,processIdentity:identity,samples,firstSampleMs:first,lastSampleMs:last,terminalHash:hash(terminal),progress:expected.role==='planner'?terminal.report.classified:terminal.report.changedRows,completionMs:terminal.report.finishedMs,coverage:'original-sampled-lifecycle',...(relative?{anchorHash,requiredStartMs,requiredEndMs}: {})});
 }
