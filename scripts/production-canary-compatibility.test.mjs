@@ -4,12 +4,16 @@ import {validateCanaryCompatibility,inspectCanaryCompatibility} from './lib/prod
 import {readFile} from 'node:fs/promises';
 import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
 import {NONROOT_LIMITS_HASH} from './lib/production-nonroot-contracts.mjs';
+import {dataCopySources} from './lib/production-data-build-inputs.mjs';
 
 const hex=n=>n.toString(16).padStart(64,'0');
 it('the control image and coordinator closure include the V3/V4 consumer and host modules',async()=>{
  const docker=await readFile(new URL('../docker/bootstrap/Dockerfile',import.meta.url),'utf8');
- expect(docker).toContain('COPY scripts/lib/production-canary-transition.mjs /bootstrap/operator/scripts/lib/production-canary-transition.mjs');
- expect(docker).toContain('COPY scripts/lib/production-image-transition.mjs /bootstrap/operator/scripts/lib/production-image-transition.mjs');
+ for(const name of ['production-canary-transition.mjs','production-image-transition.mjs']){
+  const source='scripts/lib/'+name;expect(dataCopySources(docker)).toContain(source);
+  const instruction=docker.split('\n').find(line=>line.startsWith('COPY ')&&line.split(/\s+/).includes(source));
+  const target=instruction.split(/\s+/).at(-1);expect(target.endsWith('/')?target+name:target).toBe('/bootstrap/operator/scripts/lib/'+name);
+ }
  const host=await readFile(new URL('./run-production-runtime.mjs',import.meta.url),'utf8');
  const digest=host.slice(host.indexOf('export async function productionCoordinatorDigest()'),host.indexOf('export async function retainedDeploymentEnvironment'));
  for(const name of ['production-canary-transition','production-canary-material-transition','production-canary-material-integrity','production-maintenance-admission'])expect(digest).toContain("'scripts/lib/"+name+".mjs'");

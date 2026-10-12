@@ -16232,8 +16232,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-provenance.mjs",
-      "sha256": "7c4ac17e098e684c62ae1c5b6d1a1fc68e6120f82b2778ee7f0a239dc9a1e693",
-      "bytesLength": 39347
+      "sha256": "ee59d987d9d0600f87a8e6f549b1a789dee60530d1a40779c8bd6481ddc82c1d",
+      "bytesLength": 39658
     },
     {
       "path": "scripts/lib/production-nonroot-root-material.mjs",
@@ -16633,7 +16633,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "3c083ad114b4edb7532a082a1b06c1a83551f4a9e3702f215b3f5d33314470f3",
-    "bytesLength": 6495226
+    "sha256": "c5f9e969945a256f6a75da31ae47f04ac547b74a78df6c3120a1bc77687835ab",
+    "bytesLength": 6495371
   }
 }

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { dataCopySources } from "./lib/production-data-build-inputs.mjs";
 
 import {
   M2M_RESOLUTION_QUERY,
@@ -137,9 +138,11 @@ describe("preview benchmark packaging and runner", () => {
       resolve(import.meta.dirname, "../docker/bootstrap/Dockerfile"),
       "utf8",
     );
-    expect(dockerfile).toContain(
-      "COPY scripts/benchmark-memory-namespaces.mjs /bootstrap/operator/scripts/benchmark-memory-namespaces.mjs",
-    );
+    const source = "scripts/benchmark-memory-namespaces.mjs";
+    expect(dataCopySources(dockerfile)).toContain(source);
+    const instruction = dockerfile.split("\n").find(line => line.startsWith("COPY ") && line.split(/\s+/).includes(source));
+    const target = instruction.split(/\s+/).at(-1);
+    expect(target.endsWith("/") ? target + "benchmark-memory-namespaces.mjs" : target).toBe("/bootstrap/operator/scripts/benchmark-memory-namespaces.mjs");
   });
 
   it("uses the stage bootstrap task without retained-role overrides", async () => {

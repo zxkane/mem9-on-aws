@@ -204,8 +204,16 @@ export function verifyNonrootControlBuildLog(bytes,image){
   need(events.filter(e=>e.vertex===vertex&&e.kind===kind).every(e=>e.digest===digest),'NonrootControlBuildLog');
   last=Math.max(last,...matches.map(e=>e.index));
  }
- const done=rows.flatMap((line,index)=>new RegExp('(?:^|\\s)#'+vertex+' DONE(?:\\s|$)').test(line)?[index]:[]);
- need(done.length===1&&done[0]>last&&!rows.some(line=>new RegExp('(?:^|\\s)#'+vertex+' (?:ERROR|CACHED)(?:\\s|$)').test(line)),'NonrootControlBuildLog');
+ // Export and registry push can complete in separate progress phases. An
+ // earlier DONE cannot complete later resumed work from this same vertex.
+ const progress=new RegExp('(?:^|\\s)#'+vertex+' (.*)$');
+ let lastProgress=-1,lastDone=-1,failed=false;
+ for(const [index,line]of rows.entries()){
+  const event=progress.exec(line);if(!event)continue;lastProgress=index;
+  if(/^DONE(?:\s|$)/.test(event[1]))lastDone=index;
+  if(/^(?:ERROR(?::|\s|$)|CACHED(?:\s|$))/.test(event[1]))failed=true;
+ }
+ need(lastDone>last&&lastDone===lastProgress&&!failed,'NonrootControlBuildLog');
  return {vertex};
 }
 

@@ -77,3 +77,51 @@ it.each(['conflict','repeated-start','two-vertices','missing-done','cached'])('r
  if(defect==='cached')rows.splice(0,0,'#64 CACHED');
  expect(()=>verifyNonrootControlBuildLog(Buffer.from(rows.join('\n')),image)).toThrow('NonrootControlBuildLog');
 });
+
+function resumedExportRows(image){
+ return [
+  '#12 DONE 0.1s',
+  '#64 exporting to image',
+  `#64 exporting manifest ${image.arm64Digest} 0.0s done`,
+  `#64 exporting config ${image.configDigest} 0.0s done`,
+  `#64 exporting manifest list ${image.rootDigest} 0.0s done`,
+  '#64 DONE 1.1s',
+  '#65 [auth] sharing credentials for registry.example.com',
+  '#65 DONE 0.0s',
+  '#64 exporting to image',
+  '#64 pushing layers',
+  '#64 pushing layers 2.0s done',
+  `#64 pushing manifest for registry.example.com/bootstrap:example@${image.rootDigest}`,
+  `#64 pushing manifest for registry.example.com/bootstrap:example@${image.rootDigest} 0.2s done`,
+  '#64 DONE 3.3s',
+  '#66 resolving provenance for metadata file',
+  '#66 DONE 0.0s',
+ ];
+}
+it('accepts complete resumed export progress and preserves the full original log bytes',()=>{
+ const log=Buffer.from(resumedExportRows(f.build.image).map(row=>'2026-01-01T00:00:00.000Z '+row).join('\n')+'\n'),before=Buffer.from(log);
+ expect(verifyNonrootControlBuildLog(log,f.build.image)).toEqual({vertex:'64'});
+ expect(log.equals(before)).toBe(true);
+});
+it('binds the complete resumed push log in the original action completion',async()=>{
+ const capture=await captureNonrootControlBuildAction(input(),f.options()),before=JSON.stringify(capture);
+ const job={...capture.job,status:'completed',conclusion:'success',completed_at:new Date(f.now+1000).toISOString()};
+ const log=Buffer.from(resumedExportRows(f.build.image).join('\n')+'\n');
+ const completed=completeNonrootControlBuildAction(capture,{contract:f.contract,run:capture.run,job,buildLog:log,now:f.now+2000});
+ expect(completed.buildLog.bytesLength).toBe(log.length);
+ expect(completed.buildLog.sha256).toBe(f.bytes(log).sha256);
+ expect(JSON.stringify(capture)).toBe(before);
+});
+it.each(['unfinished-push','unfinished-resume','foreign-final-done','error-after-first-done','cached-after-first-done','conflicting-root','conflicting-config','later-unfinished-progress','done-before-export'])('rejects %s after an earlier export completion',defect=>{
+ const image=f.build.image,rows=resumedExportRows(image);
+ if(defect==='unfinished-push')rows.splice(rows.indexOf('#64 DONE 3.3s'),1);
+ if(defect==='unfinished-resume')rows.splice(rows.indexOf('#64 pushing layers'),6);
+ if(defect==='foreign-final-done')rows[rows.indexOf('#64 DONE 3.3s')]='#640 DONE 3.3s';
+ if(defect==='error-after-first-done')rows.splice(9,0,'#64 ERROR: failed to push');
+ if(defect==='cached-after-first-done')rows.splice(9,0,'#64 CACHED');
+ if(defect==='conflicting-root')rows.splice(9,0,'#64 exporting manifest list sha256:'+'f'.repeat(64)+' done');
+ if(defect==='conflicting-config')rows.splice(9,0,'#64 exporting config sha256:'+'f'.repeat(64)+' done');
+ if(defect==='later-unfinished-progress')rows.push('#64 pushing manifest for registry.example.com/bootstrap:other');
+ if(defect==='done-before-export'){rows.splice(rows.indexOf('#64 DONE 3.3s'),1);rows.splice(rows.indexOf('#64 DONE 1.1s'),1);rows.unshift('#64 DONE 0.1s');}
+ expect(()=>verifyNonrootControlBuildLog(Buffer.from(rows.join('\n')),image)).toThrow('NonrootControlBuildLog');
+});
