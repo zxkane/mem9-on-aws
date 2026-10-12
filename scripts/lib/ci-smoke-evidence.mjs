@@ -2,8 +2,8 @@
  * caller. No network, process launch, approval token or clock renewal occurs. */
 import {createHash} from 'node:crypto';
 import {types} from 'node:util';
-import {canaryEvidenceHash} from './production-canary-verification.mjs';
-import {validateSamplerEvent,extractSamplerEventFromDockerLogs} from '../validate-emf-event.mjs';
+import {canaryEvidenceHash} from "./production-canary-verification.mjs";
+import {validateSamplerEvent,extractSamplerEventFromDockerLogs} from "../validate-emf-event.mjs";
 
 export const CI_SMOKE_LIMITS=Object.freeze({archiveBytes:33554432,captureBytes:8388608,references:4096,commands:1024,durationMs:900000});
 export const CI_SMOKE_CHECKS=Object.freeze(['busybox-wget','reject-zero-migration-attempts','reject-zero-connect-timeout','unhealthy-before-migration','migration-retry','healthy-after-migration','tls-required','plaintext-rejected','atomic-ingest-relations','password-absent-from-logs','non-tty-emf-framing','unhealthy-without-server','nonroot-capabilities-nnp','owned-resource-cleanup']);
@@ -102,16 +102,26 @@ export const inspectCiSmokeCheck=v=>inspectCiSmokeRecord('CheckV1',v);
 export const inspectCiSmokeResult=v=>inspectCiSmokeRecord('CiSmokeIsolationResultV1',v);
 export function ciSmokeBindingHash(value){const selected=Object.fromEntries(identityKeys.map(key=>[key,value?.[key]]));object(identityFields)(selected);return hash(selected);}
 
-function readers({readJson,readBytes}){
+
+function assertCiCurrent(assertCurrent){
+ if(assertCurrent===undefined)return;
+ need(typeof assertCurrent==='function','CiSmokeSynchronousGuard');const checked=assertCurrent();
+ if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});need(false,'CiSmokeSynchronousGuard');}
+ need(checked===undefined,'CiSmokeSynchronousGuard');
+}
+
+function readers({readJson,readBytes,assertCurrent}){
+ const resume=value=>{assertCiCurrent(assertCurrent);return value;};resume();
  need(typeof readJson==='function'&&typeof readBytes==='function','CiSmokeReadersRequired');
  const cache=new Map(),charged=new Set(),active=new Set();let total=0;
  const read=async(ref,json)=>{
+  resume();
   (json?JsonRef:ByteRef)(ref);const key=(json?'j:':'b:')+(json?ref.bytesHash:ref.sha256);
   if(cache.has(key)){const entry=cache.get(key);same(entry.ref,ref,'CiSmokeReferenceConflict');return entry.value;}
   need(!active.has(key)&&cache.size+active.size<CI_SMOKE_LIMITS.references,'CiSmokeReferenceCycle');active.add(key);
   // Each encoding passes its own inventory lookup. A cached ByteRef must not
   // bypass readJson's scope check when the same bytes are used as a JsonRef.
-  try{const digest=json?ref.bytesHash:ref.sha256;let returned;try{returned=await(json?readJson:readBytes)(ref);}catch{throw Error('CiSmokeReferenceRead');}need(returned instanceof Uint8Array&&returned.byteLength===ref.bytesLength,'CiSmokeReferenceSize');const bytes=Buffer.from(returned);need(sha(bytes)===digest,'CiSmokeReferenceHash');if(!charged.has(digest)){total+=bytes.length;charged.add(digest);}need(total<=CI_SMOKE_LIMITS.archiveBytes,'CiSmokeArchiveLimit');
+  try{const digest=json?ref.bytesHash:ref.sha256;let returned;try{returned=await(json?readJson:readBytes)(ref);}catch{throw Error('CiSmokeReferenceRead');}resume();need(returned instanceof Uint8Array&&returned.byteLength===ref.bytesLength,'CiSmokeReferenceSize');const bytes=Buffer.from(returned);need(sha(bytes)===digest,'CiSmokeReferenceHash');if(!charged.has(digest)){total+=bytes.length;charged.add(digest);}need(total<=CI_SMOKE_LIMITS.archiveBytes,'CiSmokeArchiveLimit');
    const value=json?parseCiSmokeJson(new TextDecoder('utf-8',{fatal:true}).decode(bytes),{maxBytes:CI_SMOKE_LIMITS.captureBytes}):bytes;if(json)same(hash(value),ref.canonicalHash,'CiSmokeReferenceCanonicalHash');cache.set(key,{ref,value});return value;
   }finally{active.delete(key);}
  };
@@ -129,7 +139,8 @@ const zeroScan=scan=>need(Object.values(scan).every(value=>value===0),'CiSmokeCr
  * never copied from the result being checked. commandCatalog is the pinned
  * producer's fully resolved plan, with owned-ID slots already bound by its
  * host journal; no callbacks or success booleans replace its argv checks. */
-export async function validateCiSmokeEvidence(value,{readJson,readBytes,expected,now=Date.now()}={}){
+export async function validateCiSmokeEvidence(value,{readJson,readBytes,expected,now=Date.now(),assertCurrent}={}){
+ const resume=value=>{assertCiCurrent(assertCurrent);return value;};resume();
  const result=inspectCiSmokeResult(value),e=copyCiData(expected);P(now);
  const expectedFields=['identity','isolationHash','invocationId','buildJob','smokeJob','sourceFiles','scanner','emfValidator','commandCatalog','images','environmentNames','secretEnvironmentNames','executables','database','migrationMaxAttempts'];
  exact(e,Object.fromEntries(expectedFields.map(k=>[k,()=>{}])));object(identityFields)(e.identity);H(e.isolationHash);H(e.invocationId);
@@ -138,7 +149,7 @@ export async function validateCiSmokeEvidence(value,{readJson,readBytes,expected
  for(const j of [e.buildJob,e.smokeJob]){need(j.runId===result.runId&&j.runAttempt===result.runAttempt&&j.sourceRevision===result.sourceRevision,'CiSmokeJobIdentity');time(j,{startedMs:1,completedMs:now});}
  need(e.buildJob.id===result.buildJobId&&e.smokeJob.id===result.smokeJobId&&e.buildJob.completedMs<=e.smokeJob.startedMs&&e.smokeJob.completedMs-e.smokeJob.startedMs<=CI_SMOKE_LIMITS.durationMs,'CiSmokeJobOrder');time(result,e.smokeJob);
  need(result.qualifiedImage.endsWith('@'+result.outputDigest),'CiSmokeSelectedDigest');
- const checked=await validateCaptureGraph(result,{readJson,readBytes,e,binding:ciSmokeBindingHash(result)});
+ const checked=resume(await validateCaptureGraph(result,{readJson,readBytes,e,binding:ciSmokeBindingHash(result),assertCurrent}));
  return copyCiData({resultHash:hash(result),isolationHash:result.isolationHash,sourceRevision:result.sourceRevision,sourceTree:result.sourceTree,...checked});
 }
 
@@ -170,35 +181,36 @@ export async function validateLocalCiSmokeEvidence(value,{readJson,readBytes,exp
  const checked=await validateCaptureGraph(selection,{readJson,readBytes,e,binding});return copyCiData({kind:'verified-local-ci-smoke-captures',localResultHash:hash(result),...checked});
 }
 
-async function validateCaptureGraph(result,{readJson,readBytes,e,binding}){
+async function validateCaptureGraph(result,{readJson,readBytes,e,binding,assertCurrent}){
+ const resume=value=>{assertCiCurrent(assertCurrent);return value;};resume();
  FilePin(e.scanner);FilePin(e.emfValidator);array(FilePin,1,128)(e.sourceFiles);need(new Set(e.sourceFiles.map(p=>p.path)).size===e.sourceFiles.length,'CiSmokeSourcePins');
  object(Object.fromEntries(CI_SMOKE_ROLES.map(role=>[role,array(pattern(/^[A-Za-z_][A-Za-z0-9_]*$/),0,128,true)])))(e.environmentNames);
  object(Object.fromEntries(CI_SMOKE_ROLES.map(role=>[role,array(pattern(/^[A-Za-z_][A-Za-z0-9_]*$/),0,128,true)])))(e.secretEnvironmentNames);
  object(Object.fromEntries(CI_SMOKE_ROLES.map(role=>[role,array(object({path:absolute,sha256:H}),1,32,true)])))(e.executables);
  object({host:T,user:T,name:T})(e.database);integer(1,100)(e.migrationMaxAttempts);
  need(e.emfValidator.path==='scripts/validate-emf-event.mjs'&&e.sourceFiles.some(p=>hash(p)===hash(e.scanner))&&e.sourceFiles.some(p=>hash(p)===hash(e.emfValidator)),'CiSmokeSourcePins');
- const r=readers({readJson,readBytes});for(const pin of e.sourceFiles)await r.bytes({sha256:pin.sha256,bytesLength:pin.bytes});
+ const r=readers({readJson,readBytes,assertCurrent});for(const pin of e.sourceFiles)resume(await r.bytes({sha256:pin.sha256,bytesLength:pin.bytes}));
  const common=v=>{need(v.bindingHash===binding&&v.invocationId===e.invocationId,'CiSmokeInvocationBinding');if(Object.hasOwn(v,'startedMs'))time(v,result);};
  const commands=new Map(),bySequence=new Map(),logs=new Map(),inspectCaptures=new Map();let ownedIds;
  const containerCommands=new Set(['busybox-wget','reject-migration','reject-timeout','health-before','health-after','tls-query','plaintext-query','relations-query','health-absent','create-container','start-container','inspect-container','inspect-processes','generate-tls','stat-tls','collect-logs','stop-server']);
  const catalog=new Map();array(object({sequence:integer(0,1023),commandKey:oneOf(...CI_SMOKE_COMMANDS),containerId:nullable(T),argv:array(S,1,128)}),1,1024)(e.commandCatalog);
  for(const row of e.commandCatalog){need(!catalog.has(row.sequence),'CiSmokeCommandPlanDuplicate');catalog.set(row.sequence,row);}
  async function command(ref,key,containerId){
-  const c=inspectCiSmokeCommand(await r.json(ref));common(c);if(key!==undefined)need(c.commandKey===key,'CiSmokeCommandKind');if(containerId!==undefined)need(c.containerId===containerId,'CiSmokeCommandContainer');
+  const c=inspectCiSmokeCommand(resume(await r.json(ref)));common(c);if(key!==undefined)need(c.commandKey===key,'CiSmokeCommandKind');if(containerId!==undefined)need(c.containerId===containerId,'CiSmokeCommandContainer');
   need(c.containerId===null||ownedIds?.has(c.containerId),'CiSmokeCommandOwnership');
   if(containerCommands.has(c.commandKey))need(c.containerId!==null,'CiSmokeCommandOwnership');
   const planned=catalog.get(c.sequence);need(planned,'CiSmokeUnplannedCommand');same({sequence:c.sequence,commandKey:c.commandKey,containerId:c.containerId,argv:c.argv},planned,'CiSmokeCommandArguments');
-  const prior=bySequence.get(c.sequence);need(!prior||hash(prior)===hash(c),'CiSmokeCommandSequence');bySequence.set(c.sequence,c);commands.set(ref.canonicalHash,c);await r.bytes(c.stdout);await r.bytes(c.stderr);return c;
+  const prior=bySequence.get(c.sequence);need(!prior||hash(prior)===hash(c),'CiSmokeCommandSequence');bySequence.set(c.sequence,c);commands.set(ref.canonicalHash,c);resume(await r.bytes(c.stdout));resume(await r.bytes(c.stderr));return c;
  }
  const success=c=>need(c.exitCode===0,'CiSmokeCommandFailed');
  const negative=c=>need(c.exitCode>=1&&c.exitCode<125,'CiSmokeNegativeNotApplication');
  async function log(value){
   const l=inspectCiSmokeLog(value);common(l);same(l.scanner,e.scanner,'CiSmokeScannerSource');
-  const c=await command(l.collectionCommand,undefined,l.containerId);
+  const c=resume(await command(l.collectionCommand,undefined,l.containerId));
   // An expected application rejection still has a completed captured stream.
   // Transport/timeout failures and unrelated nonzero commands never qualify.
   if(c.exitCode!==0){const readiness=c.commandKey==='start-container'&&c.containerId===database.containerId&&c.argv.some(a=>a==='pg_isready'||a.endsWith('/pg_isready'))&&[1,2].includes(c.exitCode);need(readiness||['reject-migration','reject-timeout','health-before','health-after','plaintext-query','health-absent'].includes(c.commandKey),'CiSmokeCommandFailed');negative(c);}
-  within(l,c);byteRefEqual(l.redactedBytes,c[l.stream]);const bytes=await r.bytes(l.redactedBytes);
+  within(l,c);byteRefEqual(l.redactedBytes,c[l.stream]);const bytes=resume(await r.bytes(l.redactedBytes));
   const inspected=inspectCaptures.get(l.collectionCommand.canonicalHash);
   if(inspected&&l.stream==='stdout'){
    zeroScan({cloudCredentialMatches:l.scan.cloudCredentialMatches,privateKeyMatches:l.scan.privateKeyMatches,tokenMatches:l.scan.tokenMatches});
@@ -207,13 +219,13 @@ async function validateCaptureGraph(result,{readJson,readBytes,e,binding}){
   }else{zeroScan(l.scan);need(l.redactions.length===0,'CiSmokeLogRedactionAfterLeak');need(l.rawSha256===sha(bytes)&&l.rawBytes===bytes.length,'CiSmokeIncompleteLog');}
   logs.set(hash(l),l);return bytes;
  }
- const runtime=inspectCiSmokeRuntime(await r.json(result.runtimeEvidence));common(runtime);const containers=new Map(runtime.containers.map(c=>[c.role,c]));need(containers.size===6&&new Set(ids(runtime.containers)).size===6,'CiSmokeContainerInventory');
+ const runtime=inspectCiSmokeRuntime(resume(await r.json(result.runtimeEvidence)));common(runtime);const containers=new Map(runtime.containers.map(c=>[c.role,c]));need(containers.size===6&&new Set(ids(runtime.containers)).size===6,'CiSmokeContainerInventory');
  const server=containers.get('server'),database=containers.get('database');ownedIds=new Set(ids(runtime.containers));
  const imageSchema=object({rootDigest:D,arm64Digest:D,configDigest:D,qualifiedImage:S});object({server:imageSchema,database:imageSchema})(e.images);
  same(e.images.server,{rootDigest:result.outputDigest,arm64Digest:result.arm64Digest,configDigest:result.configDigest,qualifiedImage:result.qualifiedImage},'CiSmokeImageBinding');need(e.images.database.qualifiedImage.startsWith('pgvector/pgvector@')&&e.images.database.qualifiedImage.endsWith('@'+e.images.database.rootDigest),'CiSmokeDatabaseImage');
  const network=runtime.network;common(network);need(network.createdMs>=result.startedMs&&network.createdMs<=network.observedMs&&network.observedMs<=result.completedMs,'CiSmokeNetworkTime');same([...network.attachedContainerIds].sort(),[server.containerId,database.containerId].sort(),'CiSmokeNetworkMembers');
- success(await command(network.createCommand,'create-network',null));
- const rawNetwork=outputJson(await r.bytes(network.inspectCapture));need(Array.isArray(rawNetwork)&&rawNetwork.length===1,'CiSmokeNetworkCapture');const rn=rawNetwork[0];need(rn.Id===network.id&&rn.Name===network.name&&rn.Driver==='bridge'&&rn.Internal===true,'CiSmokeNetworkCapture');same(Object.keys(rn.Containers??{}).sort(),network.attachedContainerIds.slice().sort(),'CiSmokeNetworkMembers');
+ success(resume(await command(network.createCommand,'create-network',null)));
+ const rawNetwork=outputJson(resume(await r.bytes(network.inspectCapture)));need(Array.isArray(rawNetwork)&&rawNetwork.length===1,'CiSmokeNetworkCapture');const rn=rawNetwork[0];need(rn.Id===network.id&&rn.Name===network.name&&rn.Driver==='bridge'&&rn.Internal===true,'CiSmokeNetworkCapture');same(Object.keys(rn.Containers??{}).sort(),network.attachedContainerIds.slice().sort(),'CiSmokeNetworkMembers');
  const processHashes=[],processCaptures=[],states=[];
  for(const c of runtime.containers){
   need(c.invocationId===e.invocationId,'CiSmokeInvocationBinding');const uid=c.role==='database'?999:1000,image=c.role==='database'?e.images.database:e.images.server;
@@ -225,11 +237,11 @@ async function validateCaptureGraph(result,{readJson,readBytes,e,binding}){
   const wanted=c.role==='database'?[['/pgdata',536870912,448],['/tls',16777216,448],['/var/run/postgresql',16777216,493],['/var/lib/postgresql/data',1048576,448]]:c.role==='server'?[['/tmp',268435456,448]]:[];
   need(c.mounts.length===wanted.length&&new Set(c.mounts.map(m=>m.destination)).size===wanted.length,'CiSmokeMounts');
   for(const m of c.mounts){const row=wanted.find(x=>x[0]===m.destination);need(row&&m.uid===uid&&m.gid===uid&&m.mode===row[2]&&(c.role==='server'?m.sizeBytes<=row[1]:m.sizeBytes===row[1]),'CiSmokeMounts');}
-  const create=await command(c.createCommand,'create-container',c.containerId);success(create);need(create.startedMs<=c.createdMs&&c.createdMs<=create.completedMs,'CiSmokeCreateTime');need(rawText(await r.bytes(create.stdout)).trim()===c.containerId,'CiSmokeCreateIdentity');
-  const capture=inspectCiSmokeRecord('InspectCaptureV1',await r.json(c.inspectCapture));common(capture);same(capture.scanner,e.scanner,'CiSmokeScannerSource');zeroScan(capture.scan);inspectCaptures.set(capture.command.canonicalHash,capture);
-  const inspected=await command(capture.command,'inspect-container',c.containerId);success(inspected);need(inspected.startedMs<=c.inspectMs&&c.inspectMs<=inspected.completedMs,'CiSmokeInspectTime');
+  const create=resume(await command(c.createCommand,'create-container',c.containerId));success(create);need(create.startedMs<=c.createdMs&&c.createdMs<=create.completedMs,'CiSmokeCreateTime');need(rawText(resume(await r.bytes(create.stdout))).trim()===c.containerId,'CiSmokeCreateIdentity');
+  const capture=inspectCiSmokeRecord('InspectCaptureV1',resume(await r.json(c.inspectCapture)));common(capture);same(capture.scanner,e.scanner,'CiSmokeScannerSource');zeroScan(capture.scan);inspectCaptures.set(capture.command.canonicalHash,capture);
+  const inspected=resume(await command(capture.command,'inspect-container',c.containerId));success(inspected);need(inspected.startedMs<=c.inspectMs&&c.inspectMs<=inspected.completedMs,'CiSmokeInspectTime');
   byteRefEqual({sha256:capture.redactedJson.bytesHash,bytesLength:capture.redactedJson.bytesLength},inspected.stdout);
-  const raw=await r.json(capture.redactedJson);need(Array.isArray(raw)&&raw.length===1,'CiSmokeInspectCapture');const d=raw[0],hc=d.HostConfig,config=d.Config;
+  const raw=resume(await r.json(capture.redactedJson));need(Array.isArray(raw)&&raw.length===1,'CiSmokeInspectCapture');const d=raw[0],hc=d.HostConfig,config=d.Config;
   need(d.Id===c.containerId&&d.Name==='/'+c.name&&d.Platform==='linux'&&config.Image===image.qualifiedImage,'CiSmokeInspectIdentity');
   need(Date.parse(d.Created)===c.createdMs,'CiSmokeInspectCreatedTime');
   const actualStarted=Date.parse(d.State?.StartedAt);
@@ -256,54 +268,54 @@ async function validateCaptureGraph(result,{readJson,readBytes,e,binding}){
   for(const m of c.mounts){const flags=new Map(String(tmpfs[m.destination]).split(',').map(s=>{const at=s.indexOf('=');return at<0?[s,true]:[s.slice(0,at),s.slice(at+1)];}));const size=/^(\d+)([kmg])?$/i.exec(flags.get('size'));need(size,'CiSmokeInspectMounts');const bytes=Number(size[1])*({k:1024,m:1048576,g:1073741824}[size[2]?.toLowerCase()]??1);need(['noexec','nosuid','nodev'].every(f=>flags.get(f)===true)&&Number(flags.get('uid'))===m.uid&&Number(flags.get('gid'))===m.gid&&parseInt(flags.get('mode'),8)===m.mode&&bytes===m.sizeBytes,'CiSmokeInspectMounts');}
   const pids=new Map();for(const p of c.processes){need(p.containerId===c.containerId&&p.observedMs>=c.startedMs&&p.observedMs<=result.completedMs&&[...p.uid,...p.gid].every(n=>n===uid),'CiSmokeProcessIdentity');need(e.executables[c.role].some(x=>x.path===p.executablePath&&x.sha256===p.executableSha256),'CiSmokeProcessExecutable');
    const prior=pids.get(p.pid);need(prior===undefined||prior===p.startTimeTicks,'CiSmokePidReuse');pids.set(p.pid,p.startTimeTicks);
-   const capture=outputJson(await r.bytes(p.statusCapture));object({status:text(65536),stat:text(65536),exe:absolute,executableSha256:H})(capture);processCaptures.push(p);const fields=new Map();for(const line of capture.status.split('\n')){const at=line.indexOf(':');if(at<0)continue;const key=line.slice(0,at);need(!fields.has(key),'CiSmokeProcessCapture');fields.set(key,line.slice(at+1).trim());}
+   const capture=outputJson(resume(await r.bytes(p.statusCapture)));object({status:text(65536),stat:text(65536),exe:absolute,executableSha256:H})(capture);processCaptures.push(p);const fields=new Map();for(const line of capture.status.split('\n')){const at=line.indexOf(':');if(at<0)continue;const key=line.slice(0,at);need(!fields.has(key),'CiSmokeProcessCapture');fields.set(key,line.slice(at+1).trim());}
    const words=capture.stat.match(/^(\d+) \(.*\) (\S) (.*)$/s);need(words,'CiSmokeProcessCapture');const rest=words[3].trim().split(/\s+/);need(Number(words[1])===p.pid&&Number(rest[0])===p.ppid&&Number(rest[18])===p.startTimeTicks,'CiSmokeProcessCapture');
    same(fields.get('Uid')?.split(/\s+/).map(Number),p.uid,'CiSmokeProcessCapture');same(fields.get('Gid')?.split(/\s+/).map(Number),p.gid,'CiSmokeProcessCapture');need(Number(fields.get('Pid'))===p.pid&&Number(fields.get('PPid'))===p.ppid&&fields.get('CapEff')===p.capEff&&fields.get('CapBnd')===p.capBnd&&fields.get('NoNewPrivs')==='1'&&capture.exe===p.executablePath&&capture.executableSha256===p.executableSha256,'CiSmokeProcessCapture');processHashes.push(hash(p));
   }
  }
- const tls=runtime.databaseTls;need(tls.containerId===database.containerId&&tls.generatedMs>=database.startedMs&&tls.generatedMs<=result.completedMs,'CiSmokeTlsTime');const tlsStat=await command(tls.statCommand,'stat-tls',database.containerId);success(tlsStat);need(tls.generatedMs<=tlsStat.completedMs,'CiSmokeTlsTime');
- const actualTls=outputJson(await r.bytes(tlsStat.stdout));same(actualTls,{keyPath:tls.keyPath,certificatePath:tls.certificatePath,keyUid:999,keyGid:999,keyMode:384,certificateSha256:tls.certificateSha256},'CiSmokeTlsStat');
- const checks=new Map();for(const [index,name]of CI_SMOKE_CHECKS.entries()){const checked=inspectCiSmokeCheck(await r.json(result.checks[name]));common(checked);need(checked.kind==='ci-smoke-'+suffixes[index],'CiSmokeCheckKind');checks.set(name,checked);}
- const check=name=>checks.get(name),payload=name=>check(name).payload,checkCommand=async(name,key,id,field='command')=>{const c=await command(payload(name)[field],key,id);within(c,check(name));return c;};
- const busy=payload('busybox-wget'),bc=await checkCommand('busybox-wget','busybox-wget',containers.get('busybox').containerId);success(bc);need(busy.containerId===bc.containerId,'CiSmokeCheckContainer');byteRefEqual(busy.busyboxApplets,bc.stdout);const applets=rawText(await r.bytes(busy.busyboxApplets)).trim().split('\n');need(applets.filter(x=>x==='wget').length===1&&applets.includes(busy.wgetPath),'CiSmokeBusyboxOutput');
- for(const [name,key,role]of [['reject-zero-migration-attempts','reject-migration','invalid-migration'],['reject-zero-connect-timeout','reject-timeout','invalid-timeout']]){const p=payload(name),container=containers.get(role),c=await checkCommand(name,key,container.containerId);negative(c);need(c.startedMs<=container.startedMs&&container.startedMs<=c.completedMs,'CiSmokeNegativeStartTime');need(p.containerId===c.containerId&&rawText(await r.bytes(c.stderr)).trim()===p.error,'CiSmokeNegativeDiagnostic');}
- const before=await checkCommand('unhealthy-before-migration','health-before',server.containerId);need(before.exitCode===1&&payload('unhealthy-before-migration').serverId===server.containerId&&server.startedMs<=before.startedMs&&before.completedMs<database.startedMs,'CiSmokeBeforeMigration');
- const retry=payload('migration-retry'),retryLog=await log(retry.log),dbStart=await command(retry.databaseStartCommand,undefined,database.containerId);success(dbStart);need(retry.serverId===server.containerId&&retry.log.containerId===server.containerId&&retry.log.stream==='stderr'&&retry.maxAttempts===e.migrationMaxAttempts&&retry.log.completedMs<dbStart.startedMs&&dbStart.startedMs<=database.startedMs&&database.startedMs<=dbStart.completedMs,'CiSmokeRetryOrder');
+ const tls=runtime.databaseTls;need(tls.containerId===database.containerId&&tls.generatedMs>=database.startedMs&&tls.generatedMs<=result.completedMs,'CiSmokeTlsTime');const tlsStat=resume(await command(tls.statCommand,'stat-tls',database.containerId));success(tlsStat);need(tls.generatedMs<=tlsStat.completedMs,'CiSmokeTlsTime');
+ const actualTls=outputJson(resume(await r.bytes(tlsStat.stdout)));same(actualTls,{keyPath:tls.keyPath,certificatePath:tls.certificatePath,keyUid:999,keyGid:999,keyMode:384,certificateSha256:tls.certificateSha256},'CiSmokeTlsStat');
+ const checks=new Map();for(const [index,name]of CI_SMOKE_CHECKS.entries()){const checked=inspectCiSmokeCheck(resume(await r.json(result.checks[name])));common(checked);need(checked.kind==='ci-smoke-'+suffixes[index],'CiSmokeCheckKind');checks.set(name,checked);}
+ const check=name=>checks.get(name),payload=name=>check(name).payload,checkCommand=async(name,key,id,field='command')=>{const c=resume(await command(payload(name)[field],key,id));within(c,check(name));return c;};
+ const busy=payload('busybox-wget'),bc=resume(await checkCommand('busybox-wget','busybox-wget',containers.get('busybox').containerId));success(bc);need(busy.containerId===bc.containerId,'CiSmokeCheckContainer');byteRefEqual(busy.busyboxApplets,bc.stdout);const applets=rawText(resume(await r.bytes(busy.busyboxApplets))).trim().split('\n');need(applets.filter(x=>x==='wget').length===1&&applets.includes(busy.wgetPath),'CiSmokeBusyboxOutput');
+ for(const [name,key,role]of [['reject-zero-migration-attempts','reject-migration','invalid-migration'],['reject-zero-connect-timeout','reject-timeout','invalid-timeout']]){const p=payload(name),container=containers.get(role),c=resume(await checkCommand(name,key,container.containerId));negative(c);need(c.startedMs<=container.startedMs&&container.startedMs<=c.completedMs,'CiSmokeNegativeStartTime');need(p.containerId===c.containerId&&rawText(resume(await r.bytes(c.stderr))).trim()===p.error,'CiSmokeNegativeDiagnostic');}
+ const before=resume(await checkCommand('unhealthy-before-migration','health-before',server.containerId));need(before.exitCode===1&&payload('unhealthy-before-migration').serverId===server.containerId&&server.startedMs<=before.startedMs&&before.completedMs<database.startedMs,'CiSmokeBeforeMigration');
+ const retry=payload('migration-retry'),retryLog=resume(await log(retry.log)),dbStart=resume(await command(retry.databaseStartCommand,undefined,database.containerId));success(dbStart);need(retry.serverId===server.containerId&&retry.log.containerId===server.containerId&&retry.log.stream==='stderr'&&retry.maxAttempts===e.migrationMaxAttempts&&retry.log.completedMs<dbStart.startedMs&&dbStart.startedMs<=database.startedMs&&database.startedMs<=dbStart.completedMs,'CiSmokeRetryOrder');
  const lines=(bytes,p)=>{const all=rawText(bytes).split('\n');need(p.lineStart<=p.lineEnd&&p.lineEnd<all.length,'CiSmokeLogRange');return all.slice(p.lineStart,p.lineEnd+1).join('\n');};
  need(lines(retryLog,retry).includes('migration attempt 1/'+retry.maxAttempts+' failed'),'CiSmokeRetryLog');
- const afterP=payload('healthy-after-migration'),after=await checkCommand('healthy-after-migration','health-after',server.containerId);success(after);need(afterP.serverId===server.containerId&&afterP.databaseId===database.containerId&&afterP.retryCheckHash===hash(check('migration-retry'))&&database.startedMs<=after.startedMs&&tls.generatedMs<=after.startedMs,'CiSmokeRecoveryOrder');
- need(afterP.recoveryLog.containerId===server.containerId&&afterP.recoveryLog.stream==='stdout'&&afterP.recoveryLog.startedMs>=dbStart.startedMs,'CiSmokeRecoveryLog');need(lines(await log(afterP.recoveryLog),afterP).includes('migration applied after '+afterP.retries+' retries')&&afterP.retries<retry.maxAttempts,'CiSmokeRecoveryLog');
- for(const [name,key]of [['tls-required','tls-query'],['atomic-ingest-relations','relations-query']]){const p=payload(name),c=await checkCommand(name,key,database.containerId);success(c);need(p.databaseId===database.containerId&&c.startedMs>=after.completedMs,'CiSmokeSqlOrder');byteRefEqual(p.queryResult,c.stdout);const output=outputJson(await r.bytes(p.queryResult));same(output,name==='tls-required'?{backendPid:p.backendPid,tlsEnabled:true}:{relations:p.relations,present:p.present},'CiSmokeSqlResult');}
- const plaintext=payload('plaintext-rejected'),pc=await checkCommand('plaintext-rejected','plaintext-query',database.containerId);negative(pc);need(plaintext.databaseId===database.containerId&&pc.startedMs>=after.completedMs,'CiSmokeSqlOrder');byteRefEqual(plaintext.diagnostic.redactedBytes,pc.stderr);const diagnostic=rawText(await log(plaintext.diagnostic));const escaped=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+ const afterP=payload('healthy-after-migration'),after=resume(await checkCommand('healthy-after-migration','health-after',server.containerId));success(after);need(afterP.serverId===server.containerId&&afterP.databaseId===database.containerId&&afterP.retryCheckHash===hash(check('migration-retry'))&&database.startedMs<=after.startedMs&&tls.generatedMs<=after.startedMs,'CiSmokeRecoveryOrder');
+ need(afterP.recoveryLog.containerId===server.containerId&&afterP.recoveryLog.stream==='stdout'&&afterP.recoveryLog.startedMs>=dbStart.startedMs,'CiSmokeRecoveryLog');need(lines(resume(await log(afterP.recoveryLog)),afterP).includes('migration applied after '+afterP.retries+' retries')&&afterP.retries<retry.maxAttempts,'CiSmokeRecoveryLog');
+ for(const [name,key]of [['tls-required','tls-query'],['atomic-ingest-relations','relations-query']]){const p=payload(name),c=resume(await checkCommand(name,key,database.containerId));success(c);need(p.databaseId===database.containerId&&c.startedMs>=after.completedMs,'CiSmokeSqlOrder');byteRefEqual(p.queryResult,c.stdout);const output=outputJson(resume(await r.bytes(p.queryResult)));same(output,name==='tls-required'?{backendPid:p.backendPid,tlsEnabled:true}:{relations:p.relations,present:p.present},'CiSmokeSqlResult');}
+ const plaintext=payload('plaintext-rejected'),pc=resume(await checkCommand('plaintext-rejected','plaintext-query',database.containerId));negative(pc);need(plaintext.databaseId===database.containerId&&pc.startedMs>=after.completedMs,'CiSmokeSqlOrder');byteRefEqual(plaintext.diagnostic.redactedBytes,pc.stderr);const diagnostic=rawText(resume(await log(plaintext.diagnostic)));const escaped=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
  need(new RegExp('pg_hba.conf rejects connection for host "'+escaped(e.database.host)+'", user "'+escaped(e.database.user)+'", database "'+escaped(e.database.name)+'", no encryption').test(diagnostic),'CiSmokePlaintextDiagnostic');
- const passwords=payload('password-absent-from-logs');same(passwords.scanner,e.scanner,'CiSmokeScannerSource');const scan=await checkCommand('password-absent-from-logs','scan-logs',null,'scanCommand');success(scan);
- for(const [list,cid]of [[passwords.serverLogs,server.containerId],[passwords.databaseLogs,database.containerId]]){need(['stdout','stderr'].every(stream=>list.some(l=>l.stream===stream)),'CiSmokeLogStreamMissing');for(const l of list){need(l.containerId===cid&&l.completedMs<=scan.startedMs,'CiSmokePasswordLogBinding');await log(l);}}
- const scanOutput=outputJson(await r.bytes(scan.stdout));same(scanOutput,{logHashes:[...passwords.serverLogs,...passwords.databaseLogs].map(hash),syntheticCredentialFingerprint:passwords.syntheticCredentialFingerprint,rawMatches:0,encodedMatches:0,credentialPatternMatches:0},'CiSmokeScannerResult');
- const emf=payload('non-tty-emf-framing'),ec=await checkCommand('non-tty-emf-framing','validate-emf',null);success(ec);same(emf.validator,e.emfValidator,'CiSmokeEmfSource');need(emf.serverId===server.containerId&&emf.stdout.containerId===server.containerId&&emf.stdout.stream==='stdout'&&emf.stdout.completedMs<=ec.startedMs,'CiSmokeEmfContainer');const stdout=await log(emf.stdout);extractSamplerEventFromDockerLogs(stdout);
+ const passwords=payload('password-absent-from-logs');same(passwords.scanner,e.scanner,'CiSmokeScannerSource');const scan=resume(await checkCommand('password-absent-from-logs','scan-logs',null,'scanCommand'));success(scan);
+ for(const [list,cid]of [[passwords.serverLogs,server.containerId],[passwords.databaseLogs,database.containerId]]){need(['stdout','stderr'].every(stream=>list.some(l=>l.stream===stream)),'CiSmokeLogStreamMissing');for(const l of list){need(l.containerId===cid&&l.completedMs<=scan.startedMs,'CiSmokePasswordLogBinding');resume(await log(l));}}
+ const scanOutput=outputJson(resume(await r.bytes(scan.stdout)));same(scanOutput,{logHashes:[...passwords.serverLogs,...passwords.databaseLogs].map(hash),syntheticCredentialFingerprint:passwords.syntheticCredentialFingerprint,rawMatches:0,encodedMatches:0,credentialPatternMatches:0},'CiSmokeScannerResult');
+ const emf=payload('non-tty-emf-framing'),ec=resume(await checkCommand('non-tty-emf-framing','validate-emf',null));success(ec);same(emf.validator,e.emfValidator,'CiSmokeEmfSource');need(emf.serverId===server.containerId&&emf.stdout.containerId===server.containerId&&emf.stdout.stream==='stdout'&&emf.stdout.completedMs<=ec.startedMs,'CiSmokeEmfContainer');const stdout=resume(await log(emf.stdout));extractSamplerEventFromDockerLogs(stdout);
  const frames=[];let offset=0;for(let i=0;i<stdout.length;i++)if(stdout[i]===10){const bytes=stdout.subarray(offset,i+1);if(bytes.includes(Buffer.from('"SamplerHeartbeat"'))){validateSamplerEvent(bytes);frames.push({offset,length:bytes.length,sha256:sha(bytes)});}offset=i+1;}same(emf.frames,frames,'CiSmokeEmfFrames');need(ec.argv.includes('--docker-stream'),'CiSmokeEmfCommand');
- const gone=payload('unhealthy-without-server'),stop=await checkCommand('unhealthy-without-server','stop-server',server.containerId,'stopCommand'),absent=await checkCommand('unhealthy-without-server','health-absent',containers.get('no-server-health').containerId,'negativeCommand');success(stop);need(absent.exitCode===1&&gone.stoppedServerId===server.containerId&&gone.negativeContainerId===absent.containerId&&stop.startedMs<=gone.serverStoppedMs&&gone.serverStoppedMs<=absent.startedMs&&stop.completedMs<=absent.startedMs,'CiSmokeStopOrder');
- const stopOutput=rawText(await r.bytes(stop.stdout)).trim();let stoppedInCommand=false;
+ const gone=payload('unhealthy-without-server'),stop=resume(await checkCommand('unhealthy-without-server','stop-server',server.containerId,'stopCommand')),absent=resume(await checkCommand('unhealthy-without-server','health-absent',containers.get('no-server-health').containerId,'negativeCommand'));success(stop);need(absent.exitCode===1&&gone.stoppedServerId===server.containerId&&gone.negativeContainerId===absent.containerId&&stop.startedMs<=gone.serverStoppedMs&&gone.serverStoppedMs<=absent.startedMs&&stop.completedMs<=absent.startedMs,'CiSmokeStopOrder');
+ const stopOutput=rawText(resume(await r.bytes(stop.stdout))).trim();let stoppedInCommand=false;
  // Native Docker stdout may include a deprecation notice as well as the ID.
  // Opaque stdout is not absence evidence: it requires a separate owned state
  // readback below. A typed combined stop/readback command is also supported.
- if(stopOutput.startsWith('{')){same(outputJson(await r.bytes(stop.stdout)),{containerId:server.containerId,status:'exited',running:false,observedMs:gone.serverStoppedMs},'CiSmokeStoppedReadback');need(gone.serverStoppedMs<=stop.completedMs,'CiSmokeStopOrder');stoppedInCommand=true;}
+ if(stopOutput.startsWith('{')){same(outputJson(resume(await r.bytes(stop.stdout))),{containerId:server.containerId,status:'exited',running:false,observedMs:gone.serverStoppedMs},'CiSmokeStoppedReadback');need(gone.serverStoppedMs<=stop.completedMs,'CiSmokeStopOrder');stoppedInCommand=true;}
  const isolated=payload('nonroot-capabilities-nnp');same(isolated.runtime,result.runtimeEvidence,'CiSmokeRuntimeReference');same(isolated.observedContainerIds.slice().sort(),ids(runtime.containers),'CiSmokeProcessCoverage');same(isolated.processObservationHashes.slice().sort(),processHashes.slice().sort(),'CiSmokeProcessCoverage');need(isolated.networkObservationHash===hash(network),'CiSmokeNetworkReference');
  const cleanup=payload('owned-resource-cleanup');same(result.cleanupRef,result.checks['owned-resource-cleanup'],'CiSmokeCleanupReference');need(cleanup.runtimeHash===hash(runtime),'CiSmokeCleanupRuntime');same(cleanup.containerIds.slice().sort(),ids(runtime.containers));same(cleanup.networkIds,[network.id]);
- const removed=new Set(),removedAt=new Map();for(const ref of cleanup.removeCommands){const c=await command(ref,'remove-owned');success(c);const out=outputJson(await r.bytes(c.stdout));object({containerIds:array(T,0,6,true),networkIds:array(T,0,1,true),volumeNames:literal([])})(out);for(const id of [...out.containerIds,...out.networkIds]){need([...cleanup.containerIds,network.id].includes(id)&&!removed.has(id),'CiSmokeCleanupOwnership');removed.add(id);removedAt.set(id,c.startedMs);}}
+ const removed=new Set(),removedAt=new Map();for(const ref of cleanup.removeCommands){const c=resume(await command(ref,'remove-owned'));success(c);const out=outputJson(resume(await r.bytes(c.stdout)));object({containerIds:array(T,0,6,true),networkIds:array(T,0,1,true),volumeNames:literal([])})(out);for(const id of [...out.containerIds,...out.networkIds]){need([...cleanup.containerIds,network.id].includes(id)&&!removed.has(id),'CiSmokeCleanupOwnership');removed.add(id);removedAt.set(id,c.startedMs);}}
  same([...removed].sort(),[...cleanup.containerIds,network.id].sort(),'CiSmokeRemovalCoverage');
- for(const ref of cleanup.inventoryCommands){const c=await command(ref,'inventory-owned');success(c);need(c.startedMs>=Math.max(...cleanup.removeCommands.map(ref=>commands.get(ref.canonicalHash).completedMs))&&c.completedMs<=cleanup.completedMs,'CiSmokeCleanupOrder');same(outputJson(await r.bytes(c.stdout)),{containerIds:[],networkIds:[],volumeNames:[],temporaryEntries:[]},'CiSmokeCleanupRemaining');}
- const aggregate=inspectCiSmokeRecord('LogsV1',await r.json(result.logRef));common(aggregate);for(const ref of aggregate.captures)await log(await r.json(ref));
+ for(const ref of cleanup.inventoryCommands){const c=resume(await command(ref,'inventory-owned'));success(c);need(c.startedMs>=Math.max(...cleanup.removeCommands.map(ref=>commands.get(ref.canonicalHash).completedMs))&&c.completedMs<=cleanup.completedMs,'CiSmokeCleanupOrder');same(outputJson(resume(await r.bytes(c.stdout))),{containerIds:[],networkIds:[],volumeNames:[],temporaryEntries:[]},'CiSmokeCleanupRemaining');}
+ const aggregate=inspectCiSmokeRecord('LogsV1',resume(await r.json(result.logRef)));common(aggregate);for(const ref of aggregate.captures)resume(await log(resume(await r.json(ref))));
  for(const [listed,cid]of [[passwords.serverLogs,server.containerId],[passwords.databaseLogs,database.containerId]]){
   const captured=[...logs.values()].filter(l=>l.containerId===cid&&commands.get(l.collectionCommand.canonicalHash)?.commandKey==='collect-logs');
   need(listed.every(l=>captured.some(c=>hash(c)===hash(l))),'CiSmokePasswordScanCoverage');
-  for(const prior of captured){const original=await r.bytes(prior.redactedBytes);let covered=false;for(const later of listed){if(later.stream!==prior.stream||later.completedMs<prior.completedMs)continue;const full=await r.bytes(later.redactedBytes);if(full.subarray(0,original.length).equals(original)){covered=true;break;}}need(covered,'CiSmokePasswordScanCoverage');}
+  for(const prior of captured){const original=resume(await r.bytes(prior.redactedBytes));let covered=false;for(const later of listed){if(later.stream!==prior.stream||later.completedMs<prior.completedMs)continue;const full=resume(await r.bytes(later.redactedBytes));if(full.subarray(0,original.length).equals(original)){covered=true;break;}}need(covered,'CiSmokePasswordScanCoverage');}
  }
  for(const c of commands.values())if(c.commandKey==='inspect-container'&&!inspectCaptures.has(hash(c))){
   success(c);const at=c.argv.indexOf('--format'),format=at>=0?c.argv[at+1]:c.argv.find(a=>a.startsWith('--format='))?.slice('--format='.length);
   // Supplementary HostConfig reads are not running/stopped evidence. Their
   // complete bytes remain captured and their exact argv remains source-bound.
   need(['{{json .State}}','{{json .HostConfig}}'].includes(format),'CiSmokeInspectFormat');
-  const value=outputJson(await r.bytes(c.stdout));
+  const value=outputJson(resume(await r.bytes(c.stdout)));
   if(format==='{{json .State}}'){need(value&&typeof value.Running==='boolean'&&typeof value.Status==='string'&&typeof value.StartedAt==='string','CiSmokeStateCapture');states.push({containerId:c.containerId,command:c,state:value});}
   else need(value&&typeof value==='object'&&!Array.isArray(value),'CiSmokeInspectCapture');
  }

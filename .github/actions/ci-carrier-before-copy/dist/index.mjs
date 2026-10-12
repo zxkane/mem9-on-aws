@@ -1854,9 +1854,20 @@ var init_production_nonroot_contracts = __esmMin((() => {
 }));
 //#endregion
 //#region scripts/lib/production-control-source.mjs
+function checkCurrent(assertCurrent) {
+	if (assertCurrent === void 0) return;
+	need$34(typeof assertCurrent === "function");
+	const result = assertCurrent();
+	if (result && typeof result.then === "function") {
+		Promise.resolve(result).catch(() => {});
+		fail$8();
+	}
+	need$34(result === void 0);
+}
 /** Reconstruct the full Git tree from all recursive entries. A declared tree
 * hash beside a subset of COPY files is not membership or closure evidence. */
-function createControlSourceContext(value, readBlob) {
+function createControlSourceContext(value, readBlob, { assertCurrent } = {}) {
+	checkCurrent(assertCurrent);
 	const input = copyNonrootJson(value);
 	need$34(input && Object.keys(input).sort().join() === "entries,tree");
 	const { tree, entries } = input;
@@ -1899,16 +1910,19 @@ function createControlSourceContext(value, readBlob) {
 	contexts$3.set(handle, {
 		tree,
 		files,
-		readBlob
+		readBlob,
+		assertCurrent
 	});
 	return handle;
 }
 async function readControlSourceFile(context, path) {
 	const state = contexts$3.get(context);
 	need$34(state && safePath(path));
+	checkCurrent(state.assertCurrent);
 	const entry = state.files.get(path);
 	need$34(entry?.type === "blob" && ["100644", "100755"].includes(entry.mode));
 	const bytes = await state.readBlob(entry.oid, path);
+	checkCurrent(state.assertCurrent);
 	need$34(bytes instanceof Uint8Array && bytes.byteLength <= 16777216);
 	const raw = Buffer.from(bytes);
 	need$34(gitObject("blob", raw) === entry.oid);

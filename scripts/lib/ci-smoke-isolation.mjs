@@ -1,16 +1,24 @@
 import {parseDocument} from 'yaml';
 import {posix} from 'node:path';
 import {parse as parseJavaScript} from '@babel/parser';
-import {copyNonrootJson,parseNonrootJson,nonrootHash as hash} from './production-nonroot-contracts.mjs';
-import {createControlSourceContext,readControlSourceFile,controlSourcePaths,controlSourceEntries} from './production-control-source.mjs';
+import {copyNonrootJson,parseNonrootJson,nonrootHash as hash} from "./production-nonroot-contracts.mjs";
+import {createControlSourceContext,assertControlSourceCurrent,readControlSourceFile,controlSourcePaths,controlSourceEntries} from './production-control-source.mjs';
 import {describeDataBuildInputs} from './production-data-build-inputs.mjs';
-import {CI_SMOKE_POLICY as policy} from './ci-smoke-policy.mjs';
-import {ciSmokeJobDefinition,controlBuildCaptureSteps} from './ci-smoke-job.mjs';
-import {buildNativeControlCompositionSourceJob,controlCompositionActionDefinition,CONTROL_COMPOSITION_ASSET_PATHS} from './production-control-composition-job.mjs';
+import {CI_SMOKE_POLICY as policy} from "./ci-smoke-policy.mjs";
+import {ciSmokeJobDefinition,controlBuildCaptureSteps} from "./ci-smoke-job.mjs";
+import {buildNativeControlCompositionSourceJob,controlCompositionActionDefinition,CONTROL_COMPOSITION_ASSET_PATHS} from "./production-control-composition-job.mjs";
 import {CI_SMOKE_CHECKS,inspectCiSmokeRecord,inspectCiSmokeResult,validateCiSmokeEvidence} from './ci-smoke-evidence.mjs';
-import {ciSmokeCommitTree,ciSmokeProvenanceCommitApi} from './ci-smoke-commit-source.mjs';
+import {ciSmokeCommitTree,ciSmokeProvenanceCommitApi} from "./ci-smoke-commit-source.mjs";
 
 const need=(ok,code='CiSmokeSourceInvalid')=>{if(!ok)throw Error(code);};
+
+function assertCiCurrent(assertCurrent){
+ if(assertCurrent===undefined)return;
+ need(typeof assertCurrent==='function','CiSmokeSynchronousGuard');const checked=assertCurrent();
+ if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});need(false,'CiSmokeSynchronousGuard');}
+ need(checked===undefined,'CiSmokeSynchronousGuard');
+}
+
 const same=(a,b,code)=>need(hash(a)===hash(b),code);
 const exact=(v,keys)=>need(v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join()===keys.slice().sort().join(),'CiSmokeSourceFields');
 const copy=value=>structuredClone(copyNonrootJson(value));
@@ -276,11 +284,12 @@ export function describeCiSmokePromotionPins(workflow,actions,filePins){
 
 function parseYaml(raw){const doc=parseDocument(text(raw),{uniqueKeys:true});need(!doc.errors.length&&!doc.warnings.length,'CiSmokeYamlInvalid');return doc.toJS({maxAliasCount:0});}
 const pin=file=>({path:file.path,gitMode:file.gitMode,sha256:file.sha256,bytes:file.bytes});
-async function file(context,path,expected){const result=await readControlSourceFile(context,path);if(expected)same(pin(result.file),expected,'CiSmokeFileChanged');return result;}
+async function file(context,path,expected){const result=await readControlSourceFile(context,path);assertControlSourceCurrent(context);if(expected)same(pin(result.file),expected,'CiSmokeFileChanged');return result;}
 
 /** Derive complete local imports, re-exports and script references. Dynamic
  * module selection cannot be silently omitted from a reviewed code closure. */
 export async function ciSmokeSourceClosure(context,roots){
+ const resume=value=>{assertControlSourceCurrent(context);return value;};resume();
  const maxFiles=20000,maxBytes=33554432;
  const paths=new Set(controlSourcePaths(context)),seen=new Map(),queued=new Set(),pending=[];
  let bytes=0;
@@ -318,7 +327,7 @@ export async function ciSmokeSourceClosure(context,roots){
  };
  while(pending.length){
   const path=pending.pop();if(seen.has(path))continue;
-  const found=await file(context,path);need(found.bytes.byteLength<=maxBytes-bytes,'CiSmokeClosureByteLimit');bytes+=found.bytes.byteLength;
+  const found=resume(await file(context,path));need(found.bytes.byteLength<=maxBytes-bytes,'CiSmokeClosureByteLimit');bytes+=found.bytes.byteLength;
   seen.set(path,pin(found.file));const source=text(found.bytes);
   const enqueue=specifier=>{
    const next=modulePath(path,specifier);if(next)queue(next);return next;
@@ -370,19 +379,20 @@ export async function ciSmokeSourceClosure(context,roots){
 }
 
 export async function verifyCiSmokeCompositionToolchain(context,assets){
+ const resume=value=>{assertControlSourceCurrent(context);return value;};resume();
  const toolchain=parseNonrootJson(text(assets.toolchain.bytes)),output=toolchain.output;
  exact(toolchain,['version','kind','nodeMajor','bundler','packageLockHash','inputs','output']);
  exact(output,['path','sha256','bytesLength']);
  exact(toolchain.bundler,['name','version','integrity','builderSourceHash']);
  need(toolchain.version===1&&toolchain.kind==='control-composition-ci-toolchain'&&toolchain.nodeMajor===24&&
   output?.path===CONTROL_COMPOSITION_ASSET_PATHS.bundle&&output.sha256===assets.bundle.file.sha256&&output.bytesLength===assets.bundle.file.bytes,'CiSmokeCompositionToolchain');
- const lockSource=await readControlSourceFile(context,'package-lock.json');
+ const lockSource=resume(await readControlSourceFile(context,'package-lock.json'));
  need(toolchain.packageLockHash===lockSource.file.sha256,'CiSmokeCompositionToolchainLock');
  const lock=parseNonrootJson(text(lockSource.bytes)),bundler=toolchain.bundler;
  need(lock.lockfileVersion===3&&lock.packages&&bundler.name==='rolldown'&&
   typeof bundler.version==='string'&&bundler.version.length>0&&typeof bundler.integrity==='string'&&bundler.integrity.length>0&&
   lock.packages['node_modules/rolldown']?.version===bundler.version&&lock.packages['node_modules/rolldown']?.integrity===bundler.integrity,'CiSmokeCompositionToolchainLock');
- const builder=await readControlSourceFile(context,'scripts/build-control-composition-action.mjs');
+ const builder=resume(await readControlSourceFile(context,'scripts/build-control-composition-action.mjs'));
  need(builder.file.sha256===bundler.builderSourceHash,'CiSmokeCompositionToolchainBuilder');
  need(Array.isArray(toolchain.inputs)&&toolchain.inputs.length>0&&toolchain.inputs.length<=20000,'CiSmokeCompositionToolchainInputs');
  let previous='';const sourcePaths=new Set();
@@ -402,7 +412,7 @@ export async function verifyCiSmokeCompositionToolchain(context,assets){
    need(pin.name===name&&typeof pin.version==='string'&&pin.version.length>0&&typeof pin.integrity==='string'&&pin.integrity.length>0&&
     locked?.version===pin.version&&locked?.integrity===pin.integrity,'CiSmokeCompositionToolchainPackage');
   }else{
-   const source=await readControlSourceFile(context,path);
+   const source=resume(await readControlSourceFile(context,path));
    need(source.file.sha256===input.sha256&&source.file.bytes===input.bytesLength,'CiSmokeCompositionToolchainSource');
    sourcePaths.add(path);
   }
@@ -414,7 +424,8 @@ export async function verifyCiSmokeCompositionToolchain(context,assets){
  return toolchain;
 }
 
-export async function verifyCiSmokeIsolationSource(isolation,{originContext,candidateContext,baselineContext,originRecipe,candidateRecipe}){
+export async function verifyCiSmokeIsolationSource(isolation,{originContext,candidateContext,baselineContext,originRecipe,candidateRecipe,assertCurrent}){
+ const resume=value=>{assertCiCurrent(assertCurrent);return value;};resume();
  exact(isolation,['version','kind','origin','candidate','recipeEdits','workflow','preservedScripts','smoke','promotion']);
  need([1,2].includes(isolation.version)&&isolation.kind==='ci-smoke-isolation','CiSmokeIsolationKind');
  const composition=isolation.version===2;
@@ -423,19 +434,19 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
  }
  const sourceRecipe=async context=>{
   const entries=controlSourceEntries(context),byOid=new Map(entries.map(e=>[e.oid,e.path]));
-  return describeDataBuildInputs(entries,async oid=>(await readControlSourceFile(context,byOid.get(oid))).bytes);
+  return describeDataBuildInputs(entries,async oid=>(resume(await readControlSourceFile(context,byOid.get(oid)))).bytes,{assertCurrent});
  };
- same(await sourceRecipe(originContext),originRecipe,'CiSmokeOriginRecipeSource');
- same(await sourceRecipe(candidateContext),candidateRecipe,'CiSmokeCandidateRecipeSource');
+ same(resume(await sourceRecipe(originContext)),originRecipe,'CiSmokeOriginRecipeSource');
+ same(resume(await sourceRecipe(candidateContext)),candidateRecipe,'CiSmokeCandidateRecipeSource');
  verifyIsolatedDataRecipe(originRecipe,candidateRecipe,{originHash:isolation.origin.recipeHash,candidateHash:isolation.candidate.recipeHash});
  same(isolation.recipeEdits,[{stepName:legacySmoke,field:'if',before:originalCondition,after:false},{stepName:buildName,field:'id',beforeAbsent:true,after:'mnemo'}],'CiSmokeRecipeEditShape');
  exact(isolation.workflow,['source','buildJob','digestOutput',...(composition?['composition']:[])]);need(isolation.workflow.buildJob==='build-and-push-image'&&isolation.workflow.source.path===workflowPath);
  same(isolation.workflow.digestOutput,{name:'mnemo_digest',expression:'${{ steps.mnemo.outputs.digest }}'});
- const candidate=parseYaml((await file(candidateContext,workflowPath,isolation.workflow.source)).bytes),baseline=parseYaml((await file(baselineContext,workflowPath)).bytes);
+ const candidate=parseYaml((resume(await file(candidateContext,workflowPath,isolation.workflow.source))).bytes),baseline=parseYaml((resume(await file(baselineContext,workflowPath))).bytes);
  const actions={},candidateActions={},filePins={[workflowPath]:isolation.workflow.source};for(const path of [actionPath,'.github/actions/runtime-cleanup/action.yml','.github/actions/runtime-recovery/action.yml']){
-  actions[path]=parseYaml((await file(baselineContext,path)).bytes);const found=await file(candidateContext,path);candidateActions[path]=parseYaml(found.bytes);filePins[path]=pin(found.file);
+  actions[path]=parseYaml((resume(await file(baselineContext,path))).bytes);const found=resume(await file(candidateContext,path));candidateActions[path]=parseYaml(found.bytes);filePins[path]=pin(found.file);
  }
- const gate=await file(candidateContext,CI_SMOKE_GATE_ACTION_PATH),entry=await file(candidateContext,CI_SMOKE_GATE_ENTRY_PATH);
+ const gate=resume(await file(candidateContext,CI_SMOKE_GATE_ACTION_PATH)),entry=resume(await file(candidateContext,CI_SMOKE_GATE_ENTRY_PATH));
  candidateActions[CI_SMOKE_GATE_ACTION_PATH]=parseYaml(gate.bytes);filePins[CI_SMOKE_GATE_ACTION_PATH]=pin(gate.file);filePins[CI_SMOKE_GATE_ENTRY_PATH]=pin(entry.file);
  const routes=verifyCiSmokePromotionRoutes({workflow:baseline,actions},{jobs:Object.fromEntries(CI_SMOKE_ROUTES.map(k=>[k,candidate.jobs[k]])),actions:candidateActions});
  const sourceJobs=Object.keys(policy.sourceJobs);
@@ -445,21 +456,21 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
   exact(isolation.workflow.composition,Object.keys(CONTROL_COMPOSITION_ASSET_PATHS));
   const assets={};for(const [key,path]of Object.entries(CONTROL_COMPOSITION_ASSET_PATHS)){
    need(isolation.workflow.composition[key].path===path,'CiSmokeCompositionAssetPath');
-   assets[key]=await file(candidateContext,path,isolation.workflow.composition[key]);
+   assets[key]=resume(await file(candidateContext,path,isolation.workflow.composition[key]));
   }
   same(parseYaml(assets.action.bytes),controlCompositionActionDefinition(),'CiSmokeCompositionAction');
-  await verifyCiSmokeCompositionToolchain(candidateContext,assets);
+  resume(await verifyCiSmokeCompositionToolchain(candidateContext,assets));
  }
- for(const row of policy.rows.filter(r=>r.rule.kind==='safe-recovery'))for(const source of row.rule.entryFiles)await file(candidateContext,source.path,source);
+ for(const row of policy.rows.filter(r=>r.rule.kind==='safe-recovery'))for(const source of row.rule.entryFiles)resume(await file(candidateContext,source.path,source));
  const oldBuild=buildCiSmokeImageJob(baseline),newBuild=candidate.jobs['build-and-push-image'];same(newBuild,oldBuild,'CiSmokeBuildJobChanged');
  need(Array.isArray(isolation.preservedScripts)&&isolation.preservedScripts.length===2);
  for(const [index,path]of ['scripts/run-mnemo-emf-smoke.sh','scripts/run-mnemo-health-smoke.sh'].entries()){
-  need(isolation.preservedScripts[index].path===path);await file(originContext,path,isolation.preservedScripts[index]);await file(candidateContext,path,isolation.preservedScripts[index]);
+  need(isolation.preservedScripts[index].path===path);resume(await file(originContext,path,isolation.preservedScripts[index]));resume(await file(candidateContext,path,isolation.preservedScripts[index]));
  }
  exact(isolation.smoke,['jobKey','jobHash','script','closure','databaseImage','platform','serverUser','databaseUser','capDrop','noNewPrivileges','internalNetwork','timeoutMinutes','requiredChecks']);
  const s=isolation.smoke,j=candidate.jobs[CI_SMOKE_JOB];need(s.jobKey===CI_SMOKE_JOB&&s.jobHash===hash(j)&&j.name===CI_SMOKE_JOB_NAME&&j['timeout-minutes']===15&&j.if===CI_SMOKE_JOB_CONDITION,'CiSmokeJobBinding');
  same(j,ciSmokeJobDefinition(),'CiSmokeJobExecutionChanged');
- const producer=parseJavaScript(text((await file(candidateContext,'scripts/run-mnemo-nonroot-smoke.mjs')).bytes),{sourceType:'module'});
+ const producer=parseJavaScript(text((resume(await file(candidateContext,'scripts/run-mnemo-nonroot-smoke.mjs'))).bytes),{sourceType:'module'});
  const databases=producer.program.body.filter(n=>n.type==='ExportNamedDeclaration'&&n.declaration?.type==='VariableDeclaration').flatMap(n=>n.declaration.declarations).filter(n=>n.id.name==='NONROOT_SMOKE_DATABASE_IMAGE');
  need(databases.length===1,'CiSmokeDatabaseSource');const declaration=databases[0].init;
  need(declaration?.type==='CallExpression'&&declaration.callee.type==='MemberExpression'&&declaration.callee.object.name==='Object'&&declaration.callee.property.name==='freeze'&&declaration.arguments.length===1&&declaration.arguments[0].type==='ObjectExpression','CiSmokeDatabaseSource');
@@ -467,19 +478,20 @@ export async function verifyCiSmokeIsolationSource(isolation,{originContext,cand
  const database=Object.fromEntries(databaseFields.map(p=>[p.key.name,p.value.value]));exact(database,['qualifiedImage','rootDigest','arm64Digest','configDigest']);need(databaseFields.length===4&&s.databaseImage===database.qualifiedImage,'CiSmokeDatabaseSource');
  need(j.needs.includes('build-and-push-image')&&j.needs.includes('application-region')&&j['runs-on']===newBuild['runs-on'],'CiSmokeJobDependency');
  need(s.platform==='linux/arm64'&&s.serverUser==='1000:1000'&&s.databaseUser==='999:999'&&s.noNewPrivileges===true&&s.internalNetwork===true&&s.timeoutMinutes===15&&/^pgvector\/pgvector@sha256:[a-f0-9]{64}$/.test(s.databaseImage),'CiSmokeJobIsolation');
- same(s.capDrop,['ALL']);same(s.requiredChecks,CI_SMOKE_CHECKS);need(s.script.path==='scripts/run-mnemo-nonroot-smoke.sh');await file(candidateContext,s.script.path,s.script);
- same(await ciSmokeSourceClosure(candidateContext,[s.script.path]),s.closure,'CiSmokeIncompleteClosure');
+ same(s.capDrop,['ALL']);same(s.requiredChecks,CI_SMOKE_CHECKS);need(s.script.path==='scripts/run-mnemo-nonroot-smoke.sh');resume(await file(candidateContext,s.script.path,s.script));
+ same(resume(await ciSmokeSourceClosure(candidateContext,[s.script.path])),s.closure,'CiSmokeIncompleteClosure');
  const p=isolation.promotion;exact(p,['requiredJobs','routes','preparationValidators','resultKind','sourceRule','retainedRule','failureRule']);
  same(p.requiredJobs,CI_SMOKE_ROUTES);need(p.routes.length===4&&p.resultKind==='ci-smoke-isolation-result'&&p.sourceRule==='actual-candidate-build-smoke-required'&&p.retainedRule==='original-target-evidence-also-required'&&p.failureRule==='hold-on-missing-skipped-failed-mismatch');
  same(p.routes,describeCiSmokePromotionPins(candidate,candidateActions,filePins),'CiSmokeRoutePinCoverage');
- const validators=await ciSmokeSourceClosure(candidateContext,[...CI_SMOKE_VALIDATOR_ROOTS,...(composition?[CONTROL_COMPOSITION_ASSET_PATHS.entry]:[])]);
+ const validators=resume(await ciSmokeSourceClosure(candidateContext,[...CI_SMOKE_VALIDATOR_ROOTS,...(composition?[CONTROL_COMPOSITION_ASSET_PATHS.entry]:[])]));
  same(validators,p.preparationValidators,'CiSmokeValidatorClosure');
  return Object.freeze({kind:'verified-ci-smoke-source',isolationHash:hash(isolation),sourceRevision:isolation.candidate.revision,sourceTree:isolation.candidate.tree});
 }
 
 /** Actual GitHub completion is supplied by the authenticated read-only
  * collector. A skipped main build cannot replace a completed source smoke. */
-export async function verifyCiSmokeSourceResult(isolation,result,{provenance,readJson,readBytes,expected,now=Date.now()}){
+export async function verifyCiSmokeSourceResult(isolation,result,{provenance,readJson,readBytes,expected,now=Date.now(),assertCurrent}){
+ assertCiCurrent(assertCurrent);
  const r=inspectCiSmokeResult(result);need(r.isolationHash===hash(isolation)&&r.sourceTree===isolation.candidate.tree,'CiSmokeResultSource');
  const {run,buildJob,smokeJob,buildDigest,sourceRevision,sourceTree,commit,candidateCommit}=provenance;
  const commitApi=ciSmokeProvenanceCommitApi(provenance,r.sourceRevision,isolation.candidate.revision);
@@ -494,27 +506,28 @@ export async function verifyCiSmokeSourceResult(isolation,result,{provenance,rea
  }
  const build=selected(buildJob.steps,buildName);need(build.status==='completed'&&build.conclusion==='success'&&buildDigest===r.outputDigest,'CiSmokeBuildOutput');
  need(Date.parse(buildJob.completed_at)<=Date.parse(smokeJob.started_at)&&Date.parse(smokeJob.started_at)<=r.startedMs&&r.completedMs<=Date.parse(smokeJob.completed_at)&&r.completedMs<=now,'CiSmokeActualChronology');
- return validateCiSmokeEvidence(r,{readJson,readBytes,expected,now});
+ return validateCiSmokeEvidence(r,{readJson,readBytes,expected,now,assertCurrent});
 }
 
 /** Replay the exact archived source material. The containing policySources
  * hash is independently committed by the parent proof/review; a JSON `passed`
  * field or a subset of Git entries cannot create a verified source context. */
-export async function verifyArchivedCiSmoke(isolation,result,{material,resolveJson,readBytes,originRecipe,candidateRecipe,now,processing}){
+export async function verifyArchivedCiSmoke(isolation,result,{material,resolveJson,readBytes,originRecipe,candidateRecipe,now,processing,assertCurrent}){
+ const resume=value=>{assertCiCurrent(assertCurrent);return value;};resume();
  if(processing!==undefined)need(typeof processing.source==='function'&&typeof processing.context==='function','CiSmokeProcessingRequired');
  const pay=(kind,...args)=>{if(!processing)return;const value=processing[kind](...args);if(value&&typeof value.then==='function'){Promise.resolve(value).catch(()=>{});need(false,'CiSmokeSynchronousPayment');}need(value===undefined,'CiSmokeSynchronousPayment');};
  exact(material,['version','kind','origin','candidate','baseline','provenance','expected']);
  need(material.version===1&&material.kind==='ci-smoke-source-material','CiSmokeSourceMaterial');
- const readJson=async ref=>parseNonrootJson(text(await resolveJson(ref)));
+ const readJson=async ref=>parseNonrootJson(text(resume(await resolveJson(ref))));
  const context=async ref=>{
-  const source=await readJson(ref);pay('context',source,ref);exact(source,['tree','entries','blobs']);
+  const source=resume(await readJson(ref));pay('context',source,ref);exact(source,['tree','entries','blobs']);
   need(source.blobs&&typeof source.blobs==='object'&&!Array.isArray(source.blobs)&&Object.keys(source.blobs).length<=20000,'CiSmokeSourceBlobs');
   for(const [oid,bytes]of Object.entries(source.blobs)){need(/^[a-f0-9]{40}$/.test(oid),'CiSmokeSourceBlobIdentity');inspectCiSmokeRecord('ByteRef',bytes);}
-  return createControlSourceContext({tree:source.tree,entries:source.entries},(oid,path)=>{need(source.blobs[oid],'CiSmokeSourceBlobMissing');pay('source',source.blobs[oid],path);return readBytes(source.blobs[oid]);});
+  return createControlSourceContext({tree:source.tree,entries:source.entries},(oid,path)=>{need(source.blobs[oid],'CiSmokeSourceBlobMissing');pay('source',source.blobs[oid],path);return readBytes(source.blobs[oid]);},{assertCurrent});
  };
- const originContext=await context(material.origin),candidateContext=await context(material.candidate),baselineContext=await context(material.baseline);
- const source=await verifyCiSmokeIsolationSource(isolation,{originContext,candidateContext,baselineContext,originRecipe,candidateRecipe});
- const verified=await verifyCiSmokeSourceResult(isolation,result,{provenance:await readJson(material.provenance),expected:await readJson(material.expected),
-  readJson:resolveJson,readBytes,now});
+ const originContext=resume(await context(material.origin)),candidateContext=resume(await context(material.candidate)),baselineContext=resume(await context(material.baseline));
+ const source=resume(await verifyCiSmokeIsolationSource(isolation,{originContext,candidateContext,baselineContext,originRecipe,candidateRecipe,assertCurrent}));
+ const verified=resume(await verifyCiSmokeSourceResult(isolation,result,{provenance:resume(await readJson(material.provenance)),expected:resume(await readJson(material.expected)),
+  readJson:resolveJson,readBytes,now,assertCurrent}));
  return Object.freeze({source,verified});
 }

@@ -2,7 +2,16 @@ import {createHash} from 'node:crypto';
 import {open,lstat,realpath,readdir} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {join,resolve,posix} from 'node:path';
-import {copyNonrootJson,nonrootHash,inspectNonrootRecord} from './production-nonroot-contracts.mjs';
+import {copyNonrootJson,nonrootHash,inspectNonrootRecord} from "./production-nonroot-contracts.mjs";
+
+
+function checkCurrent(assertCurrent){
+ if(assertCurrent===undefined)return;
+ need(typeof assertCurrent==='function');const result=assertCurrent();
+ if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});fail();}
+ need(result===undefined);
+}
+export function assertControlSourceCurrent(context){const state=contexts.get(context);need(state);checkCurrent(state.assertCurrent);}
 
 const contexts=new WeakMap(),fail=()=>{throw Error('ControlSourceUnverified');};
 const need=value=>{if(!value)fail();};
@@ -13,7 +22,8 @@ const safePath=path=>typeof path==='string'&&path.length<=4096&&/^[A-Za-z0-9_.\/
 
 /** Reconstruct the full Git tree from all recursive entries. A declared tree
  * hash beside a subset of COPY files is not membership or closure evidence. */
-export function createControlSourceContext(value,readBlob){
+export function createControlSourceContext(value,readBlob,{assertCurrent}={}){
+ checkCurrent(assertCurrent);
  const input=copyNonrootJson(value);need(input&&Object.keys(input).sort().join()==='entries,tree');const {tree,entries}=input;
  need(/^[a-f0-9]{40}$/.test(tree??'')&&typeof readBlob==='function');
  const rows=copyNonrootJson(entries);need(Array.isArray(rows)&&rows.length>0&&rows.length<=20000);
@@ -30,13 +40,13 @@ export function createControlSourceContext(value,readBlob){
   const bytes=Buffer.concat(entries.flatMap(([name,value])=>[Buffer.from((value instanceof Map?'40000':value.mode)+' '+name+'\0'),Buffer.from(value instanceof Map?treeHash(value):value.oid,'hex')]));
   return gitObject('tree',bytes);
  };
- need(treeHash(root)===tree);const handle=Object.freeze({kind:'verified-control-source-tree',tree});contexts.set(handle,{tree,files,readBlob});return handle;
+ need(treeHash(root)===tree);const handle=Object.freeze({kind:'verified-control-source-tree',tree});contexts.set(handle,{tree,files,readBlob,assertCurrent});return handle;
 }
 
 export async function readControlSourceFile(context,path){
- const state=contexts.get(context);need(state&&safePath(path));const entry=state.files.get(path);
+ const state=contexts.get(context);need(state&&safePath(path));checkCurrent(state.assertCurrent);const entry=state.files.get(path);
  need(entry?.type==='blob'&&['100644','100755'].includes(entry.mode));
- const bytes=await state.readBlob(entry.oid,path);need(bytes instanceof Uint8Array&&bytes.byteLength<=16777216);
+ const bytes=await state.readBlob(entry.oid,path);checkCurrent(state.assertCurrent);need(bytes instanceof Uint8Array&&bytes.byteLength<=16777216);
  const raw=Buffer.from(bytes);need(gitObject('blob',raw)===entry.oid);
  return {file:inspectNonrootRecord('SourceFileV1',{path,gitMode:entry.mode,sha256:sha(raw),bytes:raw.length,blob:{sha256:sha(raw),bytesLength:raw.length}}),bytes:raw};
 }
