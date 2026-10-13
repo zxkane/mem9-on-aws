@@ -16472,8 +16472,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-route-protocol.mjs",
-      "sha256": "f8503c9c17c2197a73f14d6d6473e05a6abb7f497fecabc501c02b9423ee0556",
-      "bytesLength": 16295
+      "sha256": "eefd94143f2e09539433a38bb5c5659dcbba2aabdf873772b610d58a2199c4bc",
+      "bytesLength": 16508
     },
     {
       "path": "scripts/lib/production-nonroot-observer-runtime-provider.mjs",
@@ -17018,7 +17018,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "1b18706002e870959b6d4cda2435fc6e245bfda9b4557b2081df19b23070ef4f",
-    "bytesLength": 7459832
+    "sha256": "5b74097ef340e3bedf08cf080732c4deefffff7195577769b75d53445f3b31ef",
+    "bytesLength": 7459948
   }
 }

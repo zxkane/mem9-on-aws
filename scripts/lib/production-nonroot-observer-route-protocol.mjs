@@ -127,8 +127,13 @@ export function parseObserverMcpResponse(raw,id){
 
 export function inspectObserverMcpInitialization(value){
  exact(value,['protocolVersion','capabilities','serverInfo']);need(value.protocolVersion==='2025-03-26','ObserverMcpVersion');
- exact(value.capabilities,['tools']);exact(value.capabilities.tools,Object.hasOwn(value.capabilities.tools,'listChanged')?['listChanged']:[]);
- if(Object.hasOwn(value.capabilities.tools,'listChanged'))need(typeof value.capabilities.tools.listChanged==='boolean','ObserverMcpCapabilities');
+ // Gateway discovery declarations do not add methods to the fixed observer requests.
+ const capabilities=value.capabilities;
+ exact(capabilities,['tools',...['prompts','resources'].filter(name=>Object.hasOwn(capabilities??{},name))]);
+ for(const declaration of Object.values(capabilities)){
+  exact(declaration,Object.hasOwn(declaration??{},'listChanged')?['listChanged']:[]);
+  if(Object.hasOwn(declaration,'listChanged'))need(typeof declaration.listChanged==='boolean','ObserverMcpCapabilities');
+ }
  exact(value.serverInfo,['name','version']);for(const v of Object.values(value.serverInfo))need(boundedText(v,128)&&/^[A-Za-z0-9._ -]+$/.test(v),'ObserverMcpServer');return value;
 }
 

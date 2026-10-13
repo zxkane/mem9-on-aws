@@ -56,6 +56,30 @@ describe('fixed observer protocol DATA only',()=>{
   expect(inspectObserverMcpInitialization(x)).toEqual(x);
   expect(()=>inspectObserverMcpInitialization({...x,protocolVersion:'unselected'})).toThrow();
  });
+ it.each([
+  {tools:{listChanged:false},prompts:{listChanged:false},resources:{listChanged:false}},
+  {tools:{},prompts:{}},
+  {tools:{listChanged:true},resources:{listChanged:true}},
+ ])('preserves optional gateway capability declarations without adding observer calls (%j)',capabilities=>{
+  const x={protocolVersion:'2025-03-26',capabilities,serverInfo:{name:'test-gateway',version:'1'}},before=structuredClone(x);
+  expect(inspectObserverMcpInitialization(x)).toBe(x);
+  expect(x).toEqual(before);
+  expect(JSON.parse(observerMcpRequest('ingress-job-status',id,'get_ingest_job_status').body).params)
+   .toEqual({name:'get_ingest_job_status',arguments:{job_id:id}});
+ });
+ it.each([
+  {prompts:{}},
+  {tools:{},unknown:{}},
+  {tools:{},prompts:null},
+  {tools:{},resources:[]},
+  {tools:{},prompts:{listChanged:'false'}},
+  {tools:{},resources:{listChanged:0}},
+  {tools:{},prompts:{unexpected:true}},
+  {tools:{},resources:{unexpected:true}},
+ ])('rejects missing, malformed or unrecognized gateway capabilities (%j)',capabilities=>{
+  const x={protocolVersion:'2025-03-26',capabilities,serverInfo:{name:'test-gateway',version:'1'}};
+  expect(()=>inspectObserverMcpInitialization(x)).toThrow();
+ });
  it('retains complete allowed status fields without memory content',()=>{
   const x={...status(),state:'failed',warning_class:'retryable',error_class:'timeout',completed_at:'2026-10-11T00:00:01Z'};
   expect(inspectObserverJobStatus(x,id)).toEqual(x);
