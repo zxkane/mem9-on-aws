@@ -153,6 +153,12 @@ describe('deployment authorization maintenance exclusions', () => {
       const target=key==='Resource'?stmt:stmt.Condition[key],field=key==='Resource'?'Resource':'iam:PermissionsBoundary';
       expect(target[field].pop()).toEqual(observerArn);
     }
+    // Reverse the explicit prefix-list read addition while retaining the
+    // original full-template preservation baseline.
+    const endpointRead = template.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement
+      .find(s => s.Sid === 'GatewaySecretEndpointRead');
+    expect(endpointRead.Action).toEqual(['ec2:DescribeVpcEndpoints','ec2:DescribePrefixLists']);
+    endpointRead.Action = 'ec2:DescribeVpcEndpoints';
     // Reviewed Gateway/endpoint delta, with all trusts and unrelated statements
     // included. Reverse only that explicit delta to retain the original proof.
     expect(createHash('sha256').update(JSON.stringify(template)).digest('hex'))
