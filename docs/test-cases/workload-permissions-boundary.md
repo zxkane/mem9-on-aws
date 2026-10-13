@@ -3,6 +3,22 @@
 Design:
 [`docs/designs/workload-permissions-boundary.md`](../designs/workload-permissions-boundary.md)
 
+## Optional preview CONTROL observer
+
+| ID | Scenario | Expected |
+| --- | --- | --- |
+| TC-IAM-OBSERVER-001 | Strict numeric preview name, six derived tags, three SSM and two secret references | Exact role/stage/source and two-key/four-context bindings; malformed reserved names reject |
+| TC-IAM-OBSERVER-002 | Direct session grants, missing tags, wrong account/stage/resource, direct or wrong-context KMS | Explicit boundary denial; all 55 synthetic owner probe cases retain their expectations |
+| TC-IAM-OBSERVER-003 | Incoming TagSession, foreign/wildcard trust, changed cutoff or missing expiry deny | Complete role readback rejects; already-issued sessions denied at the literal cutoff |
+| TC-IAM-OBSERVER-004 | Original workload/Gateway and observer roles with every boundary pairing | Only intended pairs survive; ordinary Allow lists remain the old two; observer wrong-service PassRole rejects |
+| TC-IAM-OBSERVER-005 | Owner inventory has no observer, or observer inline bytes/role identity change across awaits | Ordinary inventory requires no observer reads; observer mutation rejects without extending expiry |
+| TC-IAM-OBSERVER-006 | Maximum expanded policy inputs and original temporary quarantine | Every managed policy fits 6144 characters; each of the three CI roles' aggregate inline policies fits 10240 |
+| TC-IAM-OBSERVER-007 | Original owner force revision and policy default-version drift | All three policy documents are verified against the same source revision; mutation fails closed |
+
+Local fixtures do not establish AWS state. The original guarded owner workflow
+also requires native simulations, policy/default-version readback, and scanner
+review before deployment acceptance.
+
 ## Scope Parsing And Matching
 
 | ID                  | Scenario                                                                                     | Expected                                                                     |

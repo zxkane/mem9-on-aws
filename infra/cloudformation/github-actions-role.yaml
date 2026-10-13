@@ -193,6 +193,7 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary
           - Sid: DenyOperatorOwnedStackMutation
             # Protect every out-of-band ownership/control stack whose policy is
             # relied on to constrain a pull-request-capable deploy session.
@@ -221,6 +222,8 @@ Resources:
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/memory-namespace-operator-${ProjectName}/*
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/decision-artifact-bucket-${ProjectName}/*
           - Sid: DenyUnboundedProjectRoleCreation
+            # Creation and policy writes share identical resources/conditions.
+            # Their action union preserves both denies within the managed quota.
             # Negated ARN conditions also match a missing request/resource key,
             # so CreateRole without a boundary and boundary replacement with any
             # other policy are both denied.
@@ -228,21 +231,6 @@ Resources:
             Action:
               - iam:CreateRole
               - iam:PutRolePermissionsBoundary
-            Resource:
-              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*
-              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*
-              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
-            Condition:
-              ArnNotEquals:
-                iam:PermissionsBoundary:
-                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
-                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
-          - Sid: DenyUnboundedProjectRolePolicyWrites
-            # iam:PermissionsBoundary describes the target role for policy
-            # writes. This explicit deny protects against a future allow being
-            # added elsewhere without the corresponding boundary condition.
-            Effect: Deny
-            Action:
               - iam:AttachRolePolicy
               - iam:PutRolePolicy
             Resource:
@@ -254,6 +242,7 @@ Resources:
                 iam:PermissionsBoundary:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary
           - Sid: DenyLambdaRolePassToOtherServices
             # Boundary exceptions identify the reviewed Lambda role types by
             # generated or stable name. Prevent a PR-controlled lookalike from
@@ -977,6 +966,7 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-gateway-boundary
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary
           - Sid: WorkloadBoundarySimulation
             # SimulateCustomPolicy has no resource-level authorization. Preflight
             # uses it only with the repository-verified boundary document and a
@@ -2034,6 +2024,60 @@ Resources:
           Value: cloudformation
 
   # Independently owned inline policies preserve the temporary quarantine.
+  # Shared inline policy avoids a new managed-policy attachment on the three
+  # existing deployment roles. The owner verifier requires every statement.
+  ObserverBoundaryPairing:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub github-actions-${GitHubRepo}-observer-boundary-pairing
+      Roles:
+        - !Ref GitHubActionsRole
+        - !Ref GitHubPreviewActionsRole
+        - !Ref GitHubProductionActionsRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "ObserverRolesWithObserverBoundary"
+            Effect: "Allow"
+            Action:
+              - "iam:CreateRole"
+              - "iam:PutRolePermissionsBoundary"
+              - "iam:PutRolePolicy"
+              - "iam:AttachRolePolicy"
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-pr-*-ObserverControlTaskRole-????????????"
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary"
+          - Sid: "DenyObserverBoundaryOnOtherRoles"
+            Effect: "Deny"
+            Action:
+              - "iam:CreateRole"
+              - "iam:PutRolePermissionsBoundary"
+              - "iam:PutRolePolicy"
+              - "iam:AttachRolePolicy"
+            NotResource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-pr-*-ObserverControlTaskRole-????????????"
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary"
+          - Sid: "DenyObserverRolesWrongBoundary"
+            Effect: "Deny"
+            Action:
+              - "iam:CreateRole"
+              - "iam:PutRolePermissionsBoundary"
+              - "iam:PutRolePolicy"
+              - "iam:AttachRolePolicy"
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*-ObserverControlTaskRole-*"
+            Condition:
+              ArnNotEquals:
+                iam:PermissionsBoundary: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary"
+          - Sid: "DenyObserverPassToOtherServices"
+            Effect: "Deny"
+            Action: "iam:PassRole"
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*-ObserverControlTaskRole-*"
+            Condition:
+              StringNotEquals:
+                iam:PassedToService: !Sub "ecs-tasks.${AWS::URLSuffix}"
+
   LegacyRetainedOperatorProtection:
     Type: AWS::IAM::Policy
     Properties:
