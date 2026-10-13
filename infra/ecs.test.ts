@@ -765,16 +765,22 @@ describe("ecs stack", () => {
     expect((containersByName()["mnemo-server"].environment as Record<string,unknown>).MNEMO_CONSOLIDATION_EXECUTION_ENABLED).toBe(enabled);
   });
 
-  it("wires the mnemo-server terminal override into SST task synthesis", async () => {
+  it("keeps all service container output streams separate during SST synthesis", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
 
     const transform = services[0].args.transform as Record<string, unknown>;
+    const original = Object.keys(containersByName()).map((name) => ({
+      name,
+      pseudoTerminal: true,
+      environment: [{ name: "MARKER", value: name }],
+    }));
+    expect(original.map(({ name }) => name).sort()).toEqual([
+      "llm-proxy", "mnemo-server", "qwen3-embed",
+    ]);
     const taskArgs: Record<string, unknown> = {
-      containerDefinitions: out(
-        JSON.stringify([{ name: "mnemo-server", pseudoTerminal: true }]),
-      ),
+      containerDefinitions: out(JSON.stringify(original)),
     };
     (
       transform.taskDefinition as (
@@ -785,7 +791,9 @@ describe("ecs stack", () => {
     const definitions = JSON.parse(
       String(materialize(taskArgs.containerDefinitions)),
     ) as Record<string, unknown>[];
-    expect(definitions[0].pseudoTerminal).toBe(false);
+    expect(definitions).toEqual(
+      original.map((container) => ({ ...container, pseudoTerminal: false })),
+    );
   });
 
   it("keeps durable ingest disabled unless the deploy explicitly enables it", async () => {

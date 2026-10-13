@@ -56,7 +56,7 @@ import { workloadImage, accountId, applicationRegion, selectedDataSourceTag, sel
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
-import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
 import {applyNonrootDataTask,applyProductionNonrootTask,applyProductionNonrootService,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 import {productionRuntimeEnabled,protectLegacyRuntimeCredentials} from "./production-runtime";
 import { RECALL_TIMEOUT_MS, RECALL_RESPONSE_RESERVE_MS } from "./gateway/request-limits.mjs";
@@ -507,7 +507,9 @@ export function ecs(
     ],
     transform: {
       taskDefinition: (args) => {
-        disableMnemoServerPseudoTerminal(args);
+        for (const name of ["mnemo-server", "qwen3-embed", "llm-proxy"]) {
+          disableTaskContainerPseudoTerminal(args, name);
+        }
         if(runtime?.executionRoleArn){
           args.executionRoleArn=runtime.executionRoleArn;
           args.family=$interpolate`${cluster.nodes.cluster.name}-Mem9RuntimeServer`;
