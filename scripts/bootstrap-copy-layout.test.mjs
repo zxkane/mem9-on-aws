@@ -106,6 +106,7 @@ const expectedCopies = {
       "scripts/lib/ci-smoke-evidence.mjs",
       "scripts/lib/production-nonroot-budget-revision.mjs",
       "scripts/lib/production-nonroot-observer-control-context.mjs",
+      "scripts/lib/production-nonroot-observer-route-credentials.mjs",
       "scripts/lib/production-nonroot-observer-delivery.mjs",
       "scripts/lib/production-nonroot-observer-peer-inventory.mjs",
       "scripts/lib/production-nonroot-observer-timeline.mjs",
@@ -184,13 +185,14 @@ it('imports observer CONTROL from only the Docker COPY files and rejects either 
  const root=fileURLToPath(new URL('..',import.meta.url));
  try{
   for(const omitted of [null,'production-nonroot-observer-topology.mjs','production-nonroot-engineering-json.mjs',
-    'production-nonroot-observer-peer-inventory.mjs','production-nonroot-observer-timeline.mjs','production-nonroot-observer-route-attribution.mjs']){
+    'production-nonroot-observer-peer-inventory.mjs','production-nonroot-observer-timeline.mjs','production-nonroot-observer-route-attribution.mjs',
+    'production-nonroot-observer-route-credentials.mjs','namespace-auth.mjs','service-auth.mjs']){
    const target=join(directory,omitted??'complete');
    for(const row of copies(source())){
-    if(!row.target.startsWith('/bootstrap/operator/scripts/')||!row.input.endsWith('.mjs')||posix.basename(row.input)===omitted)continue;
+    if(!row.target.startsWith('/bootstrap/operator/')||!row.input.endsWith('.mjs')||posix.basename(row.input)===omitted)continue;
     const file=join(target,row.target);mkdirSync(dirname(file),{recursive:true});copyFileSync(join(root,row.input),file);
    }
-   const modules=['production-nonroot-observer-delivery.mjs','production-nonroot-observer-route-protocol.mjs'];
+   const modules=['production-nonroot-observer-delivery.mjs','production-nonroot-observer-route-protocol.mjs','production-nonroot-observer-route-credentials.mjs'];
    const urls=modules.map(name=>pathToFileURL(join(target,'/bootstrap/operator/scripts/lib/',name)).href);
    const child=spawnSync(process.execPath,['--input-type=module','--eval',`for(const url of ${JSON.stringify(urls)}) await import(url);`],{
     cwd:target,env:{PATH:process.env.PATH},encoding:'utf8',timeout:15000,maxBuffer:1024*1024,

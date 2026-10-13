@@ -1,6 +1,10 @@
 import {describe,it,expect} from 'vitest';
 import {generateKeyPairSync,sign,createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {rolldown} from 'rolldown';
 import {verifyObserverRouteCredentials,createObserverPrivateHeaders,clearObserverVerifiedCredentials,describeObserverContextProcessing} from './lib/production-nonroot-observer-control-context.mjs';
+import * as contextExports from './lib/production-nonroot-observer-control-context.mjs';
+import * as credentialExports from './lib/production-nonroot-observer-route-credentials.mjs';
 import {canonicalJson,classifyAccessToken,parseClientRegistry,parseSigningKeys,verifyTransportEnvelope} from '../infra/gateway/namespace-auth.mjs';
 import {requireGuardedObserverInvocation} from '../docker/bootstrap/nonroot-dispatch.mjs';
 import {resolveGuardPurpose} from '../docker/bootstrap/nonroot-identity.mjs';
@@ -17,6 +21,23 @@ function fixture(change=()=>{}){
  return {raw,route:{issuer,audience:'fixture-api',identityHash:hash(identity),registryHash:sha(raw.registry),jobId:'a'.repeat(32),transportIssuer:'fixture-transport'},token};
 }
 describe('real crypto cores only; no original runtime provider or host payment claim',()=>{
+ it('shares the exact credential function exports without exporting runtime handles',()=>{
+  const names=['describeObserverContextProcessing','verifyObserverRouteCredentials','createObserverPrivateHeaders','clearObserverVerifiedCredentials'];
+  expect(Object.keys(credentialExports).sort()).toEqual(names.sort());
+  for(const name of names)expect(contextExports[name]).toBe(credentialExports[name]);
+ });
+ it('scans the complete host credential dependency graph without container runtime imports',async()=>{
+  const entry=fileURLToPath(new URL('./lib/production-nonroot-observer-route-credentials.mjs',import.meta.url));
+  let modules=[];
+  const bundle=await rolldown({input:entry,platform:'node',treeshake:false,
+   onwarn:warning=>{throw Error(warning.code);},
+   plugins:[{name:'credential-closure',buildEnd(){modules=[...this.getModuleIds()];}}]});
+  try{await bundle.generate({format:'esm',codeSplitting:false});}finally{await bundle.close();}
+  expect(modules).toContain(entry);
+  expect(modules.some(path=>path.endsWith('/infra/gateway/namespace-auth.mjs'))).toBe(true);
+  expect(modules.some(path=>path.endsWith('/infra/gateway/service-auth.mjs'))).toBe(true);
+  for(const path of modules)expect(path).not.toMatch(/nonroot-dispatch|observer-control-context|observer-runtime-provider|observer-route-probe/);
+ });
  it('allows only the exact preview purpose and fixed module; JSON cannot become a guard or runtime context',()=>{
   const purpose='preview-observer-route-probe-v1',env={MEM9_STAGE:'pr-273',MEM9_OBSERVER_CONTROL_DELIVERY:'{"version":1}'};
   expect(resolveGuardPurpose(purpose,env)).toEqual({kind:'observer',module:'/bootstrap/operator/scripts/lib/production-nonroot-observer-route-probe.mjs',operation:purpose});

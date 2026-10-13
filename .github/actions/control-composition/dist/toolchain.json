@@ -16347,8 +16347,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-control-context.mjs",
-      "sha256": "22fba30c5df18b188c50fe67408fb156f44af47a6359cc2f4e5df87d6c46530a",
-      "bytesLength": 18081
+      "sha256": "b5348460e5110d44601088e209c54570e322966a92c938ec196651a1e241093a",
+      "bytesLength": 11906
     },
     {
       "path": "scripts/lib/production-nonroot-observer-control-logs.mjs",
@@ -16454,6 +16454,11 @@
       "path": "scripts/lib/production-nonroot-observer-route-attribution.mjs",
       "sha256": "f83a5fc9fef94def507c146b813ffc06b4fb11a839b061c6c8d679dfdf54f96f",
       "bytesLength": 6252
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-route-credentials.mjs",
+      "sha256": "1bc359600ae5c902999ff84963fc3b46a5768088204b029785163b409138d6f3",
+      "bytesLength": 7191
     },
     {
       "path": "scripts/lib/production-nonroot-observer-route-probe.mjs",
