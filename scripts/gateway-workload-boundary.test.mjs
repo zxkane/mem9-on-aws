@@ -24,6 +24,18 @@ const scope=(stage='prod',token='Mem9ProxyFnRole')=>({'aws:PrincipalArn':`arn:aw
 const secret=(stage,kind)=>`arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-${stage}-${kind}-fixture`;
 
 describe('closed Gateway permissions boundary',()=>{
+ it('allows endpoint refresh reads only in the application region',()=>{
+  const customTags=[...['!Sub','!Ref','!GetAtt'].map(tag=>({tag,resolve:value=>value})),...['!If','!Not','!Equals'].map(tag=>({tag,collection:'seq',resolve:value=>value}))];
+  const template=parse(readFileSync(new URL('../infra/cloudformation/github-actions-role.yaml',import.meta.url),'utf8'),{customTags});
+  const statement=template.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement.find(s=>s.Sid==='GatewaySecretEndpointRead');
+  expect(statement).toEqual({Sid:'GatewaySecretEndpointRead',Effect:'Allow',Action:['ec2:DescribeVpcEndpoints','ec2:DescribePrefixLists'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'ApplicationRegion'}}});
+  const deployed={Statement:[{...statement,Condition:{StringEquals:{'aws:RequestedRegion':contract.applicationRegion}}}]};
+  for(const action of ['ec2:DescribeVpcEndpoints','ec2:DescribePrefixLists']){
+   expect(decision(deployed,action,'*',{'aws:RequestedRegion':contract.applicationRegion})).toBe('allowed');
+   for(const context of [{},{'aws:RequestedRegion':'us-west-2'}])expect(decision(deployed,action,'*',context)).toBe('implicitDeny');
+  }
+  for(const action of ['ec2:DescribeManagedPrefixLists','ec2:CreateVpcEndpoint','ec2:ModifyVpcEndpoint','ec2:DeleteVpcEndpoints','ec2:ModifyManagedPrefixList'])expect(decision(deployed,action,'*',{'aws:RequestedRegion':contract.applicationRegion})).toBe('implicitDeny');
+ });
  for(const row of gatewayBoundaryProbeCases(contract))it(row.name,()=>{
   const context=Object.fromEntries(row.context.map(value=>{const key=/ContextKeyName=([^,]+)/.exec(value)[1],v=/ContextKeyValues=(.*)$/.exec(value)[1];return[key,v];}));
   expect(decision(policy,'kms:Decrypt',row.resource,context,true)).toBe(row.expected);
