@@ -42,8 +42,8 @@
     },
     {
       "path": "infra/cognito.ts",
-      "sha256": "b1302d5cb7960ac6caf311dfa53cd792692a2e8ca47e5dd9fc41ecb22fd24205",
-      "bytesLength": 12347
+      "sha256": "02f33df809b7fe72b7c37ecbc83ff4e4a097f0ab90ab74c17281c4f0971ddf41",
+      "bytesLength": 12348
     },
     {
       "path": "infra/consolidation-runtime.ts",
@@ -77,8 +77,8 @@
     },
     {
       "path": "infra/ecs.ts",
-      "sha256": "ced912d0e65735486df66044460ed1f34173b0b0ebb019e0786bc78a35b31faf",
-      "bytesLength": 36805
+      "sha256": "69c443012289c9290097a6b9e7189ea353e879951d611b7279bc2f725beddd1c",
+      "bytesLength": 36902
     },
     {
       "path": "infra/gateway-network.ts",
