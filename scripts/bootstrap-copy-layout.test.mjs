@@ -107,6 +107,9 @@ const expectedCopies = {
       "scripts/lib/production-nonroot-budget-revision.mjs",
       "scripts/lib/production-nonroot-observer-control-context.mjs",
       "scripts/lib/production-nonroot-observer-delivery.mjs",
+      "scripts/lib/production-nonroot-observer-peer-inventory.mjs",
+      "scripts/lib/production-nonroot-observer-timeline.mjs",
+      "scripts/lib/production-nonroot-observer-route-attribution.mjs",
       "scripts/lib/production-nonroot-observer-topology.mjs",
       "scripts/lib/production-nonroot-engineering-json.mjs",
       "scripts/lib/production-nonroot-observer-route-probe.mjs",
@@ -180,7 +183,8 @@ it('imports observer CONTROL from only the Docker COPY files and rejects either 
  const directory=mkdtempSync(join(tmpdir(),'bootstrap-control-copy-'));
  const root=fileURLToPath(new URL('..',import.meta.url));
  try{
-  for(const omitted of [null,'production-nonroot-observer-topology.mjs','production-nonroot-engineering-json.mjs']){
+  for(const omitted of [null,'production-nonroot-observer-topology.mjs','production-nonroot-engineering-json.mjs',
+    'production-nonroot-observer-peer-inventory.mjs','production-nonroot-observer-timeline.mjs','production-nonroot-observer-route-attribution.mjs']){
    const target=join(directory,omitted??'complete');
    for(const row of copies(source())){
     if(!row.target.startsWith('/bootstrap/operator/scripts/')||!row.input.endsWith('.mjs')||posix.basename(row.input)===omitted)continue;
