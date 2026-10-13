@@ -2570,6 +2570,24 @@ catalog and event bound uses that policy through cleanup. Publisher admission
 cannot enlarge an existing token. Legacy and held payments retain their original
 policy, charges and hashes, with no refunds or replacement ownership handles.
 
+Version five may prospectively include a closed `baselineCapture` allocation
+alongside the geometry-bound rehearsal replay. Its fixed read-only recipe binds
+the original issuer source, preparation, producer source closure and capture
+specification. It separately pays for the temporary session, metadata and private
+route observations, authentication, evidence retention and cleanup before work.
+All five counters remain enforced; LOCAL shares the selected aggregate pool,
+while the existing publisher reservation and both cleanup allocations remain
+protected. A quote contains no observed baseline or execution authority.
+
+The native baseline producer runs once after the full rehearsal replay, using
+the original finalization lifetime and proof store. It must join physical and
+credential cleanup before returning a completed capture. Baseline freshness is
+checked using the current time after capture, within the original five-minute
+window; the thirty-second cleanup reserve and original overall deadline cannot
+renew. The main proof verifier remains mandatory. Absent-field legacy budgets
+retain their exact bytes and fees; the current profile cannot omit either
+required allocation to select legacy behavior.
+
 Fresh preparation and the independent remaining-work verifier include the entire
 prospective payment once, including the full 1 GiB increase for version three.
 The enclosing forecast still includes historical consumption and every other

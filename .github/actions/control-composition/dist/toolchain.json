@@ -16247,8 +16247,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-finalization-accounting.mjs",
-      "sha256": "3dc47e79e1611ef2742a9b6ddaeec81aaf6d068052f8e429a66a551a3fa2b3f4",
-      "bytesLength": 10406
+      "sha256": "d31b32ed0914b7aa0a9a95e37479e17f9cd182742e055113079ae873d21cea04",
+      "bytesLength": 20610
     },
     {
       "path": "scripts/lib/production-nonroot-launch.mjs",
@@ -17003,7 +17003,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "f31b3304d55114b33a07f089eca33fd0abc865cf7ac160d4407ca247c5ea6502",
-    "bytesLength": 7438012
+    "sha256": "e1572768ffe1bd853bc6f52acf77d898bdebddd7182e98acbcf118db8897222e",
+    "bytesLength": 7446777
   }
 }

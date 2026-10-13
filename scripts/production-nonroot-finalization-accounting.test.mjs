@@ -2,20 +2,23 @@ import {test} from 'vitest';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {nonrootHash as hash} from './lib/production-nonroot-contracts.mjs';
-import {describeNonrootFinalizationBudget,createNonrootFinalizationPlan,nonrootFinalizationPrepaymentData,verifyNonrootFinalizationPlan,inspectNonrootFinalizationBudget,NONROOT_FINALIZATION_LIMITS} from './lib/production-nonroot-finalization-accounting.mjs';
+import {describeNonrootFinalizationBudget,createNonrootFinalizationPlan,nonrootFinalizationPrepaymentData,verifyNonrootFinalizationPlan,inspectNonrootFinalizationBudget,NONROOT_FINALIZATION_LIMITS,NONROOT_FINALIZATION_BASELINE_LIMITS,describeNonrootFinalizationBaselineCapture,inspectNonrootFinalizationBaselineCapture} from './lib/production-nonroot-finalization-accounting.mjs';
 import {verifyNonrootCacheReadAccounting} from './lib/production-nonroot-cache.mjs';
 import {NONROOT_REMAINING_WORK_CAPS_V2,NONROOT_REMAINING_WORK_LIMITS_HASH_V2} from './lib/production-nonroot-budget-revision.mjs';
 import {NONROOT_ARCHIVE_CAPACITY_V2 as ARCHIVE_CAPACITY} from './lib/production-nonroot-archive-capacity.mjs';
 
 const zero=()=>({ecrRequests:0,logicalBytes:0,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0}),sha=b=>createHash('sha256').update(b).digest('hex');
 const revision={version:2,limitsHash:NONROOT_REMAINING_WORK_LIMITS_HASH_V2,envelopeHash:hash('complete envelope'),historyHeadHash:hash('immutable history')};
-function fixture({budgetVersion=2,startingLogicalBytes=0,localAllocationBytes}={}){
+function baselineInput(scope,issuer){return {binding:{owner:scope.copyOwner,preparationHash:hash('original preparation'),specHash:hash('fixed production baseline spec'),sourceRevision:scope.sourceRevision,sourceTree:scope.sourceTree,sourceClosureHash:hash('complete producer closure'),replayGeometryHash:hash('actual replay geometry')},issuerSource:issuer.source,geometry:{sourceReads:64,sourceReadBytes:65536,inputReads:4,inputReadBytes:4096,authBytes:32768,storeEntries:300}};}
+function fixture({budgetVersion=2,startingLogicalBytes=0,localAllocationBytes,baseline=false}={}){
  const scope={copyOwner:'a'.repeat(32),account:'123456789012',region:'us-east-1',runtimeNonce:'b'.repeat(32),authorizationId:'c'.repeat(32),bucket:'example-finalization',kmsKeyArn:'arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',lockKey:'runtime-publication-locks/prod/witness.json',parameterProtection:{KeyId:'alias/aws/ssm',Tier:'Standard',DataType:'text'},sourceRevision:'d'.repeat(40),sourceTree:'e'.repeat(40),rootBindingHash:hash('root'),priorParameter:{version:1,valueHash:sha('prior protected value')}};
  const issuer={source:{provider:'instance-metadata',hash:hash('authenticated original source')},scope:{account:scope.account,personalAccount:'2'.repeat(12),region:scope.region,owner:scope.authorizationId,runtimeNonce:scope.runtimeNonce,anchorOwner:'f'.repeat(32),bucket:scope.bucket,ssmKeyArn:'arn:aws:kms:us-east-1:123456789012:key/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',s3KeyArn:scope.kmsKeyArn,parameterProtection:scope.parameterProtection}};
- const budget=budgetVersion===2?describeNonrootFinalizationBudget(scope,issuer):describeNonrootFinalizationBudget(scope,issuer,{version:budgetVersion,...([4,5].includes(budgetVersion)?{localAllocationBytes}:{})}),ledgerBinding={owner:scope.copyOwner,executionId:'f'.repeat(32),planHash:hash('COPY config'),publicationHash:hash('COPY publication')};
+ const baselineCapture=baseline?describeNonrootFinalizationBaselineCapture(baselineInput(scope,issuer)):undefined;
+ const rehearsalReplay=baseline?{geometryHash:baselineCapture.binding.replayGeometryHash,charge:{...zero(),logicalBytes:1048576,uncompressedBytes:1024,processedEntries:2}}:undefined;
+ const budget=budgetVersion===2?describeNonrootFinalizationBudget(scope,issuer):describeNonrootFinalizationBudget(scope,issuer,{version:budgetVersion,...([4,5].includes(budgetVersion)?{localAllocationBytes}:{}),...(baseline?{baselineCapture,rehearsalReplay}:{})}),ledgerBinding={owner:scope.copyOwner,executionId:'f'.repeat(32),planHash:hash('COPY config'),publicationHash:hash('COPY publication')};
  const copyReceipt={version:2,owner:scope.copyOwner,planHash:ledgerBinding.planHash,publicationHash:ledgerBinding.publicationHash,destinationReadback:{reads:[{repositoryName:'example',digest:'sha256:'+hash('blob'),size:1,mediaType:'application/octet-stream'}]}};
  const starting={...zero(),logicalBytes:startingLogicalBytes};
- const reserve={...budget.charge,logicalBytes:budget.charge.logicalBytes+1,uncompressedBytes:3,processedEntries:3},copyCheckpoint={binding:ledgerBinding,startingCounters:{...starting},counters:{...starting},remainingReservation:reserve,eventCount:1,lastEventHash:hash('COPY sealed'),active:0,sealed:true,budgetRevision:revision};
+ const reserve={...budget.charge,logicalBytes:budget.charge.logicalBytes+1,uncompressedBytes:budget.charge.uncompressedBytes+3,processedEntries:budget.charge.processedEntries+3},copyCheckpoint={binding:ledgerBinding,startingCounters:{...starting},counters:{...starting},remainingReservation:reserve,eventCount:1,lastEventHash:hash('COPY sealed'),active:0,sealed:true,budgetRevision:revision};
  const start={version:2,kind:'custody-ledger-start',binding:ledgerBinding,startingCounters:{...starting},reserve,deadlineMs:123456,mode:'adoption',budgetRevision:revision},raw=Buffer.from(JSON.stringify(start)+'\n');
  const expected={budget,ledgerBinding,ledgerStartHash:sha(raw),copyCheckpointHash:hash(copyCheckpoint),archiveManifestHash:hash('actual archive'),budgetRevision:revision,deadlineMs:start.deadlineMs},plan=createNonrootFinalizationPlan(expected);
  const events=[],spent={...starting},remaining={...reserve};
@@ -159,4 +162,149 @@ test('v5 prepays larger archive transfers without enlarging historical credit',(
  for(const mutate of [v=>v.archive.replacesDataArchiveWireBytes=134217728,v=>v.additionalAfterCopy.httpBodyBytes-=100663296,v=>v.charge.httpBodyBytes=old.budget.charge.httpBodyBytes]){
   const bad=structuredClone(next.budget);mutate(bad);assert.throws(()=>inspectNonrootFinalizationBudget(bad));
  }
+});
+
+test('baseline recipe has one fixed issuer, five metadata reads and two private probes',()=>{
+ const f=fixture(),input=baselineInput(f.scope,f.issuer),c=describeNonrootFinalizationBaselineCapture(input);
+ assert.deepEqual(c.operations.map(r=>r.key),['issuer/source-token','issuer/source-credentials','issuer/source-identity','issuer/assume','issuer/target-identity','baseline/service-before','baseline/task-before','baseline/discovery','baseline/private-unauth','baseline/private-auth','baseline/service-after','baseline/task-after']);
+ assert(c.operations.every(r=>r.count===1));assert.equal(new Set(c.rows.map(r=>r.id)).size,c.rows.length);
+ assert.equal(c.operations.filter(r=>r.action==='ecs.DescribeServices').length,2);
+ assert.equal(c.operations.filter(r=>r.action==='ecs.DescribeTasks').length,2);
+ assert.equal(c.operations.filter(r=>r.action==='servicediscovery.GetService').length,1);
+ assert.equal(c.limits.mode,'overlap-baseline-read');assert.equal(c.limits.cleanupReserveMs,30000);assert.equal(c.limits.maximumAgeMs,300000);
+ for(const k of Object.keys(zero())){
+  assert.equal(c.charge[k],c.rows.reduce((n,r)=>n+r.charge[k],0));
+  assert.equal(c.charge[k],c.normal[k]+c.cleanup[k]);
+ }
+ assert.equal(c.charge.httpBodyBytes,c.operations.reduce((n,r)=>n+r.requestBytes+r.responseBytes,0)+c.limits.unknownBytes);
+ assert.equal(c.charge.ecrRequests,0);assert(c.cleanup.logicalBytes>0&&c.cleanup.uncompressedBytes>0&&c.cleanup.processedEntries>0);
+ assert.equal(c.charge.uncompressedBytes,c.material.bytes);assert.equal(c.charge.processedEntries,c.material.records);
+ assert(Object.isFrozen(c)&&Object.isFrozen(c.operations[0].charge)&&Object.isFrozen(c.binding));
+ assert.deepEqual(inspectNonrootFinalizationBaselineCapture(c),c);
+ assert.equal(Object.hasOwn(input,'charge'),false);assert.equal(Object.isFrozen(input),false);
+});
+
+test('static temporary source removes only genuine metadata-source operations and their derived work',()=>{
+ const f=fixture(),input=baselineInput(f.scope,f.issuer),imds=describeNonrootFinalizationBaselineCapture(input);
+ input.issuerSource={provider:'static-temporary',hash:hash('original static temporary source')};
+ const c=describeNonrootFinalizationBaselineCapture(input);
+ assert.deepEqual(c.operations,imds.operations.slice(2));assert.equal(c.operations.length,10);
+ assert.equal(imds.charge.httpBodyBytes-c.charge.httpBodyBytes,4096+65536);
+ assert.equal(imds.material.normalRecords-c.material.normalRecords,4);
+ assert.equal(imds.cleanup.httpBodyBytes,0);assert.equal(c.cleanup.httpBodyBytes,0);
+});
+
+test('baseline material includes both boundaries, response originals, projections and cleanup evidence',()=>{
+ const f=fixture(),c=describeNonrootFinalizationBaselineCapture(baselineInput(f.scope,f.issuer));
+ assert.equal(c.material.normal.records,5*3+2*2+3+c.material.normalRecords);
+ assert.equal(c.material.cleanup.records,c.material.cleanupRecords+1);
+ assert.equal(c.material.cleanup.bytes,c.material.cleanupRecords*c.limits.recordBytes+c.limits.unknownBytes);
+ assert.equal(c.material.records,c.material.normal.records+c.material.cleanup.records);
+ assert.equal(c.material.bytes,c.material.normal.bytes+c.material.cleanup.bytes);
+ assert.equal(c.rows.find(r=>r.id==='material-cleanup').lane,'cleanup');
+ assert.equal(c.rows.find(r=>r.id==='material-cleanup').charge.processedEntries,c.material.cleanup.records);
+});
+
+test('v5 prepays baseline and replay once without consuming publisher reservations',()=>{
+ const localAllocationBytes=8*1073741824,f=fixture({budgetVersion:5,localAllocationBytes,baseline:true}),old=fixture({budgetVersion:5,localAllocationBytes});
+ const c=f.budget.baselineCapture,r=f.budget.rehearsalReplay;
+ assert.deepEqual(f.budget.issuers,old.budget.issuers);assert.deepEqual(f.budget.limits,old.budget.limits);assert.deepEqual(f.budget.archive,old.budget.archive);
+ assert.equal(f.budget.charge.logicalBytes,localAllocationBytes);
+ for(const k of ['ecrRequests','httpBodyBytes','uncompressedBytes','processedEntries'])assert.equal(f.budget.charge[k],old.budget.charge[k]+r.charge[k]+c.charge[k]);
+ assert.equal(f.budget.additionalAfterCopy.httpBodyBytes+old.budget.archive.replacesDataArchiveWireBytes,f.budget.charge.httpBodyBytes);
+ assert.deepEqual(inspectNonrootFinalizationBudget(f.budget),f.budget);
+ const replay=verifyNonrootCacheReadAccounting(f.record,f.options);
+ assert.equal(replay.counters.logicalBytes,localAllocationBytes+1);assert.equal(replay.counters.httpBodyBytes,f.budget.charge.httpBodyBytes);
+ assert.equal(replay.counters.uncompressedBytes,f.budget.charge.uncompressedBytes+3);assert.equal(replay.counters.processedEntries,f.budget.charge.processedEntries+3);
+ assert.deepEqual(replay.remainingReservation,zero());
+});
+
+test('baseline requires v5 replay and enough aggregate LOCAL for separate publisher and cleanup work',()=>{
+ const f=fixture({budgetVersion:5,localAllocationBytes:8*1073741824,baseline:true}),baselineCapture=f.budget.baselineCapture,rehearsalReplay=f.budget.rehearsalReplay;
+ const minimum=2147483648+rehearsalReplay.charge.logicalBytes+baselineCapture.charge.logicalBytes;
+ assert.equal(describeNonrootFinalizationBudget(f.scope,f.issuer,{version:5,localAllocationBytes:minimum,rehearsalReplay,baselineCapture}).charge.logicalBytes,minimum);
+ assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version:5,localAllocationBytes:minimum-1,rehearsalReplay,baselineCapture}),/FinalizationBaselineLocalAllocation/);
+ assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version:5,localAllocationBytes:minimum,baselineCapture}),/FinalizationBaselineVersion/);
+ for(const version of [2,3,4])assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version,...(version===4?{localAllocationBytes:minimum}:{}),baselineCapture}));
+});
+
+for(const key of ['owner','sourceRevision','sourceTree','replayGeometryHash'])test('baseline budget rejects substituted '+key,()=>{
+ const f=fixture({budgetVersion:5,localAllocationBytes:8*1073741824,baseline:true}),input=baselineInput(f.scope,f.issuer);
+ input.binding[key]='0'.repeat(input.binding[key].length);
+ const baselineCapture=describeNonrootFinalizationBaselineCapture(input);
+ assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version:5,localAllocationBytes:f.budget.localAllocationBytes,rehearsalReplay:f.budget.rehearsalReplay,baselineCapture}),/FinalizationBaselineBinding/);
+});
+
+test('baseline issuer-source provider and full hash must match the original budget',()=>{
+ const f=fixture({budgetVersion:5,localAllocationBytes:8*1073741824,baseline:true});
+ for(const source of [{...f.issuer.source,hash:hash('another source')},{provider:'static-temporary',hash:f.issuer.source.hash}]){
+  const input=baselineInput(f.scope,f.issuer);input.issuerSource=source;
+  assert.throws(()=>describeNonrootFinalizationBudget(f.scope,f.issuer,{version:5,localAllocationBytes:f.budget.localAllocationBytes,rehearsalReplay:f.budget.rehearsalReplay,baselineCapture:describeNonrootFinalizationBaselineCapture(input)}),/FinalizationBaselineSource/);
+ }
+});
+
+test('baseline inspector rejects changed rows, ordering, limits, counters and commitments',()=>{
+ const f=fixture(),c=describeNonrootFinalizationBaselineCapture(baselineInput(f.scope,f.issuer));
+ const mutations=[v=>v.operations.reverse(),v=>v.operations[0].count++,v=>v.operations[0].responseBytes++,v=>v.rows.pop(),v=>v.rows[0].lane='cleanup',v=>v.limits.requestMs++,v=>v.limits.maximumAgeMs++,v=>v.material.bytes--,v=>v.geometryHash=hash('different geometry'),v=>v.charge.logicalBytes--,v=>v.normal.httpBodyBytes--,v=>v.cleanup.processedEntries--];
+ for(const mutate of mutations){const bad=structuredClone(c);mutate(bad);assert.throws(()=>inspectNonrootFinalizationBaselineCapture(bad));}
+});
+
+test('baseline descriptor accepts only inert closed data and bounded read geometry',()=>{
+ const f=fixture(),input=baselineInput(f.scope,f.issuer);
+ for(const name of ['baseline','completed','clock','clients','credentials','callback','charge','requestBytes'])assert.throws(()=>describeNonrootFinalizationBaselineCapture({...input,[name]:name}));
+ for(const [key,value] of [['sourceReads',0],['sourceReads',Number.MAX_SAFE_INTEGER],['sourceReadBytes',-1],['sourceReadBytes',1],['inputReads',1.5],['inputReadBytes',Infinity],['authBytes',0],['authBytes',NONROOT_FINALIZATION_BASELINE_LIMITS.authBytes+1],['storeEntries',1],['storeEntries',20001]]){
+  const bad=structuredClone(input);bad.geometry[key]=value;assert.throws(()=>describeNonrootFinalizationBaselineCapture(bad));
+ }
+ let invoked=false;const bad={...input};Object.defineProperty(bad,'geometry',{enumerable:true,get(){invoked=true;return input.geometry;}});
+ assert.throws(()=>describeNonrootFinalizationBaselineCapture(bad));assert.equal(invoked,false);
+ assert.throws(()=>describeNonrootFinalizationBaselineCapture(new Proxy(input,{})));
+ assert.throws(()=>describeNonrootFinalizationBaselineCapture({...input,issuerSource:{...input.issuerSource,provider:'default-chain'}}));
+});
+
+test('baseline inspector rejects a nested getter without invoking it',()=>{
+ const f=fixture(),value=structuredClone(describeNonrootFinalizationBaselineCapture(baselineInput(f.scope,f.issuer)));let invoked=0;
+ Object.defineProperty(value.operations[0],'count',{enumerable:true,get(){invoked++;return 1;}});
+ assert.throws(()=>inspectNonrootFinalizationBaselineCapture(value),/NonrootContractInvalid/);
+ assert.equal(invoked,0);
+});
+
+test('baseline inspector rejects a nested proxy without invoking its traps',()=>{
+ const f=fixture(),value=structuredClone(describeNonrootFinalizationBaselineCapture(baselineInput(f.scope,f.issuer)));let invoked=0;
+ value.rows[0].charge=new Proxy(value.rows[0].charge,{
+  get(target,key,receiver){invoked++;return Reflect.get(target,key,receiver);},
+  ownKeys(target){invoked++;return Reflect.ownKeys(target);},
+  getOwnPropertyDescriptor(target,key){invoked++;return Reflect.getOwnPropertyDescriptor(target,key);},
+  getPrototypeOf(target){invoked++;return Reflect.getPrototypeOf(target);},
+ });
+ assert.throws(()=>inspectNonrootFinalizationBaselineCapture(value),/NonrootContractInvalid/);
+ assert.equal(invoked,0);
+});
+
+test('baseline inspector rejects an extra nested undefined field',()=>{
+ const f=fixture(),value=structuredClone(describeNonrootFinalizationBaselineCapture(baselineInput(f.scope,f.issuer)));
+ value.rows[0].charge.unpriced=undefined;
+ assert.throws(()=>inspectNonrootFinalizationBaselineCapture(value),/NonrootContractInvalid/);
+});
+
+test('source occurrences and store lookup multiplicity increase fees without enlarging network slots',()=>{
+ const f=fixture(),input=baselineInput(f.scope,f.issuer),old=describeNonrootFinalizationBaselineCapture(input);
+ const next=describeNonrootFinalizationBaselineCapture({...input,geometry:{...input.geometry,sourceReads:128,sourceReadBytes:131072,storeEntries:600}});
+ assert(next.charge.logicalBytes>old.charge.logicalBytes);assert.deepEqual(next.operations,old.operations);assert.equal(next.charge.httpBodyBytes,old.charge.httpBodyBytes);
+ assert.equal(next.charge.processedEntries,old.charge.processedEntries);
+ assert.notEqual(next.geometryHash,old.geometryHash);
+});
+
+for(const key of ['logicalBytes','httpBodyBytes','uncompressedBytes','processedEntries'])test('original adoption rejects one-unit-short baseline prepayment '+key,()=>{
+ const f=fixture({budgetVersion:5,localAllocationBytes:8*1073741824,baseline:true}),record=structuredClone(f.record);
+ record.events.at(-2).data.reserveDebit[key]--;
+ assert.throws(()=>verifyNonrootCacheReadAccounting(record,f.options));
+});
+
+test('recomputed spec cannot replace independently pinned finalization proof expectation',()=>{
+ const f=fixture({budgetVersion:5,localAllocationBytes:8*1073741824,baseline:true}),input=baselineInput(f.scope,f.issuer);
+ input.binding.specHash=hash('other genuine spec');
+ const budget=describeNonrootFinalizationBudget(f.scope,f.issuer,{version:5,localAllocationBytes:f.budget.localAllocationBytes,rehearsalReplay:f.budget.rehearsalReplay,baselineCapture:describeNonrootFinalizationBaselineCapture(input)});
+ const changed=createNonrootFinalizationPlan({...f.expected,budget});
+ assert.throws(()=>verifyNonrootFinalizationPlan(changed,f.expected),/FinalizationIndependentBinding/);
+ assert.throws(()=>verifyNonrootCacheReadAccounting(f.record,{...f.options,expectedFinalization:{...f.options.expectedFinalization,budget}}));
 });
