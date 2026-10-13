@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { AUTHORIZATION_ARCHIVE_PREFIX, parseStrictJson } from "./authorization-archive-policy.mjs";
 import { verifyAuthorizationMaintenanceIsolation } from "./authorization-maintenance-isolation.mjs";
 import { GATEWAY_BOUNDARY_POLICY_NAME, gatewayBoundaryArn, gatewayRoleArnPatterns, gatewayRoleStage, expectedGatewayBoundaryPolicyDocument } from './gateway-workload-boundary.mjs';
+import { OBSERVER_BOUNDARY_POLICY_NAME, observerBoundaryArn, observerRoleStage,
+  observerRoleArnPattern, observerReservedRoleArnPattern, expectedObserverBoundaryPolicyDocument,
+  assertObserverRoleTags } from './observer-workload-boundary.mjs';
 export { GATEWAY_BOUNDARY_POLICY_NAME, gatewayBoundaryArn, gatewayRoleArnPatterns, gatewayRoleStage, expectedGatewayBoundaryPolicyDocument };
 
 const rolloutContract = JSON.parse(
@@ -15,9 +18,11 @@ export const QUARANTINE_POLICY_NAME =
 export const WORKLOAD_BOUNDARY_POLICY_NAME =
   rolloutContract.identifiers.boundaryPolicyName;
 if (rolloutContract.identifiers.gatewayBoundaryPolicyName !== GATEWAY_BOUNDARY_POLICY_NAME) throw new Error('Gateway boundary identifier mismatch');
+if (rolloutContract.identifiers.observerBoundaryPolicyName !== OBSERVER_BOUNDARY_POLICY_NAME) throw new Error('Observer boundary identifier mismatch');
 
 export function expectedRoleBoundaryArn(roleName, {partition, accountId}) {
   assertIdentity({partition, accountId});
+  if (observerRoleStage(roleName) !== undefined) return observerBoundaryArn({partition, accountId});
   return gatewayRoleStage(roleName) === undefined
     ? `arn:${partition}:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`
     : gatewayBoundaryArn({partition, accountId});
@@ -533,7 +538,7 @@ export function expectedBoundaryPolicyDocument(contract) {
       // The statement above scopes the write to the PROJECT prefix — every
       // stage's whole SSM tree — which is too wide for a WRITE. This ceiling is
       // the only control on it: identity policies are PR-authored, and the
-      // deploy role's DenyUnboundedProjectRolePolicyWrites only requires that
+      // deploy role's DenyUnboundedProjectRoleCreation only requires that
       // the boundary be ATTACHED, never constrains its content. Preview roles
       // are bounded too, so without this a PR could grant one of its own preview
       // Lambdas ssm:PutParameter on /mem9-on-aws/prod/* and overwrite prod's
@@ -915,6 +920,9 @@ export function verifyBoundaryPolicyDocument(document, contract) {
 export function verifyGatewayBoundaryPolicyDocument(document, contract) {
   return compareBoundaryPolicyDocuments(document, expectedGatewayBoundaryPolicyDocument(contract));
 }
+export function verifyObserverBoundaryPolicyDocument(document, contract) {
+  return compareBoundaryPolicyDocuments(document, expectedObserverBoundaryPolicyDocument(contract));
+}
 
 export function verifyQuarantinePolicy(document) {
   const decoded = decodePolicyDocument(document);
@@ -1224,40 +1232,35 @@ export function verifyPermanentEnforcementDocuments(
   const rolePatterns = expectedRolePatterns({ partition, accountId });
   const gatewayArn = gatewayBoundaryArn({partition, accountId});
   const gatewayPatterns = gatewayRoleArnPatterns({partition, accountId});
+  const observerArn = observerBoundaryArn({partition, accountId});
+  const observerPattern = observerRoleArnPattern({partition, accountId});
+  const observerReserved = observerReservedRoleArnPattern({partition, accountId});
   const stackPrefix = `arn:${partition}:cloudformation:*:${accountId}:stack`;
 
-  for (const effect of ["Allow", "Deny"]) {
-    requireStatement(documents, {
-      sid:
-        effect === "Allow"
-          ? "EcsTaskRoleCreateWithBoundary"
-          : "DenyUnboundedProjectRoleCreation",
-      effect,
-      actions: ["iam:CreateRole", "iam:PutRolePermissionsBoundary"],
-      resources: rolePatterns,
-      conditionOperator: effect === "Allow" ? "ArnEquals" : "ArnNotEquals",
-      conditionKey: "iam:PermissionsBoundary",
-      conditionValue: [boundaryArn, gatewayArn],
-    });
-    requireStatement(documents, {
-      sid:
-        effect === "Allow"
-          ? "EcsTaskRolePolicyWritesWithBoundary"
-          : "DenyUnboundedProjectRolePolicyWrites",
-      effect,
-      actions: ["iam:AttachRolePolicy", "iam:PutRolePolicy"],
-      resources: rolePatterns,
-      conditionOperator: effect === "Allow" ? "ArnEquals" : "ArnNotEquals",
-      conditionKey: "iam:PermissionsBoundary",
-      conditionValue: [boundaryArn, gatewayArn],
-    });
+  for (const [sid, actions] of [
+    ['EcsTaskRoleCreateWithBoundary', ['iam:CreateRole', 'iam:PutRolePermissionsBoundary']],
+    ['EcsTaskRolePolicyWritesWithBoundary', ['iam:AttachRolePolicy', 'iam:PutRolePolicy']],
+  ]) {
+    requireStatement(documents, {sid, effect:'Allow', actions, resources:rolePatterns,
+      conditionOperator:'ArnEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:[boundaryArn,gatewayArn]});
   }
+  requireStatement(documents, {sid:'DenyUnboundedProjectRoleCreation',effect:'Deny',
+    actions:['iam:CreateRole','iam:PutRolePermissionsBoundary','iam:AttachRolePolicy','iam:PutRolePolicy'],resources:rolePatterns,
+    conditionOperator:'ArnNotEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:[boundaryArn,gatewayArn,observerArn]});
 
   const gatewayWriteActions = ['iam:CreateRole','iam:PutRolePermissionsBoundary','iam:PutRolePolicy','iam:AttachRolePolicy'];
   requireStatement(documents, {sid:'DenyGatewayBoundaryOnOtherRoles',effect:'Deny',actions:gatewayWriteActions,
     notResources:gatewayPatterns,conditionOperator:'ArnEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:gatewayArn});
   requireStatement(documents, {sid:'DenyGatewayRolesWrongBoundary',effect:'Deny',actions:gatewayWriteActions,
     resources:gatewayPatterns,conditionOperator:'ArnNotEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:gatewayArn});
+  requireStatement(documents, {sid:'ObserverRolesWithObserverBoundary',effect:'Allow',actions:gatewayWriteActions,
+    resources:[observerPattern],conditionOperator:'ArnEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:observerArn});
+  requireStatement(documents, {sid:'DenyObserverBoundaryOnOtherRoles',effect:'Deny',actions:gatewayWriteActions,
+    notResources:[observerPattern],conditionOperator:'ArnEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:observerArn});
+  requireStatement(documents, {sid:'DenyObserverRolesWrongBoundary',effect:'Deny',actions:gatewayWriteActions,
+    resources:[observerReserved],conditionOperator:'ArnNotEquals',conditionKey:'iam:PermissionsBoundary',conditionValue:observerArn});
+  requireStatement(documents, {sid:'DenyObserverPassToOtherServices',effect:'Deny',actions:['iam:PassRole'],
+    resources:[observerReserved],conditionOperator:'StringNotEquals',conditionKey:'iam:PassedToService',conditionValue:'ecs-tasks.amazonaws.com'});
 
   requireStatement(documents, {
     sid: "DenyWorkloadBoundaryRemoval",
@@ -1335,7 +1338,7 @@ export function verifyPermanentEnforcementDocuments(
       "iam:TagPolicy",
       "iam:UntagPolicy",
     ],
-    resources: [boundaryArn, gatewayArn],
+    resources: [boundaryArn, gatewayArn, observerArn],
   });
   requireStatement(documents, {
     sid: "DenyOperatorOwnedStackMutation",
@@ -1938,6 +1941,12 @@ async function requireBoundary(adapter, roleName, identity) {
 }
 
 function requireGatewayRoleTags(roleName, role) {
+  if (observerRoleStage(roleName) !== undefined) {
+    if (!Array.isArray(role.tags) || new Set(role.tags.map(t => t.Key.toLowerCase())).size !== role.tags.length) {
+      throw new Error('Observer role tag binding mismatch');
+    }
+    assertObserverRoleTags(roleName, Object.fromEntries(role.tags.map(t => [t.Key, t.Value])));
+  }
   const stage = gatewayRoleStage(roleName);
   if (stage !== undefined) {
     const tags = role.tags;

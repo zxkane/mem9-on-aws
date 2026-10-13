@@ -15,10 +15,19 @@ describe('retained operator permanent CI protection',()=>{
       ...['If','Equals','Not'].map(name=>({tag:'!'+name,collection:'seq',resolve:value=>({[name]:value.toJSON()})})),
     ]});
     expect(doc.errors).toEqual([]);
-    const policies=Object.values(doc.toJS().Resources).filter(r=>r.Type==='AWS::IAM::Policy');
+    const expected={
+      LegacyRetainedOperatorProtection:'GitHubActionsRole',
+      PreviewRetainedOperatorProtection:'GitHubPreviewActionsRole',
+      ProductionRetainedOperatorProtection:'GitHubProductionActionsRole',
+    };
+    const policies=Object.entries(doc.toJS().Resources).filter(([name])=>Object.hasOwn(expected,name));
     expect(policies).toHaveLength(3);
-    expect(policies.flatMap(r=>r.Properties.Roles.map(role=>role.Ref)).sort()).toEqual(['GitHubActionsRole','GitHubPreviewActionsRole','GitHubProductionActionsRole']);
-    for(const policy of policies){expect(policy.Condition).toBeUndefined();expect(policy.Properties.PolicyName).not.toContain('quarantine');}
+    for(const [name,policy] of policies){
+      expect(policy.Type).toBe('AWS::IAM::Policy');
+      expect(policy.Properties.Roles).toEqual([{Ref:expected[name]}]);
+      expect(policy.Condition).toBeUndefined();
+      expect(policy.Properties.PolicyName).not.toContain('quarantine');
+    }
   });
 
   for(const roleName of roles)it(`binds the exact protection and probe contract for ${roleName}`,async()=>{

@@ -61,7 +61,7 @@ describe('closed Gateway permissions boundary',()=>{
  it('deploy role admits exactly the fixed family/boundary pairs and Lambda-only passing',()=>{
   const customTags=[...['!Sub','!Ref','!GetAtt'].map(tag=>({tag,resolve:value=>value})),...['!If','!Not','!Equals'].map(tag=>({tag,collection:'seq',resolve:value=>value}))];
   const template=parse(readFileSync(new URL('../infra/cloudformation/github-actions-role.yaml',import.meta.url),'utf8'),{customTags});
-  const selected=new Set(['EcsTaskRoleCreateWithBoundary','EcsTaskRolePolicyWritesWithBoundary','DenyUnboundedProjectRoleCreation','DenyUnboundedProjectRolePolicyWrites','DenyGatewayBoundaryOnOtherRoles','DenyGatewayRolesWrongBoundary','PassRoleConstrained','DenyLambdaRolePassToOtherServices']);
+  const selected=new Set(['EcsTaskRoleCreateWithBoundary','EcsTaskRolePolicyWritesWithBoundary','DenyUnboundedProjectRoleCreation','DenyGatewayBoundaryOnOtherRoles','DenyGatewayRolesWrongBoundary','PassRoleConstrained','DenyLambdaRolePassToOtherServices']);
   const raw=Object.values(template.Resources).filter(r=>r.Type==='AWS::IAM::ManagedPolicy').flatMap(r=>r.Properties.PolicyDocument.Statement).filter(s=>selected.has(s.Sid));
   const rendered=JSON.parse(JSON.stringify(raw).replaceAll('${AWS::Partition}','aws').replaceAll('${AWS::AccountId}',contract.accountId).replaceAll('${ProjectName}','mem9-on-aws'));
   const deployed={Statement:rendered};expect(rendered).toHaveLength(selected.size);

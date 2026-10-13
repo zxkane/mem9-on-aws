@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { validateDecisionArtifactBucketName } from "./authorization-maintenance-isolation.mjs";
 import { createRetainedOperatorInventory, RETAINED_OPERATOR_ROLE_NAMES } from "./retained-operator-inventory.mjs";
 import { verifyRetainedOperatorEnforcement } from "./retained-operator-enforcement.mjs";
+import { observerBoundaryArn, observerRoleStage, assertObserverRole } from './observer-workload-boundary.mjs';
 import {
   DENY_DANGEROUS_POLICY_NAME,
   DEPLOY_ROLE_NAME,
@@ -287,6 +288,7 @@ export function createAwsCliAdapter({
 
   const deploymentRoleNames = [DEPLOY_ROLE_NAME, `${DEPLOY_ROLE_NAME}-preview`, `${DEPLOY_ROLE_NAME}-prod`].sort();
   let deploymentRoleSnapshot;
+  const observerRoleSnapshots = new Map();
   const deploymentError = () => {throw new Error("deployment-role owner identity is malformed or changed");};
   const canonical = value => Array.isArray(value)
     ? value.map(canonical).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
@@ -1019,18 +1021,58 @@ export function createAwsCliAdapter({
     },
 
     async getRole({ roleName }) {
+      const observer = observerRoleStage(roleName) !== undefined;
       const response = await invokeAwsCommand([
         "iam",
         "get-role",
         "--role-name",
         roleName,
       ]);
-      return {
+      const role = {
         assumeRolePolicyDocument: response.Role?.AssumeRolePolicyDocument,
         tags: response.Role?.Tags,
         permissionsBoundaryArn:
           response.Role?.PermissionsBoundary?.PermissionsBoundaryArn,
       };
+      if (observer) {
+        const readPolicies = async () => ({
+          names: await collectBoundedPages({
+            decodePage: p => ({ items: p?.policyNames, nextToken: p?.marker }),
+            fetchPage: marker => adapter.listInlinePolicies({roleName, marker}), label: 'observer inline policy listing',
+          }),
+          attached: await collectBoundedPages({
+            decodePage: p => ({ items: p?.policies, nextToken: p?.marker }),
+            fetchPage: marker => adapter.listAttachedPolicies({roleName, marker}), label: 'observer attached policy listing',
+          }),
+        });
+        const before = await readPolicies();
+        if (before.names.length !== 1 || before.names[0] !== 'ObserverReadOnly' || before.attached.length !== 0) {
+          throw new Error('Observer policy inventory mismatch');
+        }
+        const policy = await adapter.getInlinePolicy({roleName, policyName: 'ObserverReadOnly'});
+        role.arn = response.Role?.Arn;
+        role.inlinePolicies = [{name: 'ObserverReadOnly', document: policy.document}];
+        role.attachedPolicyArns = [];
+        const docs = assertObserverRole(roleName, role, {...identity, applicationRegion});
+        const policyAfter = await adapter.getInlinePolicy({roleName, policyName: 'ObserverReadOnly'});
+        assertObserverRole(roleName, {...role, inlinePolicies: [{name: 'ObserverReadOnly', document: policyAfter.document}]}, {...identity, applicationRegion});
+        if (JSON.stringify(canonical(JSON.parse(serializePolicyInput(policy.document)))) !==
+            JSON.stringify(canonical(JSON.parse(serializePolicyInput(policyAfter.document))))) {
+          throw new Error('Observer inline policy changed during readback');
+        }
+        const after = await invokeAwsCommand(['iam', 'get-role', '--role-name', roleName]);
+        if (response.Role?.RoleName !== roleName || typeof response.Role?.RoleId !== 'string' || !response.Role.RoleId ||
+            JSON.stringify(canonical(response.Role)) !== JSON.stringify(canonical(after.Role)) ||
+            JSON.stringify(canonical(before)) !== JSON.stringify(canonical(await readPolicies()))) {
+          throw new Error('Observer role changed during readback');
+        }
+        const snapshot = JSON.stringify(canonical({id: response.Role.RoleId, docs}));
+        if (observerRoleSnapshots.has(roleName) && observerRoleSnapshots.get(roleName) !== snapshot) {
+          throw new Error('Observer role bindings changed during rollout');
+        }
+        observerRoleSnapshots.set(roleName, snapshot);
+      }
+      return role;
     },
 
     async updateAssumeRolePolicy({ roleName, policyDocument }) {
@@ -1173,29 +1215,39 @@ export function createAwsCliAdapter({
               const documentsBefore = await verifyLivePolicyDocuments();
               const scaffoldDocuments = documentsBefore.filter(document => document.Statement.some(statement => statement.Sid === "DenyGatewayBoundaryOnOtherRoles"));
               if (scaffoldDocuments.length !== 1) return false;
+              const observerDocuments = documentsBefore.filter(document => document.Statement.some(statement => statement.Sid === 'DenyObserverBoundaryOnOtherRoles'));
+              if (observerDocuments.length !== 1) return false;
               const denyPolicyBefore = await readDenyPolicyState({
                 includeDocument: true,
               });
               if (!denyPolicyBefore) return false;
               const gatewayArn = gatewayBoundaryArn({partition, accountId});
+              const observerArn = observerBoundaryArn({partition, accountId});
+              const observerRole = `arn:${partition}:iam::${accountId}:role/mem9-on-aws-pr-7-ObserverControlTaskRole-012345abcdef`;
               const actualProbes = [...probes,
                 {action:'iam:CreatePolicyVersion',resource:gatewayArn},
                 {action:'iam:CreateRole',resource:probeRoleArn,selectedBoundary:gatewayArn},
                 {action:'iam:CreateRole',resource:vpcProxyRoleArn,selectedBoundary:boundaryArn},
+                {action:'iam:CreatePolicyVersion',resource:observerArn},
+                {action:'iam:CreateRole',resource:probeRoleArn,selectedBoundary:observerArn,observerProbe:true},
+                {action:'iam:CreateRole',resource:vpcProxyRoleArn,selectedBoundary:observerArn,observerProbe:true},
+                {action:'iam:CreateRole',resource:observerRole,selectedBoundary:boundaryArn,observerProbe:true},
+                {action:'iam:CreateRole',resource:observerRole,selectedBoundary:gatewayArn,observerProbe:true},
+                {action:'iam:PassRole',resource:observerRole,selectedBoundary:observerArn,passedTo:'lambda.amazonaws.com',observerProbe:true},
               ];
-              for (const { action, resource, selectedBoundary } of actualProbes) {
+              for (const { action, resource, selectedBoundary, observerProbe, passedTo = 'ecs-tasks.amazonaws.com' } of actualProbes) {
                 const response = await invokeAwsCommand([
                   "iam",
                   "simulate-custom-policy",
                   "--policy-input-list",
-                  serializePolicyInput(selectedBoundary ? scaffoldDocuments[0] : denyPolicyBefore.document),
+                  serializePolicyInput(observerProbe ? observerDocuments[0] : selectedBoundary ? scaffoldDocuments[0] : denyPolicyBefore.document),
                   "--action-names",
                   action,
                   "--resource-arns",
                   resource,
                   "--context-entries",
                   "ContextKeyName=iam:PassedToService," +
-                    "ContextKeyValues=ecs-tasks.amazonaws.com," +
+                  `ContextKeyValues=${passedTo},` +
                     "ContextKeyType=string",
                   ...(selectedBoundary ? [`ContextKeyName=iam:PermissionsBoundary,ContextKeyValues=${selectedBoundary},ContextKeyType=string`] : []),
                 ]);
