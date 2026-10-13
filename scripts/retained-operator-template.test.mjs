@@ -23,6 +23,35 @@ function edited(mutate){
 const rolePolicies=['Resources','GitHubPreviewActionsRole','Properties','Policies'];
 const extraPolicy=Statement=>({PolicyName:'synthetic-extra',PolicyDocument:{Version:'2012-10-17',Statement}});
 
+function previewInlineBytes(){
+  const doc=parseDocument(source,{uniqueKeys:true,customTags:[
+    ...['Ref','Sub','GetAtt'].map(name=>({tag:'!'+name,resolve:value=>({[name]:value})})),
+    ...['If','Equals','Not'].map(name=>({tag:'!'+name,collection:'seq',resolve:value=>({[name]:value.toJSON()})})),
+  ]});
+  expect(doc.errors).toEqual([]);
+  const template=doc.toJS(),noValue=Symbol('NoValue');
+  const values={...Object.fromEntries(Object.entries(template.Parameters).map(([key,value])=>[key,value.Default])),...parameters};
+  const render=value=>{
+    if(Array.isArray(value))return value.map(render).filter(item=>item!==noValue);
+    if(!value||typeof value!=='object')return value;
+    if('Ref' in value){if(value.Ref==='AWS::NoValue')return noValue;expect(values[value.Ref]).toBeDefined();return values[value.Ref];}
+    if('Sub' in value)return value.Sub.replace(/\$\{([^}]+)\}/gu,(_,key)=>{expect(values[key]).toBeDefined();return values[key];});
+    if('If' in value){const [condition,yes,no]=value.If;expect(template.Conditions[condition]).toBeDefined();return render(render(template.Conditions[condition])?yes:no);}
+    if('Equals' in value)return render(value.Equals[0])===render(value.Equals[1]);
+    if('Not' in value)return !render(value.Not[0]);
+    expect(value.GetAtt).toBeUndefined();
+    return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,render(item)]));
+  };
+  const role='GitHubPreviewActionsRole';
+  const documents=(template.Resources[role].Properties.Policies??[]).map(policy=>render(policy.PolicyDocument));
+  for(const resource of Object.values(template.Resources)){
+    if(resource.Type==='AWS::IAM::Policy'&&resource.Properties.Roles.some(ref=>ref.Ref===role)){
+      documents.push(render(resource.Properties.PolicyDocument));
+    }
+  }
+  return documents.reduce((bytes,document)=>bytes+JSON.stringify(document).length,0);
+}
+
 describe('retained operator deployment preflight',()=>{
   it.each(['true','false'])('renders managed, role-inline and separate policy resources with legacy=%s',async LegacyRoleEnabled=>{
     const sizes=await verifyAuthorizationDeploymentTemplate(source,{...parameters,LegacyRoleEnabled});
@@ -33,9 +62,10 @@ describe('retained operator deployment preflight',()=>{
     expect(JSON.stringify(quarantinePolicyDocument()).length).toBe(123);
   });
   it('includes quarantine at the exact aggregate inline quota boundary',async()=>{
-    // Independently rendered preview fixture: existing stage isolation plus the
-    // separate protection total 5812 bytes before the 123-byte quarantine.
-    const available=10240-5812-JSON.stringify(quarantinePolicyDocument()).length;
+    // Count the role's own policies and every standalone policy attached to it,
+    // including shared observer pairing, before reserving the owned quarantine.
+    const baseline=previewInlineBytes()+JSON.stringify(quarantinePolicyDocument()).length;
+    const available=10240-baseline;
     for(const excess of [0,1]){
       const extra=extraPolicy([{Effect:'Deny',Action:'s3:GetObject',Resource:[
         `arn:aws:s3:::synthetic-${accountId}/${'x'.repeat(2000)}`,
@@ -43,6 +73,7 @@ describe('retained operator deployment preflight',()=>{
       ]}]);
       extra.PolicyDocument.Statement[0].Resource[1]+='y'.repeat(available+excess-JSON.stringify(extra.PolicyDocument).length);
       expect(JSON.stringify(extra.PolicyDocument).length).toBe(available+excess);
+      expect(baseline+JSON.stringify(extra.PolicyDocument).length).toBe(10240+excess);
       const changed=edited(doc=>doc.getIn(rolePolicies).add(extra));
       if(excess)await expect(verifyAuthorizationDeploymentTemplate(changed,parameters)).rejects.toThrow(/inline policy quota/u);
       else await expect(verifyAuthorizationDeploymentTemplate(changed,parameters)).resolves.toBeDefined();
