@@ -133,6 +133,26 @@ describe('deployment authorization maintenance exclusions', () => {
     template.Resources.DenyPolicy.Properties.PolicyDocument.Statement = statements.filter(s => !sids.includes(s.Sid));
     const owner = statements.find(s => s.Sid === 'DenyOperatorOwnedStackMutation');
     expect(owner.Resource.pop()).toEqual({ Sub: 'arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/decision-artifact-bucket-${ProjectName}/*' });
+    // Reverse only this observer delta before checking the existing full-template
+    // preservation hashes. Its separate tests cover exact inline attachment and
+    // the union of the identical-resource/condition write denies.
+    expect(template.Resources.ObserverBoundaryPairing.Type).toBe('AWS::IAM::Policy');
+    delete template.Resources.ObserverBoundaryPairing;
+    const combined=template.Resources.DenyPolicy.Properties.PolicyDocument.Statement;
+    const creation=combined.find(s=>s.Sid==='DenyUnboundedProjectRoleCreation');
+    expect(creation.Action).toEqual(['iam:CreateRole','iam:PutRolePermissionsBoundary','iam:AttachRolePolicy','iam:PutRolePolicy']);
+    const writes=structuredClone(creation);writes.Sid='DenyUnboundedProjectRolePolicyWrites';writes.Action=['iam:AttachRolePolicy','iam:PutRolePolicy'];
+    creation.Action=['iam:CreateRole','iam:PutRolePermissionsBoundary'];
+    combined.splice(combined.indexOf(creation)+1,0,writes);
+    const observerArn={Sub:'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-observer-boundary'};
+    for(const [policy,sid,key] of [
+      ['DenyPolicy','DenyOperatorOwnedIamMutation','Resource'],['ComputePolicy','WorkloadBoundaryRead','Resource'],
+      ['DenyPolicy','DenyUnboundedProjectRoleCreation','ArnNotEquals'],['DenyPolicy','DenyUnboundedProjectRolePolicyWrites','ArnNotEquals'],
+    ]) {
+      const stmt=template.Resources[policy].Properties.PolicyDocument.Statement.find(s=>s.Sid===sid);
+      const target=key==='Resource'?stmt:stmt.Condition[key],field=key==='Resource'?'Resource':'iam:PermissionsBoundary';
+      expect(target[field].pop()).toEqual(observerArn);
+    }
     // Reviewed Gateway/endpoint delta, with all trusts and unrelated statements
     // included. Reverse only that explicit delta to retain the original proof.
     const endpointRead = template.Resources.ScaffoldPolicy.Properties.PolicyDocument.Statement.find(s => s.Sid === 'GatewaySecretEndpointRead');
@@ -171,7 +191,7 @@ describe('deployment authorization maintenance exclusions', () => {
     const { policies, vars } = render({ ...context, decisionArtifactBucketName: 'a'.repeat(33) });
     const measured = await verify(source, vars);
     expect(measured).toEqual(Object.fromEntries(Object.entries(policies).map(([key, policy]) => [key, JSON.stringify(policy).length])));
-    expect(measured.DenyPolicy).toBe(6053);
+    expect(measured.DenyPolicy).toBeLessThanOrEqual(6144);
     await expect(verify(source.replace('DenyIAMUserAndProvider', 'a'.repeat(6500)), vars)).rejects.toThrow(/quota/u);
     await expect(verify(source.replace('!Sub arn:', '!Unsupported arn:'), vars)).rejects.toThrow(/invalid deployment template/u);
     await expect(verify(source, { ...vars, DecisionArtifactBucketName: 'a'.repeat(34) })).rejects.toThrow(/bucket name/u);

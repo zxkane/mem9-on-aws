@@ -47,6 +47,7 @@ Parameters:
 
 Conditions:
   HasOpenAiBedrockProject: !Not [!Equals [!Ref OpenAiBedrockProjectArn, ""]]
+  InitialObserverRevision: !Equals [!Ref PolicyRevision, "r1"]
 
 Resources:
   WorkloadPermissionsBoundary:
@@ -161,7 +162,7 @@ Resources:
           # The statement above scopes the write to the PROJECT prefix, i.e. every
           # stage's whole SSM tree. That is too wide for a write, and this ceiling
           # is the only control on it: identity policies are PR-authored, and the
-          # deploy role's DenyUnboundedProjectRolePolicyWrites only requires that
+          # deploy role's DenyUnboundedProjectRoleCreation only requires that
           # the boundary be ATTACHED, never constrains its content. Preview roles
           # are bounded too, so without this a PR could grant one of its own
           # preview Lambdas ssm:PutParameter on /mem9-on-aws/prod/* and overwrite
@@ -487,7 +488,142 @@ Resources:
               "Null":
                 lambda:SourceFunctionArn: "false"
 
+  ObserverPermissionsBoundary:
+    Type: "AWS::IAM::ManagedPolicy"
+    DeletionPolicy: "Retain"
+    UpdateReplacePolicy: "Retain"
+    Properties:
+      ManagedPolicyName: "mem9-on-aws-observer-boundary"
+      Description: "Exact preview CONTROL credential reads; operator-owned ceiling"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: !If [InitialObserverRevision, ReadOnlyCeiling, !Sub "ReadOnlyCeiling${PolicyRevision}"]
+            Effect: "Allow"
+            Action:
+              - "ssm:GetParameter"
+              - "secretsmanager:GetSecretValue"
+              - "kms:Decrypt"
+            Resource: "*"
+          - Sid: "NoOtherAction"
+            Effect: "Deny"
+            NotAction:
+              - "ssm:GetParameter"
+              - "secretsmanager:GetSecretValue"
+              - "kms:Decrypt"
+            Resource: "*"
+          - Sid: "RoleBinding"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                aws:PrincipalArn: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-${!aws:PrincipalTag/Stage}-ObserverControlTaskRole-????????????"
+          - Sid: "ProjectBinding"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                aws:PrincipalTag/Project: "mem9-on-aws"
+          - Sid: "PreviewOnly"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              StringNotLike:
+                aws:PrincipalTag/Stage: "pr-?*"
+          - Sid: "RegionBinding"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              StringNotEquals:
+                aws:RequestedRegion: !Sub "${ApplicationRegion}"
+          - Sid: "MissingObserverTenantSuffix"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              "Null":
+                aws:PrincipalTag/ObserverTenantSuffix: "true"
+          - Sid: "MissingNamespaceIdentitySuffix"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              "Null":
+                aws:PrincipalTag/NamespaceIdentitySuffix: "true"
+          - Sid: "MissingObserverSsmKeyId"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              "Null":
+                aws:PrincipalTag/ObserverSsmKeyId: "true"
+          - Sid: "MissingObserverSecretKeyId"
+            Effect: "Deny"
+            Action: "*"
+            Resource: "*"
+            Condition:
+              "Null":
+                aws:PrincipalTag/ObserverSecretKeyId: "true"
+          - Sid: "OtherParameters"
+            Effect: "Deny"
+            Action: "ssm:GetParameter"
+            NotResource:
+              - !Sub "arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/cognito/client-id"
+              - !Sub "arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/cognito/client-secret"
+              - !Sub "arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/namespace/transport-signing-keys"
+          - Sid: "OtherSecrets"
+            Effect: "Deny"
+            Action: "secretsmanager:GetSecretValue"
+            NotResource:
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-tenant-api-key-${!aws:PrincipalTag/ObserverTenantSuffix}"
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-identity-signing-keys-${!aws:PrincipalTag/NamespaceIdentitySuffix}"
+          - Sid: "OtherKeys"
+            Effect: "Deny"
+            Action: "kms:Decrypt"
+            NotResource:
+              - !Sub "arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/${!aws:PrincipalTag/ObserverSsmKeyId}"
+              - !Sub "arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/${!aws:PrincipalTag/ObserverSecretKeyId}"
+          - Sid: "SsmKeyService"
+            Effect: "Deny"
+            Action: "kms:Decrypt"
+            Resource: !Sub "arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/${!aws:PrincipalTag/ObserverSsmKeyId}"
+            Condition:
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub "ssm.${ApplicationRegion}.${AWS::URLSuffix}"
+          - Sid: "SsmKeyContext"
+            Effect: "Deny"
+            Action: "kms:Decrypt"
+            Resource: !Sub "arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/${!aws:PrincipalTag/ObserverSsmKeyId}"
+            Condition:
+              StringNotEqualsIfExists:
+                kms:EncryptionContext:PARAMETER_ARN:
+                  - !Sub "arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/cognito/client-secret"
+                  - !Sub "arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${!aws:PrincipalTag/Stage}/namespace/transport-signing-keys"
+          - Sid: "SecretKeyService"
+            Effect: "Deny"
+            Action: "kms:Decrypt"
+            Resource: !Sub "arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/${!aws:PrincipalTag/ObserverSecretKeyId}"
+            Condition:
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub "secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}"
+          - Sid: "SecretKeyContext"
+            Effect: "Deny"
+            Action: "kms:Decrypt"
+            Resource: !Sub "arn:${AWS::Partition}:kms:${ApplicationRegion}:${AWS::AccountId}:key/${!aws:PrincipalTag/ObserverSecretKeyId}"
+            Condition:
+              StringNotEqualsIfExists:
+                kms:EncryptionContext:SecretARN:
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-tenant-api-key-${!aws:PrincipalTag/ObserverTenantSuffix}"
+                  - !Sub "arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-${!aws:PrincipalTag/Stage}-identity-signing-keys-${!aws:PrincipalTag/NamespaceIdentitySuffix}"
+
 Outputs:
+  ObserverPolicyArn:
+    Description: ARN of the retained preview CONTROL observer boundary
+    Value: !Ref ObserverPermissionsBoundary
   GatewayPolicyArn:
     Description: ARN of the retained Gateway Lambda boundary
     Value: !Ref GatewayPermissionsBoundary

@@ -62,6 +62,7 @@ if ! contract_identifiers="$(jq -ce '
     | select(
         (.boundaryPolicyName | type) == "string" and
         (.gatewayBoundaryPolicyName | type) == "string" and
+        (.observerBoundaryPolicyName | type) == "string" and
         (.boundaryStackName | type) == "string" and
         (.denyDangerousPolicyName | type) == "string" and
         (.deployRoleName | type) == "string" and
@@ -75,6 +76,7 @@ fi
 stack_name="$(jq -r '.boundaryStackName' <<<"$contract_identifiers")"
 policy_name="$(jq -r '.boundaryPolicyName' <<<"$contract_identifiers")"
 gateway_policy_name="$(jq -r '.gatewayBoundaryPolicyName' <<<"$contract_identifiers")"
+observer_policy_name="$(jq -r '.observerBoundaryPolicyName' <<<"$contract_identifiers")"
 deploy_role_name="$(jq -r '.deployRoleName' <<<"$contract_identifiers")"
 quarantine_policy_name="$(jq -r '.quarantinePolicyName' <<<"$contract_identifiers")"
 node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || true)"
@@ -259,7 +261,8 @@ verify_boundary_policy_at_base() {
     "scripts/lib/authorization-archive-policy.mjs" \
     "scripts/lib/authorization-maintenance-isolation.mjs" \
     "scripts/lib/retained-operator-protection.mjs" \
-    "scripts/lib/gateway-workload-boundary.mjs"; do
+    "scripts/lib/gateway-workload-boundary.mjs" \
+    "scripts/lib/observer-workload-boundary.mjs"; do
     if GIT_NO_REPLACE_OBJECTS=1 git cat-file -e "${base_ref}:${source_path}" 2>/dev/null; then
       verifier_sources+=("$source_path")
       needs_dependencies=true
@@ -527,8 +530,55 @@ verify_gateway_boundary_policy() {
   [[ "$version_after" == "$default_version" ]] || { echo "Gateway boundary changed during verification." >&2; return 1; }
 }
 
+verify_observer_boundary_policy() {
+  local observer_arn default_version boundary_policy version_after probes rows row result action resource expected context_lines
+  local -a contexts
+  # The canonical policy exists even when the optional observer role inventory
+  # is empty. Read the owner resource and its current default version exactly.
+  observer_arn="$(read_policy_arn ObserverPermissionsBoundary)" || return 1
+  [[ "$observer_arn" == "arn:${partition}:iam::${account_id}:policy/${observer_policy_name}" ]] || return 1
+  default_version="$(aws iam get-policy --policy-arn "$observer_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  [[ "$default_version" =~ ^v[1-9][0-9]*$ ]] || return 1
+  boundary_policy="$(aws iam get-policy-version --policy-arn "$observer_arn" --version-id "$default_version" --query PolicyVersion.Document --output json 2>/dev/null)" || return 1
+  WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+    WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+    node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --observer <<<"$boundary_policy" || return 1
+  probes="$(WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+    WORKLOAD_BOUNDARY_PARTITION="$partition" \
+    node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --observer-probes </dev/null)" || return 1
+  rows="$(jq -cer 'select(type == "array" and length > 0) | .[] |
+    select((.action | type) == "string" and (.resource | type) == "string" and
+      (.expected == "allowed" or .expected == "explicitDeny") and (.context | type) == "object")' <<<"$probes")" || return 1
+  [[ "$(wc -l <<<"$rows")" -eq "$(jq -er length <<<"$probes")" ]] || return 1
+  while IFS= read -r row; do
+    action="$(jq -er .action <<<"$row")" || return 1
+    resource="$(jq -er .resource <<<"$row")" || return 1
+    expected="$(jq -er .expected <<<"$row")" || return 1
+    context_lines="$(jq -er '.context | to_entries[] | "ContextKeyName=\(.key),ContextKeyType=string,ContextKeyValues=\(.value)"' <<<"$row")" || return 1
+    mapfile -t contexts <<<"$context_lines"
+    result="$(aws iam simulate-custom-policy --policy-input-list "$boundary_policy" \
+      --action-names "$action" --resource-arns "$resource" --context-entries "${contexts[@]}" --output json 2>/dev/null)" || return 1
+    jq -e --arg action "$action" --arg resource "$resource" --arg expected "$expected" '
+      ((has("IsTruncated") | not) or .IsTruncated == false) and (has("Marker") | not) and
+      (.EvaluationResults | type == "array" and length == 1) and
+      .EvaluationResults[0].EvalActionName == $action and
+      .EvaluationResults[0].EvalResourceName == $resource and
+      .EvaluationResults[0].EvalDecision == $expected and
+      (if $expected == "allowed" then ((.EvaluationResults[0].MissingContextValues // []) == []) else true end) and
+      (if .EvaluationResults[0] | has("ResourceSpecificResults") then
+        (.EvaluationResults[0].ResourceSpecificResults | type == "array" and length == 1) and
+        all(.EvaluationResults[0].ResourceSpecificResults[];
+          .EvalResourceName == $resource and .EvalResourceDecision == $expected and
+          (if $expected == "allowed" then ((.MissingContextValues // []) == []) else true end))
+       else true end)
+    ' <<<"$result" >/dev/null || { echo "Observer boundary simulation failed." >&2; return 1; }
+  done <<<"$rows"
+  version_after="$(aws iam get-policy --policy-arn "$observer_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  [[ "$version_after" == "$default_version" ]] || { echo "Observer boundary changed during verification." >&2; return 1; }
+}
+
 verify_all_boundaries() {
-  verify_boundary_policy && verify_gateway_boundary_policy
+  verify_boundary_policy && verify_gateway_boundary_policy && verify_observer_boundary_policy
 }
 
 verify_guarded_update() {

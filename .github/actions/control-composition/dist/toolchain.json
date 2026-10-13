@@ -15402,8 +15402,8 @@
     },
     {
       "path": "scripts/deploy-workload-permissions-boundary.sh",
-      "sha256": "be5014e0dbbd324cb0a6afe9b80aeed9b78175cb025007f92bce56b00bc937bc",
-      "bytesLength": 34006
+      "sha256": "3dfb6f4f280f7d582e253d4f2d51496efafdbb6ca30bc2d3554b4cdef771cecb",
+      "bytesLength": 38052
     },
     {
       "path": "scripts/dispatch-memory-consolidation.mjs",
@@ -15684,6 +15684,11 @@
       "path": "scripts/lib/nonroot-preview-source.mjs",
       "sha256": "42e269421b427dc4b18124e081432b1b809eef00a3140c415315592160fd8801",
       "bytesLength": 20097
+    },
+    {
+      "path": "scripts/lib/observer-workload-boundary.mjs",
+      "sha256": "ebc0ccb42096888b7e4788ab79adfcd04b625420d4f2337dd43f732e62ef24d5",
+      "bytesLength": 15912
     },
     {
       "path": "scripts/lib/post-runtime-preview-authority.mjs",
@@ -16787,13 +16792,13 @@
     },
     {
       "path": "scripts/lib/workload-permissions-boundary-aws.mjs",
-      "sha256": "1cf2498d1e7f65aa66add39ec3a62561a6f3585c36ef272d3664c4273924391c",
-      "bytesLength": 46633
+      "sha256": "2d0f33a7b5a09ba822eed4f0d5e96fedddedd1f8993f3a43329a53f1ca5c0603",
+      "bytesLength": 50631
     },
     {
       "path": "scripts/lib/workload-permissions-boundary.mjs",
-      "sha256": "8b8452b5226e23b0e4e2ebc41eecbf88cabebc9160c9458a4d842f78c531b662",
-      "bytesLength": 85296
+      "sha256": "370574a576ed9b8a12625457049cf0fefffc51085ca2e25981a56c3667f6b992",
+      "bytesLength": 87349
     },
     {
       "path": "scripts/manage-memory-services.mjs",
@@ -16997,13 +17002,13 @@
     },
     {
       "path": "scripts/verify-workload-permissions-boundary.mjs",
-      "sha256": "96979f835b3ba81dd46438e0687ad96c0525be1121fc9b2a60cdae213c8ef7f9",
-      "bytesLength": 2603
+      "sha256": "fba24f8d18ebb61422981e79fb96c2f8b3b2c9dd4e1cb6a9e345ee022ceb69a8",
+      "bytesLength": 3022
     },
     {
       "path": "scripts/workload-permissions-boundary-contract.json",
-      "sha256": "eaed3b03bd9c602c096cfb5499d8961d50207f1baa0bb7a3777601dbd0c3787e",
-      "bytesLength": 1429
+      "sha256": "5f851ff333179fd87f4b64348fefa1a2ee6c27ecdaab0d3e5de0718ee1a645c3",
+      "bytesLength": 1496
     },
     {
       "path": "sst.config.ts",

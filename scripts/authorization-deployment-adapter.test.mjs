@@ -12,7 +12,7 @@ const arg = (args, name) => args[args.indexOf(name) + 1];
 const boundaryArn = `arn:aws:iam::${accountId}:policy/mem9-on-aws-workload-boundary`;
 const denyArn = `arn:aws:iam::${accountId}:policy/mem9-on-aws-deny-dangerous`;
 const computeArn = `arn:aws:iam::${accountId}:policy/synthetic-compute`;
-function enforcementPolicies() {
+function enforcementPolicies(includeObserver = false) {
   const template = parse(readFileSync(new URL("../infra/cloudformation/github-actions-role.yaml", import.meta.url), "utf8"), {
     customTags: ["!Ref", "!Sub", "!GetAtt"].map(tag => ({tag, resolve: value => value}))
       .concat(["!If", "!Equals", "!Not"].map(tag => ({tag, collection: "seq", resolve: value => value}))),
@@ -24,6 +24,7 @@ function enforcementPolicies() {
     ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, render(v)])) : typeof value === "string"
       ? Object.hasOwn(values, value) ? values[value] : value.replace(/\$\{([^}]+)\}/g, (_, key) => values[key] ?? `unresolved:${key}`)
       : value;
+  if (includeObserver) return render(template.Resources.ObserverBoundaryPairing.Properties.PolicyDocument);
   return new Map([[denyArn, render(template.Resources.DenyPolicy.Properties.PolicyDocument)],
     [computeArn, render(template.Resources.ComputePolicy.Properties.PolicyDocument)],
     [`arn:aws:iam::${accountId}:policy/synthetic-scaffold`,render(template.Resources.ScaffoldPolicy.Properties.PolicyDocument)]]);
@@ -53,6 +54,7 @@ function fixture({deployEnforcement} = {}) {
         if (deletionStarted && name === failRestore) throw Error("synthetic restore failure");
         quarantined.add(name); return {};
       case "iam get-role-policy":
+        if (arg(args, '--policy-name') === 'observer-boundary-pairing') return {PolicyDocument:enforcementPolicies(true)};
         if (deletionStarted && recoveryRead) recoveryRead(name);
         if (!quarantined.has(name)) throw Error("synthetic missing policy");
         return {PolicyDocument: quarantinePolicyDocument()};
@@ -71,7 +73,7 @@ function fixture({deployEnforcement} = {}) {
         deletionStarted = true; quarantined.delete(name);
         if (name === failDelete) throw Error("synthetic lost delete response");
         return {};
-      case "iam list-role-policies": return {PolicyNames: quarantined.has(name) ? [QUARANTINE_POLICY_NAME] : [], IsTruncated: false};
+      case "iam list-role-policies": return {PolicyNames: ["observer-boundary-pairing", ...(quarantined.has(name) ? [QUARANTINE_POLICY_NAME] : [])], IsTruncated: false};
       default: throw Error(`unexpected synthetic command ${op}`);
     }
   };

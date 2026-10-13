@@ -910,6 +910,48 @@ a missing or malformed value fails synthesis. The deploy-role policy
 requires that exact boundary for role creation, boundary attachment, and
 subsequent policy writes; it denies boundary removal and mutation of the
 boundary policy or operator-owned stacks.
+
+The same owner stack also retains `mem9-on-aws-observer-boundary` for an
+optional preview CONTROL task role. The owner stack creates the policy only;
+the preview deployment owns the role and its cleanup. Ordinary workload and
+Gateway policy documents keep their existing permissions. The observer class
+uses the full name `mem9-on-aws-pr-<number>-ObserverControlTaskRole-<12-hex>`
+within IAM's role-name limit. The strict source matcher rejects malformed
+reserved names instead of treating them as ordinary workloads.
+
+This ceiling admits only singular `ssm:GetParameter`,
+`secretsmanager:GetSecretValue`, and `kms:Decrypt`: three exact preview SSM
+paths, two exact secret ARNs, and two distinct KMS keys with four exact service
+and encryption-context bindings. The client ID is an unencrypted String;
+the client secret and transport-signing keys use the SSM key, while the tenant
+and identity-signing secrets use the Secrets Manager key. It admits no ECS,
+discovery, IAM, STS, tagging, or ECS Exec actions. Explicit denies constrain
+actions, resources, principal, stage, region, missing tags, and KMS context,
+including resource-policy grants directly to an assumed-role session.
+
+The accepted trusted role-writer model also applies to this class. The writer
+derives six policy tags from authenticated source references: Project, Stage,
+two exact secret suffixes, and two key IDs. Strict source validation and repeated
+readback bind these tags to the numeric preview stage and role name. IAM glob
+matching does not enforce numeric or hexadecimal syntax. A malicious authorized
+IAM writer remains outside this guarantee; the CONTROL role cannot change tags
+or assume another session, and its ECS-only trust has no `sts:TagSession`.
+The immutable operation cutoff appears literally in both the trust's
+`DateLessThan` and the inline policy's `Deny` with `DateGreaterThanEquals`.
+The latter denies already-issued sessions after the cutoff. Inventory checks
+may retain expired roles for cleanup; they never extend their cutoff.
+
+Deployment policies separately allow the observer family with its canonical
+boundary and explicitly deny wrong role/boundary pairings in both directions,
+including use of the old boundaries on observer roles. Passing an observer role
+to a service other than ECS tasks is denied. The original owner verifier checks
+the policy's current default version and positive/negative IAM simulations even
+when no observer role exists. It checks each present observer's trust, inline
+policy, tags, and stable identity across the rollout. The existing force-revision
+mechanism changes only a statement identifier when reconciling policy drift.
+Local synthetic policy tests do not substitute for native IAM simulation,
+scanner review, or deployment readback.
+
 A global `sst.aws.Function` component transform, registered before any stack
 module is imported, gives every application Function an exact execution-role
 trust containing only `lambda.amazonaws.com`. The pinned SST version otherwise
@@ -988,9 +1030,10 @@ reads the production AgentCore Gateway, and requires every ECS task/execution,
 Lambda execution, and Gateway service role to belong to the migration inventory.
 That live binding set is re-read at every frozen-state verification. It attaches
 and reads back every role boundary. The two Gateway Lambda families use the
-fixed Gateway boundary from the same owner stack; other roles retain the
-original workload boundary. The rollout validates Gateway Project/Stage tags,
-repairs and re-verifies both exact active policy documents and default versions,
+fixed Gateway boundary from the same owner stack; optional preview CONTROL
+roles use the observer boundary. Remaining roles retain the original workload
+boundary. The rollout validates each class's role/tag bindings, repairs and
+re-verifies the exact active policy documents and default versions,
 then activates and reads back the production
 transform variable. Immediately before quarantine deletion it requires the
 default branch to remain at the reviewed commit, both reviewed workflow blobs
@@ -1155,8 +1198,9 @@ to the GitHub Actions deploy role.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Every application IAM role uses a fixed operator-owned boundary. The two
-  Gateway Lambda families use the narrower Gateway boundary; all other roles
-  retain the workload boundary. Live adoption uses the same guarded migration.
+  Gateway Lambda families use the narrower Gateway boundary; optional preview
+  CONTROL roles use the observer boundary. Remaining roles retain the workload
+  boundary. Live adoption uses the same guarded migration.
 - Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
 - Durable ingest emits job lifecycle, queue-age, sampler-heartbeat,
   phase-duration, retry, warning, truncation, and zero-fact metrics in

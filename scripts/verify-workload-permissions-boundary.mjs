@@ -4,9 +4,11 @@ import {
   boundaryPolicyDriftDiagnostic,
   verifyBoundaryPolicyDocument,
   verifyGatewayBoundaryPolicyDocument,
+  verifyObserverBoundaryPolicyDocument,
   verifyQuarantinePolicy,
 } from "./lib/workload-permissions-boundary.mjs";
 import {gatewayBoundaryProbeCases,gatewayBoundaryVerificationPlan} from './lib/gateway-workload-boundary.mjs';
+import {observerBoundaryProbeCases} from './lib/observer-workload-boundary.mjs';
 
 try {
   let input = "";
@@ -31,6 +33,10 @@ try {
     process.stdout.write(JSON.stringify(gatewayBoundaryProbeCases(contract))+'\n');
     process.exit(0);
   }
+  if (process.argv[2] === '--observer-probes') {
+    process.stdout.write(JSON.stringify(observerBoundaryProbeCases(contract))+'\n');
+    process.exit(0);
+  }
   if(process.argv[2]==='--gateway-simulation-probes'){
     process.stdout.write(JSON.stringify(gatewayBoundaryVerificationPlan(contract).simulation)+'\n');process.exit(0);
   }
@@ -39,15 +45,17 @@ try {
     await requestGatewayRuntimeSourceGate({boundary:input,contract,policyVersion:process.env.WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION});process.exit(0);
   }
   const gateway = process.argv[2] === '--gateway';
+  const observer = process.argv[2] === '--observer';
   const valid = quarantine
     ? verifyQuarantinePolicy(input)
-    : gateway ? verifyGatewayBoundaryPolicyDocument(input, contract) : verifyBoundaryPolicyDocument(input, contract);
+    : gateway ? verifyGatewayBoundaryPolicyDocument(input, contract)
+      : observer ? verifyObserverBoundaryPolicyDocument(input, contract) : verifyBoundaryPolicyDocument(input, contract);
   if (!valid) {
     const label = quarantine
       ? "Deploy-role quarantine"
       : "Workload permissions-boundary";
     process.stderr.write(`${label} policy read-back mismatch.\n`);
-    if (!quarantine && !gateway) {
+    if (!quarantine && !gateway && !observer) {
       process.stderr.write(
         `${boundaryPolicyDriftDiagnostic(input, contract)}\n`,
       );
