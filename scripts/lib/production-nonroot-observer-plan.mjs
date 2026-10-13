@@ -1,5 +1,6 @@
 import {observerSessionPurposes,observerProviderPurpose,observerCleanupPurpose} from './production-nonroot-observer-sessions.mjs';
 import {inspectObserverTopologyPlan} from './production-nonroot-observer-topology.mjs';
+import {observerPeerPreparationWork} from './production-nonroot-observer-peer-inventory.mjs';
 import {OBSERVER_ACCOUNTING_V3,OBSERVER_ACCOUNTING_LOCAL,OBSERVER_RESOURCE_READS,OBSERVER_RESOURCE_READ_LOCAL,observerAccountingJournalRecords,observerCaseVersion,inspectObserverAccounting,observerBackendAdmissionId,observerBackendAdmissionWork,observerVerificationCaptures} from './production-nonroot-observer-accounting.mjs';
 import {OBSERVER_WORKER_BIND_LOCAL,observerNeedsWorkerJob,observerWorkerJobLocal,observerWorkerAnchorLocal} from './production-nonroot-observer-worker-job.mjs';
 /** Portable original observer plan and quote arithmetic. Every identity,
@@ -331,7 +332,8 @@ function inspectObserverPlan(p){
  counter(g.sourcePreparation);counter(g.cache);counter(g.prerequisiteReplay);
  if(g.control){
   const rehearsalKeys=['rehearsalAcquisition','rehearsalCi','rehearsalNative'];
-  exact(g.control,['source','cache','proof','runtime','rawDeliveryBytes','compressedDeliveryBytes','taskPolls','logPages',...(Object.hasOwn(g.control,'observation')?['observation']:[]),...rehearsalKeys.filter(k=>Object.hasOwn(g.control,k))]);
+  exact(g.control,['source','cache','proof','runtime','rawDeliveryBytes','compressedDeliveryBytes','taskPolls','logPages',...(Object.hasOwn(g.control,'observation')?['observation']:[]),...(Object.hasOwn(g.control,'peerInventoryVersion')?['peerInventoryVersion']:[]),...rehearsalKeys.filter(k=>Object.hasOwn(g.control,k))]);
+  if(Object.hasOwn(g.control,'peerInventoryVersion'))need(p.version===3&&g.topology===1&&g.control.peerInventoryVersion===1,'ObserverPeerProfile');
   if(Object.hasOwn(g.control,'observation'))quoteObserverControlRuntimeWork(g.control.observation);
   if(rehearsalKeys.some(k=>Object.hasOwn(g.control,k))){
    need(rehearsalKeys.every(k=>Object.hasOwn(g.control,k))&&g.control.observation,'ObserverRehearsalCompleteQuote');
@@ -388,6 +390,7 @@ function buildObserverOperation(input,snapshot){
  const planHash=hash(p);
  if(snapshot)p=structuredClone(p);
  const g=p.geometry,rows=[];
+ const peerWork=g.control?.peerInventoryVersion===1?observerPeerPreparationWork(g):null;
  const addRow=(id,charge,options={})=>{debit(OBSERVER_PLAN_RECOMPILE_ROW_LOCAL+128*(rows.length+1));counter(charge);need(!rows.some(r=>r.id===id),'ObserverDuplicateQuote');rows.push({id,charge,...options});};
  addRow('authorize',local(16*p.ownerRef.bytesLength+16*p.inputsRef.bytesLength+65536+(Object.hasOwn(p,'processingPolicy')?OBSERVER_PROCESSING_POLICY_LOCAL:0)+(p.version===3?OBSERVER_ACCOUNTING_LOCAL:0)));
  addRow('source-prepare',add(g.sourcePreparation,local(observerToolInitialLocal(p.source.node.bytesLength))));
@@ -460,7 +463,7 @@ function buildObserverOperation(input,snapshot){
    for(let j=0;j<Math.ceil(g.taskLimit/100);j++)call(prefix+'/tasks/'+j,'DescribeTasks');
    addRow(prefix+'/context',local(16*g.contextSourceBytes+32*65536+5*4096));
    if(g.control){
-    addRow(key+'/control-prepare/'+i,local(g.sourcePassLocal+32*g.control.rawDeliveryBytes+16*g.control.compressedDeliveryBytes+262144));
+    addRow(key+'/control-prepare/'+i,local(g.sourcePassLocal+32*g.control.rawDeliveryBytes+16*g.control.compressedDeliveryBytes+262144+(peerWork?.nativeLocal??0)));
     addRow(key+'/control-runtime/'+i,g.control.runtime);
     call(key+'/control-run/'+i,'RunTask',{requestBytes:65536});
     for(let poll=0;poll<g.control.taskPolls;poll++)call(key+'/control-task/'+i+'/'+poll,'DescribeTasks');
@@ -496,6 +499,8 @@ function buildObserverOperation(input,snapshot){
  const assemblyRows=rows.filter(r=>r.action&&!r.cleanup&&r.action!=='Route'&&!r.id.startsWith('issuer/')&&!r.id.includes('/log/'));
  const assemblyBytes=assemblyRows.reduce((n,r)=>n+r.requestBytes+r.responseBytes,0);
  const controlLogWork=g.control?p.cases.reduce((n,c)=>n+(c.sampleTimes.length+1)*quoteObserverControlLogs(observerControlLogGeometry(g)).logicalBytes,0):0;
+ // Each replay caller funds its own same-sample peer reconstruction.
+ const peerReplayLocal=peerWork?p.cases.reduce((n,c)=>n+(c.sampleTimes.length+1)*peerWork.replayLocal,0):0;
  addRow('assembly',local(64*assemblyBytes+controlLogWork+g.sourcePassLocal+16*g.materialBytes));
  const cleanupBytes=rows.filter(r=>r.action&&r.cleanup&&!r.id.startsWith('issuer/')).reduce((n,r)=>n+r.requestBytes+r.responseBytes,0);
  addRow('cleanup-assembly',local(64*cleanupBytes+g.sourcePassLocal+16*g.materialBytes),{cleanup:true});
@@ -506,7 +511,7 @@ function buildObserverOperation(input,snapshot){
  const decodeInput=p.cases.reduce((n,c)=>n+c.runtimeRoles.length,0)*g.logPolls*g.logPages*g.rawPageBytes;
  // CONTROL acquisition and archive replay each invoke the complete parser.
  // Provider response copying, archive IO and remote runtime slots remain separate.
- addRow('replay',local(logReplayLocal+controlLogWork+16*16384*g.materialRecords+32*g.materialBytes+32*decodeInput+64*captures*1048576+g.sourcePassLocal+g.roles.reduce((n,r)=>n+r.snapshots*128*(4*g.materialBytes+32768),0)));
+ addRow('replay',local(logReplayLocal+controlLogWork+peerReplayLocal+16*16384*g.materialRecords+32*g.materialBytes+32*decodeInput+64*captures*1048576+g.sourcePassLocal+g.roles.reduce((n,r)=>n+r.snapshots*128*(4*g.materialBytes+32768),0)));
  const journal={records:6*rows.length+64+observerAccountingJournalRecords(p,rows),recordBytes:65536};journal.charge=local(journal.records*(16*journal.recordBytes+4096));
  const total=add(journal.charge,...rows.map(r=>r.charge));
  if(Object.hasOwn(p,'processingPolicy'))need(total.logicalBytes===p.capacity.logicalBytes&&total.logicalBytes===p.processingPolicy.maximumLocal,'ObserverProcessingQuote');

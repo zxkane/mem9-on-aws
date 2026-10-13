@@ -16342,13 +16342,13 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-cohort-model.mjs",
-      "sha256": "8a6897fa29c2b1342d4b8f70d27214dc11163cbe66633d38b72c3c8cfe4764fa",
-      "bytesLength": 12357
+      "sha256": "a11b9b924fd5c3251d5c63e16265d3998006d4308e7a9761a1bc023fcdac99e8",
+      "bytesLength": 12921
     },
     {
       "path": "scripts/lib/production-nonroot-observer-control-context.mjs",
-      "sha256": "2c3bca530b8ccd65080fb6627122467b9fc54975048c58fa80dd2486b12319af",
-      "bytesLength": 17401
+      "sha256": "22fba30c5df18b188c50fe67408fb156f44af47a6359cc2f4e5df87d6c46530a",
+      "bytesLength": 18081
     },
     {
       "path": "scripts/lib/production-nonroot-observer-control-logs.mjs",
@@ -16357,8 +16357,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-control-output.mjs",
-      "sha256": "94677044c7ec4b17040184d33c53e66edb4ec354fee81541b69e70945340b4b9",
-      "bytesLength": 12493
+      "sha256": "0ff10f33d374b64c601f75aa0b0cd887783e82e091b6cf45873cbed0527cb618",
+      "bytesLength": 12673
     },
     {
       "path": "scripts/lib/production-nonroot-observer-control-replay.mjs",
@@ -16392,8 +16392,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-delivery.mjs",
-      "sha256": "a6838ae313f1143fa8815b14b132ce33fce91b62d2042517bccddf8aa0fd5b12",
-      "bytesLength": 15006
+      "sha256": "05c2cb685d559430c5cdc87c203ec53fd2401cc3ef35c6d03292cfc6ef756feb",
+      "bytesLength": 15267
     },
     {
       "path": "scripts/lib/production-nonroot-observer-finalization-work.mjs",
@@ -16411,9 +16411,14 @@
       "bytesLength": 1892
     },
     {
+      "path": "scripts/lib/production-nonroot-observer-peer-inventory.mjs",
+      "sha256": "d285035b4285f3db488a97aac65f2e88c1f4a63beeffba89c3dce601f26598cf",
+      "bytesLength": 9441
+    },
+    {
       "path": "scripts/lib/production-nonroot-observer-plan.mjs",
-      "sha256": "630d66fb9b8289b7fd3eb7b660f758052b83c6f9b3611ffbaebcb93305f04c45",
-      "bytesLength": 47799
+      "sha256": "8594d9c540aa4c44be1ac9b644756bcc42f276cbd4bc152b1e0fecd4cea8f465",
+      "bytesLength": 48432
     },
     {
       "path": "scripts/lib/production-nonroot-observer-prerequisites.mjs",
@@ -16437,8 +16442,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-replay.mjs",
-      "sha256": "7968035839507fd8c3aae44b5f4232b9cbae71c2982898b8215b3794833c7988",
-      "bytesLength": 38665
+      "sha256": "e1bc890da193b708bca777543f57b703b4fc69498de220dd31855baaf7bb8155",
+      "bytesLength": 41582
     },
     {
       "path": "scripts/lib/production-nonroot-observer-resource-obligations.mjs",
@@ -16452,13 +16457,13 @@
     },
     {
       "path": "scripts/lib/production-nonroot-observer-route-probe.mjs",
-      "sha256": "5a6f00674a9fdd0267ea85c6d8c00fb28382d465655c2cd3092c0b2d48c89163",
-      "bytesLength": 12852
+      "sha256": "282a1d14a940879c2e86f320aa1c824691c8475ea2de65f2dcb38387f180d01f",
+      "bytesLength": 13076
     },
     {
       "path": "scripts/lib/production-nonroot-observer-route-protocol.mjs",
-      "sha256": "3e2d6eeb350239275807a8a1da7fc5b6e6f31e15160dd58ce8eccfd9ae69fff4",
-      "bytesLength": 15941
+      "sha256": "f8503c9c17c2197a73f14d6d6473e05a6abb7f497fecabc501c02b9423ee0556",
+      "bytesLength": 16295
     },
     {
       "path": "scripts/lib/production-nonroot-observer-runtime-provider.mjs",
@@ -17003,7 +17008,7 @@
   ],
   "output": {
     "path": ".github/actions/control-composition/dist/index.mjs",
-    "sha256": "e1572768ffe1bd853bc6f52acf77d898bdebddd7182e98acbcf118db8897222e",
-    "bytesLength": 7446777
+    "sha256": "1b18706002e870959b6d4cda2435fc6e245bfda9b4557b2081df19b23070ef4f",
+    "bytesLength": 7459832
   }
 }

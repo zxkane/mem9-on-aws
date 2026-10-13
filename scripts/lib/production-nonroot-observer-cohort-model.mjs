@@ -1,3 +1,4 @@
+import {deriveObserverPeerInventory,observerPeerPreparationWork} from './production-nonroot-observer-peer-inventory.mjs';
 import {observerDiscoveryOrigin,verifyObserverDiscoveryService,verifyObserverEmptyInstances,verifyObserverServiceRegistry} from './production-nonroot-observer-topology.mjs';
 import {observerCaseVersion} from './production-nonroot-observer-accounting.mjs';
 /** Pure reconstruction of the original five cohort definitions. The caller
@@ -44,7 +45,7 @@ export function buildObserverCohortModels({plan,input,contracts,rehearsalRef,con
   if(plan.geometry.topology===1){
    const origin=observerDiscoveryOrigin(c.discovery,{...plan.scope,owner:plan.owner,operation:plan.operation,stage:c.stage,caseName:c.name});
    need(create.serviceRegistries[0].registryArn===c.discovery.serviceArn,'ObserverTopologyRegistry');
-   for(const delivery of caseInput.controlDeliveries??[])need(delivery.version===2&&hash(delivery.discovery)===hash(c.discovery)&&delivery.route.privateOrigin===origin,'ObserverTopologyControl');
+   for(const delivery of caseInput.controlDeliveries??[])need(delivery.version===(plan.geometry.control.peerInventoryVersion===1?3:2)&&(delivery.version!==3||delivery.peerInventory===null)&&hash(delivery.discovery)===hash(c.discovery)&&delivery.route.privateOrigin===origin,'ObserverTopologyControl');
    for(const role of c.runtimeRoles.filter(r=>['planner','executor'].includes(r))){
     const env=caseInput.workerDefinitions?.[role]?.containerDefinitions?.[0]?.environment;
     need(Array.isArray(env)&&env.filter(e=>e.name==='MEM9_BASE_URL').length===1&&env.find(e=>e.name==='MEM9_BASE_URL').value===origin,'ObserverTopologyWorker');
@@ -85,7 +86,7 @@ export function observerCohortTimeline(model,{serviceArn,oldTaskArn,oldTaskDefin
  value.faultRequestHash=value.name==='successful-handover'?null:hash(update);return value;
 }
 
-export function prepareObserverControlDeliveryModel({plan,quote,model,sampleIndex,taskDefinitionArn},{reader}){
+export function prepareObserverControlDeliveryModel({plan,quote,model,sampleIndex,taskDefinitionArn,peerOriginals,peerCasePlan},{reader}){
  reader.current();reader.paid.debit(64*plan.geometry.control.rawDeliveryBytes+32*plan.geometry.control.compressedDeliveryBytes+524288);
  const original=model.controlDeliveries?.[sampleIndex];need(original,'ObserverOriginalControlDelivery');
  const value=structuredClone(original),definition=model.definitions.get('control'),binding=model.controlBinding,c=model.plan;
@@ -95,6 +96,11 @@ export function prepareObserverControlDeliveryModel({plan,quote,model,sampleInde
  const id=c.name+'/control-runtime/'+sampleIndex,row=quote.rows.find(r=>r.id===id);
  need(row&&value.allocation.id===id&&hash(value.allocation.charge)===hash(row.charge)&&value.allocation.quoteHash===null,'ObserverControlOriginalAllocation');
  value.allocation.quoteHash=hash(quote);
+ if(value.version===3){
+  need(value.peerInventory===null,'ObserverPeerPlanningRequired');
+  reader.paid.debit(observerPeerPreparationWork(plan.geometry).replayLocal);
+  value.peerInventory=deriveObserverPeerInventory({delivery:value,casePlan:peerCasePlan,originals:peerOriginals,geometry:plan.geometry});
+ }
  if(observerCaseVersion(plan))same(compileObserverControlSlots(value).delivery.allocation,value.allocation,'ObserverControlSlotQuoteChanged');
  reader.current();return value;
 }

@@ -1,3 +1,4 @@
+import {OBSERVER_PEER_LOCAL,inspectObserverPeerInventory,selectObserverPrivatePeer} from './production-nonroot-observer-peer-inventory.mjs';
 import {createHash,createPublicKey,verify,constants} from 'node:crypto';
 import {canonicalJson,parseClientRegistry,classifyAccessToken,parseSigningKeys,createInternalContext,verifyInternalContext,createTransportEnvelope,verifyTransportEnvelope,CONTEXT_TTL_SECONDS} from '../../infra/gateway/namespace-auth.mjs';
 import {observerPrivateStatusPath,inspectObserverRouteProbeInput,describeObserverRouteProbeWork} from './production-nonroot-observer-route-probe.mjs';
@@ -92,9 +93,9 @@ export async function openObserverControlContext(delivery,guardInvocation,provid
  try{
   // The literal bound is independent of attacker-selected decoded lengths.
   // Debit before delivery hashing, cloning, registry or credential work.
-  const contextLocal=64*262144+16*6*65536+32*65536+6*4096+128*4096;
+  const contextLocal=64*262144+16*6*65536+32*65536+6*4096+128*4096+(delivery.version===3?OBSERVER_PEER_LOCAL:0);
   runtime.chargeObserverRuntimeProcessing(provider,contextPermit,contextLocal);
-  const value=inspectObserverRouteProbeInput(delivery),deliveryHash=observerDataHash(value),quote=describeObserverRouteProbeWork(value);
+  const value=inspectObserverRouteProbeInput(delivery);if(value.version===3)inspectObserverPeerInventory(value.peerInventory,value);const deliveryHash=observerDataHash(value),quote=describeObserverRouteProbeWork(value);
   outputPermit=runtime.claimObserverRuntimeProcessing(provider,'output');
   runtime.chargeObserverRuntimeProcessing(provider,outputPermit,quote.output.processingLocal);
   const state=runtime.observerRuntimeState(provider);
@@ -107,6 +108,7 @@ export async function openObserverControlContext(delivery,guardInvocation,provid
   const s={provider,guardInvocation,contextPermit,outputPermit,delivery:structuredClone(value),deliveryHash,identity:state.identity,quote,requests:new Map(),credentialsActive:false,credentialsUsed:false,failed:false,closed:false,outputDone:false,contextDone:false,privateExpiry:null,tokenExpiry:null};
   context=Object.freeze({
    assertCurrent(){const p=contexts.get(context);need(p&&!p.closed,'ObserverContextClosed');requireGuardedObserverInvocation(p.guardInvocation);runtime.assertObserverRuntimeRequest(provider,p.contextPermit);},
+   get deliveryVersion(){context.assertCurrent();return s.delivery.version;},
    get deliveryHash(){context.assertCurrent();return s.deliveryHash;},
    get identity(){context.assertCurrent();return structuredClone(s.identity);},
    now(){context.assertCurrent();return Date.now();},
@@ -117,6 +119,7 @@ export async function openObserverControlContext(delivery,guardInvocation,provid
     runtime.chargeObserverRuntimeRequest(provider,permit,local(term.processingLocal));context.assertRequest(permit);return permit;
    },
    assertRequest(permit){context.assertCurrent();runtime.assertObserverRuntimeRequest(provider,permit);const p=[...s.requests.values()].find(p=>p.permit===permit);need(p&&!p.done&&Date.now()<p.deadlineMs,'ObserverContextRequestExpired');},
+   selectPrivatePeer(permit,addresses){context.assertRequest(permit);const p=[...s.requests.entries()].find(([,p])=>p.permit===permit);need(p,'ObserverContextRequest');if(s.delivery.version===3)need(s.delivery.peerInventory.completedMs<=Date.now(),'ObserverPeerFuture');return selectObserverPrivatePeer(s.delivery,p[0],addresses);},
    requestLimits(permit){context.assertRequest(permit);const limits=runtime.observerRuntimeRequestLimits(provider,permit),p=[...s.requests.values()].find(p=>p.permit===permit);return {...limits,deadlineMs:Math.min(limits.deadlineMs,p.deadlineMs)};},
    chargeWire(permit,bytes){context.assertRequest(permit);runtime.chargeObserverRuntimeRequest(provider,permit,{...observerZeroCounter(),httpBodyBytes:bytes});},
    retainIo(permit,io){context.assertRequest(permit);runtime.retainObserverRuntimeIo(provider,permit,io);[...s.requests.values()].find(p=>p.permit===permit).io=io;},

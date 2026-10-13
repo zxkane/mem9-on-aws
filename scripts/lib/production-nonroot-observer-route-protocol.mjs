@@ -1,3 +1,4 @@
+import {OBSERVER_PEER_LOCAL} from './production-nonroot-observer-peer-inventory.mjs';
 import {observerDiscoveryOrigin} from './production-nonroot-observer-topology.mjs';
 /** Pure route protocol and processing DATA shared by native IO and replay. */
 import {createHash} from 'node:crypto';
@@ -67,7 +68,7 @@ export function inspectObserverRouteProtocol(value,stage,delivery){
  exact(value,['privateOrigin','gatewayUrl','jobId','identityHash','issuer','audience','transportIssuer','tokenEndpoint','jwksUri','registryHash']);
  need(/^pr-[1-9][0-9]*$/.test(stage??'')&&jobId(value.jobId));
  const privateUrl=new URL(value.privateOrigin);
- need(value.privateOrigin===privateUrl.origin&&privateUrl.protocol==='http:'&&privateUrl.origin===(delivery?.version===2?observerDiscoveryOrigin(delivery.discovery,delivery):`http://mnemo.mem9-${stage}.local:8080`)&&privateUrl.port==='8080'&&!privateUrl.username&&!privateUrl.password,'ObserverPrivateOrigin');
+ need(value.privateOrigin===privateUrl.origin&&privateUrl.protocol==='http:'&&privateUrl.origin===([2,3].includes(delivery?.version)?observerDiscoveryOrigin(delivery.discovery,delivery):`http://mnemo.mem9-${stage}.local:8080`)&&privateUrl.port==='8080'&&!privateUrl.username&&!privateUrl.password,'ObserverPrivateOrigin');
  const https=value=>{
   need(boundedText(value,2048),'ObserverRouteUrl');const u=new URL(value);
   need(u.protocol==='https:'&&!u.username&&!u.password&&!u.search&&!u.hash&&(!u.port||u.port==='443')&&!isIP(u.hostname)&&u.hostname.includes('.')&&!u.hostname.endsWith('.')&&!u.hostname.endsWith('.local')&&!u.hostname.endsWith('.localhost')&&u.hostname!=='localhost','ObserverRouteUrl');return u;
@@ -168,7 +169,7 @@ export function inspectObserverMcpStatus(value,id){
 export const observerRouteBytesHash=hash;
 
 export function inspectObserverRouteProbeInput(value){
- inspectObserverControlDelivery(value);inspectObserverRouteProtocol(value.route,value.stage,value);
+ inspectObserverControlDelivery(value);if(value.version===3)need(Buffer.byteLength(JSON.stringify(value))<=OBSERVER_ROUTE_LIMITS.inputBytes,'ObserverRouteInputBound');inspectObserverRouteProtocol(value.route,value.stage,value);
  for(const id of OBSERVER_ROUTE_SLOTS){const row=value.allocation.slots.find(s=>s.id===id);need(row&&row.kind==='http'&&row.requestBytes>0&&row.requestBytes<=OBSERVER_ROUTE_LIMITS.requestBytes&&row.responseBytes<=OBSERVER_ROUTE_LIMITS.responseBytes,'ObserverRouteSlot');}
  return value;
 }
@@ -178,16 +179,16 @@ export function inspectObserverRouteProbeInput(value){
 export function describeObserverRouteProbeWork(value){
  inspectObserverRouteProbeInput(value);
  const finishLocal=65536;
- const contextLocal=64*262144+16*6*65536+32*65536+6*4096+128*4096;
+ const contextLocal=64*262144+16*6*65536+32*65536+6*4096+128*4096+(value.version===3?OBSERVER_PEER_LOCAL:0);
  const publicRawBytes=['runtime/container-metadata','runtime/task-metadata','source/jwks'].reduce((n,id)=>n+value.allocation.slots.find(s=>s.id===id).responseBytes,0);
  const outputInputBytes=2*OBSERVER_ROUTE_SLOTS.reduce((n,id)=>n+value.allocation.slots.find(s=>s.id===id).responseBytes,0)+4*Math.ceil(publicRawBytes/3)+131072;
- const outputLocal=32*outputInputBytes+64*4096;
+ const outputLocal=32*outputInputBytes+64*4096+(value.version===3?8*OBSERVER_PEER_LOCAL:0);
  const slots=OBSERVER_ROUTE_SLOTS.map(id=>{
   const r=value.allocation.slots.find(s=>s.id===id);
   // Preserve both4096-event caps, the failed callback, full payload work and
   // the original128-unit setup/DNS/completion/cleanup allowance. The entire
   // amount is still debited by the original beginRequest before the first IO.
-  const processingLocal=8*r.requestBytes+32*r.responseBytes+describeObserverRouteEventWork().logicalBytes+4096*128+16*65536+131072;
+  const processingLocal=8*r.requestBytes+32*r.responseBytes+describeObserverRouteEventWork().logicalBytes+4096*128+16*65536+131072+(value.version===3?OBSERVER_PEER_LOCAL:0);
   return {id,processingLocal,finishLocal,charge:{...observerZeroCounter(),logicalBytes:processingLocal+finishLocal,httpBodyBytes:r.requestBytes+r.responseBytes}};
  });
  return {authority:false,context:{id:'context',processingLocal:contextLocal,finishLocal,charge:{...observerZeroCounter(),logicalBytes:contextLocal+finishLocal}},

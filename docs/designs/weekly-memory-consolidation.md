@@ -2889,6 +2889,27 @@ before publication, so the infrastructure tool's own SDK versions cannot replace
 the application's decoder. The adapter creates no service client or transport;
 the original caller still pays before parsing and is checked after decoding.
 
+Prospective CONTROL delivery version 3 includes the peer inventory derived
+from the original service and complete RUNNING/STOPPED task observations for
+that sample. The inventory binds the owner, case, sample, source and quote.
+Peer inventory inspection rejects executable properties and Proxy objects before
+reading their values. Current native admission requires the peer inventory
+profile; historical delivery versions retain their original encoded bytes and
+quote behavior.
+
+Before sending authenticated private headers, the probe selects a resolved
+address belonging to one captured RUNNING service task. It records that actual
+selection alongside the complete DNS result and verifies the connected address.
+Replay authenticates the original provider responses before reconstructing the
+expected delivery, then retains the existing timeline and cleanup checks.
+Failed listener removal or physical connection cleanup prevents acceptance of
+either a response or a connection refusal.
+
+Native and portable quotes use the same peer-work calculation. Preparation,
+child validation and each replay caller fund their own work before inspection;
+the new profile adds no provider requests. The CONTROL image includes the
+complete transitive import closure of its peer validation helpers.
+
 ### Host verification and remote service lifetime
 
 Prospective observer plan version 3 binds an explicit accounting domain into

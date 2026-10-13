@@ -1,3 +1,4 @@
+import {selectObserverPrivatePeer} from './production-nonroot-observer-peer-inventory.mjs';
 /** Original read-only observer predicates; no owner/provider creation. */
 /** DATA replay of the fixed P producer. This cannot mint task, source,
  * credential or payment authority; acquisition supplies those originals. */
@@ -37,10 +38,10 @@ export function inspectObserverControlOutput(raw,{delivery:d,task,guard}){
   exact(r,['slot','method','urlHash','requestHash','startedMs','completedMs','dnsAddresses','attemptedAddress','requestClosed','responseClosed','kind','statusCode','connectedPeer','responseHash','responseBytes',...(isRefused?['code']:[]),...(response?['response']:[])]);
   need(r.slot===OBSERVER_CONTROL_ROUTE_SLOTS[i]&&r.method===(i<2?'GET':'POST')&&r.urlHash===sha(i<2?d.route.privateOrigin+observerPrivateStatusPath(d.route.jobId):d.route.gatewayUrl)&&hex(r.requestHash),'ObserverControlRouteBinding');
   need(time(r.startedMs,d)&&time(r.completedMs,d)&&r.startedMs>=last&&r.completedMs>=r.startedMs&&r.requestClosed===true&&r.responseClosed===true,'ObserverControlRouteLifetime');last=r.completedMs;
-  need(Array.isArray(r.dnsAddresses)&&r.dnsAddresses.length>0&&r.dnsAddresses.length<=64&&new Set(r.dnsAddresses).size===r.dnsAddresses.length&&r.dnsAddresses.every(ip=>isIP(ip)===4)&&r.attemptedAddress===r.dnsAddresses[0],'ObserverControlDns');
+  need(Array.isArray(r.dnsAddresses)&&r.dnsAddresses.length>0&&r.dnsAddresses.length<=64&&new Set(r.dnsAddresses).size===r.dnsAddresses.length&&r.dnsAddresses.every(ip=>isIP(ip)===4)&&r.attemptedAddress===selectObserverPrivatePeer(d,r.slot,r.dnsAddresses),'ObserverControlDns');
   if(isRefused){need(i<2&&i===rows.length-1&&r.code==='ECONNREFUSED'&&r.connectedPeer===null&&r.statusCode===null&&r.responseHash===null&&r.responseBytes===0&&!response,'ObserverControlRefusal');refused=r;continue;}
   const limit=d.allocation.slots.find(s=>s.id===r.slot).responseBytes;
-  need(r.kind==='http-response'&&r.dnsAddresses.includes(r.connectedPeer)&&Number.isSafeInteger(r.statusCode)&&r.statusCode>=200&&r.statusCode<=599&&!(r.statusCode>=300&&r.statusCode<400)&&hex(r.responseHash)&&Number.isSafeInteger(r.responseBytes)&&r.responseBytes>=0&&r.responseBytes<=limit,'ObserverControlHttpResponse');
+  need(r.kind==='http-response'&&r.dnsAddresses.includes(r.connectedPeer)&&(d.version!==3||r.connectedPeer===r.attemptedAddress)&&Number.isSafeInteger(r.statusCode)&&r.statusCode>=200&&r.statusCode<=599&&!(r.statusCode>=300&&r.statusCode<400)&&hex(r.responseHash)&&Number.isSafeInteger(r.responseBytes)&&r.responseBytes>=0&&r.responseBytes<=limit,'ObserverControlHttpResponse');
   if(i===0||i===2)need([401,403].includes(r.statusCode)&&!response,'ObserverControlUnauthenticated');
   else{
    need(r.statusCode>=200&&r.statusCode<300&&response,'ObserverControlAuthenticated');

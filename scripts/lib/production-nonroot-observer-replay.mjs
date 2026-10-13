@@ -19,7 +19,7 @@ import {observerControlLogGeometry} from './production-nonroot-observer-control-
 import {compileArchivedObserverSessionPolicy} from './production-nonroot-observer-session-policy.mjs';
 import {inspectObserverWorkerLayout,inspectObserverWorkerSequence} from './production-nonroot-observer-worker-job.mjs';
 
-const runStates=new WeakMap();
+const runStates=new WeakMap(),cohortOriginalStates=new WeakMap();
 
 /** Rebuild all evidence under this invocation's payer. Archived results and
  * historical handles never qualify as successful verification. */
@@ -71,18 +71,20 @@ export async function replayNonrootObserverRun(input,{work,metadataReads,dataFac
   current();const model=v.models.get(material.name);need(model,'ObserverReplaySourceCase');
   const evidence=await read(material.evidence);current();const casePlan=evidence.plan;
   need(Array.isArray(material.controlRecords)&&material.controlRecords.length===model.plan.sampleTimes.length+1,'ObserverReplayControlCount');
+  const authenticatedOriginals=plan.geometry.control?.peerInventoryVersion===1?await openObserverCohortOriginals(evidence,{reader,providers,objects,plan}):undefined;current();
   const controls=[];
   for(const [sampleIndex,ref]of material.controlRecords.entries()){
    const raw=await read(ref);current();
    need(raw.sampleIndex===sampleIndex,'ObserverReplayControlOrder');
-   const expected=prepareObserverControlDeliveryModel({plan,quote:rebuilt.quote,model,sampleIndex,taskDefinitionArn:raw.delivery.taskDefinitionArn},{reader});current();
+   const peers=authenticatedOriginals?observerSamplePeerOriginals(authenticatedOriginals,evidence,model,sampleIndex,{reader,providers,objects,plan}):{};
+   const expected=prepareObserverControlDeliveryModel({plan,quote:rebuilt.quote,model,sampleIndex,taskDefinitionArn:raw.delivery.taskDefinitionArn,...peers},{reader});current();
    same(raw.delivery,expected,'ObserverReplayOriginalDelivery');same(raw.geometry,observerControlLogGeometry(plan.geometry),'ObserverReplayControlGeometry');
    const control=await replayNonrootArchivedControl(raw,{reader,casePlan,definition:model.definitions.get('control'),runTemplate:model.runTemplates.get('control'),providers,objects});current();
    need(control.coverage==='complete'||material.name==='post-liveness-regression'&&sampleIndex>0&&sampleIndex<material.controlRecords.length-1&&control.coverage==='private-refusal','ObserverReplayControlCoverage');
    for(const originalRef of raw.originals){const original=await read(originalRef);current();allProviderIds.add(original.id);}
    controls.push(control);
   }
-  const cohort=await replayNonrootObserverCohort(material,{reader,providers,objects,plan,expectedTimeline:model.expectedTimeline,preparation,rehearsalRef:record.rehearsalRef,controls});current();
+  const cohort=await replayNonrootObserverCohort(material,{reader,providers,objects,plan,expectedTimeline:model.expectedTimeline,preparation,rehearsalRef:record.rehearsalRef,controls,authenticatedOriginals});current();
   const modelResult=await verifyNonrootObserverCohortModel(cohort,{reader,model,plan,objects});current();
   for(const control of controls)need(control.task.taskDefinitionArn===modelResult.arns.get('control'),'ObserverReplayControlRegistration');
   modelResult.providerIds.forEach(id=>allProviderIds.add(id));
@@ -128,6 +130,45 @@ export async function replayNonrootObserverRun(input,{work,metadataReads,dataFac
  assertSource();current();runStates.set(handle,{reader,current,assertSource,archive,runRef,preparation,work,metadataReads,reserve,rehearsal,source,value});return handle;
 }
 
+
+// Authenticate the original archive once, before any v3 expected-delivery
+// projection. The private handle can only be reused by this reader/plan.
+async function openObserverCohortOriginals(evidence,{reader,providers,objects,plan}){
+ reader.current();const p=evidence.plan;
+ const member=ref=>{const key=ref.bytesHash??ref.sha256,found=objects.get(key);need(found&&found.bytesLength===ref.bytesLength,'ObserverReplayCaseObject');return ref;};
+ need(Array.isArray(evidence.providerOriginals)&&evidence.providerOriginals.length>0,'ObserverReplayProviderCoverage');
+ reader.paid.debit(8192*evidence.providerOriginals.length);
+ const originals=new Map();
+ for(const ref of evidence.providerOriginals){
+  const original=await reader.json(member(ref));reader.current();
+  exact(original,['id','action','input','startedMs','completedMs','raw']);
+  need(original.id.startsWith(p.name+'/')&&!originals.has(original.id),'ObserverReplayOriginalProviderId');
+  const bound=providers.get(original.id);need(bound&&bound.action===original.action&&bound.requestHash===hash(original.input)&&bound.startedMs===original.startedMs&&bound.completedMs===original.completedMs,'ObserverReplayProviderBinding');
+  const raw=await reader.readBytes(member(original.raw),33554432);reader.current();
+  need(bound.rawHash===sha(raw)&&bound.rawBytes===raw.length,'ObserverReplayProviderRaw');
+  const value=await decodeArchivedObserverProviderResponse(original.action,raw,{reader,region:plan.scope.region});reader.current();
+  originals.set(original.id,{original,value});
+ }
+
+ const handle=Object.freeze({kind:'authenticated-observer-cohort-originals'});
+ cohortOriginalStates.set(handle,{reader,providers,objects,plan,caseName:p.name,originalRefs:evidence.providerOriginals,originalRefsHash:hash(evidence.providerOriginals),originals});return handle;
+}
+function requireObserverCohortOriginals(handle,evidence,{reader,providers,objects,plan}){
+ reader.current();const state=cohortOriginalStates.get(handle);
+ need(state&&state.reader===reader&&state.providers===providers&&state.objects===objects&&state.plan===plan&&state.caseName===evidence.plan.name&&(state.originalRefs===evidence.providerOriginals||state.originalRefsHash===hash(evidence.providerOriginals)),'ObserverReplayOriginalsHandle');return state.originals;
+}
+function observerSamplePeerOriginals(handle,evidence,model,sampleIndex,context){
+ const originals=requireObserverCohortOriginals(handle,evidence,context),prefix=model.plan.name+'/sample/'+sampleIndex;
+ const selected=[];
+ for(const [id,row]of originals)if(id.startsWith(prefix+'/')&&!id.endsWith('/root')){
+  const bound=context.providers.get(id);selected.push({id,action:row.original.action,input:row.original.input,value:row.value,responseHash:bound.rawHash,responseBytes:bound.rawBytes,startedMs:row.original.startedMs,completedMs:row.original.completedMs});
+ }
+ const created=originals.get(model.plan.name+'/create');need(created?.original.action==='CreateService','ObserverPeerOriginalService');
+ const service=created.value.service;
+ need(service?.clusterArn===context.plan.scope.clusterArn&&service.serviceName===model.plan.serviceName&&service.serviceArn===evidence.plan.serviceArn,'ObserverPeerOriginalService');
+ return {peerOriginals:selected,peerCasePlan:{...model.plan,clusterArn:context.plan.scope.clusterArn,serviceArn:service.serviceArn}};
+}
+
 /** Credential exchange bodies are intentionally zeroed by the native
  * issuer. Preserve its source-bound journal and complete retained charges,
  * reconstruct exact requests, and never export or reissue credentials. */
@@ -162,7 +203,7 @@ export function requireNonrootObserverRunReplay(handle,{archive,runRef,preparati
 
 /** Reconcile the recorded cohort with every original SDK response and the
  * independently replayed CONTROL routes. No claimed outage or PASS is read. */
-export async function replayNonrootObserverCohort(caseMaterial,{reader,providers,objects,plan,expectedTimeline,preparation,rehearsalRef,controls}){
+export async function replayNonrootObserverCohort(caseMaterial,{reader,providers,objects,plan,expectedTimeline,preparation,rehearsalRef,controls,authenticatedOriginals}){
  reader.current();reader.paid.debit(65536);
  exact(caseMaterial,['name','evidence','controlRecords','captures']);
  const selected=plan.cases.filter(c=>c.name===caseMaterial.name);need(selected.length===1,'ObserverReplayCaseSelection');const selectedPlan=selected[0];
@@ -179,19 +220,8 @@ export async function replayNonrootObserverCohort(caseMaterial,{reader,providers
  need(expectedTimeline&&typeof expectedTimeline==='object','ObserverReplayExpectedTimeline');
  for(const [key,value]of Object.entries(expectedTimeline))same(p[key],value,'ObserverReplayTimelineChanged');
  need(Array.isArray(evidence.samples)&&evidence.samples.length===selectedPlan.sampleTimes.length&&Array.isArray(controls)&&controls.length===evidence.samples.length+1,'ObserverReplaySampleCoverage');
- need(Array.isArray(evidence.providerOriginals)&&evidence.providerOriginals.length>0,'ObserverReplayProviderCoverage');
- reader.paid.debit(8192*evidence.providerOriginals.length);
- const originals=new Map();
- for(const ref of evidence.providerOriginals){
-  const original=await reader.json(member(ref));reader.current();
-  exact(original,['id','action','input','startedMs','completedMs','raw']);
-  need(original.id.startsWith(p.name+'/')&&!originals.has(original.id),'ObserverReplayOriginalProviderId');
-  const bound=providers.get(original.id);need(bound&&bound.action===original.action&&bound.requestHash===hash(original.input)&&bound.startedMs===original.startedMs&&bound.completedMs===original.completedMs,'ObserverReplayProviderBinding');
-  const raw=await reader.readBytes(member(original.raw),33554432);reader.current();
-  need(bound.rawHash===sha(raw)&&bound.rawBytes===raw.length,'ObserverReplayProviderRaw');
-  const value=await decodeArchivedObserverProviderResponse(original.action,raw,{reader,region:plan.scope.region});reader.current();
-  originals.set(original.id,{original,value});
- }
+ const originalHandle=authenticatedOriginals??await openObserverCohortOriginals(evidence,{reader,providers,objects,plan});reader.current();
+ const originals=requireObserverCohortOriginals(originalHandle,evidence,{reader,providers,objects,plan});
  const matched=new Set();
  function response(id,action,input,value,row){
   reader.current();const found=originals.get(id);

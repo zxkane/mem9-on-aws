@@ -11,6 +11,11 @@ import * as workerApi from './lib/production-nonroot-observer-worker-job.mjs';
 import {OBSERVER_ACCOUNTING_V3} from './lib/production-nonroot-observer-accounting.mjs';
 import {IMAGE_TRANSITION_LIMITS} from './lib/production-image-transition.mjs';
 import {hash} from './lib/production-nonroot-engineering-json.mjs';
+import {observerDiscoveryName} from './lib/production-nonroot-observer-topology.mjs';
+import {observerPeerPreparationWork} from './lib/production-nonroot-observer-peer-inventory.mjs';
+import {prepareObserverControlDeliveryModel} from './lib/production-nonroot-observer-cohort-model.mjs';
+import {compileObserverControlSlots} from './lib/production-nonroot-observer-control-slots.mjs';
+import {peerDelivery,peerInputs} from './production-nonroot-observer-peer.fixture.mjs';
 
 // BEGIN SYNTHETIC FIXTURE
 export function relativeQuoteFixture(version=3){
@@ -96,6 +101,42 @@ test('relative quote rejects unsafe totals and an unavailable current replay pay
  const f=relativeQuoteFixture(),r=f.plan.geometry.roles.find(r=>r.role==='planner');r.observationVersion=2;r.snapshots=Number.MAX_SAFE_INTEGER;
  assert.throws(()=>quote(f));
  assert.throws(()=>quoteNonrootObserverOperation(f.plan,{sourceModel:f.sourceModel,work:{assertCurrent(){throw Error('CurrentPayerHeld');},chargeLocal(){throw Error('must not charge');}}}),/CurrentPayerHeld/);
+});
+
+function peerQuoteFixture(){
+ const f=relativeQuoteFixture(),p=f.plan;p.geometry.topology=1;
+ p.cases.forEach((c,i)=>{c.discovery={namespaceId:'ns-synthetic',namespaceName:'mem9-'+c.stage+'.local',serviceId:'srv-synthetic'+i,serviceArn:`arn:aws:servicediscovery:${p.scope.region}:${p.scope.account}:service/srv-synthetic${i}`,serviceName:observerDiscoveryName({owner:p.owner,operation:p.operation,stage:c.stage,caseName:c.name})};});
+ p.scope.discoveryServiceArns=p.cases.map(c=>c.discovery.serviceArn);return f;
+}
+test('peer marker accepts only version1 on outer v3 with dedicated topology',()=>{
+ for(const marker of [0,2,null,undefined,'1',true]){const f=peerQuoteFixture();f.plan.geometry.control.peerInventoryVersion=marker;assert.throws(()=>quote(f));}
+ for(const version of [1,2,3]){const f=relativeQuoteFixture(version);f.plan.geometry.control.peerInventoryVersion=1;assert.throws(()=>quote(f));}
+ const f=peerQuoteFixture();f.plan.geometry.control.peerInventoryVersion=1;assert.doesNotThrow(()=>quote(f));
+});
+test('peer marker adds shared preparation and replay charges on original rows only',()=>{
+ const f=peerQuoteFixture(),old=quote(f);f.plan.geometry.control.peerInventoryVersion=1;
+ const current=quote(f),peer=observerPeerPreparationWork(f.plan.geometry),samples=f.plan.cases.reduce((n,c)=>n+c.sampleTimes.length+1,0);
+ assert.deepEqual(current.rows.map(r=>r.id),old.rows.map(r=>r.id));assert.deepEqual(current.journal,old.journal);
+ for(const row of current.rows){
+  const prior=old.rows.find(r=>r.id===row.id),extra=row.id.includes('/control-prepare/')?peer.nativeLocal:row.id==='replay'?samples*peer.replayLocal:0;
+  assert.deepEqual(row,{...prior,charge:{...prior.charge,logicalBytes:prior.charge.logicalBytes+extra}});
+ }
+ assert.deepEqual(current.total,{...old.total,logicalBytes:old.total.logicalBytes+samples*(peer.nativeLocal+peer.replayLocal)});
+});
+test('peer reconstruction rejects insufficient current payer before original inspection',()=>{
+ let delivery=peerDelivery(3);delivery.sampleIndex=0;delivery.peerInventory=null;delivery.allocation.id=delivery.caseName+'/control-runtime/0';
+ const definition={taskRoleArn:delivery.taskRoleArn,containerDefinitions:[{name:delivery.containerName}]};delivery.taskDefinitionHash=hash(definition);
+ delivery=compileObserverControlSlots(delivery).delivery;delivery.allocation.quoteHash=null;
+ const peers=peerInputs(delivery),peer=observerPeerPreparationWork(peers.geometry);
+ const plan={version:3,owner:delivery.owner,operation:delivery.operation,scope:{account:delivery.account,region:delivery.region,clusterArn:delivery.clusterArn},geometry:{...peers.geometry,control:{rawDeliveryBytes:262144,compressedDeliveryBytes:8192,peerInventoryVersion:1}}};
+ const model={plan:{name:delivery.caseName,stage:delivery.stage,startedMs:delivery.startedMs,deadlineMs:delivery.deadlineMs},controlDeliveries:[delivery],definitions:new Map([['control',definition]]),controlBinding:delivery.controlImage,input:{timeline:{sourceTree:delivery.sourceTree}}};
+ let inspected=false,remaining=peer.replayLocal-1;const charges=[];
+ const paid=bindObserverReplayWork({assertCurrent(){},chargeLocal(n){
+  if(charges.length){assert.equal(n,peer.replayLocal);assert(n<=remaining,'CurrentPeerReplayCapacity');remaining-=n;}charges.push(n);
+ }});
+ const originals=new Proxy(peers.originals,{get(){inspected=true;throw Error('UnpaidPeerInspection');}}),reader={current:paid.current,paid};
+ assert.throws(()=>prepareObserverControlDeliveryModel({plan,model,quote:{rows:[{id:delivery.allocation.id,charge:delivery.allocation.charge}]},sampleIndex:0,taskDefinitionArn:delivery.taskDefinitionArn,peerOriginals:originals,peerCasePlan:peers.casePlan},{reader}),/CurrentPeerReplayCapacity/);
+ assert.equal(inspected,false);assert.equal(charges.length,1);assert.equal(remaining,peer.replayLocal-1);
 });
 
 // Isolate only the authenticated source accessor. The original replay entry

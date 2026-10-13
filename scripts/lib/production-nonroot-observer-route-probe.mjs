@@ -19,20 +19,19 @@ function addressAllowed(address,lane){
 async function joinRouteIo(io,deadline){
  const objects=[io.request,io.response].filter(Boolean),listeners=[];let timer,firstFailure;
  try{
-  const joins=objects.map(x=>x.closed===true?Promise.resolve():new Promise(resolve=>{const fn=()=>{if(x.closed===true)resolve();};x.on('close',fn);listeners.push([x,fn]);fn();}));
+  const joins=objects.map(x=>x.closed===true?Promise.resolve():new Promise(resolve=>{const fn=()=>{if(x.closed===true)resolve();};try{x.on('close',fn);listeners.push([x,fn]);fn();}catch(error){firstFailure??=error;}}));
   for(const object of objects)if(object.closed!==true)try{object.destroy();}catch(error){firstFailure??=error;}
-  await Promise.race([Promise.all(joins),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('ObserverRouteCloseUnknown')),Math.max(0,Math.min(1000,deadline-Date.now())));})]);
-  // This is cleanup-only inspection of objects already retained by the
-  // original permit; it cannot parse or release a normal result.
-  need(objects.every(x=>x.closed===true),'ObserverRouteCloseUnknown');
-  if(firstFailure)throw Error('ObserverRouteCloseUnknown');
- }finally{clearTimeout(timer);for(const [x,fn]of listeners)x.off('close',fn);}
+  try{await Promise.race([Promise.all(joins),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('ObserverRouteCloseUnknown')),Math.max(0,Math.min(1000,deadline-Date.now())));})]);}catch(error){firstFailure??=error;}
+  if(!objects.every(x=>x.closed===true))firstFailure??=Error('ObserverRouteCloseUnknown');
+ }finally{clearTimeout(timer);for(const [x,fn]of listeners)try{x.off('close',fn);}catch(error){firstFailure??=error;}}
+ if(firstFailure)throw Error('ObserverRouteCloseUnknown');
 }
 
 async function performRouteRequest(context,slot,{url,method,headers,body=''}){
  const permit=context.beginRequest(slot,{url,method}),limits=context.requestLimits(permit),target=new URL(url),lane=slot.startsWith('private-')?'private':'ingress';
  const events=createObserverRouteEventCounter(limits.responseBytes),io={request:null,response:null},parts=[];
- let timer,resolver,lookupPromise,addresses,peer,status,rawHeaders,bytes=0,refusal=false,primary,eventFailure,listenerFailure,wireSocket,wireListener,bodyListener;
+ let timer,resolver,lookupPromise,addresses,attemptedAddress,peer,status,rawHeaders,bytes=0,refusal=false,primary,eventFailure,listenerFailure,wireSocket,wireListener,bodyListener;
+ const destroyOwned=()=>{for(const object of [io.response,io.request])if(object&&object.closed!==true)try{object.destroy();}catch{listenerFailure=true;}};
  const detachData=()=>{
   // Attempt both removals even if the first fails; a cleanup failure cannot
   // be hidden by a previously received body or a known connection refusal.
@@ -51,23 +50,23 @@ async function performRouteRequest(context,slot,{url,method,headers,body=''}){
   lookupPromise=resolver.resolve4(target.hostname);
   addresses=await lookupPromise;context.assertRequest(permit);
   need(addresses.length>0&&addresses.length<=64&&new Set(addresses).size===addresses.length&&addresses.every(a=>addressAllowed(a,lane)),'ObserverRouteDns');
-  const attemptedAddress=addresses[0];
+  attemptedAddress=context.selectPrivatePeer(permit,addresses);context.assertRequest(permit);
   await new Promise((resolve,reject)=>{
    let done=false;const settle=e=>{if(e){eventFailure??=e;detachData();}if(done)return;done=true;clearTimeout(timer);e?reject(e):resolve();};
    const req=(target.protocol==='https:'?https:http).request(target,{method,headers:{...headers,Connection:'close',...(method==='POST'?{'Content-Length':String(payload.length)}:{})},agent:false,family:4,autoSelectFamily:false,
     lookup(_hostname,options,callback){callback(null,options?.all?[{address:attemptedAddress,family:4}]:attemptedAddress,...(options?.all?[]:[4]));}},res=>{
     io.response=res;status=res.statusCode;peer=res.socket?.remoteAddress?.replace(/^::ffff:/,'');rawHeaders=res.headers;
-    try{context.assertRequest(permit);need(addresses.includes(peer),'ObserverRoutePeer');}catch(e){settle(e);res.destroy();req.destroy();return;}
-    bodyListener=chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array,'ObserverRouteResponseBound');events.body(chunk.length);bytes+=chunk.length;parts.push(Buffer.from(chunk));}catch(e){settle(e);res.destroy();req.destroy();}};
+    try{context.assertRequest(permit);need(addresses.includes(peer)&&(context.deliveryVersion!==3||peer===attemptedAddress),'ObserverRoutePeer');}catch(e){settle(e);destroyOwned();return;}
+    bodyListener=chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array,'ObserverRouteResponseBound');events.body(chunk.length);bytes+=chunk.length;parts.push(Buffer.from(chunk));}catch(e){settle(e);destroyOwned();}};
     res.on('data',bodyListener);
     res.once('end',()=>settle());res.once('aborted',()=>settle(Error('ObserverRouteAborted')));res.once('error',e=>settle(e));
    });io.request=req;
    // Socket data includes HTTP headers/chunk framing before Node exposes the
    // decoded body. TLS sockets emit decrypted HTTP bytes here.
-   req.once('socket',socket=>{wireSocket=socket;wireListener=chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array,'ObserverRouteWireBound');events.wire(chunk.length);context.chargeWire(permit,chunk.length);}catch(e){settle(e);req.destroy();io.response?.destroy();}};socket.prependListener('data',wireListener);});
+   req.once('socket',socket=>{wireSocket=socket;wireListener=chunk=>{try{context.assertRequest(permit);need(chunk instanceof Uint8Array,'ObserverRouteWireBound');events.wire(chunk.length);context.chargeWire(permit,chunk.length);}catch(e){settle(e);destroyOwned();}};socket.prependListener('data',wireListener);});
    req.once('error',e=>{if(done)return;try{context.assertRequest(permit);refusal=!io.response&&!req.socket?.remoteAddress&&e.code==='ECONNREFUSED'&&e.syscall==='connect'&&e.address===attemptedAddress&&e.port===Number(target.port||(target.protocol==='https:'?443:80));}catch(error){settle(error);return;}settle(e);});
    req.once('close',()=>{if(!done)settle(Error('ObserverRoutePrematureClose'));});
-   timer=setTimeout(()=>{settle(Error('ObserverRouteDeadline'));req.destroy();},Math.max(1,Math.min(15000,limits.deadlineMs-Date.now())));req.end(payload);
+   timer=setTimeout(()=>{settle(Error('ObserverRouteDeadline'));destroyOwned();},Math.max(1,Math.min(15000,limits.deadlineMs-Date.now())));req.end(payload);
   });context.assertRequest(permit);
  }catch(e){primary=e;}
  try{
@@ -81,7 +80,7 @@ async function performRouteRequest(context,slot,{url,method,headers,body=''}){
  try{
   context.assertRequest(permit); // same resumed frame, before any result work
   if(primary&&!refusal)throw primary;
-  const common={slot,method,urlHash:hash(url),requestHash:hash(JSON.stringify({method,url,headersHash:hash(JSON.stringify(headers)),bodyHash:hash(body)})),startedMs,completedMs:context.now(),dnsAddresses:addresses,attemptedAddress:addresses[0],requestClosed:io.request.closed===true,responseClosed:!io.response||io.response.closed===true};
+  const common={slot,method,urlHash:hash(url),requestHash:hash(JSON.stringify({method,url,headersHash:hash(JSON.stringify(headers)),bodyHash:hash(body)})),startedMs,completedMs:context.now(),dnsAddresses:addresses,attemptedAddress,requestClosed:io.request.closed===true,responseClosed:!io.response||io.response.closed===true};
   if(refusal)return {permit,body:null,headers:null,observation:{...common,kind:'connection-refused',code:'ECONNREFUSED',connectedPeer:null,statusCode:null,responseHash:null,responseBytes:0}};
   need(Number.isSafeInteger(status)&&status>=200&&status<=599&&!(status>=300&&status<400),'ObserverRouteRedirect');
   const raw=Buffer.concat(parts,bytes);
