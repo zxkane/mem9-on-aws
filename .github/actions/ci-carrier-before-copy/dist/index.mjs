@@ -149736,6 +149736,13 @@ var init_ci_carrier_startup = __esmMin((() => {
 	positive$1 = (n) => Number.isSafeInteger(n) && n > 0;
 }));
 //#endregion
+//#region scripts/lib/production-nonroot-data-cache.mjs
+var init_production_nonroot_data_cache = __esmMin((() => {
+	init_production_image_graph();
+	init_production_image_transition();
+	init_production_nonroot_contracts();
+}));
+//#endregion
 //#region scripts/lib/production-control-capacity.mjs
 function inspectFutureControlCapacity(value) {
 	need$13(nonrootHash(value) === FUTURE_CONTROL_CAPACITY_HASH, "FutureControlCapacityPolicy");
@@ -149860,6 +149867,7 @@ var production_nonroot_control_cache_exports = /* @__PURE__ */ __exportAll({
 * before opening it, including config/FS/file-extraction rereads. */
 async function openOwnedNonrootControlCache({ directory, binding, inventory, budget }) {
 	assertImageBudget(budget);
+	need$12(budget.kind !== "prepaid-local-data-cache", "DataCacheControlForbidden");
 	binding = copyNonrootJson(binding);
 	inventory = copyNonrootJson(inventory);
 	need$12(typeof directory === "string" && resolve(directory) === directory, "NonrootControlCachePath");
@@ -150477,6 +150485,7 @@ function controlGraph(binding, options) {
 * avoids a module-initialization cycle; the ordinary graph API stays pure IO.
 */
 async function readOwnedControlImageCache(binding, options = {}) {
+	need$11(!prepaidDataBudgets.has(options.budget), "DataCacheControlForbidden");
 	need$11(record$1(options) && Object.keys(options).every((k) => [
 		"directory",
 		"inventory",
@@ -150521,6 +150530,7 @@ async function readOwnedControlImageCache(binding, options = {}) {
 * graph receipt. The fixed local reader reconstructs every edge/attestation,
 * then requires exact coverage of the downloaded nodes before returning it. */
 async function readCollectedControlImageCache(binding, options = {}) {
+	need$11(!prepaidDataBudgets.has(options.budget), "DataCacheControlForbidden");
 	need$11(record$1(options) && Object.keys(options).every((k) => [
 		"directory",
 		"nodes",
@@ -150593,7 +150603,7 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		if (origins.has(key)) return;
 		origins.add(key);
 		const leave = budget.enter();
-		if (!prepaidControlBudgets.has(budget)) {
+		if (!prepaidControlBudgets.has(budget) && !prepaidDataBudgets.has(budget)) {
 			budget.transfer(d.size);
 			budget.call();
 		}
@@ -150642,12 +150652,12 @@ async function readGraph(roots, { readManifest, readBlob, source, store, budget,
 		validateImageDescriptor(d, "manifest");
 		register(d);
 		budget.manifest(d);
-		const repositoryName = side === "control" ? root.repositoryName : side === "source" ? root.sourceRepository : root.destinationRepository, key = repositoryName + "\0" + d.digest;
+		const repositoryName = side === "control" ? root.repositoryName : side === "source" || side === "local-data" ? root.sourceRepository : root.destinationRepository, key = repositoryName + "\0" + d.digest;
 		need$11(!visiting.has(key), "ImageGraphCycle");
 		if (done.has(key)) return;
 		visiting.add(key);
 		const leave = budget.enter();
-		if (!prepaidControlBudgets.has(budget)) {
+		if (!prepaidControlBudgets.has(budget) && !prepaidDataBudgets.has(budget)) {
 			budget.transfer(d.size);
 			budget.call();
 		}
@@ -150846,8 +150856,9 @@ function imageGraphState(handle) {
 		} })
 	};
 }
-var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts$1, budgets, prepaidControlBudgets, imageDigest, imageFailure, need$11, record$1, integer, hexDigest, freeze$2, bytesOf, oneChunk;
+var IMAGE_MEDIA, indexes$3, manifests$4, configs, IMAGE_LAYER_MEDIA, media, contexts$1, budgets, prepaidControlBudgets, prepaidDataBudgets, imageDigest, imageFailure, need$11, record$1, integer, hexDigest, freeze$2, bytesOf, oneChunk;
 var init_production_image_graph = __esmMin((() => {
+	init_production_nonroot_data_cache();
 	init_production_control_capacity();
 	init_production_image_transition();
 	init_production_canary_verification();
@@ -150893,6 +150904,7 @@ var init_production_image_graph = __esmMin((() => {
 	contexts$1 = /* @__PURE__ */ new WeakMap();
 	budgets = /* @__PURE__ */ new WeakSet();
 	prepaidControlBudgets = /* @__PURE__ */ new WeakMap();
+	prepaidDataBudgets = /* @__PURE__ */ new WeakMap();
 	imageDigest = (bytes) => "sha256:" + createHash("sha256").update(bytes).digest("hex");
 	imageFailure = (code) => {
 		throw Object.assign(Error(code), {

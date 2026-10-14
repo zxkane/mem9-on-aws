@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {openOwnedNonrootDataCache} from './production-nonroot-data-cache.mjs';
 import {inspectFutureControlCapacity,verifyFutureControlGraphCapacity} from './production-control-capacity.mjs';
 import {IMAGE_TRANSITION_LIMITS as L,IMAGE_TRANSITION_LIMITS_HASH,IMAGE_TRANSITION_COMPONENTS} from './production-image-transition.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
@@ -12,6 +13,9 @@ export const IMAGE_LAYER_MEDIA=Object.freeze([IMAGE_MEDIA.tar,IMAGE_MEDIA.gzip,I
 const media=new Set([...manifests,...configs,IMAGE_MEDIA.attestation,...IMAGE_LAYER_MEDIA]);
 const contexts=new WeakMap(),copies=new WeakMap(),budgets=new WeakSet();
 const prepaidControlBudgets=new WeakMap();
+const prepaidDataBudgets=new WeakMap();
+export const DATA_CACHE_READ_CHUNK_BYTES=65536;
+const DATA_CACHE_OPEN_LOGICAL_BYTES=4096,DATA_CACHE_READ_FACTOR=3;
 export const imageDigest=bytes=>'sha256:'+createHash('sha256').update(bytes).digest('hex');
 export const imageFailure=code=>{throw Object.assign(Error(code),{code,hold:true});};
 const need=(ok,code='ImageGraphInvalid')=>{if(!ok)imageFailure(code);};
@@ -115,6 +119,52 @@ export function createPrepaidControlCacheBudget(options={}){
  check();budgets.add(budget);prepaidControlBudgets.set(budget,{metadataReads,used:false});return Object.freeze(budget);
 }
 export function assertImageBudget(budget){need(budgets.has(budget),'ImageBudgetRequired');budget.check();return budget;}
+
+/** A local DATA pass spends an existing invocation; it never invents a
+ * credential lifetime or a network/copy allowance. CONTROL keeps its own brand. */
+export function createPrepaidDataCacheBudget(options={}){
+ need(record(options)&&Reflect.ownKeys(options).every(k=>['metadataReads','now','deadlineMs','signal'].includes(k)),'DataCacheBudgetOptions');
+ const {metadataReads,signal}=options,now=options.now??Date.now;
+ need(metadataReads&&typeof metadataReads.reserveLocal==='function'&&typeof now==='function','DataCachePrepaymentRequired');
+ const reserveLocal=metadataReads.reserveLocal,startedMs=now(),deadlineMs=options.deadlineMs??startedMs+L.maxBlobTransferMs;
+ need(integer(startedMs)&&Number.isSafeInteger(deadlineMs)&&deadlineMs>startedMs+L.cleanupReserveMs&&deadlineMs<=startedMs+L.maxBlobTransferMs,'DataCacheDeadline');
+ need(hash(L)===IMAGE_TRANSITION_LIMITS_HASH,'ImageLimitsChanged');
+ const zero=()=>({ecrRequests:0,logicalBytes:0,httpBodyBytes:0,uncompressedBytes:0,processedEntries:0});
+ let held=false,manifestNodes=0,blobNodes=0,uniqueBytes=0,logicalBytes=0,physicalBytes=0,localReads=0,uncompressedBytes=0,fsEntries=0,active=0;
+ const reserve=charge=>{
+  need(metadataReads.reserveLocal===reserveLocal,'DataCachePayerChanged');
+  const result=reserveLocal.call(metadataReads,Object.freeze(charge));
+  if(result&&typeof result.then==='function'){Promise.resolve(result).catch(()=>{});imageFailure('DataCacheSynchronousReservationRequired');}
+ };
+ const check=()=>{
+  need(!held,'DataCacheBudgetHeld');
+  try{signal?.throwIfAborted();const t=now();need(integer(t)&&t>=startedMs&&t<deadlineMs-L.cleanupReserveMs,'DataCacheDeadline');reserve(zero());}
+  catch(error){held=true;throw error;}
+ };
+ const guarded=fn=>(...args)=>{try{check();return fn(...args);}catch(error){held=true;throw error;}};
+ const seen=new Map(),edges=new Set();
+ const add=(d,isManifest)=>{
+  validateImageDescriptor(d,isManifest?'manifest':'blob');const prior=seen.get(d.digest);
+  if(prior){need(prior.size===d.size&&prior.isManifest===isManifest,'ImageDescriptorConflict');return;}
+  need(uniqueBytes+d.size<=L.maxUniqueCompressedGraphBytes,'ImageGraphByteLimit');
+  need(isManifest?manifestNodes<L.maxManifestNodes:blobNodes<L.maxBlobNodes,'ImageGraphNodeLimit');
+  seen.set(d.digest,{size:d.size,isManifest});uniqueBytes+=d.size;if(isManifest)manifestNodes++;else blobNodes++;
+ };
+ const noNetwork=guarded(()=>imageFailure('DataCacheNetworkForbidden'));
+ const budget={kind:'prepaid-local-data-cache',limitsHash:IMAGE_TRANSITION_LIMITS_HASH,startedMs,deadlineMs,now,signal,check,
+  manifest:guarded(d=>add(d,true)),blob:guarded(d=>add(d,false)),
+  edge:guarded(key=>{need(typeof key==='string');if(!edges.has(key)){need(edges.size<L.maxEdges,'ImageGraphEdgeLimit');edges.add(key);}}),
+  cacheOpen:guarded(()=>{need(localReads<L.maxEcrCalls,'ImageCallLimit');reserve({...zero(),logicalBytes:DATA_CACHE_OPEN_LOGICAL_BYTES});logicalBytes+=DATA_CACHE_OPEN_LOGICAL_BYTES;localReads++;}),
+  cacheRead:guarded(size=>{need(integer(size)&&size<=DATA_CACHE_READ_CHUNK_BYTES&&physicalBytes+size<=L.maxTransferredBytes,'ImageTransferLimit');reserve({...zero(),logicalBytes:DATA_CACHE_READ_FACTOR*size});physicalBytes+=size;logicalBytes+=DATA_CACHE_READ_FACTOR*size;}),
+  uncompressed:guarded(size=>{need(integer(size)&&uncompressedBytes+size<=L.maxUncompressedBytes,'ImageUncompressedLimit');reserve({...zero(),uncompressedBytes:size});uncompressedBytes+=size;}),
+  entry:guarded(()=>{need(fsEntries<L.maxFsEntries,'ImageFilesystemEntryLimit');reserve({...zero(),processedEntries:1});fsEntries++;}),
+  enter:guarded(()=>{need(active<L.maxConcurrency,'ImageConcurrencyLimit');active++;let released=false;return()=>{if(!released){released=true;active--;}};}),
+  transfer:noNetwork,call:noNetwork,projected:noNetwork,
+  hold(){held=true;},
+  usage:()=>({manifestNodes,blobNodes,edges:edges.size,uniqueBytes,transferredBytes:0,calls:0,logicalBytes,localReads,uncompressedBytes,fsEntries,active}),
+ };
+ check();budgets.add(budget);prepaidDataBudgets.set(budget,{metadataReads,used:false});return Object.freeze(budget);
+}
 /** Bounded LOCAL work for decoding and hashing descriptor content. This is
  * data accounting only; callers reserve it before decode, and meter the cache
  * write/read separately. The containing manifest already paid its wire bytes. */
@@ -199,6 +249,7 @@ function validateRoots(roots){
  * approval flags. A context proves validated bytes, not source/caller authority. */
 export async function readImageGraph(roots,{readManifest,readBlob,source,store,budget,side='source'}={}){
  need(!prepaidControlBudgets.has(budget),'ControlCacheNetworkForbidden');
+ need(!prepaidDataBudgets.has(budget),'DataCacheNetworkForbidden');
  validateRoots(roots);assertImageBudget(budget);need(['source','destination'].includes(side));
  return readGraph(roots,{readManifest,readBlob,source,store,budget,side});
 }
@@ -213,6 +264,7 @@ function validateControlBinding(binding){
 }
 export async function readControlImageGraph(binding,options={}){
  need(!prepaidControlBudgets.has(options.budget),'ControlCacheNetworkForbidden');
+ need(!prepaidDataBudgets.has(options.budget),'DataCacheControlForbidden');
  validateControlBinding(binding);
  need(record(options)&&Object.keys(options).every(key=>['readManifest','readBlob','source','store','budget'].includes(key)),'ControlImageOptions');
  assertImageBudget(options.budget);
@@ -227,6 +279,7 @@ function controlGraph(binding,options){
  * budget still cannot enter either generic network-reader API. Historical
  * object paths are never interpreted: only native archive refs are read. */
 export async function readArchivedControlImageGraph(binding,{archive,inventory,budget,metadataReads}){
+ need(!prepaidDataBudgets.has(budget),'DataCacheControlForbidden');
  validateControlBinding(binding);assertImageBudget(budget);
  const prepaid=prepaidControlBudgets.get(budget);
  need(prepaid&&prepaid.metadataReads===metadataReads&&!prepaid.used,'ControlCacheAcquisitionMismatch');prepaid.used=true;
@@ -253,6 +306,7 @@ export async function readArchivedControlImageGraph(binding,{archive,inventory,b
  * avoids a module-initialization cycle; the ordinary graph API stays pure IO.
  */
 export async function readOwnedControlImageCache(binding,options={}){
+ need(!prepaidDataBudgets.has(options.budget),'DataCacheControlForbidden');
  need(record(options)&&Object.keys(options).every(k=>['directory','inventory','budget','metadataReads'].includes(k)),'ControlCacheReadOptions');
  validateControlBinding(binding);const {budget}=options;assertImageBudget(budget);
  const prepaid=prepaidControlBudgets.get(budget);
@@ -271,6 +325,7 @@ export async function readOwnedControlImageCache(binding,options={}){
  * graph receipt. The fixed local reader reconstructs every edge/attestation,
  * then requires exact coverage of the downloaded nodes before returning it. */
 export async function readCollectedControlImageCache(binding,options={}){
+ need(!prepaidDataBudgets.has(options.budget),'DataCacheControlForbidden');
  need(record(options)&&Object.keys(options).every(k=>['directory','nodes','budget','metadataReads'].includes(k)),'ControlCacheReadOptions');
  validateControlBinding(binding);const {budget}=options;assertImageBudget(budget);
  const prepaid=prepaidControlBudgets.get(budget);need(prepaid&&prepaid.metadataReads===options.metadataReads&&!prepaid.used,'ControlCacheAcquisitionMismatch');prepaid.used=true;
@@ -286,6 +341,25 @@ export async function readCollectedControlImageCache(binding,options={}){
  }catch(error){await cache.close();throw error;}
 }
 
+/** The sole DATA-local graph entry uses fixed filesystem readers, not caller
+ * adapters. Its side preserves graph bytes without granting source authority. */
+export async function readOwnedDataImageCache(roots,options={}){
+ need(record(options)&&Reflect.ownKeys(options).every(k=>['inventory','objects','budget','metadataReads'].includes(k)),'DataCacheReadOptions');
+ const {budget,metadataReads}=options,prepaid=prepaidDataBudgets.get(budget);
+ need(prepaid&&prepaid.metadataReads===metadataReads,'DataCacheAcquisitionMismatch');
+ assertImageBudget(budget);need(!prepaid.used,'DataCacheBudgetConsumed');prepaid.used=true;
+ let cache;
+ try{
+  roots=freeze(structuredClone(roots));validateRoots(roots);
+  const inventory=freeze(structuredClone(options.inventory)),objects=freeze(structuredClone(options.objects));
+  budget.check();
+  cache=await openOwnedNonrootDataCache({roots,inventory,objects,budget});
+  const graph=await readGraph(roots,{budget,store:cache.store,readManifest:cache.readManifest,readBlob:cache.readBlob,side:'local-data'});
+  budget.check();need(hash(graph.inventory)===hash(inventory),'NonrootDataCacheGraphChanged');await cache.check();
+  return {graph,cache};
+ }catch(error){budget.hold();if(cache)try{await cache.close();}catch(cleanup){throw Object.assign(new AggregateError([error,cleanup],'NonrootDataCacheCleanup'),{cleanupComplete:false,hold:true});}throw error;}
+}
+
 async function readGraph(roots,{readManifest,readBlob,source,store,budget,side},controlBinding){
  readManifest??=source&&(({repositoryName,descriptor})=>source.manifest(repositoryName,descriptor));
  readBlob??=source&&(({repositoryName,descriptor})=>source.blob(repositoryName,descriptor));
@@ -293,14 +367,14 @@ async function readGraph(roots,{readManifest,readBlob,source,store,budget,side},
  const manifestMap=new Map(),blobs=new Map(),descriptors=new Map(),visiting=new Set(),done=new Set(),origins=new Set(),edges=[],attestations=[],images=new Map(),readbacks=[];
  const register=d=>{const before=descriptors.get(d.digest);if(before)need(before.size===d.size&&before.mediaType===d.mediaType,'ImageDescriptorConflict');else descriptors.set(d.digest,{digest:d.digest,size:d.size,mediaType:d.mediaType});};
  const blob=async(repositoryName,d)=>{validateImageDescriptor(d,'blob');register(d);budget.blob(d);const key=repositoryName+'\0'+d.digest;if(origins.has(key))return;origins.add(key);
-  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)){budget.transfer(d.size);budget.call();}try{const input=await readBlob({repositoryName,descriptor:d,signal:budget.signal});budget.check();let consumed=false;const checked=(async function*(){yield*verifyImageBytes(input,d,budget);budget.check();consumed=true;})();if(!blobs.has(d.digest)){await store.put(d,checked);budget.check();need(consumed,'ImageBlobNotConsumed');blobs.set(d.digest,{...descriptors.get(d.digest)});}else for await(const _ of checked){budget.check();}budget.check();readbacks.push({repositoryName,...descriptors.get(d.digest)});}finally{leave();}
+  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)&&!prepaidDataBudgets.has(budget)){budget.transfer(d.size);budget.call();}try{const input=await readBlob({repositoryName,descriptor:d,signal:budget.signal});budget.check();let consumed=false;const checked=(async function*(){yield*verifyImageBytes(input,d,budget);budget.check();consumed=true;})();if(!blobs.has(d.digest)){await store.put(d,checked);budget.check();need(consumed,'ImageBlobNotConsumed');blobs.set(d.digest,{...descriptors.get(d.digest)});}else for await(const _ of checked){budget.check();}budget.check();readbacks.push({repositoryName,...descriptors.get(d.digest)});}finally{leave();}
  };
  const edge=(component,parent,d,kind,index)=>{validateImageDescriptor(d,manifests.has(d.mediaType)?'manifest':'blob');const row={component,parent,child:d.digest,kind,index};budget.edge(hash(row));edges.push(row);};
  const visit=async(root,d,depth)=>{
   need(depth<=L.maxGraphDepth,'ImageGraphDepth');validateImageDescriptor(d,'manifest');register(d);budget.manifest(d);
-  const repositoryName=side==='control'?root.repositoryName:side==='source'?root.sourceRepository:root.destinationRepository,key=repositoryName+'\0'+d.digest;
+  const repositoryName=side==='control'?root.repositoryName:side==='source'||side==='local-data'?root.sourceRepository:root.destinationRepository,key=repositoryName+'\0'+d.digest;
   need(!visiting.has(key),'ImageGraphCycle');if(done.has(key))return;visiting.add(key);
-  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)){budget.transfer(d.size);budget.call();}let bytes;try{const received=await readManifest({repositoryName,descriptor:d,signal:budget.signal});budget.check();bytes=bytesOf(received);need(bytes.length===d.size&&imageDigest(bytes)===d.digest,'ImageManifestDigest');}finally{leave();}
+  const leave=budget.enter();if(!prepaidControlBudgets.has(budget)&&!prepaidDataBudgets.has(budget)){budget.transfer(d.size);budget.call();}let bytes;try{const received=await readManifest({repositoryName,descriptor:d,signal:budget.signal});budget.check();bytes=bytesOf(received);need(bytes.length===d.size&&imageDigest(bytes)===d.digest,'ImageManifestDigest');}finally{leave();}
   const document=await readImageJson(oneChunk(bytes),{maxBytes:L.maxManifestBytes,budget});budget.check();need(record(document)&&document.schemaVersion===2&&document.mediaType===d.mediaType,'ImageManifestSchema');
   readbacks.push({repositoryName,...descriptors.get(d.digest)});
   const allowed=indexes.has(d.mediaType)?['schemaVersion','mediaType','manifests','annotations','subject','artifactType']:['schemaVersion','mediaType','config','layers','annotations','subject','artifactType'];need(Object.keys(document).every(k=>allowed.includes(k)),'ImageManifestFields');

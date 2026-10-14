@@ -20,7 +20,7 @@ const manifests=new Set([IMAGE_MEDIA.index,IMAGE_MEDIA.dockerIndex,IMAGE_MEDIA.m
  * replace these readers with network callbacks. Every descriptor is charged
  * before opening it, including config/FS/file-extraction rereads. */
 export async function openOwnedNonrootControlCache({directory,binding,inventory,budget}){
- assertImageBudget(budget);binding=copyNonrootJson(binding);inventory=copyNonrootJson(inventory);
+ assertImageBudget(budget);need(budget.kind!=='prepaid-local-data-cache','DataCacheControlForbidden');binding=copyNonrootJson(binding);inventory=copyNonrootJson(inventory);
  need(typeof directory==='string'&&resolve(directory)===directory,'NonrootControlCachePath');const realDirectory=await realpath(directory);budget.check();need(realDirectory===directory,'NonrootControlCachePath');
  const initial=await lstat(directory);budget.check();
  need(initial.isDirectory()&&initial.uid===process.getuid()&&(initial.mode&0o777)===0o700,'NonrootControlCacheDirectory');

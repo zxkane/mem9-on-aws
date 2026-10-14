@@ -15797,8 +15797,8 @@
     },
     {
       "path": "scripts/lib/production-image-graph.mjs",
-      "sha256": "fae091f18ba2aefce001b9b52cd7d7e5840aeea55722949e57aac734ec40dd0a",
-      "bytesLength": 43227
+      "sha256": "c931267b4c1fb48bd5a774cdb051382967020d4a4c5078ec737b31c03a20df04",
+      "bytesLength": 49417
     },
     {
       "path": "scripts/lib/production-image-response.mjs",
@@ -15842,8 +15842,8 @@
     },
     {
       "path": "scripts/lib/production-nonroot-control-cache.mjs",
-      "sha256": "c6ad1bee8cd6a2a8c68d984fdecaa8f0d5d143886a4a444a799f87bb6bb0b395",
-      "bytesLength": 7117
+      "sha256": "351ef5b6b8184c4eb86630322e89d6538fcbd248e8b5c569075cf333f8454d75",
+      "bytesLength": 7192
     },
     {
       "path": "scripts/lib/production-nonroot-control-current.mjs",
@@ -15864,6 +15864,11 @@
       "path": "scripts/lib/production-nonroot-control-prerequisites.mjs",
       "sha256": "56d50a5f0de9767055f9e064f39e48ead82b55f9c1ec20115ad82f0bd9e47cab",
       "bytesLength": 46145
+    },
+    {
+      "path": "scripts/lib/production-nonroot-data-cache.mjs",
+      "sha256": "55d7d72b120484e913e45fc97c626fefed099ca0b7e6ee445af5d6814662e369",
+      "bytesLength": 7019
     },
     {
       "path": "scripts/lib/production-nonroot-descriptor-processing.mjs",
@@ -15958,7 +15963,7 @@
   ],
   "output": {
     "path": ".github/actions/ci-carrier-before-copy/dist/index.mjs",
-    "sha256": "3ea5efe9372f2e6439195df5a425aedea8dc3c7b7da1e3eb5beb125b87a2fb93",
-    "bytesLength": 6284233
+    "sha256": "baa2f1ba2c62a52fd0a715571c9a5062b13f2355a954dad74985a3f75f7f01b1",
+    "bytesLength": 6284923
   }
 }
