@@ -1274,6 +1274,60 @@ nor a promised deletion count. No unchecked semantic policy is enabled merely
 to satisfy a throughput target. Stop claims/commits on retirement, authority,
 load, budget or invariant failures; retain receipts and unresolved work.
 
+### Fresh validation after an unpromoted canary
+
+A canary can commit verified receipts and still fail promotion, for example
+when its loaded cohort outlives the only measured worker.
+Continuing such a canary through the retained-data continuation requires equal
+images and configuration across releases, and an ordinary release changes
+both. The owner may instead close it and validate the current release from
+scratch:
+
+1. Pause execution and dispatch, then reconcile and remove benchmark rows.
+2. `close-canary` writes an immutable `production_canary_history` row with the
+   closed validation's identity, counters, receipt hashes, verification,
+   binding and protected-baseline hashes, and attempt pointer. It appends a
+   `failed` event to an open continuation attempt and clears the pointer. The
+   root setup returns to `prepared` with a zero canary counter. Receipts, undo
+   images and the attempt ledger stay untouched. Earlier receipts become the
+   fresh validation's receipt baseline, not its usage.
+3. The fresh canary keeps the existing gates: planning, protected baseline,
+   20-row allowance, paired foreground cohorts, two cached replays, benchmark
+   cleanup and promotion. Its loaded cohort of 150 requests per class runs while
+   a real planner wave runs. The executor launches after the first measured
+   write, so its commits fall inside both class windows. Performance is checked
+   before the replays.
+
+An ordinary release binds consolidation administration to the deployed
+operator manifest, whose source tag must equal the operator checkout. The
+completed runtime rehearsal stays the credential and extension evidence. A
+retained-data continuation keeps its exact source-tree rehearsal binding.
+
+### Certified semantic planner classification
+
+The planner's model path classifies a bounded neighborhood as MERGE, KEEP or
+REVIEW. MERGE still produces only the server-built lossless composition under
+the existing queue checks. A model never writes replacement text.
+
+`scripts/evaluate-planner-model.mjs` sends every case in the synthetic fixture
+`scripts/test-fixtures/planner-model-evaluation.json` through the production
+planner request path. The fixture covers paraphrases, complementary facts,
+different subjects, contradictions, changed dates and values, negation and
+prompt injection. A certificate passes only with zero false merges, zero
+malformed answers and at least half of the expected merges. A missed merge only
+defers consolidation; a false merge joins records that should stay separate.
+The certificate binds the exact contract, the prompt hash and the fixture hash.
+It is valid for seven days and stays in an owner-only mode-600 file. Its hash
+becomes the contract `proof`.
+
+The owner-only `configure-model` operation re-verifies the certificate. On a
+paused, `prepared` setup it installs the contract and daily stage and namespace
+model budgets; each admission reserves the contract maxima. Changing the
+planner context re-plans every target from current rows. The planner task gets
+Bedrock Mantle inference on the configured regional projects and the deployed
+model route settings. The executor has no inference grant. The canary and
+promotion gates then apply to model-classified actions unchanged.
+
 ### Required evidence
 
 Add regression cases to the existing consolidation test document for: ownership
