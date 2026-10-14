@@ -70,6 +70,18 @@ describe('production worker administrative task invocation',()=>{
     await expect(runProductionConsolidationTask(rejected.clients,{region,operation:'status',...data},rejected.options)).rejects.toThrow();
     expect(rejected.calls.some(c=>c.type==='RunTaskCommand')).toBe(false);
   });
+  it('binds an ordinary release to its deployed manifest rather than the rehearsal source tree',async()=>{
+    const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+    const acceptance={sourceTree:'f'.repeat(40),coordinatorDigest:'f'.repeat(64)};
+    const f=fixture({acceptance,sourceTag:'mem9-'+revision.slice(0,7)});
+    await runProductionConsolidationTask(f.clients,{region,operation:'close-canary'},f.options);
+    const launch=f.calls.find(c=>c.type==='RunTaskCommand');
+    const request=JSON.parse(launch.input.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_PRODUCTION_CONSOLIDATION_REQUEST').value);
+    expect(request).toMatchObject({operation:'close-canary',acceptance});
+    const stale=fixture({acceptance,sourceTag:'mem9-0000000'});
+    await expect(runProductionConsolidationTask(stale.clients,{region,operation:'close-canary'},stale.options)).rejects.toThrow('ProductionWorkerImageRevisionMismatch');
+    expect(stale.calls.some(c=>c.type==='RunTaskCommand')).toBe(false);
+  });
   it('validates the control credential and exact IAM policy, then matches the terminal nonce',async()=>{
     const f=fixture();expect((await runProductionConsolidationTask(f.clients,{region,operation:'status'},f.options)).outcome).toBe('complete');
     expect(f.journals.size).toBe(0);

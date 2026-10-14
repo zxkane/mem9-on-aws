@@ -11,7 +11,7 @@ import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
 import {protectedRowHashes,captureCanarySnapshot} from './lib/production-canary-snapshot.mjs';
 import {canaryWitnessMatches} from './lib/production-canary-compatibility.mjs';
 import {currentCanaryAttempt,beginCanaryContinuation,bindAttemptProof,verifyCanaryMembership,appendCanaryAttemptEvent,
-  recordCanaryAdmission,canaryRootIdentity} from './lib/production-canary-continuation.mjs';
+  recordCanaryAdmission,canaryRootIdentity,closeCanaryValidation} from './lib/production-canary-continuation.mjs';
 import {assertCanaryAttemptCommitWindow} from './lib/production-canary-continuation.mjs';
 import {decodeCanaryReport,verifyCanaryReport,decodeBenchmarkRefs,readCanaryReportFragments,canaryReportDigest} from './lib/production-canary-report.mjs';
 import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
@@ -28,7 +28,7 @@ export const canaryPolicy=()=>({limits:{total:20,rewrite:20,delete:20,archive:0,
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -173,7 +173,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','cleanup-benchmark','prepare','begin-continuation'].includes(request.operation)){
+    if(!['status','pause','cleanup-benchmark','prepare','begin-continuation','close-canary'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -247,6 +247,15 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
             {...proof,...verifiedReport,budget,admission,activationSeed,activationNonce:request.invocation}]);
           responseEvidence={verification:proof,performance:verifiedReport.performance,dailyRows:request.dailyRows,admission,activationSeed};
         }
+      }else if(request.operation==='close-canary'){
+        if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE')||
+          await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('PauseBeforeCanaryClose');
+        const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        for(const kind of ['planner','executor']){
+          if(Number(await scalar(db,'SELECT $1::regrole::oid AS result',[config[kind].username]))!==Number(setup?.[kind+'_oid']))throw Error('CanaryWorkerIdentityChanged');
+          await verifyWorkerPrivileges(db,config[kind].username,kind);
+        }
+        responseEvidence=await closeCanaryValidation(db,config,setup,request.invocation);
       }else if(request.operation==='cleanup-benchmark'){
         if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE')||
           await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('PauseBeforeBenchmarkCleanup');

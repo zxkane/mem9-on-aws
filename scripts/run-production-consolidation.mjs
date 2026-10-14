@@ -163,7 +163,10 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     const proof=await send(clients.ssm,new GetParametersCommand({Names:[prefix+'runtime/rehearsal-acceptance'],WithDecryption:true}));
     if(proof.InvalidParameters?.length||proof.Parameters?.length!==1)fail('ProductionWorkerRehearsalRequired');
     try{acceptance=JSON.parse(proof.Parameters[0].Value);}catch{fail('ProductionWorkerRehearsalRequired');}
-    if(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest())fail('ProductionWorkerReleaseEvidenceMismatch');
+    // A retained-data continuation replays a release rehearsed for this exact
+    // source. An ordinary release is bound below to the deployed operator
+    // manifest; the completed runtime rehearsal remains its credential evidence.
+    if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
     const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote'].includes(operation)?'admission':'inspection';

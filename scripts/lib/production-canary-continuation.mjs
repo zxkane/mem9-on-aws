@@ -315,3 +315,58 @@ export async function installCanaryContinuation(db){
     throw error;
   }
 }
+
+/**
+ * Close an unpromoted canary validation and return the root setup to
+ * `prepared`, so a fresh validation can run against the current release.
+ * The caller holds the execution-control and root setup row locks with
+ * execution and dispatch disabled. Receipts, undo images and the attempt
+ * ledger stay untouched. An append-only history row keeps the closed
+ * validation's identity, counters and exact receipt hashes.
+ */
+export async function closeCanaryValidation(db,config,setup,invocation){
+  if(!id(invocation)||setup?.phase!=='canary'||setup.generation!==config.generation||!id(setup.validation_id)||
+    !Number.isInteger(setup.canary_used)||setup.canary_used<0||setup.canary_used>20)fail('ProductionCanaryNotOpen');
+  for(const namespace of config.targets)if((await db.query('SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS present',
+    [namespace,'mem9-canary-'+setup.validation_id])).rows[0]?.present)fail('BenchmarkCleanupIncomplete');
+  await db.query('SAVEPOINT canary_history_install');
+  try{
+    await db.query(`
+    CREATE TABLE IF NOT EXISTS mem9_maintenance.production_canary_history(
+      validation_id TEXT PRIMARY KEY CHECK(validation_id~'^[a-f0-9]{32}$'),
+      invocation TEXT NOT NULL UNIQUE CHECK(invocation~'^[a-f0-9]{32}$'),
+      record JSONB NOT NULL CHECK(jsonb_typeof(record)='object' AND octet_length(record::text)<=262144),
+      closed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());
+    REVOKE ALL ON mem9_maintenance.production_canary_history
+      FROM PUBLIC,mem9_maintenance_backend,mem9_maintenance_planner,mem9_maintenance_executor,mem9_maintenance_operator;
+    DROP TRIGGER IF EXISTS canary_history_immutable ON mem9_maintenance.production_canary_history;
+    CREATE TRIGGER canary_history_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.production_canary_history
+      FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
+    await db.query('RELEASE SAVEPOINT canary_history_install');
+  }catch(error){await db.query('ROLLBACK TO SAVEPOINT canary_history_install');throw error;}
+  const attempt=await currentCanaryAttempt(db,{lock:true});
+  if(attempt?.promoted)fail('ProductionCanaryNotOpen');
+  const receipts=setup.canary_started_at?(await db.query(`SELECT namespace_id,action_id,encode(sha256(convert_to(to_jsonb(r)::text,'UTF8')),'hex') AS digest
+    FROM mem9_maintenance.receipts r WHERE committed_at>=$1 ORDER BY committed_at,namespace_id,action_id LIMIT 10001`,[setup.canary_started_at])).rows:[];
+  if(receipts.length>10000)fail('CanaryHistoryTooLarge');
+  const protectedBaseline=Array.isArray(setup.protected_baseline)?setup.protected_baseline:[];
+  const record={version:1,generation:setup.generation,targets:setup.targets,canaryUsed:setup.canary_used,
+    canaryStartedMs:setup.canary_started_at?new Date(setup.canary_started_at).getTime():null,
+    receipts:receipts.map(r=>[r.namespace_id,r.action_id,r.digest]),
+    verificationHash:setup.receipt_verification?hash(setup.receipt_verification):null,
+    backendBindingHash:setup.backend_binding?hash(setup.backend_binding):null,
+    baselineReceiptsHash:hash(setup.baseline_receipts??null),
+    protectedBaseline:{rows:protectedBaseline.length,hash:hash(protectedBaseline.map(r=>[r.namespace_id,r.id,r.digest]))},
+    attempt:attempt?{id:attempt.row.attempt_id,ordinal:attempt.row.ordinal,phase:attempt.phase,lastHash:attempt.lastHash}:null};
+  const existing=(await db.query('SELECT invocation,record FROM mem9_maintenance.production_canary_history WHERE validation_id=$1',[setup.validation_id])).rows[0];
+  if(existing)fail('CanaryHistoryConflict');
+  await db.query('INSERT INTO mem9_maintenance.production_canary_history(validation_id,invocation,record) VALUES($1,$2,$3)',[setup.validation_id,invocation,record]);
+  if(attempt){
+    if(attempt.phase!=='failed'&&attempt.row.ordinal>0)await appendCanaryAttemptEvent(db,attempt.row.attempt_id,'failed',{closedBy:invocation});
+    await db.query('DELETE FROM mem9_maintenance.production_canary_validation_current WHERE singleton');
+  }
+  await db.query(`UPDATE mem9_maintenance.production_worker_setup SET phase='prepared',validation_id=NULL,protected_baseline=NULL,
+    canary_started_at=NULL,canary_used=0,receipt_verification=NULL,baseline_receipts=NULL,promotion_verification=NULL,
+    benchmark_cleanup=NULL,backend_binding=NULL WHERE singleton`);
+  return {closedValidationId:setup.validation_id,closedReceipts:receipts.length,closedCanaryUsed:setup.canary_used,historyHash:hash(record)};
+}
