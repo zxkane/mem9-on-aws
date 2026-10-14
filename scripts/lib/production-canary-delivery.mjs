@@ -59,6 +59,22 @@ export function ownsCanaryTask(task,journal){
     canaryEvidenceHash({containerOverrides:overrides.containerOverrides})===journal.overridesHash;
 }
 
+// Only the planner may hold Mantle inference, and only on the regional
+// projects its own route settings name. Any other grant fails verification.
+export function plannerModelStatements({kind,region,account,values}){
+  const project=values.MEM9_BEDROCK_PROJECT,openai=values.MEM9_BEDROCK_PROJECT_OPENAI,responsesRegion=values.MEM9_LLM_RESPONSES_REGION;
+  if(kind!=='planner'){
+    if([project,openai,responsesRegion,values.MEM9_LLM_MODEL].some(value=>value!==undefined))fail();
+    return [];
+  }
+  const valid=value=>value===''||/^(default|proj_[a-z0-9]{1,20})$/.test(value??'');
+  if(!valid(project)||!valid(openai)||!/^[a-z]{2}(?:-[a-z]+)+-[0-9]+$/.test(responsesRegion??'')||values.AWS_REGION!==region)fail();
+  const projects=[...(project?[`arn:aws:bedrock-mantle:${region}:${account}:project/${project}`]:[]),
+    ...(openai?[`arn:aws:bedrock-mantle:${responsesRegion}:${account}:project/${openai}`]:[])];
+  return projects.length?[{Effect:'Allow',Action:['bedrock-mantle:CreateInference'],Resource:projects},
+    {Effect:'Allow',Action:['bedrock-mantle:CallWithBearerToken'],Resource:'*'}]:[];
+}
+
 export async function loadProductionCanaryWorker(clients,{region,kind,revision,controlSourceTree}){
   if(!['planner','executor'].includes(kind)||!/^[a-f0-9]{40}$/.test(revision??''))fail();
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
@@ -96,7 +112,7 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
   const meta={...manifest,region,account,cluster,kind,revision,controlSourceTag:approved.controlSourceTag??approved.sourceTag,dataRelease,
     image:worker.image,sourceTag:worker.sourceTag,containerName,taskDefinitionArn:worker.taskDefinitionArn,subnets:approved.subnets,securityGroup:approved.securityGroup,
     taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn};
-  await verifyProductionTaskRoles(clients,meta,definition,containerName,secrets,'WorkerParameters');
+  await verifyProductionTaskRoles(clients,meta,definition,containerName,secrets,'WorkerParameters',plannerModelStatements({kind,region,account,values}));
   const template=await send(clients.scheduler,new GetScheduleCommand({Name:worker.scheduleName,GroupName:manifest.groupName}));
   return {...meta,template,logOptions:container.logConfiguration?.options};
 }

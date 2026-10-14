@@ -1274,6 +1274,71 @@ nor a promised deletion count. No unchecked semantic policy is enabled merely
 to satisfy a throughput target. Stop claims/commits on retirement, authority,
 load, budget or invariant failures; retain receipts and unresolved work.
 
+### Fresh validation after an unpromoted canary
+
+A canary can commit verified receipts and still fail promotion, for example
+when its loaded cohort outlives the only measured worker.
+Continuing such a canary through the retained-data continuation requires equal
+images and configuration across releases, and an ordinary release changes
+both. The owner may instead close it and validate the current release from
+scratch:
+
+1. Pause execution and dispatch, then reconcile and remove benchmark rows.
+2. `close-canary` writes an immutable `production_canary_history` row with the
+   closed validation's identity, counters, receipt hashes, verification,
+   binding and protected-baseline hashes, and attempt pointer. It appends a
+   `failed` event to an open continuation attempt and clears the pointer. The
+   root setup returns to `prepared` with a zero canary counter. Receipts, undo
+   images and the attempt ledger stay untouched. Earlier receipts become the
+   fresh validation's receipt baseline, not its usage.
+
+   This deliberately replaces the continuation's single lifetime allowance:
+   each validation has its own 20-row allowance, and at most three closed
+   validations per worker generation bound unpromoted changes to 80 rows. The
+   stage's daily budget window is not reset, so a fresh canary on the same UTC
+   day starts with whatever headroom remains.
+3. The fresh canary keeps the existing gates: planning, protected baseline,
+   20-row allowance, paired foreground cohorts, two cached replays, benchmark
+   cleanup and promotion. A real planner wave starts first and must report
+   classified work without failed slices. The executor launches while it runs,
+   and the loaded cohort of 150 requests per class starts once the executor
+   task runs, so its first commits fall inside both class windows. Every sample
+   must still lie within a measured worker run. Performance is checked before
+   the replays.
+
+An ordinary release binds consolidation administration to the deployed
+operator manifest, whose source tag must equal the operator checkout. The
+completed runtime rehearsal stays the credential and extension evidence. A
+retained-data continuation keeps its exact source-tree rehearsal binding. The
+canary release hash therefore names the rehearsal tree together with the
+deployed source tag and worker image digest that actually ran.
+
+### Certified semantic planner classification
+
+The planner's model path classifies a bounded neighborhood as MERGE, KEEP or
+REVIEW. MERGE still produces only the server-built lossless composition under
+the existing queue checks. A model never writes replacement text.
+
+`scripts/evaluate-planner-model.mjs` sends every case in the synthetic fixture
+`scripts/test-fixtures/planner-model-evaluation.json` through the production
+planner request path. The fixture covers paraphrases, complementary facts,
+different subjects, contradictions, changed dates and values, negation and
+prompt injection. A certificate records every synthetic verdict and passes
+only with zero false merges, zero malformed answers and at least half of the
+expected merges; installation recomputes the outcome from those verdicts. A missed merge only
+defers consolidation; a false merge joins records that should stay separate.
+The certificate binds the exact contract, the prompt hash and the fixture hash.
+It is valid for seven days and stays in an owner-only mode-600 file. Its hash
+becomes the contract `proof`.
+
+The owner-only `configure-model` operation re-verifies the certificate. On a
+paused, `prepared` setup it installs the contract and daily stage and namespace
+model budgets; each admission reserves the contract maxima. Changing the
+planner context re-plans every target from current rows. The planner task gets
+Bedrock Mantle inference on the configured regional projects and the deployed
+model route settings. The executor has no inference grant. The canary and
+promotion gates then apply to model-classified actions unchanged.
+
 ### Required evidence
 
 Add regression cases to the existing consolidation test document for: ownership
@@ -1728,7 +1793,7 @@ file, its runner and test dependencies. Packaged SQL is mapped into the test's
 expected paths; another application source tree must not replace the inherited
 modules. A digest-pinned PostgreSQL sidecar listens only on loopback and receives
 no Aurora, tenant or production credentials. Both containers run as non-root.
-The runner requires all 17 named cases, zero skipped/failed cases and a successful
+The runner requires all 20 named cases, zero skipped/failed cases and a successful
 test process, then removes the four shared fixture roles and proves zero fixture
 database/role residue before PostgreSQL exits. The host may emit the final
 marked preview evidence only after verifying the actual images, task completion

@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {loadProductionCanaryWorker} from './lib/production-canary-delivery.mjs';
+import {loadProductionCanaryWorker,plannerModelStatements} from './lib/production-canary-delivery.mjs';
 
 function fixture(drift){
   const account='123456789012',region='ap-northeast-1',revision='a'.repeat(40),generation='b'.repeat(64),cluster='mem9-on-aws-prod-Fixture';
@@ -53,5 +53,23 @@ describe('production canary worker target loading',()=>{
   it.each(['host','database','port'])('rejects %s drift before schedule creation',async drift=>{
     const f=fixture(drift);await expect(loadProductionCanaryWorker(f.clients,f.options)).rejects.toThrow('ProductionCanaryDeliveryFailed');
     expect(f.calls).not.toContain('GetScheduleCommand');expect(f.calls).not.toContain('CreateScheduleCommand');
+  });
+});
+describe('planner model grant verification',()=>{
+  const context={region:'ap-northeast-1',account:'123456789012'};
+  const values={MEM9_LLM_MODEL:'openai.gpt-example',MEM9_BEDROCK_PROJECT:'proj_app',MEM9_BEDROCK_PROJECT_OPENAI:'proj_responses',
+    MEM9_LLM_RESPONSES_REGION:'us-west-2',AWS_REGION:'ap-northeast-1'};
+  it('expects exactly the planner route projects and the bearer-token call',()=>{
+    expect(plannerModelStatements({...context,kind:'planner',values})).toEqual([
+      {Effect:'Allow',Action:['bedrock-mantle:CreateInference'],Resource:['arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_app',
+        'arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_responses']},
+      {Effect:'Allow',Action:['bedrock-mantle:CallWithBearerToken'],Resource:'*'}]);
+    expect(plannerModelStatements({...context,kind:'planner',values:{...values,MEM9_BEDROCK_PROJECT:'',MEM9_BEDROCK_PROJECT_OPENAI:''}})).toEqual([]);
+  });
+  it('rejects model settings on the executor and malformed planner routes',()=>{
+    expect(plannerModelStatements({...context,kind:'executor',values:{}})).toEqual([]);
+    expect(()=>plannerModelStatements({...context,kind:'executor',values})).toThrow();
+    for(const drift of [{MEM9_BEDROCK_PROJECT:'proj_*'},{MEM9_LLM_RESPONSES_REGION:'*'},{AWS_REGION:'us-east-1'}])
+      expect(()=>plannerModelStatements({...context,kind:'planner',values:{...values,...drift}})).toThrow();
   });
 });

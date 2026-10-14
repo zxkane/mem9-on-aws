@@ -68,6 +68,28 @@ export function consolidationPreviewConfig():ConsolidationPreviewConfig|undefine
   return {generation,database:shape.database,context,verification,values,arns};
 }
 
+// The planner may classify a neighborhood with the deployed ingest model
+// (MEM9_LLM_MODEL). Only a planner policy carrying an owner-certified model
+// contract makes a request; the grant and route settings alone never do.
+// Mantle projects are regional, so the Responses route needs its own project.
+function plannerModelAccess(){
+  const project=process.env.MEM9_BEDROCK_PROJECT||"",openaiProject=process.env.MEM9_BEDROCK_PROJECT_OPENAI||"";
+  const responsesRegion=process.env.MEM9_LLM_RESPONSES_REGION||"us-west-2";
+  const projects=[
+    ...(project?[$interpolate`arn:aws:bedrock-mantle:${applicationRegion()}:${accountId()}:project/${project}`]:[]),
+    ...(openaiProject?[$interpolate`arn:aws:bedrock-mantle:${responsesRegion}:${accountId()}:project/${openaiProject}`]:[]),
+  ];
+  const environment={MEM9_LLM_MODEL:process.env.MEM9_LLM_MODEL||"zai.glm-5",MEM9_BEDROCK_PROJECT:project,
+    MEM9_BEDROCK_PROJECT_OPENAI:openaiProject,MEM9_LLM_RESPONSES_REGION:responsesRegion,AWS_REGION:applicationRegion()};
+  const permissions:sst.aws.FargatePermission[]=projects.length?[
+    {actions:["bedrock-mantle:CreateInference"],resources:projects},
+    // Bearer-token calls have no resource scope; the project grant above and
+    // the workload boundary bound what the token can invoke.
+    {actions:["bedrock-mantle:CallWithBearerToken"],resources:["*"]},
+  ]:[];
+  return {environment,permissions};
+}
+
 export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:ConsolidationWorkerConfig,identity:MaintenanceIdentityOutputs):ConsolidationWorker[]{
   if(!isConsolidationPreview($app.stage)&&!($app.stage==='prod'&&config.production))throw Error("PreviewWorkersOnly");
   if(config.production&&$app.stage!=='prod')throw Error('ProductionWorkersOnly');
@@ -83,6 +105,7 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
       secrets.MEM9_SERVICE_TRANSPORT_SIGNING_KEYS=identity.serviceParameterArns.consolidation;
     }
     const parameters=Object.values(secrets);
+    const model=kind==="planner"?plannerModelAccess():{environment:{},permissions:[]};
     const task=new sst.aws.Task(containerName,{
       cluster:ecs.cluster,architecture:"arm64",cpu:"0.5 vCPU",memory:"1 GB",
       image:config.production?config.image!:workloadImage("llm-proxy",process.env.MEM9_IMAGE_TAG||"latest"),entrypoint:["node"],command:["/app/scripts/consolidation-worker.mjs"],
@@ -92,8 +115,8 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
         MEM9_SERVICE_TRANSPORT_ISSUER:"maintenance:consolidation",
         MEM9_SERVICE_TRANSPORT_SIGNING_REVISION:identity.revision,
         MEM9_WORKER_SLICE_SECONDS:config.production?'180':kind==="executor"?"450":"180",
-        ...(config.production?{MEM9_WORKER_MAX_SECONDS:kind==='planner'?'780':'240'}:{})},
-      ssm:secrets,permissions:[],logging:{retention:"1 month"},
+        ...(config.production?{MEM9_WORKER_MAX_SECONDS:kind==='planner'?'780':'240'}:{}),...model.environment},
+      ssm:secrets,permissions:model.permissions,logging:{retention:"1 month"},
       transform:{taskDefinition:args=>{disableTaskContainerPseudoTerminal(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};},
         taskRole:args=>{args.assumeRolePolicy=trust;},
         executionRole:args=>{

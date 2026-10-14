@@ -442,6 +442,82 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(await scalar(f.admin,'SELECT receipt_verification AS result FROM mem9_maintenance.production_worker_setup WHERE singleton')).toEqual(frozen.verification);
   }),60000);
 
+  it('closes an unpromoted canary into immutable history and admits a fresh validation',()=>fixture(async f=>{
+    const frozen=await frozenPair(f);
+    const fresh=operation=>({...f.request(operation),invocation:randomUUID().replaceAll('-','')});
+    const receipts=await scalar(f.admin,"SELECT jsonb_agg(jsonb_build_array(namespace_id,action_id) ORDER BY namespace_id,action_id) AS result FROM mem9_maintenance.receipts");
+    await f.admin.query("SELECT mem9_maintenance.set_execution_mode('prod',true,ARRAY[$1::regrole::oid],'qwen3-embedding-0.6b')",[f.legacy]);
+    await expect(runProductionConsolidation(f.admin,f.config,fresh('close-canary'),{connect:f.connect})).rejects.toThrow('PauseBeforeCanaryClose');
+    await runProductionConsolidation(f.admin,f.config,fresh('pause'),{connect:f.connect});
+    const marker='mem9-canary-'+frozen.verification.validationId;
+    const residue=randomUUID();
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,agent_id,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,$4,'benchmark-fixture',$5,'[]','{}','pinned')`,[residue,f.namespace,f.principal,canaryBenchmarkContent(frozen.verification.validationId,'loaded',0),marker]);
+    await expect(runProductionConsolidation(f.admin,f.config,fresh('close-canary'),{connect:f.connect})).rejects.toThrow('BenchmarkCleanupIncomplete');
+    await f.admin.query('DELETE FROM public.memories WHERE id=$1',[residue]);
+    const close=fresh('close-canary'),closed=await runProductionConsolidation(f.admin,f.config,close,{connect:f.connect});
+    expect(closed).toMatchObject({phase:'close-canary',closedValidationId:frozen.verification.validationId,closedReceipts:1,closedCanaryUsed:2});
+    const setup=(await f.admin.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0];
+    expect(setup).toMatchObject({phase:'prepared',validation_id:null,canary_used:0,receipt_verification:null,canary_started_at:null,backend_binding:null,protected_baseline:null});
+    const history=(await f.admin.query('SELECT * FROM mem9_maintenance.production_canary_history')).rows;
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({validation_id:frozen.verification.validationId,invocation:close.invocation});
+    expect(history[0].record).toMatchObject({version:1,canaryUsed:2,verificationHash:canaryEvidenceHash(frozen.verification)});
+    expect(history[0].record.receipts.map(r=>r.slice(0,2))).toEqual(receipts);
+    await expect(f.admin.query('UPDATE mem9_maintenance.production_canary_history SET record=$1',[{}])).rejects.toThrow();
+    await expect(f.admin.query('DELETE FROM mem9_maintenance.production_canary_history')).rejects.toThrow();
+    expect(await scalar(f.admin,"SELECT count(*)::int AS result FROM mem9_maintenance.receipts")).toBe(1);
+    await expect(runProductionConsolidation(f.admin,f.config,fresh('close-canary'),{connect:f.connect})).rejects.toThrow('ProductionCanaryNotOpen');
+    // The fresh validation starts from current rows; earlier receipts are its baseline, not canary usage.
+    await runProductionConsolidation(f.admin,f.config,fresh('plan'),{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,fresh('pause'),{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,fresh('baseline'),{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,fresh('canary'),{connect:f.connect});
+    const reopened=(await f.admin.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0];
+    expect(reopened).toMatchObject({phase:'canary',canary_used:0});
+    expect(reopened.baseline_receipts).toEqual(receipts);
+    expect(reopened.validation_id).not.toBe(frozen.verification.validationId);
+    // Each closed validation keeps its own allowance; the close count bounds them.
+    for(const i of [1,2])await f.admin.query('INSERT INTO mem9_maintenance.production_canary_history(validation_id,invocation,record) VALUES($1,$2,$3)',
+      [String(i).repeat(32),String(i+2).repeat(32),{version:1,generation:f.config.generation}]);
+    await runProductionConsolidation(f.admin,f.config,fresh('pause'),{connect:f.connect});
+    await expect(runProductionConsolidation(f.admin,f.config,fresh('close-canary'),{connect:f.connect})).rejects.toThrow('CanaryCloseLimitReached');
+    expect(await scalar(f.admin,'SELECT phase AS result FROM mem9_maintenance.production_worker_setup WHERE singleton')).toBe('canary');
+  }),60000);
+
+  it('installs a certified planner model and budgets only on a paused, prepared setup',()=>fixture(async f=>{
+    const contract={adapter:'mantle-responses-total-v1',model:'openai.gpt-example',region:'us-west-2',project:'proj_responses',max_input_tokens:32768,
+      max_output_tokens:2048,proof:'7'.repeat(64),reasoning:'low',input_bound:'context_limit',output_bound:'total_tokens'};
+    const limits={requests:10,input:327680,output:20480};
+    const plannerModel={contract,similarity:0.82,stage:{limits,slots:2,unknown:1},namespace:{limits}};
+    const configure=()=>runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel},{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,f.request('plan'),{connect:f.connect});
+    await expect(configure()).rejects.toThrow('PauseBeforePlannerModel');
+    await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});
+    expect(await configure()).toMatchObject({phase:'configure-model',modelEnabled:true,modelContractHash:canaryEvidenceHash(contract)});
+    expect(await scalar(f.admin,'SELECT policy AS result FROM mem9_maintenance.planner_policies WHERE namespace_id=$1',[f.namespace])).toEqual({enabled:true,similarity:0.82,model:contract});
+    expect(await scalar(f.admin,"SELECT jsonb_agg(jsonb_build_array(scope,limits) ORDER BY scope) AS result FROM mem9_maintenance.model_policies")).toEqual([[f.namespace,limits],['stage',limits]].sort((a,b)=>a[0].localeCompare(b[0])));
+    expect(await scalar(f.admin,'SELECT slots AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(2);
+    await runProductionConsolidation(f.admin,f.config,f.request('baseline'),{connect:f.connect});
+    await expect(configure()).rejects.toThrow('PlannerModelRequiresPreparedSetup');
+    await expect(runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel:{...plannerModel,contract:{...contract,adapter:'other'}}},{connect:f.connect})).rejects.toThrow();
+  }),60000);
+
+  it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
+    const {child}=await admittedContinuation(f,{admit:false});
+    await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});
+    const before=await readCanaryAttempt(f.admin,child.attemptId);
+    const close={...f.request('close-canary'),invocation:randomUUID().replaceAll('-','')};
+    await runProductionConsolidation(f.admin,f.config,close,{connect:f.connect});
+    const after=await readCanaryAttempt(f.admin,child.attemptId);
+    expect(after.events.slice(0,before.events.length)).toEqual(before.events);
+    expect(after.phase).toBe('failed');
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.production_canary_validation_current')).toBe(0);
+    const history=(await f.admin.query('SELECT record FROM mem9_maintenance.production_canary_history')).rows[0].record;
+    expect(history.attempt).toMatchObject({id:child.attemptId,ordinal:1,phase:'planning'});
+  }),60000);
+
   it('rejects canary re-admission before changing a frozen parent or policy epochs',()=>fixture(async f=>{
     const frozen=await frozenPair(f);
     const before=await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s WHERE singleton');
