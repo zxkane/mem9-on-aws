@@ -20,7 +20,7 @@ const dependencies = Object.keys(
 
 // Deploy jobs install only infra dependencies. An isolated module graph prevents
 // root node_modules from hiding a missing Lambda runtime dependency in CI.
-function importDeployment({ omitVerifier = false } = {}) {
+function importDeployment({ omitVerifier = false, omitSecretClient = false } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-identity-package-"));
   try {
     cpSync(gateway, join(directory, "gateway"), {
@@ -29,6 +29,7 @@ function importDeployment({ omitVerifier = false } = {}) {
     });
     for (const name of dependencies) {
       if (omitVerifier && name === "aws-jwt-verify") continue;
+      if (omitSecretClient && name === "@aws-sdk/client-secrets-manager") continue;
       const destination = join(directory, "node_modules", name);
       mkdirSync(dirname(destination), { recursive: true });
       symlinkSync(join(infra, "node_modules", name), destination, "dir");
@@ -57,6 +58,11 @@ describe("identity interceptor deployment dependencies", () => {
   it("detects a missing verifier even when the root package has it installed", () => {
     expect(() => importDeployment({ omitVerifier: true })).toThrow(
       /aws-jwt-verify/,
+    );
+  });
+  it("detects a missing secret client even when the root package has it installed", () => {
+    expect(() => importDeployment({ omitSecretClient: true })).toThrow(
+      /@aws-sdk\/client-secrets-manager/,
     );
   });
 });

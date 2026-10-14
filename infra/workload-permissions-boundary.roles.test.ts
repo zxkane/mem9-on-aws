@@ -44,12 +44,24 @@ const authorizerRoleLogicalName =
 const authorizerFunctionLogicalName =
   "Mem9OauthFacadeApiAuthorizerMem9OauthFacadeAllowAllHandlerFunction";
 const workloadRolePrefixes = ["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"];
+const gatewayRoleNames = new Set(["Mem9ProxyFnRole", "Mem9IdentityInterceptorFnRole"]);
+
+function verifyBoundaryAssignments(stage: string): void {
+  const roles = recordedResources.filter(({ type }) => type === "aws:iam/role:Role");
+  expect(roles.filter(({ name }) => gatewayRoleNames.has(name)).map(r => r.name).sort()).toEqual([...gatewayRoleNames].sort());
+  for (const role of roles) {
+    const policy = gatewayRoleNames.has(role.name) ? "mem9-on-aws-gateway-boundary" : WORKLOAD_BOUNDARY_POLICY_NAME;
+    expect(role.inputs.permissionsBoundary, role.name).toBe(`arn:aws:iam::${accountId}:policy/${policy}`);
+    if (gatewayRoleNames.has(role.name)) expect(role.inputs.tags, role.name).toMatchObject({ Project: "mem9-on-aws", Stage: stage });
+  }
+}
 
 function moduleUrl(path: string): string {
   return pathToFileURL(resolve(repositoryRoot, path)).href;
 }
 
 function mockArn(type: string, name: string): string {
+  if (type === "aws:iam/role:Role") return `arn:aws:iam::${accountId}:role/${name}`;
   const service = type.split(":")[1] || "mock";
   return `arn:aws:${service}:${region}:${accountId}:${name}`;
 }
@@ -70,6 +82,8 @@ function mockCall(args: MockCallArgs): Record<string, unknown> {
       };
     case "aws:index/getRegion:getRegion":
       return { description: "mock region", name: region, region };
+    case "aws:kms/getKey:getKey":
+      return { ...args.inputs, arn: `arn:aws:kms:${region}:${accountId}:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee` };
     case "aws:ecr/getImage:getImage":
       return {...args.inputs,id:'synthetic-image',imageDigest:'sha256:'+'a'.repeat(64),imageTags:[args.inputs.imageTag],
         imageUri:`${accountId}.dkr.ecr.${region}.amazonaws.com/${args.inputs.repositoryName}@sha256:${'a'.repeat(64)}`};
@@ -105,7 +119,7 @@ function mockNewResource(args: MockResourceArgs): {
     name: args.name,
     type: args.type,
   });
-  const id = `${args.name}-id`;
+  let id = `${args.name}-id`;
   const state: Record<string, unknown> = {
     ...args.inputs,
     arn: mockArn(args.type, args.name),
@@ -113,6 +127,17 @@ function mockNewResource(args: MockResourceArgs): {
     name: args.inputs.name ?? args.name,
   };
   switch (args.type) {
+    case "aws:ec2/vpcEndpoint:VpcEndpoint": {
+      const service = String(args.inputs.serviceName).split(".").at(-1);
+      id = service === "ssm" ? "vpce-aaaaaaaa" : "vpce-bbbbbbbb";
+      Object.assign(state, { id, dnsEntries: [
+        { dnsName: `${id}-fixture.${service}.${region}.vpce.amazonaws.com` },
+      ] });
+      break;
+    }
+    case "aws:secretsmanager/secret:Secret":
+      state.arn = `arn:aws:secretsmanager:${region}:${accountId}:secret:${args.inputs.namePrefix}fixture-AbCd12`;
+      break;
     case "aws:rds/cluster:Cluster":
       Object.assign(state, {
         clusterIdentifier: args.name,
@@ -441,6 +466,7 @@ describe("workload role coverage from the real SST graph", () => {
         MEM9_CONSOLIDATION_SCHEDULE_ENABLED: scheduleEnabled ? "1" : "0",
         SST_SECRET_MaintenanceNamespaceIds: JSON.stringify(scheduleEnabled ? maintenanceNamespaceIds : []),
         SST_SECRET_SlackWebhookUrl: "https://hooks.example.com/services/mock",
+        SST_SECRET_OauthStateHmacKey: "synthetic-existing-oauth-key",
         MEM9_SLACK_APPROVAL_ENABLED: "0",
         MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: "0",
         MEM9_CLEANUP_SCAN_ENABLED: "0",
@@ -577,6 +603,7 @@ describe("workload role coverage from the real SST graph", () => {
           return outputs;
         });
         await pulumi.runtime.waitForRPCs();
+        if (!unsupportedFlag) verifyBoundaryAssignments(stage);
         if (preview) {
           const service = oneResource('aws:ecs/service:Service', 'Mem9ServerService');
           expect(service.inputs.name).toBe('Mem9Server');
@@ -622,11 +649,6 @@ describe("workload role coverage from the real SST graph", () => {
           expectedRoleNames,
         );
         const expectedBoundary = `arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
-        expect(
-          createdRoles.every(
-            ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
-          ),
-        ).toBe(true);
         await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired, productionMode);
         if(productionMode){
           const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));

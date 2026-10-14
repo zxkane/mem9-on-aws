@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { createHmac } from "node:crypto";
 
 import {
   loadConfig,
@@ -13,20 +14,26 @@ import {
   type SsmLike,
 } from "./config.js";
 
-const PREFIX = "/example-app/pr-7/mcp";
+const PREFIX = "/mem9-on-aws/pr-7";
+const HMAC_ARN = `arn:aws:ssm:ap-northeast-1:123456789012:parameter${PREFIX}/oauth/state-hmac-key`;
 
 function ssmReturning(params: Record<string, string>): SsmLike {
   return {
-    send: vi.fn(async () => ({
-      Parameters: Object.entries(params).map(([Name, Value]) => ({
-        Name,
-        Value,
-      })),
-    })),
+    send: vi.fn(async (command: unknown) => {
+      const names = (command as { input: { Names: string[] } }).input.Names;
+      return {
+        Parameters: Object.entries(params).map(([Name, Value]) => ({
+          Name, Value,
+          ARN: `arn:aws:ssm:ap-northeast-1:123456789012:parameter${Name}`,
+          Type: Name.endsWith("/oauth/state-hmac-key") ? "SecureString" : "String",
+        })).filter(p => names.includes(p.Name) || names.includes(p.ARN)),
+      };
+    }),
   };
 }
 
 const fullSsm = {
+  [`${PREFIX}/oauth/state-hmac-key`]: "the-key",
   [`${PREFIX}/auth/providers/provider-a/browser/client-id`]: "external-client",
   [`${PREFIX}/auth/providers/provider-a/browser/client-secret`]:
     "external-secret",
@@ -45,7 +52,10 @@ const baseEnv = {
   COGNITO_REVOCATION_ENDPOINT: "https://revoke",
   COGNITO_JWKS_URI: "https://jwks",
   RESOURCE_SCOPES: "example-mcp/query/read, example-mcp/query/write",
-  OAUTH_STATE_HMAC_KEY: "the-key",
+  OAUTH_STATE_HMAC_KEY_PARAMETER_ARN: HMAC_ARN,
+  STAGE: "pr-7",
+  AWS_REGION: "ap-northeast-1",
+  MEM9_SECRET_ACCOUNT_ID: "123456789012",
 };
 
 describe("external OIDC runtime configuration", () => {
@@ -116,20 +126,22 @@ describe("external OIDC runtime configuration", () => {
       }),
     ).resolves.toMatchObject({ userClientSecret: "" });
   });
-  it("binds state/code signing to provider context and preserves disabled HMAC", async () => {
+  it("binds state/code signing to provider context and rejects an empty HMAC", async () => {
     const config = async (version: string, key = "key") =>
       loadConfig({
         env: {
           ...baseEnv,
           AUTH_CONTEXT_VERSION: version,
-          OAUTH_STATE_HMAC_KEY: key,
         },
-        ssm: ssmReturning(fullSsm),
+        ssm: ssmReturning({...fullSsm,[`${PREFIX}/oauth/state-hmac-key`]:key}),
       });
     expect((await config("provider-a")).hmacKey).not.toBe(
       (await config("provider-b")).hmacKey,
     );
-    expect((await config("provider-a", "")).hmacKey).toBe("");
+    expect((await config("provider-a")).hmacKey).toBe(
+      createHmac("sha256", "key").update("provider-a").digest("hex"),
+    );
+    await expect(config("provider-a", "")).rejects.toThrow("RuntimeSecretUnavailable");
   });
 });
 
@@ -191,10 +203,52 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     ).rejects.toThrow(/missing env COGNITO_TOKEN_ENDPOINT/);
   });
 
-  it("empty OAUTH_STATE_HMAC_KEY is preserved as the proxy-disabled sentinel", async () => {
+  it("plaintext HMAC environment compatibility is rejected", async () => {
     const env = { ...baseEnv, OAUTH_STATE_HMAC_KEY: "" };
-    const cfg = await loadConfig({ ssm: ssmReturning(fullSsm), env });
-    expect(cfg.hmacKey).toBe("");
+    await expect(loadConfig({ssm:ssmReturning(fullSsm),env})).rejects.toThrow("RuntimeSecretReferenceInvalid");
+  });
+
+  it.each([
+    undefined,
+    HMAC_ARN.replace("pr-7", "prod"),
+    HMAC_ARN.replace("123456789012", "0".repeat(12)),
+    HMAC_ARN.replace("ap-northeast-1", "us-west-2"),
+    `${HMAC_ARN}/other`,
+  ])("rejects a missing or foreign HMAC reference (%s)", async arn => {
+    await expect(loadConfig({
+      env: { ...baseEnv, OAUTH_STATE_HMAC_KEY_PARAMETER_ARN: arn },
+      ssm: ssmReturning(fullSsm),
+    })).rejects.toThrow("RuntimeSecretReferenceInvalid");
+  });
+
+  it.each(["missing", "plaintext", "foreign", "unavailable"])(
+    "fails closed on a %s HMAC read without exposing the secret",
+    async fault => {
+      const store = ssmReturning(fullSsm);
+      const original = store.send;
+      store.send = vi.fn(async command => {
+        const names = (command as { input: { Names: string[] } }).input.Names;
+        if (!names.includes(HMAC_ARN)) return original(command);
+        if (fault === "unavailable") throw new Error("must-not-expose-fixture-key");
+        if (fault === "missing") return { Parameters: [] };
+        return { Parameters: [{
+          Name: `${PREFIX}/oauth/state-hmac-key`, Value: "must-not-expose-fixture-key",
+          ARN: fault === "foreign" ? HMAC_ARN.replace("pr-7", "prod") : HMAC_ARN,
+          Type: fault === "plaintext" ? "String" : "SecureString",
+        }] };
+      });
+      await expect(loadConfig({ env: baseEnv, ssm: store }))
+        .rejects.toThrow(/^RuntimeSecretUnavailable$/);
+    },
+  );
+
+  it("requests only the exact HMAC ARN with decryption", async () => {
+    const store = ssmReturning(fullSsm);
+    await loadConfig({ env: baseEnv, ssm: store });
+    const calls = vi.mocked(store.send).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect((calls[1]![0] as { input: unknown }).input)
+      .toEqual({ Names: [HMAC_ARN], WithDecryption: true });
   });
 
   it("empty RESOURCE_SCOPES yields an empty scopes array", async () => {

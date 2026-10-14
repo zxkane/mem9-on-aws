@@ -19,15 +19,14 @@
  *   - `{mcpPrefix}/cognito/reader/client-secret`   (SecureString)
  *   - `{mcpPrefix}/oauth/allowed-callback-urls`
  *
- * The remaining, non-cyclic values (Cognito endpoint URLs that depend only on
- * the user pool + domain, the stage-specific HMAC key, and the resource scopes)
- * are plain env vars. Production sources the key from an operator-set SST
- * secret; ephemeral stages use a Pulumi-generated secret output. The SSM client
+ * Endpoint URLs and resource scopes remain non-secret environment values.
+ * The HMAC key is read from its exact stage-scoped SecureString ARN. The SSM client
  * is injected (`SsmLike`) so the loader is unit-testable without AWS.
  */
 
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { createHmac } from "node:crypto";
+import { createRuntimeSecretReader } from "../../gateway/runtime-secrets.mjs";
 
 export interface FacadeConfig {
   authMode?: "managed" | "oidc";
@@ -65,6 +64,7 @@ export interface SsmLike {
 }
 
 type Env = Record<string, string | undefined>;
+const defaultSsm = new SSMClient({ region: process.env.AWS_REGION, maxAttempts: 2, ignoreConfiguredEndpointUrls: true });
 const ALLOWED_CALLBACK_URLS_SETTING = "OauthAllowedCallbackUrls";
 const MAX_ALLOWED_CALLBACK_URLS = 20;
 const MAX_CALLBACK_URL_LENGTH = 2048;
@@ -192,7 +192,7 @@ export async function loadConfig(
   opts: { ssm?: SsmLike; env?: Env } = {},
 ): Promise<FacadeConfig> {
   const env = opts.env ?? process.env;
-  const ssm = opts.ssm ?? new SSMClient({});
+  const ssm = opts.ssm ?? defaultSsm;
   const prefix = reqEnv(env, "SSM_PREFIX");
   const authMode = env.AUTH_MODE ?? "managed";
   const method = env.AUTH_TOKEN_AUTH_METHOD ?? "client_secret_post";
@@ -216,7 +216,7 @@ export async function loadConfig(
     method === "none",
     credentialPrefix,
   );
-  const hmacKey = env.OAUTH_STATE_HMAC_KEY ?? "";
+  const hmacKey = await createRuntimeSecretReader({ env, ssm })("oauth");
   if (authMode === "oidc" && hmacKey && !env.AUTH_CONTEXT_VERSION) {
     throw new Error("AUTH_CONTEXT_VERSION is required for external OAuth");
   }
@@ -248,7 +248,7 @@ export async function loadConfig(
     allowedClientRedirectUris: parseAllowedCallbackUrls(
       resolved.allowedCallbackUrls,
     ),
-    // Empty (not missing) is the intended "proxy disabled" sentinel.
+    // Preserve the exact existing key and provider-context derivation.
     hmacKey:
       hmacKey && env.AUTH_CONTEXT_VERSION
         ? createHmac("sha256", hmacKey)

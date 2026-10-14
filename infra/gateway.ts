@@ -32,6 +32,8 @@ import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
 import type { AuthConfig } from "./auth-config";
+import { runtimeSsmSecretPermissions, runtimeSecretsManagerPermissions } from "./runtime-secret-permissions";
+import { createGatewayProxyNetwork, provisionGatewaySecretEndpoints } from "./gateway-network";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
@@ -197,11 +199,7 @@ export function gateway(
   const { vpcId, privateSubnetIds } = resolveVpc();
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
-
-  const tenantKey = identity.tenantId;
-
-  const identitySigningKeys = namespaceIdentity.identitySigningKeys;
-  const transportSigningKeys = namespaceIdentity.transportSigningKeys;
+  const accountId = awsAny.getCallerIdentityOutput().accountId;
   const clientRegistry = $jsonStringify({
     human: [readerClientId],
     m2m: machineClientIds,
@@ -220,47 +218,27 @@ export function gateway(
     environment: {
       MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
       MEM9_CLIENT_REGISTRY: clientRegistry,
-      MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
+      MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN: namespaceIdentity.identitySigningSecretArn,
+      STAGE: stage,
+      MEM9_SECRET_ACCOUNT_ID: accountId,
       MEM9_IDENTITY_JWKS_URI: external?.jwksUri ?? cognitoOut!.jwksUri,
       MEM9_ACCEPTANCE_STAGE: /^pr-[1-9][0-9]*$/.test(stage) ? stage : "",
     },
+    permissions: runtimeSecretsManagerPermissions([{arn:namespaceIdentity.identitySigningSecretArn,kmsKeyId:namespaceIdentity.identitySigningKmsKeyId}],region,accountId),
   });
 
   // --- Proxy target Lambda (VPC-attached, nodejs24.x) ---
   // Keep the proxy off the ECS/bootstrap SG. Aurora accepts 5432 only from that
   // ECS SG, so this distinct SG makes a Lambda-originated database pool
   // impossible at the network layer while retaining the private HTTP path.
-  const proxySg = new awsAny.ec2.SecurityGroup("Mem9GatewayProxySg", {
-    vpcId,
-    description: "Gateway proxy Lambda; HTTP to mnemo-server, no Aurora ingress",
-    egress: [
-      {
-        protocol: "-1",
-        fromPort: 0,
-        toPort: 0,
-        cidrBlocks: ["0.0.0.0/0"],
-      },
-    ],
-    tags,
+  const { proxySg, endpointSg, securityGroups: proxySecurityGroups } = createGatewayProxyNetwork({
+    vpcId, backendSecurityGroupId: ecsOut.taskSecurityGroupId, tags,
   });
-  const proxyIngress = new awsAny.ec2.SecurityGroupRule("Mem9TaskFromProxyLambda", {
-    type: "ingress",
-    securityGroupId: ecsOut.taskSecurityGroupId,
-    sourceSecurityGroupId: proxySg.id,
-    protocol: "tcp",
-    fromPort: MNEMO_PORT,
-    toPort: MNEMO_PORT,
-    description: "mnemo-server HTTP from the dedicated Gateway proxy SG",
-  });
-  const proxySecurityGroups = proxySg.id.apply((proxySgId: string) =>
-    proxyIngress.id.apply(() => [proxySgId]),
-  );
 
   // An `sst.aws.Function` (not a raw aws.lambda.Function): SST zips the handler,
   // creates the exec role with the VPC-ENI + logs perms, and forces nodejs24.x via
   // the sst.config $transform. Its dedicated SG reaches the ECS SG only on :8080.
-  // Env carries
-  // the Cloud Map URL + the X-API-Key (tenant id). The handler path is app-root-
+  // Env carries the Cloud Map URL and exact secret references. The handler path is app-root-
   // relative (SST resolves handlers from the sst.config.ts dir). The local
   // provision command below separately resolves the checkout root at runtime.
   const proxyFn = new sst.aws.Function("Mem9ProxyFn", {
@@ -273,13 +251,35 @@ export function gateway(
     },
     environment: {
       MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
-      MEM9_API_KEY: tenantKey,
-      MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
-      MEM9_TRANSPORT_SIGNING_KEYS: transportSigningKeys,
+      MEM9_API_KEY_SECRET_ARN: identity.tenantSecretArn,
+      MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN: namespaceIdentity.identitySigningSecretArn,
+      MEM9_TRANSPORT_SIGNING_KEYS_PARAMETER_ARN: namespaceIdentity.transportSigningParameterArn,
+      STAGE: stage,
+      MEM9_SECRET_ACCOUNT_ID: accountId,
       MEM9_TRANSPORT_ISSUER: "gateway-target",
+      MEM9_SECRET_ENDPOINT_MODE: "private",
       MEM9_ACCEPTANCE_STAGE: /^pr-[1-9][0-9]*$/.test(stage) ? stage : "",
     },
+    permissions: [
+      ...runtimeSecretsManagerPermissions([
+        {arn:identity.tenantSecretArn,kmsKeyId:identity.tenantKmsKeyId},
+        {arn:namespaceIdentity.identitySigningSecretArn,kmsKeyId:namespaceIdentity.identitySigningKmsKeyId},
+      ],region,accountId),
+      ...runtimeSsmSecretPermissions([namespaceIdentity.transportSigningParameterArn], region),
+    ],
   });
+
+  const privateSecrets = provisionGatewaySecretEndpoints({
+    vpcId, subnetIds: privateSubnetIds, endpointSecurityGroupId: endpointSg.id,
+    roleArn: proxyFn.nodes.role.arn, tenantSecretArn: identity.tenantSecretArn,
+    identitySecretArn: namespaceIdentity.identitySigningSecretArn,
+    transportParameterArn: namespaceIdentity.transportSigningParameterArn, region, tags,
+  });
+  // SST's existing late-environment primitive avoids a role/endpoint/function
+  // dependency cycle. Until it settles, private mode fails before any secret read.
+  const privateSecretConfiguration = (proxyFn as unknown as {
+    addEnvironment(environment: Input<Record<string, Input<string>>>): unknown;
+  }).addEnvironment(privateSecrets.environment);
 
   // --- Gateway service role (assumed by AgentCore to invoke the proxy Lambda) ---
   // Name it explicitly so the CI role's mem9-on-aws-* iam grants can PutRolePolicy.
@@ -409,7 +409,7 @@ export function gateway(
       },
     },
     {
-      dependsOn: [bedrockGateway, identityFn, proxyFn],
+      dependsOn: [bedrockGateway, identityFn, proxyFn, privateSecretConfiguration],
       // A `triggers` change (e.g. the tool schema) REPLACES this Command. Pulumi's
       // default replace order is create-new-THEN-delete-old — and because the create
       // step reuses an existing READY target, the new create was a no-op and the

@@ -5,7 +5,7 @@ import * as pulumi from "@pulumi/pulumi";
 import { LocalWorkspace } from "@pulumi/pulumi/automation";
 import * as dynamic from "@pulumi/pulumi/dynamic";
 import { afterEach, describe, expect, it } from "vitest";
-import { WORKLOAD_BOUNDARY_POLICY_NAME } from "./workload-permissions-boundary";
+import { WORKLOAD_BOUNDARY_POLICY_NAME, roleBoundaryPolicyName } from "./workload-permissions-boundary";
 import { EXPECTED_WORKLOAD_ROLE_NAMES } from "./workload-permissions-boundary.test-fixtures";
 
 const PULUMI_OPERATION_TIMEOUT_MS = 30_000;
@@ -82,7 +82,7 @@ describe("workload role boundary Pulumi lifecycle", () => {
     );
   });
 
-  it("retains the exact boundary through update and role deletion", async () => {
+  it("retains each classified boundary through create, update and role deletion", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mem9-pulumi-boundary-"));
     temporaryPaths.push(directory);
     const backendPath = join(directory, "backend");
@@ -95,7 +95,9 @@ describe("workload role boundary Pulumi lifecycle", () => {
     const previousPath = process.env.PATH ?? "";
     process.env.PATH = `${sstBin}${delimiter}${previousPath}`;
 
-    const boundaryArn = `arn:aws:iam::123456789012:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
+    const expectedBoundary = (roleKind: string) => `arn:aws:iam::123456789012:policy/${
+      ["Mem9ProxyFnRole", "Mem9IdentityInterceptorFnRole"].includes(roleKind)
+        ? "mem9-on-aws-gateway-boundary" : WORKLOAD_BOUNDARY_POLICY_NAME}`;
     try {
       const stack = await LocalWorkspace.createOrSelectStack(
         {
@@ -106,11 +108,11 @@ describe("workload role boundary Pulumi lifecycle", () => {
             for (const roleKind of EXPECTED_WORKLOAD_ROLE_NAMES) {
               const args: RoleInputs = {
                 assumeRolePolicy: "{}",
-                permissionsBoundary: boundaryArn,
+                permissionsBoundary: `arn:aws:iam::123456789012:policy/${roleBoundaryPolicyName(roleKind)}`,
                 revision,
                 roleKind,
               };
-              new MockRole(`${roleKind}-role`, args, boundaryArn);
+              new MockRole(`${roleKind}-role`, args, expectedBoundary(roleKind));
             }
           },
         },
@@ -151,8 +153,8 @@ describe("workload role boundary Pulumi lifecycle", () => {
         expect(
           roles.every(
             ({ inputs, outputs }) =>
-              inputs?.permissionsBoundary === boundaryArn &&
-              outputs?.permissionsBoundary === boundaryArn,
+              inputs?.permissionsBoundary === expectedBoundary(String(inputs?.roleKind)) &&
+              outputs?.permissionsBoundary === expectedBoundary(String(inputs?.roleKind)),
           ),
         ).toBe(true);
 

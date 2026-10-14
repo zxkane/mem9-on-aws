@@ -91,6 +91,10 @@ identity checks, authenticated semantic and keyword queries, and unchanged
 paused maintenance history. This operation does not renew a historical
 maintenance witness or enable a batch.
 
+Gateway Lambda roles use their dedicated permissions boundary and stage tags.
+Gateway and OAuth functions read exact secret references under scoped roles;
+the VPC proxy uses stage-owned private endpoints for these reads.
+
 ### Region topology
 
 This is not a single-region deployment where one `AWS_REGION` applies to every
