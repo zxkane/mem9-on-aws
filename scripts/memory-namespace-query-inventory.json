@@ -3076,6 +3076,22 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
+      "id": "c4bd5a589f661f49c53c",
+      "owner": "scripts/run-service-nonroot-smoke.mjs",
+      "line": 377,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "6e08a42f9252b3f3e82d298665f47e95225385974f629f6773de2be93808fec3",
+      "statement": "INSERT INTO memories(id,namespace_id,content,memory_type,embedding,created_by_principal_id,updated_by_principal_id) VALUES($1,$2,'synthetic telescope calibration','pinned',$3::vector,$4,$4)",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
       "id": "3f4e3298a8236ca61476",
       "owner": "upstream/server/cmd/mnemo-server/main.go",
       "line": 575,
