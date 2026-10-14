@@ -28,3 +28,12 @@ it('rejects swapped references, control identity, hash, generation and selected 
 it('preserves the legacy single-release path without reading another parameter',async()=>{
  const f=fixture();expect(await loadWorkerDataRelease(f.clients,{version:1,sourceTag:'mem9-aaaaaaa'},f.options)).toBeUndefined();expect(f.calls).toEqual([]);
 });
+it('lets a retired release answer inspection of its own deployment but never admission',async()=>{
+ const f=fixture();
+ f.parameter.Value=JSON.stringify({version:1,kind:'retirement',stage:'prod',account:f.data.account,region:f.data.region,dataReleaseHash:f.meta.dataReleaseHash,
+  parameterVersion:1,expiresMs:f.data.expiresMs,retiredMs:f.data.expiresMs});f.parameter.Version=2;
+ const options={...f.options,now:f.data.expiresMs};
+ expect(await loadWorkerDataRelease(f.clients,f.meta,options)).toBeUndefined();
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...options,mode:'admission'})).rejects.toThrow('DataReleaseRetired');
+ await expect(loadWorkerDataRelease(f.clients,{...f.meta,dataReleaseHash:hex(91)},options)).rejects.toThrow('DataReleaseRetired');
+});

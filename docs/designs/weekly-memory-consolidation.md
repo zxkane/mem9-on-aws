@@ -1850,6 +1850,26 @@ budget policies, execution/dispatcher changes and attempt admission. Pause,
 status, inspection and cleanup remain available. Expiry does not automatically
 stop a verified recurring worker or add per-tick secret-store access.
 
+An expired authorization would otherwise block every later deployment, because
+its control tree no longer matches. The owner retires it explicitly:
+
+```bash
+STAGE=prod node scripts/run-production-runtime.mjs retire-data-release
+```
+
+Retirement rejects an unexpired authorization. It overwrites the descriptor
+with a record of the exact release hash, parameter version and expiry, so the
+record inherits the deployment-role mutation deny and SSM history keeps the
+original. A repeated run is idempotent, and a concurrent descriptor write is
+reported as a conflict. `configure` returns a retained selection or a version 2
+operator manifest to ordinary tag images only when every retained selector names
+the retired release. A missing descriptor or any other mismatch still rejects.
+Until that deployment completes, the old manifest still answers pause, status,
+inspection and cleanup. Admission rejects. Retirement abandons the continuation,
+because replays can no longer use the retained data images. Issuing a later
+descriptor requires an absent parameter, so the owner deletes the retirement
+record only after a deployment has returned the selection to tag images.
+
 Predeployment authorization must be independently produced before the new
 postdeployment witness exists. Publication still performs the paused read-only
 parent audit and material/authority/credential checks. Actual old-data/new-control
