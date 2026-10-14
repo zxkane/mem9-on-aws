@@ -479,6 +479,25 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(reopened.validation_id).not.toBe(frozen.verification.validationId);
   }),60000);
 
+  it('installs a certified planner model and budgets only on a paused, prepared setup',()=>fixture(async f=>{
+    const contract={adapter:'mantle-responses-total-v1',model:'openai.gpt-example',region:'us-west-2',project:'proj_responses',max_input_tokens:32768,
+      max_output_tokens:2048,proof:'7'.repeat(64),reasoning:'low',input_bound:'context_limit',output_bound:'total_tokens'};
+    const limits={requests:10,input:327680,output:20480};
+    const plannerModel={contract,similarity:0.82,stage:{limits,slots:2,unknown:1},namespace:{limits}};
+    const configure=()=>runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel},{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await runProductionConsolidation(f.admin,f.config,f.request('plan'),{connect:f.connect});
+    await expect(configure()).rejects.toThrow('PauseBeforePlannerModel');
+    await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});
+    expect(await configure()).toMatchObject({phase:'configure-model',modelEnabled:true,modelContractHash:canaryEvidenceHash(contract)});
+    expect(await scalar(f.admin,'SELECT policy AS result FROM mem9_maintenance.planner_policies WHERE namespace_id=$1',[f.namespace])).toEqual({enabled:true,similarity:0.82,model:contract});
+    expect(await scalar(f.admin,"SELECT jsonb_agg(jsonb_build_array(scope,limits) ORDER BY scope) AS result FROM mem9_maintenance.model_policies")).toEqual([[f.namespace,limits],['stage',limits]].sort((a,b)=>a[0].localeCompare(b[0])));
+    expect(await scalar(f.admin,'SELECT slots AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(2);
+    await runProductionConsolidation(f.admin,f.config,f.request('baseline'),{connect:f.connect});
+    await expect(configure()).rejects.toThrow('PlannerModelRequiresPreparedSetup');
+    await expect(runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel:{...plannerModel,contract:{...contract,adapter:'other'}}},{connect:f.connect})).rejects.toThrow();
+  }),60000);
+
   it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
     const {child}=await admittedContinuation(f,{admit:false});
     await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});

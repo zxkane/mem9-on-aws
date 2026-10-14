@@ -67,5 +67,28 @@ describe("continuous consolidation preview resources",()=>{
     expect(JSON.stringify(policy)).not.toContain("executor-credential");
     expect(JSON.stringify(policy)).not.toContain("secretsmanager:GetSecretValue");
     expect(value(planner.args.environment).MEM9_WORKER_GENERATION).toBe(config.generation);
+    expect(value(executor.args.environment).MEM9_LLM_MODEL).toBeUndefined();
+  });
+  it("grants only the planner inference on the configured regional projects",async()=>{
+    vi.stubEnv("MEM9_LLM_MODEL","openai.gpt-example");vi.stubEnv("MEM9_BEDROCK_PROJECT","proj_app");
+    vi.stubEnv("MEM9_BEDROCK_PROJECT_OPENAI","proj_responses");vi.stubEnv("MEM9_LLM_RESPONSES_REGION","us-west-2");
+    setup("pr-7");const {consolidationPreviewConfig,continuousConsolidationTasks}=await import("./consolidation-runtime");
+    continuousConsolidationTasks(ecs() as any,db() as any,consolidationPreviewConfig()!,{serviceParameterArns:{consolidation:out("consolidation-signing")}} as any);
+    const planner=resources.find(r=>r.kind==="task"&&r.name.endsWith("Planner"))!;
+    const executor=resources.find(r=>r.kind==="task"&&r.name.endsWith("Executor"))!;
+    expect(value(planner.args.permissions)).toEqual([
+      {actions:["bedrock-mantle:CreateInference"],resources:["arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_app",
+        "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_responses"]},
+      {actions:["bedrock-mantle:CallWithBearerToken"],resources:["*"]}]);
+    expect(value(planner.args.environment)).toMatchObject({MEM9_LLM_MODEL:"openai.gpt-example",MEM9_BEDROCK_PROJECT:"proj_app",
+      MEM9_BEDROCK_PROJECT_OPENAI:"proj_responses",MEM9_LLM_RESPONSES_REGION:"us-west-2",AWS_REGION:"ap-northeast-1"});
+    expect(executor.args.permissions).toEqual([]);
+    expect(Object.keys(value(executor.args.environment)).some(key=>key.startsWith("MEM9_LLM")||key.startsWith("MEM9_BEDROCK"))).toBe(false);
+  });
+  it("grants no inference when no project is configured",async()=>{
+    vi.stubEnv("MEM9_BEDROCK_PROJECT","");vi.stubEnv("MEM9_BEDROCK_PROJECT_OPENAI","");
+    setup("pr-7");const {consolidationPreviewConfig,continuousConsolidationTasks}=await import("./consolidation-runtime");
+    continuousConsolidationTasks(ecs() as any,db() as any,consolidationPreviewConfig()!,{serviceParameterArns:{consolidation:out("consolidation-signing")}} as any);
+    expect(resources.find(r=>r.kind==="task"&&r.name.endsWith("Planner"))!.args.permissions).toEqual([]);
   });
 });

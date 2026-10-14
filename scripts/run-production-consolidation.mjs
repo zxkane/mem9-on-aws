@@ -7,7 +7,10 @@ import {CloudWatchLogsClient,FilterLogEventsCommand} from '@aws-sdk/client-cloud
 import {STSClient,GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {IAMClient,GetRoleCommand,GetRolePolicyCommand,ListRolePoliciesCommand,ListAttachedRolePoliciesCommand} from '@aws-sdk/client-iam';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
-import {parseProductionConsolidationRequest} from './production-consolidation-operator.mjs';
+import {parseProductionConsolidationRequest,validatePlannerModel} from './production-consolidation-operator.mjs';
+import {readFile} from 'node:fs/promises';
+import {certifiedPlannerContract} from './lib/planner-model-certificate.mjs';
+import {PLANNER_EVALUATION_FIXTURE} from './evaluate-planner-model.mjs';
 import {productionCoordinatorDigest,productionSourceTree} from './run-production-runtime.mjs';
 import {execFileSync} from 'node:child_process';
 import {canaryReportDigest,canaryReportFragments} from './lib/production-canary-report.mjs';
@@ -130,7 +133,7 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   return meta;
 }
 
-export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility},{now=Date.now,sleep=delay}={}){
+export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel},{now=Date.now,sleep=delay}={}){
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix='/mem9-on-aws/prod/',manifestName=prefix+'consolidation-runtime/operator-manifest';
   const response=await send(clients.ssm,new GetParametersCommand({Names:[manifestName],WithDecryption:true}));
@@ -169,7 +172,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
-    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote'].includes(operation)?'admission':'inspection';
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model'].includes(operation)?'admission':'inspection';
     const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
@@ -177,7 +180,8 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   const invocation=randomUUID().replaceAll('-','');
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
     ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
-    ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{})};
+    ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{}),
+    ...(plannerModel!==undefined?{plannerModel}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
     await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));
@@ -225,8 +229,31 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   await send(clients.ssm,new DeleteParameterCommand({Name:journalName}));return result;
 }
 
+/**
+ * Build the configure-model request from an owner-held evaluation certificate.
+ * The certificate is re-verified against the current prompt and fixture, and
+ * its hash becomes the contract proof. Daily limits are owner settings.
+ */
+export async function plannerModelRequest(env=process.env,{now=Date.now()}={}){
+  if(!env.MEM9_PLANNER_CERTIFICATE)throw Error('PlannerModelCertificateRequired');
+  const fixture=JSON.parse(await readFile(PLANNER_EVALUATION_FIXTURE,'utf8'));
+  const contract=certifiedPlannerContract(JSON.parse(await readFile(env.MEM9_PLANNER_CERTIFICATE,'utf8')),{fixture,now});
+  const requests=Number(env.MEM9_PLANNER_DAILY_REQUESTS||4000);
+  if(!Number.isSafeInteger(requests)||requests<1||requests>100000)throw Error('InvalidPlannerModelBudget');
+  // Each admission reserves the contract maxima; settlement charges actual usage.
+  const limits={requests,input:requests*contract.max_input_tokens,output:requests*contract.max_output_tokens};
+  return validatePlannerModel({contract,similarity:0.82,stage:{limits,slots:2,unknown:1},namespace:{limits}});
+}
+
 async function main(){
   const region=process.env.AWS_REGION||await resolveApplicationRegion();
+  if(process.argv[2]==='configure-model'){
+    const plannerModel=await plannerModelRequest();
+    const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),logs:new CloudWatchLogsClient({region}),sts:new STSClient({region}),iam:new IAMClient({region})};
+    try{process.stdout.write(JSON.stringify(await runProductionConsolidationTask(clients,{region,operation:'configure-model',plannerModel}))+'\n');}
+    finally{Object.values(clients).forEach(client=>client.destroy());}
+    return;
+  }
   const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),logs:new CloudWatchLogsClient({region}),sts:new STSClient({region}),iam:new IAMClient({region})};
   try{const result=await runProductionConsolidationTask(clients,{region,operation:process.argv[2],dailyRows:Number(process.argv[3]),basisPoints:Number(process.argv[4])});process.stdout.write(JSON.stringify(result)+'\n');}
   finally{Object.values(clients).forEach(client=>client.destroy());}

@@ -25,13 +25,29 @@ const runningAdmission=setup=>setup.promotion_verification?.admission;
 export const canaryPolicy=()=>({limits:{total:20,rewrite:20,delete:20,archive:0,mark:0},
   bps:{total:10000,rewrite:10000,delete:10000,archive:10000,mark:10000},rate:0.05,burst:1});
 
+const exactKeys=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===[...keys].sort().join();
+const modelUnits=value=>exactKeys(value,['requests','input','output'])&&Object.values(value).every(n=>Number.isSafeInteger(n)&&n>0);
+// The database re-validates the contract and units; this rejects malformed
+// requests before a task is launched.
+export function validatePlannerModel(value){
+  if(!exactKeys(value,['contract','similarity','stage','namespace'])||!exactKeys(value.contract,['adapter','model','region','project',
+    'max_input_tokens','max_output_tokens','proof','reasoning','input_bound','output_bound'])||!/^[a-f0-9]{64}$/.test(value.contract.proof??'')||
+    typeof value.similarity!=='number'||value.similarity<0.5||value.similarity>1||
+    !exactKeys(value.stage,['limits','slots','unknown'])||!modelUnits(value.stage.limits)||!Number.isInteger(value.stage.slots)||value.stage.slots<1||value.stage.slots>4||
+    !Number.isInteger(value.stage.unknown)||value.stage.unknown<1||value.stage.unknown>value.stage.slots||
+    !exactKeys(value.namespace,['limits'])||!modelUnits(value.namespace.limits))throw Error('InvalidPlannerModel');
+  return value;
+}
+
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
-    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+  if(request.operation==='configure-model')validatePlannerModel(request.plannerModel);
+  else if(request.plannerModel!==undefined)throw Error('UnexpectedPlannerModel');
   if(['begin-continuation','inspect-canary','resume-plan'].includes(request.operation)&&!/^[a-f0-9]{32}$/.test(request.attemptId??''))throw Error('CanaryAttemptRequired');
   if(request.attemptId!==undefined&&(!['begin-continuation','inspect-canary','resume-plan','canary','verify-canary','promote'].includes(request.operation)||!/^[a-f0-9]{32}$/.test(request.attemptId)))throw Error('UnexpectedCanaryAttempt');
   if(request.operation==='begin-continuation'){
@@ -156,7 +172,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -173,7 +189,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','cleanup-benchmark','prepare','begin-continuation','close-canary'].includes(request.operation)){
+    if(!['status','pause','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -256,6 +272,20 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
         responseEvidence=await closeCanaryValidation(db,config,setup,request.invocation);
+      }else if(request.operation==='configure-model'){
+        // Model classification changes the planner context, so every target is
+        // re-planned from current rows. Only a fresh, paused validation may change it.
+        if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE')||
+          await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('PauseBeforePlannerModel');
+        const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(setup?.phase!=='prepared'||setup.validation_id||setup.generation!==config.generation)throw Error('PlannerModelRequiresPreparedSetup');
+        const model=request.plannerModel;
+        await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2,$3,$4)',['stage',model.stage.limits,model.stage.slots,model.stage.unknown]);
+        for(const namespace of config.targets){
+          await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2)',[namespace,model.namespace.limits]);
+          await db.query('SELECT mem9_maintenance.configure_planner($1,$2)',[namespace,{enabled:true,similarity:model.similarity,model:model.contract}]);
+        }
+        responseEvidence={modelContractHash:canaryEvidenceHash(model.contract)};
       }else if(request.operation==='cleanup-benchmark'){
         if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE')||
           await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('PauseBeforeBenchmarkCleanup');
@@ -392,7 +422,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     if(request.operation==='prepare'){
       await checkpoint();await db.query("UPDATE mem9_maintenance.production_worker_setup SET phase='prepared' WHERE singleton AND generation=$1",[config.generation]);
     }
-    return {phase:request.operation,namespaces:config.targets.length,modelEnabled:false,...responseEvidence,
+    return {phase:request.operation,namespaces:config.targets.length,modelEnabled:request.operation==='configure-model',...responseEvidence,
       ...(['plan','resume-plan','canary'].includes(request.operation)?{admission:request.invocation}:{}),...(request.operation==='baseline'?{
       validationId:await scalar(db,'SELECT validation_id AS result FROM mem9_maintenance.production_worker_setup WHERE singleton')}:{} )};
   });
