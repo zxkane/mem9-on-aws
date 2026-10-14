@@ -8,7 +8,7 @@ import {readFile, writeFile, mkdir, mkdtemp, lstat, chmod, readdir, rm, realpath
 import {resolve, join, dirname} from 'node:path';
 import {isIP} from 'node:net';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {hardenServiceContainer,frozenServiceRegistration} from './lib/service-nonroot.mjs';
+import {hardenServiceContainer,frozenServiceRegistration,verifyServiceLoadedImage} from './lib/service-nonroot.mjs';
 import {SERVICE_PROCESS_COLLECTOR, inspectServiceProcessOutput} from './lib/service-nonroot-runtime.mjs';
 
 const exec = promisify(execFile);
@@ -44,11 +44,13 @@ export function imageReferences(baseline) {
 
 export function verifyLoadedServiceImage(image,name,baseline){
   const ref=imageReferences(baseline)[name];need(ref&&image.RepoDigests?.includes(ref),'LoadedImageDigestMismatch');
-  need(image.Os==='linux'&&image.Architecture==='arm64','LoadedImagePlatformMismatch');
-  need(/^sha256:[a-f0-9]{64}$/.test(image.Id??''),'LoadedImageIdMissing');
-  const binding=baseline.imageBindings?.images[name];
-  if(binding)need(image.Id===JSON.parse(binding.leafManifest).config.digest,'LoadedImageLeafMismatch');
-  return image.Id;
+  return verifyServiceLoadedImage({id:image.Id,os:image.Os,architecture:image.Architecture,descriptor:image.Descriptor},baseline.imageBindings?.images[name]);
+}
+
+export function verifiedContainerImageId(container,expected){
+  if(container.Image===expected)return container.Image;
+  need(container.ImageManifestDescriptor?.digest===expected,'ContainerPlatformImageMismatch');
+  return container.ImageManifestDescriptor.digest;
 }
 
 export function verifyProcessStatus(text) {
@@ -162,7 +164,7 @@ export async function runSmoke(options) {
   const runId = randomUUID(), network = `nonroot-${runId}`;
   const report = {version: 1, scope: 'local-actual-images-synthetic-only', runId, startedAt: new Date().toISOString(),
     outcome: 'running', limits: {memoryMiB: 4096, cpus: 2, deadlineSeconds: 840}, checks: {}, failures: []};
-  const containers = [], activeChildren = new Set(), clients = new Set();
+  const containers = [], activeChildren = new Set(), clients = new Set(),imageReferencesById=new Map();
   let networkCreated = false, database, lockAcquired = false;
   const localLock = join(options.evidenceRoot, 'local-image-smoke.lock');
   const deadline = Date.now() + 840000;
@@ -227,17 +229,19 @@ export async function runSmoke(options) {
   }
   async function create(kind, image, args = [], env = {}, entry = []) {
     const name = `nonroot-${kind}-${runId}`; containers.push(name);
-    await docker(['create', '--name', name, '--label', `${LABEL}=${runId}`, ...containerLimits(kind),
+    const reference=imageReferencesById.get(image)??image;
+    await docker(['create', '--platform','linux/arm64','--name', name, '--label', `${LABEL}=${runId}`, ...containerLimits(kind),
       '--network', network, '--network-alias', kind, '--dns', '127.0.0.1',
-      '--env-file', await envFile(kind, env), ...args, ...(entry.length ? ['--entrypoint', entry[0]] : []), image, ...entry.slice(1)]);
+      '--env-file', await envFile(kind, env), ...args, ...(entry.length ? ['--entrypoint', entry[0]] : []), reference, ...entry.slice(1)]);
     const actual = await inspect(name), limits = containerLimits(kind);
-    need(actual.Config.Image === image && actual.HostConfig.Memory === parseInt(limits[limits.indexOf('--memory') + 1]) * 1024 * 1024 &&
+    if(imageReferencesById.has(image))verifiedContainerImageId(actual,image);
+    need(actual.Config.Image === reference && actual.HostConfig.Memory === parseInt(limits[limits.indexOf('--memory') + 1]) * 1024 * 1024 &&
       actual.HostConfig.MemorySwap === actual.HostConfig.Memory && actual.HostConfig.NanoCpus === Number(limits[limits.indexOf('--cpus') + 1]) * 1e9 &&
       actual.HostConfig.RestartPolicy.Name === 'no' && !actual.HostConfig.Privileged &&
       actual.Config.Labels?.[LABEL] === runId, 'ContainerLimitsReadbackMismatch');
     if (kind !== 'postgres') need(actual.Config.User === '1000:1000' && JSON.stringify(actual.HostConfig.CapDrop) === '["ALL"]' &&
       actual.HostConfig.Init === true, 'ContainerHardeningReadbackMismatch');
-    await mark(`${kind}ContainerConfiguration`, {image: actual.Config.Image, user: actual.Config.User,
+    await mark(`${kind}ContainerConfiguration`, {image: imageReferencesById.has(image)?verifiedContainerImageId(actual,image):actual.Config.Image,reference:actual.Config.Image,descriptor:actual.ImageManifestDescriptor??null,user: actual.Config.User,
       memoryBytes: actual.HostConfig.Memory, nanoCpus: actual.HostConfig.NanoCpus, capDrop: actual.HostConfig.CapDrop, init: actual.HostConfig.Init});
     return name;
   }
@@ -280,15 +284,17 @@ export async function runSmoke(options) {
     report.source = {head: (await command('git', ['-C', ROOT, 'rev-parse', 'HEAD'])).trim(),
       scriptHash: hash(await readFile(fileURLToPath(import.meta.url))), transformHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot.mjs'))),
       runtimeHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot-runtime.mjs')))};
-    const images = {};report.imagePlatforms={};
+    const images = {};report.imagePlatforms={};report.imageDescriptors={};
     for (const [name, ref] of Object.entries(references)) {
-      const image = JSON.parse(await docker(['image', 'inspect', ref]))[0];
+      const image = JSON.parse(await docker(['image', 'inspect', '--platform', 'linux/arm64', ref]))[0];
       verifyLoadedServiceImage(image,name,baseline);
       need(JSON.stringify(image.Config.Entrypoint) === JSON.stringify(name === 'mnemo-server' ? ['/usr/local/bin/entrypoint.sh'] : ['node', 'server.mjs']) &&
         (!image.Config.Cmd || image.Config.Cmd.length === 0), 'ActualImageEntrypointMismatch');
       need(!image.Config.Env?.some(v => /^(AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|CONTAINER_CREDENTIALS)|MNEMO_DSN|MEM9_DB_SECRET)=/.test(v)), 'ImageContainsCredentialEnvironment');
       images[name] = image.Id;
+      imageReferencesById.set(image.Id,ref);
       report.imagePlatforms[name]={os:image.Os,architecture:image.Architecture};
+      report.imageDescriptors[name]=image.Descriptor??null;
     }
     report.images = images;
     const pgImage = JSON.parse(await docker(['image', 'inspect', 'pgvector/pgvector:pg17']))[0].Id;

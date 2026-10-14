@@ -1,6 +1,7 @@
 import {test} from 'vitest';
 import assert from 'node:assert/strict';
-import {parseArgs, imageReferences, verifyLoadedServiceImage, verifyProcessStatus, containerLimits} from './run-service-nonroot-smoke.mjs';
+import {parseArgs, imageReferences, verifyLoadedServiceImage, verifiedContainerImageId, verifyProcessStatus, containerLimits} from './run-service-nonroot-smoke.mjs';
+import {createHash} from 'node:crypto';
 import {taggedServiceDefinition} from './test-fixtures/service-nonroot-images.mjs';
 
 test('CLI accepts only explicit private input/output paths and rejects duplicate or arbitrary options', () => {
@@ -28,6 +29,13 @@ test('cached index identity cannot substitute a different platform or image conf
   const image={Id:JSON.parse(e.leafManifest).config.digest,RepoDigests:[imageReferences(baseline)['mnemo-server']],Os:'linux',Architecture:'arm64'};
   assert.equal(verifyLoadedServiceImage(image,'mnemo-server',baseline),image.Id);
   for(const delta of [{Architecture:'amd64'},{Os:'windows'},{Id:'sha256:'+'f'.repeat(64)}])assert.throws(()=>verifyLoadedServiceImage({...image,...delta},'mnemo-server',baseline));
+  const leafDigest='sha256:'+createHash('sha256').update(e.leafManifest).digest('hex'),descriptor={digest:leafDigest,mediaType:JSON.parse(e.leafManifest).mediaType,platform:{os:'linux',architecture:'arm64'}};
+  assert.equal(verifyLoadedServiceImage({...image,Id:leafDigest,Descriptor:descriptor},'mnemo-server',baseline),leafDigest);
+  assert.throws(()=>verifyLoadedServiceImage({...image,Id:leafDigest},'mnemo-server',baseline));
+  assert.throws(()=>verifyLoadedServiceImage({...image,Id:leafDigest,Descriptor:{...descriptor,digest:e.registryDigest}},'mnemo-server',baseline));
+  assert.equal(verifiedContainerImageId({Image:e.registryDigest,ImageManifestDescriptor:descriptor},leafDigest),leafDigest);
+  assert.equal(verifiedContainerImageId({Image:image.Id},image.Id),image.Id);
+  assert.throws(()=>verifiedContainerImageId({Image:e.registryDigest},leafDigest));
 });
 test('application evidence rejects root, saved root IDs, every nonzero capability set and missing NoNewPrivs', () => {
   assert.equal(verifyProcessStatus(status).NoNewPrivs, '1');

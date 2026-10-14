@@ -101,3 +101,16 @@ export function frozenServiceRegistration(response){
  }
  return result;
 }
+
+/** Classic Docker identifies an image by config digest; the containerd store
+ * reports the selected platform manifest. Both must bind to the proved leaf. */
+export function verifyServiceLoadedImage(image,binding){
+ const check=v=>need(v,'ServiceNonrootLoadedImage');
+ check(object(image)&&image.os==='linux'&&image.architecture==='arm64'&&/^sha256:[a-f0-9]{64}$/.test(image.id??''));
+ if(binding){
+  const leaf=JSON.parse(binding.leafManifest),leafDigest='sha256:'+createHash('sha256').update(binding.leafManifest).digest('hex');
+  check([leaf.config.digest,leafDigest].includes(image.id));
+  if(image.id===leafDigest||image.descriptor!=null){const d=image.descriptor;check(object(d)&&d.digest===leafDigest&&d.mediaType===leaf.mediaType&&d.platform?.os==='linux'&&d.platform?.architecture==='arm64');}
+ }
+ return image.id;
+}

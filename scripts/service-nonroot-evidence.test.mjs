@@ -38,6 +38,7 @@ async function fixture({tagged=false}={}) {
     checks[prefix + 'RootObserver'] = {observer: {...status(), Uid: '0 0 0 0', Gid: '0 0 0 0', NoNewPrivs: '0'},
       processes: [{pid: '/proc/7', Application: name === 'mnemo-server' ? 'mnemo-server' : 'node-server', IdentitySource: 'proc-cmdline-prefix', ...status()}]};
     checks[prefix + 'ContainerConfiguration'] = {image: localImages[name], user: '1000:1000', init: true, capDrop: ['ALL']};
+    if(tagged)Object.assign(checks[prefix+'ContainerConfiguration'],{reference:images[name],descriptor:null});
   }
   checks.proxyModule = Object.fromEntries(['exportedModule', 'realTokenGenerator', 'syntheticSessionsOnly', 'healthBeforeMint', 'healthAfterMint', 'authRemint', 'timedRefresh', 'credentialFailure', 'invalidRequest'].map(k => [k, true]));
   Object.assign(checks, {missingSignatureObservation: {status: 403}, expiredSignatureObservation: {status: 403}, wrongTenantObservation: {status: 400},
@@ -80,7 +81,18 @@ it('accepts complete candidate-bound receipts with actual process, source, query
 it('binds a tagged baseline and its image proof across local, preview and plan evidence',async()=>{
   const f=await fixture({tagged:true});await expect(f.validate()).resolves.toHaveProperty('registrationHash',hash(f.plan.target));
 });
-it.each(['local-proof','review-proof','preview-baseline','service-count','local-image-config','local-platform','embedding-config','embedding-platform'])('rejects %s substitution even when the frozen images are unchanged',async kind=>{
+it('binds containerd platform-manifest IDs and actual container descriptors to the same verified leaf',async()=>{
+  const f=await fixture({tagged:true});f.suite.imageDescriptors={};
+  for(const [prefix,name] of [['mnemo','mnemo-server'],['proxy','llm-proxy'],['embedding','qwen3-embed']]){
+    const raw=f.baseline.imageBindings.images[name].leafManifest,id='sha256:'+sha(raw),descriptor={digest:id,mediaType:JSON.parse(raw).mediaType,platform:{os:'linux',architecture:'arm64'}};
+    if(prefix==='embedding'){f.embedding.imageId=id;f.embedding.descriptor=descriptor;}
+    else{f.suite.images[name]=id;f.suite.imageDescriptors[name]=descriptor;Object.assign(f.suite.checks[prefix+'ContainerConfiguration'],{image:id,descriptor});}
+  }
+  await f.write();await expect(f.validate()).resolves.toHaveProperty('previewHash');
+  f.suite.checks.mnemoContainerConfiguration.descriptor={...f.suite.checks.mnemoContainerConfiguration.descriptor,digest:'sha256:'+'f'.repeat(64)};
+  await f.write();await expect(f.validate()).rejects.toThrow();
+});
+it.each(['local-proof','review-proof','preview-baseline','service-count','local-image-config','local-platform','embedding-config','embedding-platform','injected-image-id','injected-embedding-id'])('rejects %s substitution even when the frozen images are unchanged',async kind=>{
   const f=await fixture({tagged:true});
   if(kind==='local-proof')f.baseline.imageBindings.tasks[0].taskArn=f.baseline.imageBindings.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32));
   if(kind==='review-proof')f.values.images.imageBindings.tasks[0].taskArn=f.values.images.imageBindings.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32));
@@ -90,6 +102,8 @@ it.each(['local-proof','review-proof','preview-baseline','service-count','local-
   if(kind==='local-platform')f.suite.imagePlatforms['mnemo-server'].architecture='amd64';
   if(kind==='embedding-config')f.embedding.imageId='sha256:'+'f'.repeat(64);
   if(kind==='embedding-platform')f.embedding.platform.os='windows';
+  if(kind==='injected-image-id'){f.suite.imagePlatforms['mnemo-server'].id=f.suite.images['mnemo-server'];f.suite.images['mnemo-server']='sha256:'+'f'.repeat(64);f.suite.checks.mnemoContainerConfiguration.image=f.suite.images['mnemo-server'];}
+  if(kind==='injected-embedding-id'){f.embedding.platform.id=f.embedding.imageId;f.embedding.imageId='sha256:'+'f'.repeat(64);}
   await f.write();await expect(f.validate()).rejects.toThrow();
 });
 it.each(['local', 'preview'])('rejects summary-only %s evidence', async key => {

@@ -3,7 +3,7 @@ import {constants} from 'node:fs';
 import {resolve, join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
-import {registrationInput, frozenServiceRegistration, hardenServiceRegistration, serviceNonrootHash as hash} from './service-nonroot.mjs';
+import {registrationInput, frozenServiceRegistration, verifyServiceLoadedImage, hardenServiceRegistration, serviceNonrootHash as hash} from './service-nonroot.mjs';
 
 const need = (value, code) => {if (!value) throw Error('ServiceEvidence' + code);};
 const equal = (a, b, code) => need(isDeepStrictEqual(a, b), code);
@@ -46,6 +46,11 @@ function imageMap(registration) {
   equal(registration.containerDefinitions.map(c => c.name).sort(), [...names].sort(), 'ContainerSet');
   const images = Object.fromEntries(registration.containerDefinitions.map(c => [c.name, c.image]));
   need(Object.values(images).every(v => typeof v === 'string' && /^[^\s@]+@sha256:[a-f0-9]{64}$/.test(v)), 'ImageDigest'); return images;
+}
+function loadedImageEvidence(id,platform,descriptor,binding){
+  need(platform&&typeof platform==='object'&&!Array.isArray(platform),'LocalPlatformFields');
+  equal(Object.keys(platform).sort(),['architecture','os'],'LocalPlatformFields');
+  return verifyServiceLoadedImage({id,os:platform.os,architecture:platform.architecture,descriptor},binding);
 }
 function previewOriginal(p, old, plan) {
   equal(old, hardenServiceRegistration(old), 'PreviewRestoreNonroot');
@@ -112,15 +117,14 @@ export async function validateServiceEvidence(plan, values, {root}) {
   const checks = suite.checks; need(checks && Object.keys(checks).length >= 24 && required.every(k => checks[k] === true), 'LocalChecks');
   if(baseline.imageBindings){
     for(const name of ['mnemo-server','llm-proxy']){
-      equal(suite.images?.[name],JSON.parse(baseline.imageBindings.images[name].leafManifest).config.digest,'LocalImageConfig');
-      equal(suite.imagePlatforms?.[name],{os:'linux',architecture:'arm64'},'LocalImagePlatform');
+      loadedImageEvidence(suite.images?.[name],suite.imagePlatforms?.[name],suite.imageDescriptors?.[name],baseline.imageBindings.images[name]);
     }
-    equal(embedding.imageId,JSON.parse(baseline.imageBindings.images['qwen3-embed'].leafManifest).config.digest,'EmbeddingImageConfig');
-    equal(embedding.platform,{os:'linux',architecture:'arm64'},'EmbeddingImagePlatform');
+    loadedImageEvidence(embedding.imageId,embedding.platform,embedding.descriptor,baseline.imageBindings.images['qwen3-embed']);
   }
   for (const [prefix, name, denied] of [['mnemo', 'mnemo-server', ['/usr/local/bin/mnemo-server', '/usr/local/bin/entrypoint.sh', '/usr/local/share/mem9']],
     ['proxy', 'llm-proxy', ['/app/server.mjs', '/app/node_modules', '/app']]]) {
     const process = checks[prefix + 'Process'], config = checks[prefix + 'ContainerConfiguration']; identity(process?.status);
+    if(baseline.imageBindings){equal(config?.reference,images[name],'ContainerImageReference');loadedImageEvidence(config?.image,suite.imagePlatforms?.[name],config?.descriptor,baseline.imageBindings.images[name]);}
     need(process.writableTmp === true && denied.every(path => process.deniedWrites?.includes(path)), 'FilesystemChecks');
     need(/^sha256:[a-f0-9]{64}$/.test(suite.images?.[name] ?? '') && config?.image === suite.images[name] && config.user === '1000:1000' && config.init === true, 'LocalContainer');
     equal(config.capDrop, ['ALL'], 'LocalCapabilities');
