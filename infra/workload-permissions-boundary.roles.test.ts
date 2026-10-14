@@ -622,11 +622,18 @@ describe("workload role coverage from the real SST graph", () => {
           expectedRoleNames,
         );
         const expectedBoundary = `arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
+        // The Gateway Lambda roles carry the operator-owned Gateway boundary and
+        // the stage tags it keys on; every other role keeps the workload boundary.
+        const gatewayRoles=["Mem9ProxyFnRole","Mem9IdentityInterceptorFnRole"];
         expect(
           createdRoles.every(
-            ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
+            ({ inputs, name }) => inputs.permissionsBoundary === (gatewayRoles.includes(name)
+              ? `arn:aws:iam::${accountId}:policy/mem9-on-aws-gateway-boundary` : expectedBoundary),
           ),
         ).toBe(true);
+        for (const role of createdRoles.filter(({name})=>gatewayRoles.includes(name))) {
+          expect(role.inputs.tags).toMatchObject({Project:"mem9-on-aws",Stage:stage});
+        }
         await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired, productionMode);
         if(productionMode){
           const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));
