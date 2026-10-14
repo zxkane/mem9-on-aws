@@ -3094,9 +3094,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "d4a130f1aaa98e8b2f0d",
+      "id": "a3163d3d4d95af06af5c",
       "owner": "scripts/run-service-nonroot-smoke.mjs",
-      "line": 390,
+      "line": 406,
       "tables": [
         "memories"
       ],
