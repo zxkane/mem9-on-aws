@@ -1291,17 +1291,27 @@ scratch:
    root setup returns to `prepared` with a zero canary counter. Receipts, undo
    images and the attempt ledger stay untouched. Earlier receipts become the
    fresh validation's receipt baseline, not its usage.
+
+   This deliberately replaces the continuation's single lifetime allowance:
+   each validation has its own 20-row allowance, and at most three closed
+   validations per worker generation bound unpromoted changes to 80 rows. The
+   stage's daily budget window is not reset, so a fresh canary on the same UTC
+   day starts with whatever headroom remains.
 3. The fresh canary keeps the existing gates: planning, protected baseline,
    20-row allowance, paired foreground cohorts, two cached replays, benchmark
-   cleanup and promotion. Its loaded cohort of 150 requests per class runs while
-   a real planner wave runs. The executor launches after the first measured
-   write, so its commits fall inside both class windows. Performance is checked
-   before the replays.
+   cleanup and promotion. A real planner wave starts first and must report
+   classified work without failed slices. The executor launches while it runs,
+   and the loaded cohort of 150 requests per class starts once the executor
+   task runs, so its first commits fall inside both class windows. Every sample
+   must still lie within a measured worker run. Performance is checked before
+   the replays.
 
 An ordinary release binds consolidation administration to the deployed
 operator manifest, whose source tag must equal the operator checkout. The
 completed runtime rehearsal stays the credential and extension evidence. A
-retained-data continuation keeps its exact source-tree rehearsal binding.
+retained-data continuation keeps its exact source-tree rehearsal binding. The
+canary release hash therefore names the rehearsal tree together with the
+deployed source tag and worker image digest that actually ran.
 
 ### Certified semantic planner classification
 
@@ -1313,8 +1323,9 @@ the existing queue checks. A model never writes replacement text.
 `scripts/test-fixtures/planner-model-evaluation.json` through the production
 planner request path. The fixture covers paraphrases, complementary facts,
 different subjects, contradictions, changed dates and values, negation and
-prompt injection. A certificate passes only with zero false merges, zero
-malformed answers and at least half of the expected merges. A missed merge only
+prompt injection. A certificate records every synthetic verdict and passes
+only with zero false merges, zero malformed answers and at least half of the
+expected merges; installation recomputes the outcome from those verdicts. A missed merge only
 defers consolidation; a false merge joins records that should stay separate.
 The certificate binds the exact contract, the prompt hash and the fixture hash.
 It is valid for seven days and stays in an owner-only mode-600 file. Its hash

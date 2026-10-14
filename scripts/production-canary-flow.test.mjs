@@ -39,8 +39,8 @@ describe('production canary orchestration failure boundaries',()=>{
       wake:async(kind,options,...rest)=>{
         if(typeof options!=='object'){calls.push(options);return {};}
         const {wave,onRunning}=options;calls.push(kind+':'+wave);
-        if(kind==='planner'){await onRunning();return {kind:'planner',startedMs:epoch+90000,stoppedMs:epoch+200000,exitCode:0,image:proof.workerImage,imageDigest};}
-        if(wave==='apply'){expect(calls).toContain('planner:plan');return {kind:'executor',startedMs:epoch+105000,stoppedMs:epoch+160000,exitCode:0,image:proof.workerImage,imageDigest};}
+        if(kind==='planner'){await onRunning();return {kind:'planner',startedMs:epoch+90000,stoppedMs:epoch+200000,exitCode:0,image:proof.workerImage,imageDigest,record:{classified:3,failedSlices:0}};}
+        if(wave==='apply'){expect(calls).toContain('planner:plan');await onRunning();return {kind:'executor',startedMs:epoch+99000,stoppedMs:epoch+160000,exitCode:0,image:proof.workerImage,imageDigest};}
         const i=wave==='repeat-a'?1:2;
         return {invocation:String(i).repeat(32),taskArn:'synthetic-'+i,startedMs:epoch+210000+i*10000,stoppedMs:epoch+211000+i*10000,image:proof.workerImage,imageDigest,record:{matched:5,resultHash:proof.replayResultHash}};
       }};
@@ -68,13 +68,28 @@ describe('production canary orchestration failure boundaries',()=>{
       sample:async(_id,phase,{onWrite})=>{await onWrite({id:phase,version:1,agentId:'mem9-canary-'+'a'.repeat(32),contentHash:'f'.repeat(64),phase,index:0,warmup:false});return cohort(epoch+(phase==='baseline'?0:100000));},
       wake:async(kind,options)=>{
         if(typeof options!=='object')return {};calls.push(kind+':'+options.wave);
-        if(kind==='planner'){await options.onRunning();return {kind,startedMs:epoch+90000,stoppedMs:epoch+120000,exitCode:0,image,imageDigest};}
-        return {kind,startedMs:epoch+105000,stoppedMs:epoch+130000,exitCode:0,image,imageDigest};
+        if(kind==='planner'){await options.onRunning();return {kind,startedMs:epoch+90000,stoppedMs:epoch+120000,exitCode:0,image,imageDigest,record:{classified:1,failedSlices:0}};}
+        await options.onRunning();return {kind,startedMs:epoch+99000,stoppedMs:epoch+130000,exitCode:0,image,imageDigest};
       }};
     await expect(runProductionCanaryFlow(deps)).rejects.toThrow('CanaryPerformanceNotVerified');
     expect(calls).not.toContain('executor:repeat-a');expect(calls).not.toContain('promote');
     expect(calls.lastIndexOf('pause')).toBeGreaterThan(calls.indexOf('verify-canary'));
     expect(calls).toContain('cleanup-benchmark');
+  });
+  it('rejects a covering planner that did no genuine work and joins the launched executor',async()=>{
+    const calls=[],imageDigest='sha256:'+'f'.repeat(64),image='example/worker@sha256:'+'e'.repeat(64);let executorDone=false;
+    const deps={verifyScheduling:async()=>({backendBinding}),disableScheduling:async()=>calls.push('disable-scheduling'),
+      admin:async op=>{calls.push(op);if(op==='status')return {setupPhase:'prepared',queuedActions:5};if(op==='baseline')return {validationId:'a'.repeat(32)};
+        if(['plan','canary'].includes(op))return {admission:'9'.repeat(32)};if(op==='cleanup-benchmark')return {remaining:0};return {};},
+      recoverDeliveries:async()=>calls.push('recover'),quiesce:async()=>{},persist:async()=>{},
+      sample:async()=>({}),
+      wake:async(kind,options)=>{
+        if(typeof options!=='object')return {};
+        if(kind==='planner'){await options.onRunning();return {kind,record:{classified:0,failedSlices:0}};}
+        await options.onRunning();await new Promise(resolve=>setTimeout(resolve,5));executorDone=true;return {kind,image,imageDigest};
+      }};
+    await expect(runProductionCanaryFlow(deps)).rejects.toThrow('GenuinePlannerWorkMissing');
+    expect(executorDone).toBe(true);expect(calls).not.toContain('verify-canary');expect(calls).toContain('recover');
   });
   it('never activates execution when planning did not produce enough eligible actions',async()=>{
     const f=fixture({queuedActions:0});

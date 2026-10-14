@@ -48,21 +48,18 @@ export function buildPlannerCertificate({fixture,contract,verdicts,evaluatedMs})
   const policy=PLANNER_CERTIFICATE_POLICY;
   const passed=results.falseMerges<=policy.maxFalseMerges&&results.errors<=policy.maxErrors&&
     results.observedMerges>=Math.ceil(results.expectedMerges*policy.minMergeRecall);
-  return {version:1,contract,promptHash:plannerPromptHash(),fixtureHash:hash(fixture),policy:{...policy},results,passed,evaluatedMs};
+  return {version:1,contract,promptHash:plannerPromptHash(),fixtureHash:hash(fixture),policy:{...policy},verdicts,results,passed,evaluatedMs};
 }
 
 /**
- * Recompute the certificate's outcome and bind it to the current prompt and
- * fixture. The returned contract carries the certificate hash as its proof.
+ * Recompute the certificate's outcome from its recorded verdicts and bind it
+ * to the current prompt and fixture. The returned contract carries the
+ * certificate hash as its proof. Verdicts name synthetic cases only.
  */
 export function certifiedPlannerContract(certificate,{fixture,now=Date.now()}){
-  if(certificate?.version!==1||!exact(certificate,['version','contract','promptHash','fixtureHash','policy','results','passed','evaluatedMs']))fail();
-  validatePlannerEvaluation(fixture);
-  if(!exact(certificate.contract,CONTRACT_KEYS)||hash(fixture)!==certificate.fixtureHash||certificate.promptHash!==plannerPromptHash()||hash(certificate.policy)!==hash({...PLANNER_CERTIFICATE_POLICY})||
-    certificate.passed!==true||certificate.evaluatedMs>now||now-certificate.evaluatedMs>PLANNER_CERTIFICATE_POLICY.maxAgeMs)fail();
-  const r=certificate.results,policy=PLANNER_CERTIFICATE_POLICY;
-  if(r?.cases!==fixture.cases.length||r.expectedMerges!==fixture.cases.filter(c=>c.expect==='MERGE').length||
-    !Number.isSafeInteger(r.observedMerges)||r.falseMerges>policy.maxFalseMerges||r.errors>policy.maxErrors||
-    r.observedMerges<Math.ceil(r.expectedMerges*policy.minMergeRecall))fail();
+  if(certificate?.version!==1||!exact(certificate,['version','contract','promptHash','fixtureHash','policy','verdicts','results','passed','evaluatedMs'])||
+    !Number.isSafeInteger(certificate.evaluatedMs)||certificate.evaluatedMs>now||now-certificate.evaluatedMs>PLANNER_CERTIFICATE_POLICY.maxAgeMs)fail();
+  const expected=buildPlannerCertificate({fixture,contract:certificate.contract,verdicts:certificate.verdicts,evaluatedMs:certificate.evaluatedMs});
+  if(hash(expected)!==hash(certificate)||expected.passed!==true)fail();
   return {...certificate.contract,proof:hash(certificate)};
 }

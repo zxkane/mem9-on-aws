@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {readFile,mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {readFile,mkdtemp,writeFile,rm,chmod} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {buildPlannerCertificate,certifiedPlannerContract,evaluatePlannerModel,validatePlannerEvaluation,PLANNER_CERTIFICATE_POLICY} from './lib/planner-model-certificate.mjs';
@@ -41,6 +41,9 @@ describe('planner model certification',()=>{
       [{...certificate,passed:false},{}],
       [{...certificate,promptHash:'0'.repeat(64)},{}],
       [{...certificate,results:{...certificate.results,falseMerges:1}},{}],
+      [{...certificate,results:{...certificate.results,falseMerges:Number.NaN}},{}],
+      [{...certificate,verdicts:certificate.verdicts.map(v=>v.id===certificate.verdicts.find(x=>x.expect==='NOT_MERGE').id?{...v,verdict:'MERGE'}:v)},{}],
+      [{...certificate,verdicts:certificate.verdicts.slice(1)},{}],
       [{...certificate,policy:{...certificate.policy,maxFalseMerges:1}},{}],
       [{...certificate,contract:{...contract,extra:1}},{}],
       [certificate,{now:now+PLANNER_CERTIFICATE_POLICY.maxAgeMs+1}],
@@ -61,7 +64,9 @@ describe('planner model certification',()=>{
     const directory=await mkdtemp(join(tmpdir(),'planner-certificate-'));
     try{
       const certificate=buildPlannerCertificate({fixture,contract,verdicts:perfect,evaluatedMs:now}),file=join(directory,'certificate.json');
-      await writeFile(file,JSON.stringify(certificate));
+      await writeFile(file,JSON.stringify(certificate),{mode:0o644});
+      await expect(plannerModelRequest({MEM9_PLANNER_CERTIFICATE:file},{now})).rejects.toThrow('PlannerModelCertificateExposed');
+      await chmod(file,0o600);
       const model=await plannerModelRequest({MEM9_PLANNER_CERTIFICATE:file,MEM9_PLANNER_DAILY_REQUESTS:'100'},{now});
       expect(model.contract.proof).toBe(hash(certificate));
       expect(model.stage).toEqual({limits:{requests:100,input:100*32768,output:100*2048},slots:2,unknown:1});

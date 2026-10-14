@@ -46,22 +46,20 @@ export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=10
     state.admission=(await deps.admin('canary')).admission;
     if(!/^[a-f0-9]{32}$/.test(state.admission??''))fail('ProductionWorkerAdmissionMissing');
     await persist('canary');
-    // A real planner wave covers the whole loaded cohort. The executor starts
-    // only after the first measured write, so its commits fall inside both
-    // class windows. Neither worker's duration alone bounds the cohort.
+    // A real planner wave is running before the executor launches. Sampling
+    // starts once the executor task runs, so its first commits fall inside both
+    // class windows; every sample must still lie within a measured worker run.
     let executor;
     const covering=await deps.wake('planner',{wave:'plan',admission:state.admission,onRunning:async()=>{
-      state.loaded=await deps.sample(state.validationId,'loaded',{samplesPerKind,onWrite:async ref=>{
-        await collect(ref);
-        if(!executor&&ref.phase==='loaded'&&ref.warmup===false){
-          executor=deps.wake('executor',{wave:'apply',admission:state.admission}).then(value=>({value}),error=>({error}));executorWake=executor;
-        }
-      }});
-      await deps.persist(state);
+      executor=deps.wake('executor',{wave:'apply',admission:state.admission,onRunning:async()=>{
+        state.loaded=await deps.sample(state.validationId,'loaded',{samplesPerKind,onWrite:collect});await deps.persist(state);
+      }}).then(value=>({value}),error=>({error}));executorWake=executor;
+      await executor;
     }});
     if(!executor||!state.loaded)fail('CanaryLoadNotObserved');
     const launched=await executor;if(launched.error)throw launched.error;
     const applied=launched.value;
+    if(!(covering?.record?.classified>0)||covering.record.failedSlices)fail('GenuinePlannerWorkMissing');
     if(covering?.kind!=='planner'||applied?.kind!=='executor')fail('CanaryWorkerActivityMissing');
     state.deliveries.push(covering,applied);await deps.persist(state);
     await deps.admin('pause');await deps.quiesce();

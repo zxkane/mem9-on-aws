@@ -324,13 +324,17 @@ export async function installCanaryContinuation(db){
  * ledger stay untouched. An append-only history row keeps the closed
  * validation's identity, counters and exact receipt hashes.
  */
-export async function closeCanaryValidation(db,config,setup,invocation){
+export const CANARY_CLOSE_LIMIT=3;
+export async function closeCanaryValidation(db,config,state,setup,invocation){
   if(!id(invocation)||setup?.phase!=='canary'||setup.generation!==config.generation||!id(setup.validation_id)||
     !Number.isInteger(setup.canary_used)||setup.canary_used<0||setup.canary_used>20)fail('ProductionCanaryNotOpen');
   for(const namespace of config.targets)if((await db.query('SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS present',
     [namespace,'mem9-canary-'+setup.validation_id])).rows[0]?.present)fail('BenchmarkCleanupIncomplete');
   await db.query('SAVEPOINT canary_history_install');
   try{
+    const defaults=(await db.query(`SELECT EXISTS(SELECT FROM pg_default_acl a LEFT JOIN pg_namespace n ON n.oid=a.defaclnamespace
+      WHERE a.defaclnamespace=0 OR n.nspname=ANY($1)) AS present`,[['public','mem9_runtime','mem9_maintenance']])).rows[0]?.present;
+    if(defaults!==false)throw Error('UnexpectedDefaultPrivileges');
     await db.query(`
     CREATE TABLE IF NOT EXISTS mem9_maintenance.production_canary_history(
       validation_id TEXT PRIMARY KEY CHECK(validation_id~'^[a-f0-9]{32}$'),
@@ -342,13 +346,18 @@ export async function closeCanaryValidation(db,config,setup,invocation){
     DROP TRIGGER IF EXISTS canary_history_immutable ON mem9_maintenance.production_canary_history;
     CREATE TRIGGER canary_history_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.production_canary_history
       FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
+    if((await db.query('SELECT mem9_runtime.acl_valid($1::oid) AS valid',[state.identity.runtimeRoleOid])).rows[0]?.valid!==true)throw Error('CanaryHistoryRuntimeAclInvalid');
     await db.query('RELEASE SAVEPOINT canary_history_install');
   }catch(error){await db.query('ROLLBACK TO SAVEPOINT canary_history_install');throw error;}
+  // Each validation keeps its own 20-row allowance, so the number of closed
+  // validations per worker generation bounds unpromoted production changes.
+  const closed=Number((await db.query("SELECT count(*)::text AS value FROM mem9_maintenance.production_canary_history WHERE record->>'generation'=$1",[setup.generation])).rows[0].value);
+  if(closed>=CANARY_CLOSE_LIMIT)fail('CanaryCloseLimitReached');
   const attempt=await currentCanaryAttempt(db,{lock:true});
   if(attempt?.promoted)fail('ProductionCanaryNotOpen');
   const receipts=setup.canary_started_at?(await db.query(`SELECT namespace_id,action_id,encode(sha256(convert_to(to_jsonb(r)::text,'UTF8')),'hex') AS digest
-    FROM mem9_maintenance.receipts r WHERE committed_at>=$1 ORDER BY committed_at,namespace_id,action_id LIMIT 10001`,[setup.canary_started_at])).rows:[];
-  if(receipts.length>10000)fail('CanaryHistoryTooLarge');
+    FROM mem9_maintenance.receipts r WHERE committed_at>=$1 ORDER BY committed_at,namespace_id,action_id LIMIT 1001`,[setup.canary_started_at])).rows:[];
+  if(receipts.length>1000)fail('CanaryHistoryTooLarge');
   const protectedBaseline=Array.isArray(setup.protected_baseline)?setup.protected_baseline:[];
   const record={version:1,generation:setup.generation,targets:setup.targets,canaryUsed:setup.canary_used,
     canaryStartedMs:setup.canary_started_at?new Date(setup.canary_started_at).getTime():null,

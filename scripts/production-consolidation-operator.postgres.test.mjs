@@ -477,6 +477,12 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(reopened).toMatchObject({phase:'canary',canary_used:0});
     expect(reopened.baseline_receipts).toEqual(receipts);
     expect(reopened.validation_id).not.toBe(frozen.verification.validationId);
+    // Each closed validation keeps its own allowance; the close count bounds them.
+    for(const i of [1,2])await f.admin.query('INSERT INTO mem9_maintenance.production_canary_history(validation_id,invocation,record) VALUES($1,$2,$3)',
+      [String(i).repeat(32),String(i+2).repeat(32),{version:1,generation:f.config.generation}]);
+    await runProductionConsolidation(f.admin,f.config,fresh('pause'),{connect:f.connect});
+    await expect(runProductionConsolidation(f.admin,f.config,fresh('close-canary'),{connect:f.connect})).rejects.toThrow('CanaryCloseLimitReached');
+    expect(await scalar(f.admin,'SELECT phase AS result FROM mem9_maintenance.production_worker_setup WHERE singleton')).toBe('canary');
   }),60000);
 
   it('installs a certified planner model and budgets only on a paused, prepared setup',()=>fixture(async f=>{

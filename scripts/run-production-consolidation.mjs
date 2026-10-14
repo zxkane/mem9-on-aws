@@ -8,7 +8,7 @@ import {STSClient,GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {IAMClient,GetRoleCommand,GetRolePolicyCommand,ListRolePoliciesCommand,ListAttachedRolePoliciesCommand} from '@aws-sdk/client-iam';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
 import {parseProductionConsolidationRequest,validatePlannerModel} from './production-consolidation-operator.mjs';
-import {readFile} from 'node:fs/promises';
+import {readFile,stat} from 'node:fs/promises';
 import {certifiedPlannerContract} from './lib/planner-model-certificate.mjs';
 import {PLANNER_EVALUATION_FIXTURE} from './evaluate-planner-model.mjs';
 import {productionCoordinatorDigest,productionSourceTree} from './run-production-runtime.mjs';
@@ -87,7 +87,7 @@ export async function stopPreviousProductionAdministration(clients,meta,{now=Dat
     await send(clients.ssm,new DeleteParameterCommand({Name:name}));
   }
 }
-async function verifyOperatorRole(clients,meta,definition,name,secrets,kind,executionPolicyName='ProductionWorkerOperator'){
+async function verifyOperatorRole(clients,meta,definition,name,secrets,kind,executionPolicyName='ProductionWorkerOperator',taskStatements=[]){
   const roleArn=definition[kind+'RoleArn'],scope=`arn:aws:iam::${meta.account}:role/`;
   const suffix=name+(kind==='execution'?'Execution':'Task')+'Role-';
   if(!roleArn?.startsWith(scope)||!/^mem9-on-a(?:ws|w)?-prod-/.test(roleArn.slice(scope.length))||!roleArn.includes('-'+suffix))fail('ProductionOperatorRoleScope');
@@ -106,12 +106,12 @@ async function verifyOperatorRole(clients,meta,definition,name,secrets,kind,exec
   const references=Object.values(secrets),expected={Version:'2012-10-17',Statement:kind==='execution'?[
     {Effect:'Allow',Action:['ssm:GetParameters'],Resource:references},
     {Effect:'Allow',Action:['kms:Decrypt'],Resource:'*',Condition:{StringEquals:{'kms:ViaService':`ssm.${meta.region}.amazonaws.com`,'kms:EncryptionContext:PARAMETER_ARN':references}}},
-  ]:[{Effect:'Allow',Action:['ssmmessages:CreateControlChannel','ssmmessages:CreateDataChannel','ssmmessages:OpenControlChannel','ssmmessages:OpenDataChannel'],Resource:'*'}]};
+  ]:[{Effect:'Allow',Action:['ssmmessages:CreateControlChannel','ssmmessages:CreateDataChannel','ssmmessages:OpenControlChannel','ssmmessages:OpenDataChannel'],Resource:'*'},...taskStatements]};
   if(!same(actual,expected))fail('ProductionOperatorPolicyMismatch');
 }
 
-export async function verifyProductionTaskRoles(clients,meta,definition,name,secrets,executionPolicyName='ProductionWorkerOperator'){
-  for(const kind of ['task','execution'])await verifyOperatorRole(clients,meta,definition,name,secrets,kind,executionPolicyName);
+export async function verifyProductionTaskRoles(clients,meta,definition,name,secrets,executionPolicyName='ProductionWorkerOperator',taskStatements=[]){
+  for(const kind of ['task','execution'])await verifyOperatorRole(clients,meta,definition,name,secrets,kind,executionPolicyName,taskStatements);
 }
 
 export function validateProductionWorkerTarget(meta,{region,account}){
@@ -236,6 +236,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
  */
 export async function plannerModelRequest(env=process.env,{now=Date.now()}={}){
   if(!env.MEM9_PLANNER_CERTIFICATE)throw Error('PlannerModelCertificateRequired');
+  if(((await stat(env.MEM9_PLANNER_CERTIFICATE)).mode&0o077)!==0)throw Error('PlannerModelCertificateExposed');
   const fixture=JSON.parse(await readFile(PLANNER_EVALUATION_FIXTURE,'utf8'));
   const contract=certifiedPlannerContract(JSON.parse(await readFile(env.MEM9_PLANNER_CERTIFICATE,'utf8')),{fixture,now});
   const requests=Number(env.MEM9_PLANNER_DAILY_REQUESTS||4000);

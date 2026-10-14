@@ -271,7 +271,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           if(Number(await scalar(db,'SELECT $1::regrole::oid AS result',[config[kind].username]))!==Number(setup?.[kind+'_oid']))throw Error('CanaryWorkerIdentityChanged');
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
-        responseEvidence=await closeCanaryValidation(db,config,setup,request.invocation);
+        responseEvidence=await closeCanaryValidation(db,config,state,setup,request.invocation);
       }else if(request.operation==='configure-model'){
         // Model classification changes the planner context, so every target is
         // re-planned from current rows. Only a fresh, paused validation may change it.
