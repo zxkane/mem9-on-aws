@@ -1,7 +1,7 @@
 import {readFile,writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {createPlannerModelClient} from './lib/consolidation-model.mjs';
-import {evaluatePlannerModel,buildPlannerCertificate} from './lib/planner-model-certificate.mjs';
+import {evaluatePlannerModel,buildPlannerCertificate,PLANNER_CERTIFICATE_POLICY} from './lib/planner-model-certificate.mjs';
 
 export const PLANNER_EVALUATION_FIXTURE=new URL('./test-fixtures/planner-model-evaluation.json',import.meta.url);
 
@@ -25,12 +25,13 @@ async function main(){
     return getToken({credentials:await fromNodeProviderChain()(),region,expiresInSeconds:3600});
   };
   const infer=createPlannerModelClient({mintToken,dispatch:async()=>{},env:process.env});
-  const verdicts=await evaluatePlannerModel({fixture,contract,infer});
-  const certificate=buildPlannerCertificate({fixture,contract,verdicts,evaluatedMs:Date.now()});
+  const runs=[];
+  for(let run=0;run<PLANNER_CERTIFICATE_POLICY.runs;run++)runs.push(await evaluatePlannerModel({fixture,contract,infer}));
+  const certificate=buildPlannerCertificate({fixture,contract,runs,evaluatedMs:Date.now()});
   // Synthetic case IDs and verdicts only; no memory content leaves this process.
   await writeFile(output,JSON.stringify(certificate),{mode:0o600,flag:'wx'});
   process.stdout.write(JSON.stringify({event:'planner_model_evaluation',passed:certificate.passed,...certificate.results,
-    misses:verdicts.filter(v=>(v.expect==='MERGE')!==(v.verdict==='MERGE')).map(v=>[v.id,v.verdict])})+'\n');
+    misses:runs.map(verdicts=>verdicts.filter(v=>v.expect!=='EITHER'&&(v.expect==='MERGE')!==(v.verdict==='MERGE')).map(v=>[v.id,v.verdict]))})+'\n');
   if(!certificate.passed)process.exitCode=1;
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(error=>{
