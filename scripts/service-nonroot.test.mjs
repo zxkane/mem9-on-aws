@@ -12,7 +12,7 @@ describe('service-only nonroot transformation',()=>{
   expect(before).toEqual(saved);
   for(let i=0;i<3;i++){
    const a=before.containerDefinitions[i],b=target.containerDefinitions[i];
-   expect(b.user).toBe('1000:1000');expect(b.linuxParameters.capabilities).toEqual({drop:['ALL']});
+   expect(b.user).toBe('1000:1000');expect(b.linuxParameters.capabilities).toEqual({add:[],drop:['ALL']});
    expect(b.entryPoint.slice(1,3)).toEqual(['--no-new-privs','--']);
    const restored=structuredClone(b);delete restored.user;delete restored.entryPoint;
    if(a.linuxParameters)restored.linuxParameters=structuredClone(a.linuxParameters);else delete restored.linuxParameters;
@@ -24,6 +24,17 @@ describe('service-only nonroot transformation',()=>{
   const target=hardenServiceRegistration(fixture());
   expect(target.containerDefinitions[0].healthCheck.command).toEqual(['CMD','/bin/setpriv','--no-new-privs','--','/bin/sh','-c','wget -q -O /dev/null http://localhost:8080/healthz || exit 1']);
   expect(hardenServiceRegistration(target)).toEqual(target);
+ });
+ it('matches the ECS empty-add readback and preserves it as a restore baseline',()=>{
+  const target=hardenServiceRegistration(fixture()),readback=structuredClone(target);
+  for(const c of readback.containerDefinitions)c.linuxParameters.capabilities.add=[];
+  expect(registrationInput({taskDefinition:readback})).toEqual(target);
+  expect(hardenServiceRegistration(readback)).toEqual(readback);
+ });
+ it('rejects any capability addition on an otherwise hardened readback',()=>{
+  const readback=hardenServiceRegistration(fixture());
+  readback.containerDefinitions[0].linuxParameters.capabilities.add=['CHOWN'];
+  expect(()=>hardenServiceRegistration(readback)).toThrow('ServiceNonrootConfiguration');
  });
  it.each(['user','privileged','capabilities','entryPoint','command','health'])('rejects an unexpected %s configuration',kind=>{
   const c=fixture().containerDefinitions[0];

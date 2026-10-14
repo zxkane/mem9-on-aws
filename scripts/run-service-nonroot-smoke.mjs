@@ -9,6 +9,7 @@ import {resolve, join, dirname} from 'node:path';
 import {isIP} from 'node:net';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {hardenServiceContainer} from './lib/service-nonroot.mjs';
+import {SERVICE_PROCESS_COLLECTOR, inspectServiceProcessOutput} from './lib/service-nonroot-runtime.mjs';
 
 const exec = promisify(execFile);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -243,6 +244,17 @@ export async function runSmoke(options) {
     const statuses = output.split(/(?=^Name:)/m).filter(v => v.trim());
     need(statuses.length === 1, 'ApplicationProcessNotUnique');
     const status = verifyProcessStatus(statuses[0]);
+    const observerText = await docker(['exec', '--user', '0:0', name, '/bin/sh', '-c',
+      'sed -n "/^Uid:/p;/^Gid:/p;/^Cap/p;/^NoNewPrivs:/p" /proc/self/status']);
+    const observer = Object.fromEntries(observerText.trim().split(/\r?\n/).map(line => {
+      const i = line.indexOf(':'); return [line.slice(0, i), line.slice(i + 1).trim()];
+    }));
+    need(['Uid', 'Gid'].every(key => observer[key]?.split(/\s+/).join() === '0,0,0,0') &&
+      ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'].every(key => /^0+$/.test(observer[key] ?? '')), 'RootObserverCapabilities');
+    const rootOutput = await docker(['exec', '--user', '0:0', name, '/bin/sh', '-c', SERVICE_PROCESS_COLLECTOR]);
+    const processes = inspectServiceProcessOutput(rootOutput, kind === 'mnemo' ? 'mnemo-server' : 'node-server');
+    need(processes.length === 1 && processes[0].pid === `/proc/${status.Pid}`, 'RootObserverApplicationIdentity');
+    await mark(`${kind}RootObserver`, {observer, processes});
     const primitive = kind === 'mnemo' ? '/bin/setpriv' : '/usr/bin/setpriv';
     const paths = kind === 'mnemo' ? ['/usr/local/bin/mnemo-server', '/usr/local/bin/entrypoint.sh', '/usr/local/share/mem9'] : ['/app/server.mjs', '/app/node_modules', '/app'];
     // Opening for write without truncation tests actual permission, including files.
@@ -257,7 +269,8 @@ export async function runSmoke(options) {
     const baselineBytes = await readFile(options.baseline), baseline = JSON.parse(baselineBytes);
     const references = imageReferences(baseline); report.baselineHash = hash(baselineBytes);
     report.source = {head: (await command('git', ['-C', ROOT, 'rev-parse', 'HEAD'])).trim(),
-      scriptHash: hash(await readFile(fileURLToPath(import.meta.url))), transformHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot.mjs')))};
+      scriptHash: hash(await readFile(fileURLToPath(import.meta.url))), transformHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot.mjs'))),
+      runtimeHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot-runtime.mjs')))};
     const images = {};
     for (const [name, ref] of Object.entries(references)) {
       const image = JSON.parse(await docker(['image', 'inspect', ref]))[0];

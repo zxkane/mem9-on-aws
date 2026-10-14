@@ -16,6 +16,7 @@ async function fixture() {
   await mkdir(join(root, 'scripts/lib'), {recursive: true});
   await writeFile(join(root, 'scripts/run-service-nonroot-smoke.mjs'), 'synthetic reviewed smoke source');
   await writeFile(join(root, 'scripts/lib/service-nonroot.mjs'), 'synthetic reviewed transform source');
+  await writeFile(join(root, 'scripts/lib/service-nonroot-runtime.mjs'), 'synthetic reviewed runtime source');
   const registration = {family: 'synthetic-prod-runtime', networkMode: 'awsvpc', cpu: '2048', memory: '6144',
     runtimePlatform: {cpuArchitecture: 'ARM64', operatingSystemFamily: 'LINUX'}, tags: [],
     containerDefinitions: names.map((name, i) => ({name, image: `example.com/${name}@sha256:${String(i + 1).repeat(64)}`,
@@ -31,14 +32,16 @@ async function fixture() {
   const localImages = {'mnemo-server': 'sha256:' + '4'.repeat(64), 'llm-proxy': 'sha256:' + '5'.repeat(64)};
   for (const [prefix, name, paths] of [['mnemo', 'mnemo-server', ['/usr/local/bin/mnemo-server', '/usr/local/bin/entrypoint.sh', '/usr/local/share/mem9']],
     ['proxy', 'llm-proxy', ['/app/server.mjs', '/app/node_modules', '/app']]]) {
-    checks[prefix + 'Process'] = {status: status(), writableTmp: true, deniedWrites: paths};
+    checks[prefix + 'Process'] = {status: {Pid: '7', ...status()}, writableTmp: true, deniedWrites: paths};
+    checks[prefix + 'RootObserver'] = {observer: {...status(), Uid: '0 0 0 0', Gid: '0 0 0 0', NoNewPrivs: '0'},
+      processes: [{pid: '/proc/7', Application: name === 'mnemo-server' ? 'mnemo-server' : 'node-server', IdentitySource: 'proc-cmdline-prefix', ...status()}]};
     checks[prefix + 'ContainerConfiguration'] = {image: localImages[name], user: '1000:1000', init: true, capDrop: ['ALL']};
   }
   checks.proxyModule = Object.fromEntries(['exportedModule', 'realTokenGenerator', 'syntheticSessionsOnly', 'healthBeforeMint', 'healthAfterMint', 'authRemint', 'timedRefresh', 'credentialFailure', 'invalidRequest'].map(k => [k, true]));
   Object.assign(checks, {missingSignatureObservation: {status: 403}, expiredSignatureObservation: {status: 403}, wrongTenantObservation: {status: 400},
     syntheticDependencyCalls: {embeddings: 1, upstream: 1}, fixtureContainerConfiguration: {}, postgresContainerConfiguration: {}});
   const suite = {version: 1, scope: 'local-actual-images-synthetic-only', outcome: 'PASS', phase: 'complete', checks, images: localImages,
-    source: {scriptHash: sha('synthetic reviewed smoke source'), transformHash: sha('synthetic reviewed transform source')}, failures: [], cleanup: {complete: true, failures: []}};
+    source: {scriptHash: sha('synthetic reviewed smoke source'), transformHash: sha('synthetic reviewed transform source'), runtimeHash: sha('synthetic reviewed runtime source')}, failures: [], cleanup: {complete: true, failures: []}};
   const embedding = {image: images['qwen3-embed'], isolatedNetwork: 'none', result: {status: 200, dimensions: 1024, norm: 1.00000007},
     applicationIdentity: Object.entries(status()).map(([key, value]) => key + ': ' + value).join('\n')};
   const old = hardenServiceRegistration({...copy(registration), family: 'synthetic-pr-123-runtime'}), target = hardenServiceRegistration(old), targetDefinition = definition(target, 8);
@@ -51,7 +54,7 @@ async function fixture() {
   const preview = {outcome: 'PASS', stage: 'pr-123', sourceTree: plan.source.tree, productionRegistrationHash: hash(plan.target),
     originalDefinition: definition(old, 7), targetDefinition, service, tasks,
     processEvidence: names.map(name => ({taskArn, container: name, runtimeId: name + '-runtime', processes: [{pid: '/proc/7',
-      Executable: name === 'mnemo-server' ? '/usr/local/bin/mnemo-server' : '/usr/local/bin/node', ...status()}]})),
+      Application: name === 'mnemo-server' ? 'mnemo-server' : 'node-server', IdentitySource: 'proc-cmdline-prefix', ...status()}]})),
     mcp: {kind: 'service-mcp-read-verification', unauthenticatedStatus: 401, readScopeIsolated: true,
       results: ['semantic', 'keyword'].map(mode => ({mode, returned: 1, responseHash: '6'.repeat(64)}))},
     cleanup: {verified: true, remainingCandidateTasks: [], failures: []}};
@@ -79,6 +82,13 @@ const mutations = {
   localRegistration: f => {f.values.local.registrationHash = '0'.repeat(64);},
   suiteBaseline: f => {f.suite.source.scriptHash = '0'.repeat(64);},
   transformSource: f => {f.suite.source.transformHash = '0'.repeat(64);},
+  runtimeSource: f => {f.suite.source.runtimeHash = '0'.repeat(64);},
+  rootObserverMissing: f => {delete f.suite.checks.mnemoRootObserver;},
+  rootObserverPrivileged: f => {f.suite.checks.proxyRootObserver.observer.CapEff = '0001';},
+  rootObserverWrongPid: f => {f.suite.checks.proxyRootObserver.processes[0].pid = '/proc/8';},
+  rootObserverWrongApplication: f => {f.suite.checks.proxyRootObserver.processes[0].Application = 'mnemo-server';},
+  rootObserverWrongSource: f => {f.suite.checks.proxyRootObserver.processes[0].IdentitySource = 'unverified';},
+  obsoleteExecutableClaim: f => {f.preview.processEvidence[0].processes[0].Executable = '/usr/local/bin/mnemo-server';},
   localFailure: f => {f.suite.failures.push('failed');},
   localCleanup: f => {f.suite.cleanup.complete = false;},
   rootProcess: f => {f.suite.checks.mnemoProcess.status.Uid = '1000 1000 0 1000';},

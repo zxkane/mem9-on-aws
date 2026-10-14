@@ -125,7 +125,7 @@ function harness() {
     if (h.retagDuringProbe) h.registryDigests['mnemo-server'] = 'sha256:' + '0'.repeat(64);
     const observed = await aws.inventory();
     const evidence = {processEvidence: observed.flatMap(t => t.containers.map(c => ({taskArn: t.taskArn, container: c.name, runtimeId: c.runtimeId,
-      processes: [{Executable: c.name === 'mnemo-server' ? '/usr/local/bin/mnemo-server' : '/usr/local/bin/node', Uid: '1000 1000 1000 1000', Gid: '1000 1000 1000 1000', CapInh: '0000', CapPrm: '0000', CapEff: '0000', CapBnd: '0000', CapAmb: '0000', NoNewPrivs: '1'}]}))),
+      processes: [{pid: '/proc/7', Application: c.name === 'mnemo-server' ? 'mnemo-server' : 'node-server', IdentitySource: 'proc-cmdline-prefix', Uid: '1000 1000 1000 1000', Gid: '1000 1000 1000 1000', CapInh: '0000', CapPrm: '0000', CapEff: '0000', CapBnd: '0000', CapAmb: '0000', NoNewPrivs: '1'}]}))),
       mcp: {kind: 'service-mcp-read-verification', observedMs: Date.now(), unauthenticatedStatus: 401, readScopeIsolated: true, results: ['semantic', 'keyword'].map(mode => ({mode, returned: 0, responseHash: 'f'.repeat(64)}))}};
     await aws.persistOnce('runtime-verification.json', evidence);
     return {tasks: await aws.inventory(), evidenceHash: hash(evidence)};

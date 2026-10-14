@@ -6,15 +6,37 @@ import {SSMClient,GetParametersCommand} from '@aws-sdk/client-ssm';
 import {serviceNonrootHash as hash} from './service-nonroot.mjs';
 
 const exec=promisify(execFile);
-// The observer is a shell, so it cannot be mistaken for a Node application.
-// Output contains process security attributes only, never argv or environment.
-const processCommand=`/bin/sh -c 'for p in /proc/[0-9]*; do x=$(readlink "$p/exe" 2>/dev/null) || continue; case "$x" in /usr/local/bin/node|/usr/local/bin/mnemo-server) echo "MEM9_PROCESS $p"; echo "Executable: $x"; sed -n "/^Uid:/p;/^Gid:/p;/^Cap/p;/^NoNewPrivs:/p" "$p/status"; echo MEM9_PROCESS_END;; esac; done'`;
-export function inspectServiceProcessOutput(output){
- const matches=[...output.matchAll(/MEM9_PROCESS (\/proc\/\d+)\r?\n([\s\S]*?)MEM9_PROCESS_END/g)];
+// /proc/PID/exe is ptrace-gated: root without capabilities cannot necessarily
+// read it across UIDs. Classify only NUL-delimited known argv prefixes; this is
+// deliberately NOT executable-path attestation. Never emit argv or environment.
+const prefix=words=>Buffer.from(words.join('\0')+'\0').toString('hex')+'*';
+const nodePrefixes=['node','/usr/local/bin/node'].flatMap(node=>['server.mjs','/app/server.mjs'].map(script=>prefix([node,script]))).join('|');
+const mnemoPrefixes=['mnemo-server','/usr/local/bin/mnemo-server'].map(name=>prefix([name])).join('|');
+export const SERVICE_PROCESS_COLLECTOR=`set +x
+for proc_entry in /proc/[0-9]*; do
+ command_hex=$(od -An -v -tx1 -N 64 "$proc_entry/cmdline" 2>/dev/null | tr -d '[:space:]') || exit 1
+ case "$command_hex" in
+  ${nodePrefixes}) application=node-server;;
+  ${mnemoPrefixes}) application=mnemo-server;;
+  *) continue;;
+ esac
+ kernel_status=$(sed -n '/^Uid:/p;/^Gid:/p;/^CapInh:/p;/^CapPrm:/p;/^CapEff:/p;/^CapBnd:/p;/^CapAmb:/p;/^NoNewPrivs:/p' "$proc_entry/status" 2>/dev/null) || exit 1
+ printf 'MEM9_PROCESS /proc/%s\\nApplication: %s\\nIdentitySource: proc-cmdline-prefix\\n%s\\nMEM9_PROCESS_END\\n' "\${proc_entry##*/}" "$application" "$kernel_status"
+done`;
+export const SERVICE_PROCESS_COMMAND="/bin/sh -c '"+SERVICE_PROCESS_COLLECTOR.replaceAll("'", "'\\''")+"'";
+export function inspectServiceProcessOutput(output,expectedApplication){
+ const matches=[...output.matchAll(/^MEM9_PROCESS (\/proc\/[1-9]\d*)\r?\n([\s\S]*?)^MEM9_PROCESS_END\r?$/gm)];
  assert(matches.length>0&&matches.length<=64,'ApplicationProcessMissing');
+ assert(new Set(matches.map(m=>m[1])).size===matches.length,'ApplicationProcessDuplicate');
+ assert((output.match(/^MEM9_PROCESS(?: |$)/gm)??[]).length===matches.length&&(output.match(/^MEM9_PROCESS_END\r?$/gm)??[]).length===matches.length,'ApplicationProcessFraming');
  return matches.map(([,pid,body])=>{
-  const rows=Object.fromEntries(body.trim().split(/\r?\n/).map(line=>{const i=line.indexOf(':');return [line.slice(0,i),line.slice(i+1).trim()];}));
-  assert(['/usr/local/bin/node','/usr/local/bin/mnemo-server'].includes(rows.Executable),'ApplicationExecutableInvalid');
+  const entries=body.trim().split(/\r?\n/).map(line=>{const i=line.indexOf(':');assert(i>0,'ApplicationStatusFraming');return [line.slice(0,i),line.slice(i+1).trim()];});
+  const fields=['Application','IdentitySource','Uid','Gid','CapInh','CapPrm','CapEff','CapBnd','CapAmb','NoNewPrivs'];
+  assert(entries.length===fields.length&&new Set(entries.map(([key])=>key)).size===fields.length&&entries.every(([key])=>fields.includes(key)),'ApplicationStatusFields');
+  const rows=Object.fromEntries(entries);
+  assert(['node-server','mnemo-server'].includes(rows.Application),'ApplicationCommandInvalid');
+  assert(rows.IdentitySource==='proc-cmdline-prefix','ApplicationIdentitySourceInvalid');
+  if(expectedApplication!==undefined)assert(rows.Application===expectedApplication,'ApplicationContainerMismatch');
   for(const key of ['Uid','Gid'])assert.deepEqual(rows[key]?.split(/\s+/),['1000','1000','1000','1000'],'ApplicationIdentityInvalid');
   for(const key of ['CapInh','CapPrm','CapEff','CapBnd','CapAmb'])assert(/^0+$/.test(rows[key]??''),'ApplicationCapabilityInvalid');
   assert.equal(rows.NoNewPrivs,'1','ApplicationPrivilegeEscalationPossible');return {pid,...rows};
@@ -83,8 +105,10 @@ export async function verifyServiceRuntime(arn,{plan,deadline,aws,scope,authMode
   for(const c of plan.target.containerDefinitions){
    const actual=task.containers.find(x=>x.name===c.name);assert(actual&&actual.image===c.image&&actual.imageDigest===c.image.split('@')[1]&&actual.healthStatus==='HEALTHY');
    assert(deadline>Date.now(),'RuntimeVerificationDeadline');
-   const result=await exec('aws',['ecs','execute-command','--region',scope.region,'--cluster',scope.cluster,'--task',task.taskArn,'--container',c.name,'--interactive','--command',processCommand],{timeout:Math.min(60000,deadline-Date.now()),maxBuffer:128*1024});
-   processEvidence.push({taskArn:task.taskArn,container:c.name,runtimeId:actual.runtimeId,processes:inspectServiceProcessOutput(result.stdout)});
+   const result=await exec('aws',['ecs','execute-command','--region',scope.region,'--cluster',scope.cluster,'--task',task.taskArn,'--container',c.name,'--interactive','--command',SERVICE_PROCESS_COMMAND],{timeout:Math.min(60000,deadline-Date.now()),maxBuffer:128*1024});
+   const application=c.name==='mnemo-server'?'mnemo-server':['qwen3-embed','llm-proxy'].includes(c.name)?'node-server':undefined;
+   assert(application,'ApplicationContainerUnknown');
+   processEvidence.push({taskArn:task.taskArn,container:c.name,runtimeId:actual.runtimeId,processes:inspectServiceProcessOutput(result.stdout,application)});
   }
  }
  const mcp=await verifyServiceMcp({scope,authMode});

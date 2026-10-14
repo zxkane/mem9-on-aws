@@ -64,7 +64,7 @@ describe("real SST task-definition synthesis", () => {
     const resource=registered.find(r=>r.type==='aws:ecs/taskDefinition:TaskDefinition');
     const definitions=JSON.parse(resource.inputs.containerDefinitions);
     for(const c of definitions){
-      expect(c.user).toBe('1000:1000');expect(c.linuxParameters).toEqual({initProcessEnabled:true,capabilities:{drop:['ALL']}});
+      expect(c.user).toBe('1000:1000');expect(c.linuxParameters).toEqual({initProcessEnabled:true,capabilities:{add:[],drop:['ALL']}});
       expect(c.entryPoint.slice(1,3)).toEqual(['--no-new-privs','--']);
       expect(c.environment).toContainEqual({name:'FIXTURE',value:'preserved'});
       expect(c.pseudoTerminal).toBe(c.name!=='mnemo-server');

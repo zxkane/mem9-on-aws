@@ -30,7 +30,7 @@ export function hardenServiceContainer(original){
  need(c.entryPoint===undefined||isDeepStrictEqual(c.entryPoint,s.entry)||isDeepStrictEqual(c.entryPoint,entry));
  need(c.command===undefined||isDeepStrictEqual(c.command,[]));
  need(c.entrypoint===undefined,'ServiceNonrootAmbiguousEntrypoint');
- c.user='1000:1000';c.linuxParameters={...c.linuxParameters,capabilities:{drop:['ALL']}};c.entryPoint=entry;
+ c.user='1000:1000';c.linuxParameters={...c.linuxParameters,capabilities:{add:[],drop:['ALL']}};c.entryPoint=entry;
  if(c.healthCheck!==undefined){
   const health=s.health[0]==='CMD-SHELL'?['CMD',...prefix,'/bin/sh','-c',s.health[1]]:['CMD',...prefix,...s.health.slice(1)];
   need(object(c.healthCheck)&&(isDeepStrictEqual(c.healthCheck.command,s.health)||isDeepStrictEqual(c.healthCheck.command,health)));

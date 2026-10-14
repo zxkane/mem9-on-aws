@@ -124,7 +124,7 @@ export async function runServiceNonrootAudit({scope,phase,operationId,persistOnc
   need(!images.failures?.length&&images.images?.length===1);const im=images.images[0];need(im.registryId===selected.account&&im.repositoryName==='mem9-on-aws/bootstrap'&&im.imageId.imageDigest===root&&sha(im.imageManifest)===root.slice(7));
   const index=JSON.parse(im.imageManifest),children=index.manifests?.filter(m=>m.platform?.architecture==='arm64'&&m.platform?.os==='linux');need(index.schemaVersion===2&&children?.length===1&&/^sha256:[a-f0-9]{64}$/.test(children[0].digest));
   const context={version:1,operationId,phase,scope:selected,deadline:deadline-60000,manifestHash:hash(parameter)},contextHash=hash(context);
-  c.user='1000:1000';c.linuxParameters={...c.linuxParameters,capabilities:{drop:['ALL']}};c.entryPoint=['/bin/setpriv','--no-new-privs','--','/usr/local/bin/node'];c.command=['--input-type=module','--eval',SERVICE_NONROOT_AUDIT_SOURCE,JSON.stringify(context)];
+  c.user='1000:1000';c.linuxParameters={...c.linuxParameters,capabilities:{add:[],drop:['ALL']}};c.entryPoint=['/bin/setpriv','--no-new-privs','--','/usr/local/bin/node'];c.command=['--input-type=module','--eval',SERVICE_NONROOT_AUDIT_SOURCE,JSON.stringify(context)];
   need(Buffer.byteLength(JSON.stringify(c.command))<=16384,'ServiceNonrootAuditSourceBound');
   const plan={version:1,scope:selected,operationId,phase,started,deadline,parameter,baseline:before,candidate,scriptHash:SERVICE_NONROOT_AUDIT_SCRIPT_HASH,contextHash,arm64Digest:children[0].digest,expectedProjection:expectedProjection??null};
   await persist('plan',plan);same(await manifest(),parameter);same(registrationInput(await describe(target.taskDefinition)),registrationInput(before));

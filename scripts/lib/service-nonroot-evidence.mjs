@@ -30,6 +30,13 @@ function identity(rows) {
   for (const key of ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']) need(typeof rows[key] === 'string' && /^0+$/.test(rows[key]), 'ProcessCapabilities');
   equal(rows.NoNewPrivs, '1', 'ProcessNoNewPrivs');
 }
+function applicationIdentity(process, name) {
+  need(process && /^\/proc\/[1-9]\d*$/.test(process.pid ?? ''), 'ApplicationPid');
+  equal(Object.keys(process).sort(), ['pid', 'Application', 'IdentitySource', 'Uid', 'Gid', 'CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb', 'NoNewPrivs'].sort(), 'ApplicationFields');
+  equal(process.Application, name === 'mnemo-server' ? 'mnemo-server' : 'node-server', 'ApplicationCommand');
+  equal(process.IdentitySource, 'proc-cmdline-prefix', 'ApplicationIdentitySource');
+  identity(process);
+}
 function identityText(text) {
   need(typeof text === 'string', 'EmbeddingIdentity'); const rows = {};
   for (const line of text.trim().split(/\r?\n/)) {const i = line.indexOf(':'); need(i > 0 && !Object.hasOwn(rows, line.slice(0, i)), 'IdentityFraming'); rows[line.slice(0, i)] = line.slice(i + 1).trim();}
@@ -91,6 +98,7 @@ export async function validateServiceEvidence(plan, values, {root}) {
   equal(registrationInput(baseline), original, 'BaselineRegistration'); equal(suite.baselineHash, local.baselineHash, 'SuiteBaseline');
   equal(suite.source?.scriptHash, sha(await readFile(join(root, 'scripts/run-service-nonroot-smoke.mjs'))), 'SmokeSource');
   equal(suite.source?.transformHash, sha(await readFile(join(root, 'scripts/lib/service-nonroot.mjs'))), 'TransformSource');
+  equal(suite.source?.runtimeHash, sha(await readFile(join(root, 'scripts/lib/service-nonroot-runtime.mjs'))), 'RuntimeSource');
   need(suite.version === 1 && suite.scope === 'local-actual-images-synthetic-only' && suite.outcome === 'PASS' && suite.phase === 'complete' &&
     empty(suite.failures) && suite.cleanup?.complete === true && empty(suite.cleanup.failures), 'LocalCompletion');
   const checks = suite.checks; need(checks && Object.keys(checks).length >= 24 && required.every(k => checks[k] === true), 'LocalChecks');
@@ -100,6 +108,12 @@ export async function validateServiceEvidence(plan, values, {root}) {
     need(process.writableTmp === true && denied.every(path => process.deniedWrites?.includes(path)), 'FilesystemChecks');
     need(/^sha256:[a-f0-9]{64}$/.test(suite.images?.[name] ?? '') && config?.image === suite.images[name] && config.user === '1000:1000' && config.init === true, 'LocalContainer');
     equal(config.capDrop, ['ALL'], 'LocalCapabilities');
+    const rootObserver = checks[prefix + 'RootObserver'];
+    for (const key of ['Uid', 'Gid']) equal(rootObserver?.observer?.[key]?.split(/\s+/), ['0', '0', '0', '0'], 'RootObserverIdentity');
+    for (const key of ['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb']) need(/^0+$/.test(rootObserver?.observer?.[key] ?? ''), 'RootObserverCapabilities');
+    need(rootObserver?.processes?.length === 1, 'RootObserverProcesses');
+    applicationIdentity(rootObserver.processes[0], name);
+    equal(rootObserver.processes[0].pid, '/proc/' + process.status.Pid, 'RootObserverPid');
   }
   need(['exportedModule', 'realTokenGenerator', 'syntheticSessionsOnly', 'healthBeforeMint', 'healthAfterMint', 'authRemint', 'timedRefresh', 'credentialFailure', 'invalidRequest']
     .every(k => checks.proxyModule?.[k] === true), 'ProxyChecks');
@@ -137,7 +151,7 @@ export async function validateServiceEvidence(plan, values, {root}) {
       need(c.image === images[c.name] && c.imageDigest === images[c.name].split('@')[1] && c.lastStatus === 'RUNNING' && c.healthStatus === 'HEALTHY' && typeof c.runtimeId === 'string' && c.runtimeId.length > 0, 'PreviewImage');
       const matches = p.processEvidence.filter(e => e.taskArn === task.taskArn && e.container === c.name && e.runtimeId === c.runtimeId);
       need(matches.length === 1 && Array.isArray(matches[0].processes) && matches[0].processes.length > 0, 'PreviewProcesses');
-      for (const process of matches[0].processes) {identity(process); equal(process.Executable, c.name === 'mnemo-server' ? '/usr/local/bin/mnemo-server' : '/usr/local/bin/node', 'PreviewExecutable');}
+      for (const process of matches[0].processes) applicationIdentity(process, c.name);
     }
   }
   need(p.mcp?.kind === 'service-mcp-read-verification' && [401, 403].includes(p.mcp.unauthenticatedStatus) && p.mcp.readScopeIsolated === true && p.mcp.results?.length === 2, 'PreviewMcp');
