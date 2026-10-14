@@ -1704,6 +1704,25 @@ is active. Planner and executor credentials remain separate, and the persistent
 exposes the execution route for the canary while recurring targets stay disabled;
 database execution and dispatch require their independent admission controls.
 
+An unpromoted canary is closed before a fresh validation, and a certified
+planner model is installed before planning starts:
+
+```bash
+STAGE=prod node scripts/run-production-consolidation.mjs pause
+STAGE=prod node scripts/run-production-consolidation.mjs close-canary
+# Bedrock Mantle model route settings as deployed (MEM9_LLM_MODEL, projects, regions).
+certificate="$HOME/.local/state/mem9-planner-certificate.local.json"  # owner-only, mode 600
+node scripts/evaluate-planner-model.mjs mantle-responses-total-v1 "$certificate"
+MEM9_PLANNER_CERTIFICATE="$certificate" \
+  STAGE=prod node scripts/run-production-consolidation.mjs configure-model
+STAGE=prod node scripts/run-production-canary.mjs
+```
+
+The evaluation is a release gate for the exact model contract: zero false
+merges among synthetic contradictions and unrelated records, zero malformed
+answers, and at least half of the expected merges. See the consolidation design
+for the history record and binding rules.
+
 The initial production canary uses `scripts/run-production-canary.mjs` with
 `STAGE=prod` and the application's AWS region. It prepares restricted worker
 bindings, plans with execution disabled, pauses workers and captures protected

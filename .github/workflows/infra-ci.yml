@@ -1557,6 +1557,11 @@ jobs:
       - name: Install infra dependencies
         run: pnpm -C infra install --frozen-lockfile
 
+      # The boundary preflight and the runtime operator both import root
+      # packages (for example `yaml` in the authorization archive policy).
+      - name: Install production runtime operator dependencies
+        run: npm ci
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
@@ -1691,9 +1696,6 @@ jobs:
           KEY=$(openssl rand -base64 32)
           pnpm -C infra exec sst secret set OauthStateHmacKey "$KEY" --stage prod
           echo "::notice::OauthStateHmacKey seeded for prod (re-linked by the deploy below)"
-
-      - name: Install production runtime operator dependencies
-        run: npm ci
 
       - name: Resolve production runtime deployment mode
         env:

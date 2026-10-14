@@ -351,6 +351,18 @@ describe("workflow integration", () => {
     );
   });
 
+  it("installs root operator dependencies before every boundary preflight", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    for (const job of ["deploy-preview", "deploy-prod"]) {
+      const steps = workflow.jobs[job].steps;
+      const install = steps.findIndex(({ run }) => run === "npm ci");
+      const preflight = steps.findIndex(({ name }) => name === "Preflight — verify role is assumable");
+      expect(preflight, job).toBeGreaterThanOrEqual(0);
+      expect(install, job).toBeGreaterThanOrEqual(0);
+      expect(install, job).toBeLessThan(preflight);
+    }
+  });
+
   it("TC-GROUPNS-125: verifies constraints_complete before a required prod deploy", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
     const steps = workflow.jobs["deploy-prod"].steps;

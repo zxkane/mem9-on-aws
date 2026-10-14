@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as pulumi from "@pulumi/pulumi";
 import {
   WORKLOAD_BOUNDARY_POLICY_NAME,
   registerWorkloadRoleBoundary,
@@ -127,6 +128,22 @@ describe("workload role boundary transform", () => {
     expect(materialize(args.tags)).toEqual({ Project: "mem9-on-aws", Stage: stage });
   });
 
+  it.each(["prod", "pr-7"])("selects Gateway only by fixed logical role and binds stage %s", stage => {
+    (globalThis as Record<string, unknown>).$app = {stage};
+    registerWorkloadRoleBoundary();
+    for (const name of ["Mem9ProxyFnRole", "Mem9IdentityInterceptorFnRole"]) {
+      const args:Record<string,unknown> = {permissionsBoundary:"wrong", tags:{Project:"wrong",Stage:"wrong",Existing:"kept"}};
+      roleTransform?.(args, {}, name);
+      expect(materialize(args.permissionsBoundary)).toBe("arn:aws:iam::123456789012:policy/mem9-on-aws-gateway-boundary");
+      expect(materialize(args.tags)).toEqual({Project:"mem9-on-aws",Stage:stage,Existing:"kept"});
+    }
+    for (const name of ["Mem9ServerExecutionRole", "Mem9ProxyFnRoleSuffix", "OtherMem9ProxyFnRole"]) {
+      const args:Record<string,unknown> = {name:`mem9-on-aws-${stage}-Mem9ProxyFnRole-fixture`,permissionsBoundary:"wrong"};
+      roleTransform?.(args, {}, name);
+      expect(materialize(args.permissionsBoundary)).toBe(`arn:aws:iam::123456789012:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`);
+    }
+  });
+
   it("registers the role transform before any stack module is imported", () => {
     const config = readFileSync(
       new URL("../sst.config.ts", import.meta.url),
@@ -162,6 +179,8 @@ describe("workload role boundary transform", () => {
       (globalThis as Record<string, unknown>).$config = (value: unknown) =>
         value;
       (globalThis as Record<string, unknown>).$app = { stage: "prod" };
+      (globalThis as Record<string, unknown>).$cli = { command: "deploy" };
+      (globalThis as Record<string, unknown>).$util = pulumi;
       (globalThis as Record<string, unknown>).aws = {
         ec2: {
           getVpcOutput: () => {
@@ -246,6 +265,8 @@ describe("workload role boundary transform", () => {
         }
         for (const name of [
           "$app",
+          "$cli",
+          "$util",
           "$config",
           "aws",
           "sst",

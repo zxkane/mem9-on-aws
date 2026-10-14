@@ -23,7 +23,7 @@ import {restoreMissingAdministrator,armAdministratorLoss,deletePreviewAdministra
 import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
-import {loadDeploymentDataRelease} from './lib/production-data-release-loader.mjs';
+import {loadDeploymentDataRelease,retireDataRelease} from './lib/production-data-release-loader.mjs';
 import {captureDataReleaseBuild} from './lib/production-data-evidence.mjs';
 import {inspectDataRelease} from './lib/production-data-release.mjs';
 
@@ -150,12 +150,15 @@ async function readOptional(clients,name){
 }
 
 export async function runProductionRuntime({clients,stage,region,command,env=process.env,execute=executeProductionCommand}){
-  if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview','rehearse','catalog','arm-cancellation'].includes(command))throw Error('InvalidProductionCommand');
+  if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview','rehearse','catalog','arm-cancellation','retire-data-release'].includes(command))throw Error('InvalidProductionCommand');
   if(command==='rehearse'&&stage==='prod')throw Error('PreviewAdministratorRehearsalOnly');
   if(!['0','1'].includes(env.MEM9_RUNTIME_CANCELLATION_DRILL??'0')||
     (stage==='prod'&&(command==='arm-cancellation'||env.MEM9_RUNTIME_CANCELLATION_DRILL==='1')))throw Error('PreviewCancellationOnly');
   const commandDeadline=Date.now()+45*60000;
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
+  if(command==='retire-data-release'){
+    const result=await retireDataRelease(clients,{stage,account,region});emit({phase:'data-release-retired',...result});return result;
+  }
   const prefix=`/mem9-on-aws/${stage}/runtime`,planPath=prefix+'/production-plan',statePath=prefix+'/production-state';
   let plan=await readOptional(clients,planPath),meta;
   if(plan&&(plan.version!==1||plan.stage!==stage||plan.region!==region||plan.account!==account||!/^[a-f0-9]{32}$/.test(plan.nonce??'')))throw Error('ProductionPlanMismatch');

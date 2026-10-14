@@ -2339,6 +2339,24 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
+      "id": "772962f951d0100278f5",
+      "owner": "scripts/lib/production-canary-continuation.mjs",
+      "line": 331,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "20a3ebac51ea5235e0d0ecada4948c13d167511755485a2013b29c04ef7ce963",
+      "statement": "SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS present",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
       "id": "337d8cc0d929e3173deb",
       "owner": "scripts/lib/production-canary-paused-audit.mjs",
       "line": 55,
@@ -2936,9 +2954,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "bfa7dc2d2b11e141d911",
+      "id": "148f0e350b9b081ffae7",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 233,
+      "line": 249,
       "tables": [
         "memories"
       ],
@@ -2954,9 +2972,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "9441b32520b970791a6e",
+      "id": "15b9f2287c35644cbca7",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 259,
+      "line": 298,
       "tables": [
         "memories"
       ],
@@ -2972,9 +2990,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "a0398bf67c3da53be9d9",
+      "id": "ac5f01c4a8e60e3b1749",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 271,
+      "line": 310,
       "tables": [
         "memories"
       ],
@@ -2990,9 +3008,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "d439a9cec6e6aa60709a",
+      "id": "1af86d90babb9f3c978c",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 275,
+      "line": 314,
       "tables": [
         "memories"
       ],

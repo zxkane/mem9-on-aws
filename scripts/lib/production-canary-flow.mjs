@@ -1,12 +1,13 @@
 import {canaryEvidenceHash} from './production-canary-verification.mjs';
 import {encodeCanaryReport,encodeBenchmarkRefs,verifyCanaryReport} from './production-canary-report.mjs';
+import {verifyCanaryPerformance} from './production-canary-performance.mjs';
 
 const fail=code=>{throw Error(code);};
 const queued=status=>{if(!Number.isSafeInteger(status.queuedActions)||status.queuedActions<0)fail('InvalidCanaryPlanningStatus');return status.queuedActions;};
 
 /** The adapter supplies verified AWS targets; this function orders admission. */
-export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=1000,basisPoints=5000}={}){
-  if(!Number.isInteger(planningWaves)||planningWaves<1||planningWaves>8||!Number.isInteger(dailyRows)||dailyRows<20||dailyRows>50000||
+export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=1000,basisPoints=5000,samplesPerKind=150}={}){
+  if(!Number.isInteger(samplesPerKind)||samplesPerKind<100||samplesPerKind>500||!Number.isInteger(planningWaves)||planningWaves<1||planningWaves>8||!Number.isInteger(dailyRows)||dailyRows<20||dailyRows>50000||
     !Number.isInteger(basisPoints)||basisPoints<1||basisPoints>5000)fail('InvalidCanaryRunConfiguration');
   const initial=await deps.admin('status');
   if(initial.setupPhase==='promote'&&initial.enabled&&initial.dispatcherEnabled){
@@ -23,7 +24,7 @@ export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=10
       if(reconciled.remaining!==0)fail('BenchmarkCleanupIncomplete');
     }
   };
-  let promoted=false;
+  let promoted=false,executorWake=null;
   try{
     const deployment=await deps.verifyScheduling({enabled:false});state.backendBinding=deployment.backendBinding;await deps.persist(state);
     await deps.admin('pause');await deps.recoverDeliveries();await deps.quiesce();
@@ -41,20 +42,34 @@ export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=10
     const baseline=await deps.admin('baseline',{backendBinding:state.backendBinding});state.validationId=baseline.validationId;
     if(!/^[a-f0-9]{32}$/.test(state.validationId??''))fail('CanaryBaselineMissing');
     await persist('baseline');
-    state.baseline=await deps.sample(state.validationId,'baseline',collect);await deps.persist(state);
+    state.baseline=await deps.sample(state.validationId,'baseline',{samplesPerKind,onWrite:collect});await deps.persist(state);
     state.admission=(await deps.admin('canary')).admission;
     if(!/^[a-f0-9]{32}$/.test(state.admission??''))fail('ProductionWorkerAdmissionMissing');
     await persist('canary');
-    const applied=await deps.wake('executor','apply',undefined,async()=>{
-      state.loaded=await deps.sample(state.validationId,'loaded',collect);await deps.persist(state);
-    },state.admission);
-    state.deliveries.push(applied);
+    // A real planner wave is running before the executor launches. Sampling
+    // starts once the executor task runs, so its first commits fall inside both
+    // class windows; every sample must still lie within a measured worker run.
+    let executor;
+    const covering=await deps.wake('planner',{wave:'plan',admission:state.admission,onRunning:async()=>{
+      executor=deps.wake('executor',{wave:'apply',admission:state.admission,onRunning:async()=>{
+        state.loaded=await deps.sample(state.validationId,'loaded',{samplesPerKind,onWrite:collect});await deps.persist(state);
+      }}).then(value=>({value}),error=>({error}));executorWake=executor;
+      await executor;
+    }});
+    if(!executor||!state.loaded)fail('CanaryLoadNotObserved');
+    const launched=await executor;if(launched.error)throw launched.error;
+    const applied=launched.value;
+    if(!(covering?.record?.classified>0)||covering.record.failedSlices)fail('GenuinePlannerWorkMissing');
+    if(covering?.kind!=='planner'||applied?.kind!=='executor')fail('CanaryWorkerActivityMissing');
+    state.deliveries.push(covering,applied);await deps.persist(state);
     await deps.admin('pause');await deps.quiesce();
-    if(!state.loaded)fail('CanaryLoadNotObserved');
-    const verified=await deps.admin('verify-canary');state.verified=verified;await persist('replaying');
+    const verified=await deps.admin('verify-canary');state.verified=verified;
+    const activity=[covering,applied].map(task=>({kind:task.kind,startedMs:task.startedMs,stoppedMs:task.stoppedMs,exitCode:task.exitCode,image:task.image,imageDigest:task.imageDigest}));
+    state.performance=verifyCanaryPerformance({baseline:state.baseline,loaded:state.loaded,activity,receipts:verified.receiptWindow});
+    await persist('replaying');
     const replays=[];
     for(const wave of ['repeat-a','repeat-b']){
-      const delivery=await deps.wake('executor',wave,verified.replayActions);
+      const delivery=await deps.wake('executor',{wave,actions:verified.replayActions});
       if(delivery.image!==applied.image||delivery.imageDigest!==applied.imageDigest)fail('ProductionWorkerArtifactChanged');
       state.deliveries.push(delivery);
       const after=await deps.admin('verify-canary');
@@ -65,7 +80,7 @@ export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=10
       state.replays=replays;await deps.persist(state);
     }
     const report={version:1,verificationHash:canaryEvidenceHash(verified.verification),baseline:state.baseline,loaded:state.loaded,
-      activity:[{kind:'executor',startedMs:applied.startedMs,stoppedMs:applied.stoppedMs,exitCode:applied.exitCode,image:applied.image,imageDigest:applied.imageDigest}],replays,receipts:verified.receiptWindow};
+      activity,replays,receipts:verified.receiptWindow};
     verifyCanaryReport(report,verified.verification,verified.receiptWindow);
     state.report=report;await persist('cleaning-benchmark');await cleanup();
     const fresh=await deps.admin('verify-canary');
@@ -81,7 +96,10 @@ export async function runProductionCanaryFlow(deps,{planningWaves=8,dailyRows=10
     return {phase:'running',canary:verified.verification,performance:result.performance,dailyRows,status};
   }catch(error){
     if(!promoted){
-      await deps.admin('pause');await deps.disableScheduling();await deps.recoverDeliveries();await deps.quiesce();
+      await deps.admin('pause');await deps.disableScheduling();
+      // A launched executor wake is joined before cleanup; it never rejects.
+      if(executorWake)await executorWake;
+      await deps.recoverDeliveries();await deps.quiesce();
       if(state.validationId)await cleanup();
     }
     await persist('failed');throw error;

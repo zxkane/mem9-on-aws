@@ -28,6 +28,9 @@ export const fixtureCaseNames=Object.freeze([
   'rejects late dispatchers from every earlier admission after pause and re-enable',
   'requires matching conservation and performance evidence before committing promotion',
   'prepares restricted logins, requires verification before canary and can pause through evidence drift',
+  'closes an unpromoted canary into immutable history and admits a fresh validation',
+  'installs a certified planner model and budgets only on a paused, prepared setup',
+  'closes an open continuation attempt without rewriting its ledger',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;

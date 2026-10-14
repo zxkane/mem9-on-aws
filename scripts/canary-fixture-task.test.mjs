@@ -46,7 +46,7 @@ it('rejects credential injection, different code, overrides and foreign or unfin
  }
 });
 it('requires matching complete database evidence within the immutable task deadline',()=>{
- const f=fixture(),record={event:'canary_fixture_database',phase:'complete',identity:f.identity,cases:17,databaseHash:'8'.repeat(64),completedMs:1800000400000,
+ const f=fixture(),record={event:'canary_fixture_database',phase:'complete',identity:f.identity,cases:20,databaseHash:'8'.repeat(64),completedMs:1800000400000,
   checks:Object.fromEntries(canaryFixtureChecks.map(k=>[k,true]))};
  expect(fixtureEvidenceFromRecord(record,f.identity,f.task,1800000500001)).toMatchObject({kind:'synthetic-canary-continuation',stage});
  for(const patch of [{cases:16},{completedMs:f.identity.deadlineMs+1},{identity:{...f.identity,nonce:'a'.repeat(32)}},{checks:{...record.checks,cleanup:false}}]){
