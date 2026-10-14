@@ -42,6 +42,15 @@ export function imageReferences(baseline) {
   }));
 }
 
+export function verifyLoadedServiceImage(image,name,baseline){
+  const ref=imageReferences(baseline)[name];need(ref&&image.RepoDigests?.includes(ref),'LoadedImageDigestMismatch');
+  need(image.Os==='linux'&&image.Architecture==='arm64','LoadedImagePlatformMismatch');
+  need(/^sha256:[a-f0-9]{64}$/.test(image.Id??''),'LoadedImageIdMissing');
+  const binding=baseline.imageBindings?.images[name];
+  if(binding)need(image.Id===JSON.parse(binding.leafManifest).config.digest,'LoadedImageLeafMismatch');
+  return image.Id;
+}
+
 export function verifyProcessStatus(text) {
   const fields = Object.fromEntries(text.trim().split('\n').map(line => {
     const index = line.indexOf(':'); return [line.slice(0, index), line.slice(index + 1).trim()];
@@ -271,14 +280,15 @@ export async function runSmoke(options) {
     report.source = {head: (await command('git', ['-C', ROOT, 'rev-parse', 'HEAD'])).trim(),
       scriptHash: hash(await readFile(fileURLToPath(import.meta.url))), transformHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot.mjs'))),
       runtimeHash: hash(await readFile(join(ROOT, 'scripts/lib/service-nonroot-runtime.mjs')))};
-    const images = {};
+    const images = {};report.imagePlatforms={};
     for (const [name, ref] of Object.entries(references)) {
       const image = JSON.parse(await docker(['image', 'inspect', ref]))[0];
-      need(image.RepoDigests?.includes(ref), 'LoadedImageDigestMismatch');
+      verifyLoadedServiceImage(image,name,baseline);
       need(JSON.stringify(image.Config.Entrypoint) === JSON.stringify(name === 'mnemo-server' ? ['/usr/local/bin/entrypoint.sh'] : ['node', 'server.mjs']) &&
         (!image.Config.Cmd || image.Config.Cmd.length === 0), 'ActualImageEntrypointMismatch');
       need(!image.Config.Env?.some(v => /^(AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|CONTAINER_CREDENTIALS)|MNEMO_DSN|MEM9_DB_SECRET)=/.test(v)), 'ImageContainsCredentialEnvironment');
       images[name] = image.Id;
+      report.imagePlatforms[name]={os:image.Os,architecture:image.Architecture};
     }
     report.images = images;
     const pgImage = JSON.parse(await docker(['image', 'inspect', 'pgvector/pgvector:pg17']))[0].Id;

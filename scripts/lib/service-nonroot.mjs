@@ -90,7 +90,9 @@ export function frozenServiceRegistration(response){
   }else requireProof(leafTypes.includes(m.mediaType)&&m.manifests===undefined&&e.leafManifest===e.imageManifest);
   requireProof('sha256:'+createHash('sha256').update(e.leafManifest).digest('hex')===leaf);
   const image=JSON.parse(e.leafManifest);requireProof(image.schemaVersion===2&&leafTypes.includes(image.mediaType)&&image.manifests===undefined&&digest(image.config?.digest)&&Array.isArray(image.layers));
-  requireProof(leaf===e.imageDigest);c.image=repo+'@'+leaf;
+  // ECS can report the pulled index or its platform manifest. Preserve that
+  // observed digest while proving the same fixed ARM64 content in either case.
+  requireProof([e.registryDigest,leaf].includes(e.imageDigest));c.image=repo+'@'+e.imageDigest;
  }
  for(const t of b.tasks){
   requireProof(typeof t.taskArn==='string'&&t.taskArn.startsWith(taskPrefix)&&/^[a-f0-9]{32}$/.test(t.taskArn.slice(taskPrefix.length))&&t.clusterArn===s.clusterArn&&t.group==='service:'+s.serviceName&&t.taskDefinitionArn===s.taskDefinition&&t.desiredStatus==='RUNNING'&&t.lastStatus==='RUNNING'&&t.healthStatus==='HEALTHY');

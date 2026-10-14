@@ -1,6 +1,7 @@
 import {test} from 'vitest';
 import assert from 'node:assert/strict';
-import {parseArgs, imageReferences, verifyProcessStatus, containerLimits} from './run-service-nonroot-smoke.mjs';
+import {parseArgs, imageReferences, verifyLoadedServiceImage, verifyProcessStatus, containerLimits} from './run-service-nonroot-smoke.mjs';
+import {taggedServiceDefinition} from './test-fixtures/service-nonroot-images.mjs';
 
 test('CLI accepts only explicit private input/output paths and rejects duplicate or arbitrary options', () => {
   assert.deepEqual(parseArgs(['--baseline', '/private/input', '--evidence-root', '/private/output']), {baseline: '/private/input', evidenceRoot: '/private/output'});
@@ -22,6 +23,12 @@ test('baseline permits exactly the known containers and immutable digest referen
 });
 
 const status = 'Name:\tmnemo-server\nUid:\t1000 1000 1000 1000\nGid:\t1000 1000 1000 1000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\n';
+test('cached index identity cannot substitute a different platform or image config',()=>{
+  const baseline=taggedServiceDefinition(),e=baseline.imageBindings.images['mnemo-server'];e.imageDigest=e.registryDigest;baseline.imageBindings.tasks[0].containers[0].imageDigest=e.registryDigest;
+  const image={Id:JSON.parse(e.leafManifest).config.digest,RepoDigests:[imageReferences(baseline)['mnemo-server']],Os:'linux',Architecture:'arm64'};
+  assert.equal(verifyLoadedServiceImage(image,'mnemo-server',baseline),image.Id);
+  for(const delta of [{Architecture:'amd64'},{Os:'windows'},{Id:'sha256:'+'f'.repeat(64)}])assert.throws(()=>verifyLoadedServiceImage({...image,...delta},'mnemo-server',baseline));
+});
 test('application evidence rejects root, saved root IDs, every nonzero capability set and missing NoNewPrivs', () => {
   assert.equal(verifyProcessStatus(status).NoNewPrivs, '1');
   for (const key of ['Uid', 'Gid']) {

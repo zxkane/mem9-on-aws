@@ -31,7 +31,7 @@ async function fixture({tagged=false}={}) {
   const checks = Object.fromEntries(['internalNetwork', 'proxyExactEntrypointHealth', 'proxySyntheticHttpUpstream', 'frozenRuntimeBootstrap',
     'verifyRejectsUnreadySchema', 'mnemoVerifyEntrypointHealth', 'runtimeRoleReadinessAndDdlDenial', 'missingSignature', 'wrongTenant',
     'expiredSignature', 'semanticNamespaceSearch', 'keywordNamespaceSearch', 'crossNamespaceReadDenied'].map(k => [k, true]));
-  const localImages = {'mnemo-server': 'sha256:' + '4'.repeat(64), 'llm-proxy': 'sha256:' + '5'.repeat(64)};
+  const localImages = tagged?Object.fromEntries(['mnemo-server','llm-proxy'].map(n=>[n,JSON.parse(baseline.imageBindings.images[n].leafManifest).config.digest])):{'mnemo-server': 'sha256:' + '4'.repeat(64), 'llm-proxy': 'sha256:' + '5'.repeat(64)};
   for (const [prefix, name, paths] of [['mnemo', 'mnemo-server', ['/usr/local/bin/mnemo-server', '/usr/local/bin/entrypoint.sh', '/usr/local/share/mem9']],
     ['proxy', 'llm-proxy', ['/app/server.mjs', '/app/node_modules', '/app']]]) {
     checks[prefix + 'Process'] = {status: {Pid: '7', ...status()}, writableTmp: true, deniedWrites: paths};
@@ -46,6 +46,7 @@ async function fixture({tagged=false}={}) {
     source: {scriptHash: sha('synthetic reviewed smoke source'), transformHash: sha('synthetic reviewed transform source'), runtimeHash: sha('synthetic reviewed runtime source')}, failures: [], cleanup: {complete: true, failures: []}};
   const embedding = {image: images['qwen3-embed'], isolatedNetwork: 'none', result: {status: 200, dimensions: 1024, norm: 1.00000007},
     applicationIdentity: Object.entries(status()).map(([key, value]) => key + ': ' + value).join('\n')};
+  if(tagged){suite.imagePlatforms=Object.fromEntries(['mnemo-server','llm-proxy'].map(n=>[n,{os:'linux',architecture:'arm64'}]));embedding.imageId=JSON.parse(baseline.imageBindings.images['qwen3-embed'].leafManifest).config.digest;embedding.platform={os:'linux',architecture:'arm64'};}
   const old = hardenServiceRegistration({...frozenServiceRegistration(baseline), family: 'synthetic-pr-123-runtime'}), target = hardenServiceRegistration(old), targetDefinition = definition(target, 8);
   const taskArn = ecs + 'task/synthetic-pr-123/task-one', clusterArn = ecs + 'cluster/synthetic-pr-123';
   const service = {serviceArn: ecs + 'service/synthetic-pr-123/Preview', clusterArn, serviceName: 'Preview', status: 'ACTIVE',
@@ -79,12 +80,16 @@ it('accepts complete candidate-bound receipts with actual process, source, query
 it('binds a tagged baseline and its image proof across local, preview and plan evidence',async()=>{
   const f=await fixture({tagged:true});await expect(f.validate()).resolves.toHaveProperty('registrationHash',hash(f.plan.target));
 });
-it.each(['local-proof','review-proof','preview-baseline','service-count'])('rejects %s substitution even when the frozen images are unchanged',async kind=>{
+it.each(['local-proof','review-proof','preview-baseline','service-count','local-image-config','local-platform','embedding-config','embedding-platform'])('rejects %s substitution even when the frozen images are unchanged',async kind=>{
   const f=await fixture({tagged:true});
   if(kind==='local-proof')f.baseline.imageBindings.tasks[0].taskArn=f.baseline.imageBindings.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32));
   if(kind==='review-proof')f.values.images.imageBindings.tasks[0].taskArn=f.values.images.imageBindings.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32));
   if(kind==='preview-baseline')f.preview.baselineHash='f'.repeat(64);
   if(kind==='service-count')f.plan.baseline.service.desiredCount=2;
+  if(kind==='local-image-config'){f.suite.images['mnemo-server']='sha256:'+'f'.repeat(64);f.suite.checks.mnemoContainerConfiguration.image=f.suite.images['mnemo-server'];}
+  if(kind==='local-platform')f.suite.imagePlatforms['mnemo-server'].architecture='amd64';
+  if(kind==='embedding-config')f.embedding.imageId='sha256:'+'f'.repeat(64);
+  if(kind==='embedding-platform')f.embedding.platform.os='windows';
   await f.write();await expect(f.validate()).rejects.toThrow();
 });
 it.each(['local', 'preview'])('rejects summary-only %s evidence', async key => {
@@ -176,6 +181,11 @@ async function taggedFixture() {
 }
 it('accepts CI-bound tagged originals only with manifest, original-task and exact restoration evidence', async () => {
   const f = await taggedFixture(); await expect(f.validate()).resolves.toHaveProperty('previewHash', f.values.preview.receiptHash);
+});
+it('accepts either verified index or platform digest in original and restored ECS observations',async()=>{
+  const f=await taggedFixture();
+  for(const tasks of [f.preview.originalTasks,f.preview.cleanup.restoredTasks])for(const t of tasks)for(const c of t.containers)c.imageDigest=f.preview.originalImageEvidence[c.name].registryDigest;
+  await f.write();await expect(f.validate()).resolves.toHaveProperty('previewHash',f.values.preview.receiptHash);
 });
 const tagMutations = {
   unrelatedTag: p => {p.originalDefinition.taskDefinition.containerDefinitions[0].image = p.originalDefinition.taskDefinition.containerDefinitions[0].image.replace('pr-ccccccc', 'pr-eeeeeee');},

@@ -186,7 +186,7 @@ describe('live tagged image proof',()=>{
    if(kind==='DescribeTasksCommand')return {tasks:h.tasks,failures:[]};
    if(kind==='BatchGetImageCommand'){
     const e=h.registry[input.repositoryName.split('/').at(-1)],tag=input.imageIds[0].imageTag;
-    return {images:[{registryId:scope.account,repositoryName:input.repositoryName,imageId:{imageDigest:tag?e.registryDigest:e.imageDigest,...(tag?{imageTag:tag}:{})},imageManifest:tag?e.imageManifest:e.leafManifest}],failures:[]};
+    return {images:[{registryId:scope.account,repositoryName:input.repositoryName,imageId:{imageDigest:tag?e.registryDigest:input.imageIds[0].imageDigest,...(tag?{imageTag:tag}:{})},imageManifest:tag?e.imageManifest:e.leafManifest}],failures:[]};
    }
    return fallback(kind,input,...rest);
   });return h;
@@ -194,6 +194,10 @@ describe('live tagged image proof',()=>{
  it('captures and verifies the complete served inventory and both manifest levels',async()=>{
   const h=await setup();expect(await h.io.captureImageBindings(h.definition,h.service)).toEqual(h.definition.imageBindings);
   await expect(h.io.assertImageBindings({baseline:{service:h.service,definition:h.definition}})).resolves.toBeUndefined();
+ });
+ it('fetches the ARM64 child even when ECS reports the index digest',async()=>{
+  const h=await setup();for(const c of h.tasks[0].containers){const e=h.definition.imageBindings.images[c.name];c.imageDigest=e.imageDigest=e.registryDigest;}
+  expect(await h.io.captureImageBindings(h.definition,h.service)).toEqual(h.definition.imageBindings);
  });
  it('rejects a new registry index even when its ARM64 image is unchanged',async()=>{
   const h=await setup(),e=h.registry['mnemo-server'];e.imageManifest+=' ';e.registryDigest='sha256:'+createHash('sha256').update(e.imageManifest).digest('hex');

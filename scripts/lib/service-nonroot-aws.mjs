@@ -144,11 +144,18 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
    assert(im.registryId===scope.account&&im.repositoryName===repositoryName&&im.imageId?.imageTag===tag,'ImageManifestIdentityChanged');
    const actual=tasks[0]?.containers?.find(x=>x.name===c.name);
    assert(/^sha256:[a-f0-9]{64}$/.test(actual?.imageDigest??''),'ServedImageDigestMissing');
+   assert(typeof im.imageManifest==='string'&&Buffer.byteLength(im.imageManifest)<=256*1024,'ImageManifestSize');
+   const manifest=JSON.parse(im.imageManifest);let leafDigest=im.imageId.imageDigest;
+   if(manifest.manifests!==undefined){
+    assert(Array.isArray(manifest.manifests)&&manifest.manifests.length<=32,'ImageManifestPlatform');
+    const arm=manifest.manifests.filter(m=>m.platform?.architecture==='arm64'&&m.platform?.os==='linux');assert(arm.length===1,'ImageManifestPlatform');leafDigest=arm[0].digest;
+   }
+   assert(/^sha256:[a-f0-9]{64}$/.test(leafDigest??''),'ImageLeafDigestMissing');
    let leafManifest=im.imageManifest;
-   if(im.imageId.imageDigest!==actual.imageDigest){
-    const child=await send(clients.ecr,new BatchGetImageCommand({registryId:scope.account,repositoryName,imageIds:[{imageDigest:actual.imageDigest}]}));
+   if(im.imageId.imageDigest!==leafDigest){
+    const child=await send(clients.ecr,new BatchGetImageCommand({registryId:scope.account,repositoryName,imageIds:[{imageDigest:leafDigest}]}));
     assert(!child.failures?.length&&child.images?.length===1,'ImageLeafMissing');const leaf=child.images[0];
-    assert(leaf.registryId===scope.account&&leaf.repositoryName===repositoryName&&leaf.imageId?.imageDigest===actual.imageDigest,'ImageLeafIdentityChanged');leafManifest=leaf.imageManifest;
+    assert(leaf.registryId===scope.account&&leaf.repositoryName===repositoryName&&leaf.imageId?.imageDigest===leafDigest,'ImageLeafIdentityChanged');leafManifest=leaf.imageManifest;
    }
    images[c.name]={image:c.image,registryDigest:im.imageId.imageDigest,imageDigest:actual.imageDigest,imageManifest:im.imageManifest,leafManifest};
   }

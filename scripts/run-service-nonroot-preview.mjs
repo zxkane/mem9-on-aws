@@ -132,8 +132,9 @@ export async function runServiceNonrootPreview({stage, baselinePath, baselineHas
     need(tasks.length === beforeService.desiredCount && tasks.every(t => t.taskDefinitionArn === beforeService.taskDefinition), 'OriginalTaskIdentity');
     for (const t of tasks) {
       need(equal(t.containers.map(c => c.name).sort(), [...SERVICE_CONTAINERS].sort()), 'OriginalContainerSet');
-      for (const c of original.containerDefinitions) {const actual = t.containers.find(x => x.name === c.name), digest = c.image.includes('@') ? c.image.split('@')[1] : report.originalImageEvidence[c.name]?.imageDigest;
-        need(actual.image === c.image && actual.imageDigest === digest && actual.lastStatus === 'RUNNING' && actual.healthStatus === 'HEALTHY', 'OriginalImageChanged');}
+      for (const c of original.containerDefinitions) {const actual = t.containers.find(x => x.name === c.name), proof=report.originalImageEvidence[c.name];
+        const digests=c.image.includes('@')?[c.image.split('@')[1]]:[proof?.registryDigest,proof?.imageDigest];
+        need(actual.image === c.image && digests.includes(actual.imageDigest) && actual.lastStatus === 'RUNNING' && actual.healthStatus === 'HEALTHY', 'OriginalImageChanged');}
     }
   }
   const deployedConfig = () => ({...beforeService.deploymentConfiguration, minimumHealthyPercent: 100, maximumPercent: 200, deploymentCircuitBreaker: {...beforeService.deploymentConfiguration.deploymentCircuitBreaker, enable: true, rollback: false}});

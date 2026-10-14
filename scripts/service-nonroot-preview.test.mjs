@@ -80,8 +80,9 @@ function harness() {
     else throw Error('Unexpected mocked GitHub request: ' + path);
     return {stdout: JSON.stringify(value), stderr: ''};
   });
+  const originalObservedDigest=name=>h.reportIndexDigests?'sha256:'+createHash('sha256').update(JSON.stringify({schemaVersion:2,manifests:[{platform:{architecture:'arm64',os:'linux'},digest:h.originalDigests[name]}]})).digest('hex'):h.originalDigests[name];
   const tasks = () => [{taskArn: `${prefix}task/${cluster}/fixture-task`, clusterArn: service.clusterArn, group: 'service:Mem9Server', taskDefinitionArn: service.taskDefinition, lastStatus: 'RUNNING', healthStatus: 'HEALTHY',
-    containers: h.definitions.get(service.taskDefinition).containerDefinitions.map(c => ({name: c.name, image: c.image, imageDigest: c.image.split('@')[1] ?? (h.restoredBadImage ? 'sha256:' + '0'.repeat(64) : h.originalDigests[c.name]), runtimeId: 'fixture', lastStatus: 'RUNNING', healthStatus: 'HEALTHY'}))}, ...(h.worker ? [{taskArn: `${prefix}task/${cluster}/worker`, clusterArn: service.clusterArn, group: 'family:worker', lastStatus: 'PENDING'}] : [])];
+    containers: h.definitions.get(service.taskDefinition).containerDefinitions.map(c => ({name: c.name, image: c.image, imageDigest: c.image.split('@')[1] ?? (h.restoredBadImage ? 'sha256:' + '0'.repeat(64) : originalObservedDigest(c.name)), runtimeId: 'fixture', lastStatus: 'RUNNING', healthStatus: 'HEALTHY'}))}, ...(h.worker ? [{taskArn: `${prefix}task/${cluster}/worker`, clusterArn: service.clusterArn, group: 'family:worker', lastStatus: 'PENDING'}] : [])];
   mock.send.mockImplementation(async (kind, input) => {
     h.requests.push({kind, input: copy(input)});
     if (kind === 'GetCallerIdentityCommand') return {Account: account};
@@ -247,6 +248,11 @@ describe('actual frozen image preview rehearsal', () => {
     expect(result.cleanup.restoredTasks[0].containers.map(c => c.imageDigest)).toEqual(names.map(n => h.originalDigests[n]));
     expect(result.evidenceFiles.some(f => f.name === 'original-images.json')).toBe(true);
     for (const f of result.evidenceFiles) {const body = h.files.get(output + '/' + f.name); expect(f.sha256).toBe(createHash('sha256').update(body).digest('hex')); expect(f.bytes).toBe(Buffer.byteLength(body));}
+  });
+  it('accepts and restores verified index digests reported by ECS for tagged originals',async()=>{
+    const h=harness();tagged(h);ci(h);h.reportIndexDigests=true;const result=await h.run();
+    expect(result.outcome).toBe('PASS');expect(h.mutations).toEqual(['register','update','restore','deregister']);
+    for(const c of result.cleanup.restoredTasks[0].containers)expect(c.imageDigest).toBe(result.originalImageEvidence[c.name].registryDigest);
   });
   it.each(['unrelated-tag', 'running-digest', 'retagged-before-restore', 'changed-after-restore'])('holds tagged original image mismatch: %s', async kind => {
     const h = harness(); tagged(h);

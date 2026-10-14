@@ -14,6 +14,12 @@ describe('actual running image bindings',()=>{
     const d=taggedServiceDefinition();d.taskDefinition.containerDefinitions=frozenServiceRegistration(d).containerDefinitions;delete d.imageBindings;
     expect(frozenServiceRegistration(d)).toEqual(registrationInput(d));
   });
+  it('preserves a served index digest while verifying its ARM64 content',()=>{
+    const d=taggedServiceDefinition();
+    for(const c of d.imageBindings.tasks[0].containers){const e=d.imageBindings.images[c.name];c.imageDigest=e.imageDigest=e.registryDigest;}
+    const r=frozenServiceRegistration(d);
+    for(const c of r.containerDefinitions)expect(c.image).toBe(d.imageBindings.images[c.name].image.replace(/:[^/:]+$/,'@'+d.imageBindings.images[c.name].registryDigest));
+  });
   it('accepts a single image manifest only when its digest is the served digest',()=>{
     const d=taggedServiceDefinition(),e=d.imageBindings.images['mnemo-server'];
     e.imageManifest=JSON.stringify({schemaVersion:2,mediaType:'application/vnd.oci.image.manifest.v1+json',config:{digest:'sha256:'+'a'.repeat(64)},layers:[]});e.leafManifest=e.imageManifest;

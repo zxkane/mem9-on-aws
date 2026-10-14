@@ -62,7 +62,7 @@ function previewOriginal(p, old, plan) {
   equal(Object.keys(p.originalImageEvidence ?? {}).sort(), tagged.map(c => c.name).sort(), 'PreviewOriginalImageEvidence');
   const digests = {};
   for (const c of old.containerDefinitions) {
-    if (c.image.includes('@')) {need(/@sha256:[a-f0-9]{64}$/.test(c.image), 'PreviewOriginalDigest'); digests[c.name] = c.image.split('@')[1]; continue;}
+    if (c.image.includes('@')) {need(/@sha256:[a-f0-9]{64}$/.test(c.image), 'PreviewOriginalDigest'); digests[c.name] = [c.image.split('@')[1]]; continue;}
     equal(c.image, `${plan.scope.accountId}.dkr.ecr.${plan.scope.region}.amazonaws.com/${proof.namespace}/${c.name}:${proof.tag}`, 'PreviewOriginalTag');
     const e = p.originalImageEvidence[c.name]; equal(e.image, c.image, 'PreviewOriginalImage');
     need(typeof e.imageManifest === 'string' && Buffer.byteLength(e.imageManifest) <= 256 * 1024, 'PreviewOriginalManifest');
@@ -70,7 +70,7 @@ function previewOriginal(p, old, plan) {
     const manifest = JSON.parse(e.imageManifest); need(manifest.schemaVersion === 2, 'PreviewOriginalManifest'); let leaf = e.registryDigest;
     if (manifest.manifests) {const arm = manifest.manifests.filter(m => m.platform?.architecture === 'arm64' && m.platform?.os === 'linux'); need(arm.length === 1 && /^sha256:[a-f0-9]{64}$/.test(arm[0].digest), 'PreviewOriginalPlatform'); leaf = arm[0].digest;}
     else need(/^sha256:[a-f0-9]{64}$/.test(manifest.config?.digest) && Array.isArray(manifest.layers), 'PreviewOriginalManifest');
-    equal(e.imageDigest, leaf, 'PreviewOriginalLeaf'); digests[c.name] = leaf;
+    equal(e.imageDigest, leaf, 'PreviewOriginalLeaf'); digests[c.name] = [e.registryDigest,leaf];
   }
   equal(p.cleanup?.restoredDefinition, p.originalDefinition.taskDefinition.taskDefinitionArn, 'PreviewRestoredDefinition');
   for (const tasks of [p.originalTasks, p.cleanup.restoredTasks]) {
@@ -79,7 +79,7 @@ function previewOriginal(p, old, plan) {
       need(task.taskArn?.startsWith(p.service.clusterArn.replace(':cluster/', ':task/') + '/') && task.clusterArn === p.service.clusterArn && task.group === 'service:' + p.service.serviceName &&
         task.taskDefinitionArn === p.originalDefinition.taskDefinition.taskDefinitionArn && task.lastStatus === 'RUNNING' && task.healthStatus === 'HEALTHY', 'PreviewRestoredTask');
       equal(task.containers?.map(c => c.name).sort(), [...names].sort(), 'PreviewRestoredContainers');
-      for (const c of task.containers) need(c.image === old.containerDefinitions.find(o => o.name === c.name).image && c.imageDigest === digests[c.name] && c.lastStatus === 'RUNNING' && c.healthStatus === 'HEALTHY', 'PreviewRestoredImage');
+      for (const c of task.containers) need(c.image === old.containerDefinitions.find(o => o.name === c.name).image && digests[c.name].includes(c.imageDigest) && c.lastStatus === 'RUNNING' && c.healthStatus === 'HEALTHY', 'PreviewRestoredImage');
     }
   }
 }
@@ -110,6 +110,14 @@ export async function validateServiceEvidence(plan, values, {root}) {
   need(suite.version === 1 && suite.scope === 'local-actual-images-synthetic-only' && suite.outcome === 'PASS' && suite.phase === 'complete' &&
     empty(suite.failures) && suite.cleanup?.complete === true && empty(suite.cleanup.failures), 'LocalCompletion');
   const checks = suite.checks; need(checks && Object.keys(checks).length >= 24 && required.every(k => checks[k] === true), 'LocalChecks');
+  if(baseline.imageBindings){
+    for(const name of ['mnemo-server','llm-proxy']){
+      equal(suite.images?.[name],JSON.parse(baseline.imageBindings.images[name].leafManifest).config.digest,'LocalImageConfig');
+      equal(suite.imagePlatforms?.[name],{os:'linux',architecture:'arm64'},'LocalImagePlatform');
+    }
+    equal(embedding.imageId,JSON.parse(baseline.imageBindings.images['qwen3-embed'].leafManifest).config.digest,'EmbeddingImageConfig');
+    equal(embedding.platform,{os:'linux',architecture:'arm64'},'EmbeddingImagePlatform');
+  }
   for (const [prefix, name, denied] of [['mnemo', 'mnemo-server', ['/usr/local/bin/mnemo-server', '/usr/local/bin/entrypoint.sh', '/usr/local/share/mem9']],
     ['proxy', 'llm-proxy', ['/app/server.mjs', '/app/node_modules', '/app']]]) {
     const process = checks[prefix + 'Process'], config = checks[prefix + 'ContainerConfiguration']; identity(process?.status);
