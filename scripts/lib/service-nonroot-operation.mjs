@@ -1,5 +1,5 @@
 import {isDeepStrictEqual as equal} from 'node:util';
-import {registrationInput, hardenServiceRegistration, serviceNonrootHash as hash} from './service-nonroot.mjs';
+import {registrationInput, frozenServiceRegistration, hardenServiceRegistration, serviceNonrootHash as hash} from './service-nonroot.mjs';
 
 const MAX_AGE = 30 * 60_000, POLLS = 120, INTERVAL = 5_000;
 const need = (value, code) => {if (!value) throw Error(`service-nonroot:${code}`);};
@@ -67,7 +67,8 @@ export function buildServiceNonrootPlan({scope, source, service, definition, evi
   need(typeof owner === 'string' && owner.trim() === owner && owner.length > 0 && owner.length <= 256, 'owner');
   need(object(evidence) && ['review', 'images', 'local', 'preview', 'fences', 'maintenance'].every(k => digest(evidence[k])), 'evidence');
   need(Number.isSafeInteger(now) && now >= 0 && now <= Number.MAX_SAFE_INTEGER - MAX_AGE, 'time');
-  const target = hardenServiceRegistration(original);
+  const target = hardenServiceRegistration(frozenServiceRegistration(definition));
+  if (definition.imageBindings) need(equal(definition.imageBindings.service, {clusterArn: service.clusterArn, serviceName: service.serviceName, taskDefinition: service.taskDefinition, desiredCount: service.desiredCount}), 'image-service-binding');
   need(target.containerDefinitions.every(c => typeof c.image === 'string' && /@sha256:[a-f0-9]{64}$/.test(c.image)), 'unpinned-image');
   const body = copy({version: 1, scope, source, owner, evidence, createdAt: now, expiresAt: now + MAX_AGE,
     baseline: {service, definition, serviceHash: hash(config(service)), definitionHash: hash(original)}, target});
@@ -124,6 +125,7 @@ export async function applyServiceNonrootPlan(input, {expectedHash, source, io, 
   validate(plan, expectedHash, io);
   need(typeof source === 'function' && typeof now === 'function', 'source-reader-or-clock');
   for (const name of ['readRecord', 'persistOnce', 'assertEvidence', 'readService', 'readDefinition', 'assertPaused', 'acquireFences', 'assertFences', 'register', 'update', 'verifyRuntime', 'wait', 'releaseFences']) need(typeof io[name] === 'function', `io-${name}`);
+  if (plan.baseline.definition.imageBindings) need(typeof io.assertImageBindings === 'function', 'io-assertImageBindings');
   const started = Date.now();
   const remaining = () => Math.min(plan.expiresAt - now(), MAX_AGE - (Date.now() - started));
   const time = () => need(Number.isSafeInteger(now()) && now() >= plan.createdAt && remaining() > 0, 'expired');
@@ -156,6 +158,13 @@ export async function applyServiceNonrootPlan(input, {expectedHash, source, io, 
     await sourceAndTime(); await call('assertFences'); await call('assertPaused'); time();
     const latest = await call('readService');
     need(hash(config(latest)) === plan.baseline.serviceHash && settled(latest, plan.baseline.service.taskDefinition), 'service-drift'); time();
+    if (plan.baseline.definition.imageBindings) {
+      await call('assertImageBindings', plan);
+      await sourceAndTime(); await call('assertFences'); await call('assertPaused');
+      const finalService=await call('readService');
+      need(hash(config(finalService))===plan.baseline.serviceHash&&settled(finalService,plan.baseline.service.taskDefinition),'service-drift');
+    }
+    time();
   }
   async function candidateDefinition(arn) {
     candidateArn(plan, arn);

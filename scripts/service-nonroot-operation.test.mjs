@@ -1,6 +1,7 @@
 import {describe, it, expect} from 'vitest';
 import {buildServiceNonrootPlan, applyServiceNonrootPlan, inspectServiceNonrootOperation} from './lib/service-nonroot-operation.mjs';
 import {serviceNonrootHash} from './lib/service-nonroot.mjs';
+import {taggedServiceDefinition} from './test-fixtures/service-nonroot-images.mjs';
 
 const stamp = Date.parse('2026-10-14T12:00:00Z');
 const root = 'arn:aws:ecs:us-east-1:123456789012:';
@@ -17,14 +18,16 @@ function inputs() {
     definition: {taskDefinition: {taskDefinitionArn: oldArn, family: 'fixture-runtime', revision: 7, status: 'ACTIVE', cpu: '2048', memory: '6144', networkMode: 'awsvpc', containerDefinitions: ['mnemo-server', 'qwen3-embed', 'llm-proxy'].map((name, i) => ({name, image: `example.invalid/${name}@sha256:${String(i + 1).repeat(64)}`, linuxParameters: {initProcessEnabled: true}, environment: [{name: 'MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS', value: '30000'}, {name: 'MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT', value: '2s'}]}))}, tags: [{key: 'fixture', value: 'preserved'}]},
   };
 }
-function harness() {
-  const input = inputs(), plan = buildServiceNonrootPlan(input), records = new Map(), calls = [];
+function harness({tagged=false}={}) {
+  const input = inputs();if(tagged)input.definition=taggedServiceDefinition(input.definition,input.service);
+  const plan = buildServiceNonrootPlan(input), records = new Map(), calls = [];
   let service = copy(input.service), registered, clock = stamp, currentSource = copy(source);
   const io = {
     scope: copy(scope),
     readRecord: async name => copy(records.get(name)),
     persistOnce: async (name, value) => {calls.push(name.slice(`service-nonroot-${plan.hash}-`.length, -5)); if (records.has(name)) return false; records.set(name, copy(value)); return true;},
     assertEvidence: async () => {calls.push('evidence');},
+    assertImageBindings: async () => {calls.push('image-bindings');},
     readService: async () => copy(service),
     readDefinition: async arn => arn === oldArn ? copy(input.definition) : copy(registered),
     assertPaused: async () => {calls.push('paused');},
@@ -41,6 +44,26 @@ function harness() {
 }
 
 describe('bounded service nonroot operation', () => {
+  it('pins a tagged baseline in the same nonroot update and keeps the raw definition in the plan',async()=>{
+    const h=harness({tagged:true});expect(h.plan.baseline.definition.taskDefinition.containerDefinitions.every(c=>c.image.includes(':mem9-'))).toBe(true);
+    expect(h.plan.target.containerDefinitions.every(c=>c.image.includes('@sha256:')&&c.user==='1000:1000')).toBe(true);
+    await expect(h.apply()).resolves.toMatchObject({status:'remediated'});
+    expect(h.calls.filter(x=>x==='register')).toHaveLength(1);expect(h.calls.filter(x=>x==='update')).toHaveLength(1);
+    expect(h.calls.filter(x=>x==='image-bindings').length).toBeGreaterThanOrEqual(4);
+  });
+  it.each(['register','update'])('holds observed tag drift after %s intent without sending that mutation',async phase=>{
+    const h=harness({tagged:true}),persist=h.io.persistOnce;
+    h.io.persistOnce=async(name,value)=>{const result=await persist(name,value);if(name.endsWith('-'+phase+'-intent.json'))h.io.assertImageBindings=async()=>{throw Error('ImageTagChanged');};return result;};
+    await expect(h.apply()).rejects.toThrow('ImageTagChanged');expect(h.calls).not.toContain(phase);expect(h.calls).not.toContain('release');
+  });
+  it('requires a live image reader before acquiring fences for tagged images',async()=>{
+    const h=harness({tagged:true});delete h.io.assertImageBindings;
+    await expect(h.apply()).rejects.toThrow('io-assertImageBindings');expect(h.calls).not.toContain('acquire');
+  });
+  it('rechecks source and ownership after image reads',async()=>{
+    const h=harness({tagged:true});h.io.assertImageBindings=async()=>h.setSource({...source,tree:'f'.repeat(40)});
+    await expect(h.apply()).rejects.toThrow('source-drift');expect(h.calls).not.toContain('register');expect(h.calls).not.toContain('release');
+  });
   it('builds deterministic detached data, binding full original definition/tags and configuration', () => {
     const input = inputs(), before = copy(input), plan = buildServiceNonrootPlan(input);
     expect(input).toEqual(before); expect(plan).toEqual(buildServiceNonrootPlan(copy(input)));

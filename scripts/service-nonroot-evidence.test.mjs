@@ -4,14 +4,15 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {validateServiceEvidence} from './lib/service-nonroot-evidence.mjs';
-import {hardenServiceRegistration, registrationInput, serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
+import {hardenServiceRegistration, frozenServiceRegistration, registrationInput, serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
+import {taggedServiceDefinition} from './test-fixtures/service-nonroot-images.mjs';
 
 const directories = [], sha = v => createHash('sha256').update(v).digest('hex'), copy = structuredClone;
 const names = ['mnemo-server', 'qwen3-embed', 'llm-proxy'], ecs = 'arn:aws:ecs:us-east-1:123456789012:';
 const status = () => ({Uid: '1000\t1000\t1000\t1000', Gid: '1000 1000 1000 1000', NoNewPrivs: '1',
   ...Object.fromEntries(['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'].map(k => [k, '0000000000000000']))});
 afterEach(async () => {await Promise.all(directories.splice(0).map(path => rm(path, {recursive: true, force: true})));});
-async function fixture() {
+async function fixture({tagged=false}={}) {
   const root = await mkdtemp(join(tmpdir(), 'nonroot-evidence-test-')); directories.push(root);
   await mkdir(join(root, 'scripts/lib'), {recursive: true});
   await writeFile(join(root, 'scripts/run-service-nonroot-smoke.mjs'), 'synthetic reviewed smoke source');
@@ -23,7 +24,8 @@ async function fixture() {
       linuxParameters: {initProcessEnabled: true}, environment: [{name: 'MNEMO_LLM_MODEL', value: 'synthetic-model'}, {name: 'MNEMO_SCHEMA_MODE', value: 'verify'}]}))};
   const definition = (registration, revision) => {const {tags, ...rest} = copy(registration); return {tags, taskDefinition: {...rest,
     taskDefinitionArn: `${ecs}task-definition/${rest.family}:${revision}`, revision, status: 'ACTIVE'}};};
-  const baseline = definition(registration, 7), plan = {baseline: {definition: copy(baseline)}, target: hardenServiceRegistration(registration),
+  const rawBaseline=definition(registration,7),boundService={clusterArn:ecs+'cluster/synthetic-prod',serviceName:'Mem9Server',taskDefinition:rawBaseline.taskDefinition.taskDefinitionArn,desiredCount:1};
+  const baseline = tagged?taggedServiceDefinition(rawBaseline,boundService):rawBaseline, plan = {baseline: {definition: copy(baseline),...(tagged?{service:boundService}:{})}, target: hardenServiceRegistration(frozenServiceRegistration(baseline)),
     source: {tree: 'a'.repeat(40)}, scope: {accountId: '123456789012', region: 'us-east-1', clusterArn: ecs + 'cluster/synthetic-prod', serviceArn: ecs + 'service/synthetic-prod/Mem9Server'}};
   const images = Object.fromEntries(plan.target.containerDefinitions.map(c => [c.name, c.image]));
   const checks = Object.fromEntries(['internalNetwork', 'proxyExactEntrypointHealth', 'proxySyntheticHttpUpstream', 'frozenRuntimeBootstrap',
@@ -44,7 +46,7 @@ async function fixture() {
     source: {scriptHash: sha('synthetic reviewed smoke source'), transformHash: sha('synthetic reviewed transform source'), runtimeHash: sha('synthetic reviewed runtime source')}, failures: [], cleanup: {complete: true, failures: []}};
   const embedding = {image: images['qwen3-embed'], isolatedNetwork: 'none', result: {status: 200, dimensions: 1024, norm: 1.00000007},
     applicationIdentity: Object.entries(status()).map(([key, value]) => key + ': ' + value).join('\n')};
-  const old = hardenServiceRegistration({...copy(registration), family: 'synthetic-pr-123-runtime'}), target = hardenServiceRegistration(old), targetDefinition = definition(target, 8);
+  const old = hardenServiceRegistration({...frozenServiceRegistration(baseline), family: 'synthetic-pr-123-runtime'}), target = hardenServiceRegistration(old), targetDefinition = definition(target, 8);
   const taskArn = ecs + 'task/synthetic-pr-123/task-one', clusterArn = ecs + 'cluster/synthetic-pr-123';
   const service = {serviceArn: ecs + 'service/synthetic-pr-123/Preview', clusterArn, serviceName: 'Preview', status: 'ACTIVE',
     taskDefinition: targetDefinition.taskDefinition.taskDefinitionArn, desiredCount: 1, runningCount: 1, pendingCount: 0,
@@ -59,9 +61,11 @@ async function fixture() {
       results: ['semantic', 'keyword'].map(mode => ({mode, returned: 1, responseHash: '6'.repeat(64)}))},
     cleanup: {verified: true, remainingCandidateTasks: [], failures: []}};
   const values = {local: {images, registrationHash: hash(plan.target)}, preview: {images, registrationHash: hash(plan.target)}};
+  if(tagged)values.images={images,imageBindings:copy(baseline.imageBindings)};
   const save = async (name, value) => {const path = join(root, name + '.local.json'), bytes = JSON.stringify(value); await writeFile(path, bytes, {mode: 0o600}); return {path, hash: sha(bytes)};};
   const write = async () => {
     const b = await save('baseline', baseline); suite.baselineHash = b.hash;
+    if(tagged&&preview.baselineHash===undefined)preview.baselineHash=b.hash;
     for (const [key, ref] of [['baseline', b], ['suite', await save('suite', suite)], ['embedding', await save('embedding', embedding)]])
       Object.assign(values.local, {[key + 'Path']: ref.path, [key + 'Hash']: ref.hash});
     const p = await save('preview', preview); Object.assign(values.preview, {receiptPath: p.path, receiptHash: p.hash});
@@ -71,6 +75,17 @@ async function fixture() {
 it('accepts complete candidate-bound receipts with actual process, source, query and cleanup evidence', async () => {
   const f = await fixture(); expect(await f.validate()).toEqual({registrationHash: hash(f.plan.target), suiteHash: f.values.local.suiteHash,
     embeddingHash: f.values.local.embeddingHash, previewHash: f.values.preview.receiptHash});
+});
+it('binds a tagged baseline and its image proof across local, preview and plan evidence',async()=>{
+  const f=await fixture({tagged:true});await expect(f.validate()).resolves.toHaveProperty('registrationHash',hash(f.plan.target));
+});
+it.each(['local-proof','review-proof','preview-baseline','service-count'])('rejects %s substitution even when the frozen images are unchanged',async kind=>{
+  const f=await fixture({tagged:true});
+  if(kind==='local-proof')f.baseline.imageBindings.tasks[0].taskArn=f.baseline.imageBindings.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32));
+  if(kind==='review-proof')f.values.images.imageBindings.tasks[0].taskArn=f.values.images.imageBindings.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32));
+  if(kind==='preview-baseline')f.preview.baselineHash='f'.repeat(64);
+  if(kind==='service-count')f.plan.baseline.service.desiredCount=2;
+  await f.write();await expect(f.validate()).rejects.toThrow();
 });
 it.each(['local', 'preview'])('rejects summary-only %s evidence', async key => {
   const f = await fixture(); f.values[key] = {images: f.values[key].images, outcome: 'passed'}; await expect(f.validate()).rejects.toThrow();

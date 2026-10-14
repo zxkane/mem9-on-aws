@@ -8,7 +8,8 @@ import {S3Client,GetObjectCommand,PutObjectCommand,DeleteObjectCommand,GetPublic
 import {SSMClient,GetParametersCommand} from '@aws-sdk/client-ssm';
 import {SchedulerClient,ListScheduleGroupsCommand,ListSchedulesCommand} from '@aws-sdk/client-scheduler';
 import {STSClient,GetCallerIdentityCommand} from '@aws-sdk/client-sts';
-import {serviceNonrootHash as hash} from './service-nonroot.mjs';
+import {ECRClient,BatchGetImageCommand} from '@aws-sdk/client-ecr';
+import {serviceNonrootHash as hash,registrationInput,frozenServiceRegistration} from './service-nonroot.mjs';
 import {validateDecisionArtifactBucketName} from './authorization-maintenance-isolation.mjs';
 
 const exec=promisify(execFile),lockKey='runtime-publication-locks/prod/witness.json';
@@ -40,7 +41,7 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
  assert(resolve(directory)===directory&&resolve(root)===root);
  await mkdir(directory,{mode:0o700,recursive:true});const stat=await lstat(directory);assert(stat.isDirectory()&&!stat.isSymbolicLink()&&(stat.mode&0o077)===0);
  const config={region:scope.region,maxAttempts:1};
- const clients={ecs:new ECSClient(config),s3:new S3Client(config),ssm:new SSMClient(config),scheduler:new SchedulerClient(config),sts:new STSClient(config)};
+ const clients={ecs:new ECSClient(config),s3:new S3Client(config),ssm:new SSMClient(config),scheduler:new SchedulerClient(config),sts:new STSClient(config),ecr:new ECRClient(config)};
  const identity=await send(clients.sts,new GetCallerIdentityCommand({}));assert.equal(identity.Account,scope.account,'OperatorAccountChanged');
  const repository='zxkane/mem9-on-aws';let fences;
  const gh=async(path,value)=>{
@@ -130,6 +131,39 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
   const active=tasks.filter(t=>t.lastStatus!=='STOPPED');
   assert(active.every(t=>t.group==='service:'+scope.service),'ActiveAdministrationOrWorker');return plain(active);
  };
+ const captureImageBindings=async(definition,service)=>{
+  assert.equal(service.serviceArn,`arn:aws:ecs:${scope.region}:${scope.account}:service/${scope.cluster}/${scope.service}`);
+  assert.equal(definition.taskDefinition.taskDefinitionArn,service.taskDefinition);
+  const tasks=await inventory(),images={};
+  for(const c of definition.taskDefinition.containerDefinitions){
+   assert(['mnemo-server','qwen3-embed','llm-proxy'].includes(c.name));
+   const repositoryName='mem9-on-aws/'+c.name,root=`${scope.account}.dkr.ecr.${scope.region}.amazonaws.com/${repositoryName}:`;
+   assert(c.image.startsWith(root)&&/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(c.image.slice(root.length)),'TaggedBaselineImageRequired');
+   const tag=c.image.slice(root.length),r=await send(clients.ecr,new BatchGetImageCommand({registryId:scope.account,repositoryName,imageIds:[{imageTag:tag}]}));
+   assert(!r.failures?.length&&r.images?.length===1,'ImageManifestMissing');const im=r.images[0];
+   assert(im.registryId===scope.account&&im.repositoryName===repositoryName&&im.imageId?.imageTag===tag,'ImageManifestIdentityChanged');
+   const actual=tasks[0]?.containers?.find(x=>x.name===c.name);
+   assert(/^sha256:[a-f0-9]{64}$/.test(actual?.imageDigest??''),'ServedImageDigestMissing');
+   let leafManifest=im.imageManifest;
+   if(im.imageId.imageDigest!==actual.imageDigest){
+    const child=await send(clients.ecr,new BatchGetImageCommand({registryId:scope.account,repositoryName,imageIds:[{imageDigest:actual.imageDigest}]}));
+    assert(!child.failures?.length&&child.images?.length===1,'ImageLeafMissing');const leaf=child.images[0];
+    assert(leaf.registryId===scope.account&&leaf.repositoryName===repositoryName&&leaf.imageId?.imageDigest===actual.imageDigest,'ImageLeafIdentityChanged');leafManifest=leaf.imageManifest;
+   }
+   images[c.name]={image:c.image,registryDigest:im.imageId.imageDigest,imageDigest:actual.imageDigest,imageManifest:im.imageManifest,leafManifest};
+  }
+  const imageBindings=plain({version:1,service:{clusterArn:service.clusterArn,serviceName:service.serviceName,taskDefinition:service.taskDefinition,desiredCount:service.desiredCount},tasks,images});
+  frozenServiceRegistration({...definition,imageBindings});
+  return imageBindings;
+ };
+ const assertImageBindings=async plan=>{
+  const service=await readService();assert.equal(service.taskDefinition,plan.baseline.service.taskDefinition,'ImageServiceChanged');
+  const definition=await readDefinition(service.taskDefinition);assert.deepEqual(registrationInput(definition),registrationInput(plan.baseline.definition),'ImageDefinitionChanged');
+  const actual=await captureImageBindings(definition,service),expected=plan.baseline.definition.imageBindings;
+  assert.deepEqual(actual.service,expected.service,'ImageServiceChanged');
+  assert.deepEqual(actual.images,expected.images,'ImageTagChanged');
+  assert.deepEqual(frozenServiceRegistration({...definition,imageBindings:actual}),frozenServiceRegistration(plan.baseline.definition),'ServedImagesChanged');
+ };
  const pausedSnapshot=async()=>{
   await inventory();
   const groups=await send(clients.scheduler,new ListScheduleGroupsCommand({NamePrefix:'mem9-on-aws-prod',MaxResults:100}));assert(!groups.NextToken);
@@ -172,7 +206,7 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
   assert.equal(await getMutex(),null);await persistOnce('mutex-released.json',{released:true});
  };
  const boundScope={accountId:scope.account,region:scope.region,clusterArn:`arn:aws:ecs:${scope.region}:${scope.account}:cluster/${scope.cluster}`,serviceArn:`arn:aws:ecs:${scope.region}:${scope.account}:service/${scope.cluster}/${scope.service}`};
- return {scope:boundScope,identity:plain(identity),readService,readDefinition,inventory,pausedSnapshot,readRecord,persistOnce,noProductionRuns,acquireFences,assertFences,releaseFences,
+ return {scope:boundScope,identity:plain(identity),readService,readDefinition,inventory,captureImageBindings,assertImageBindings,pausedSnapshot,readRecord,persistOnce,noProductionRuns,acquireFences,assertFences,releaseFences,
   readSource:()=>currentSource(root),
   register:async target=>(await send(clients.ecs,new RegisterTaskDefinitionCommand(target))).taskDefinition.taskDefinitionArn,
   update:async(arn,settings)=>plain(await send(clients.ecs,new UpdateServiceCommand({cluster:scope.cluster,service:scope.service,taskDefinition:arn,...settings}))),

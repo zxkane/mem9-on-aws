@@ -74,6 +74,10 @@ capabilities, and launch applications and health checks through the image's
 fixed `setpriv --no-new-privs` entrypoint. IaC and the service-remediation tool
 share the same transformation. Image digests, credential references, database
 settings, namespace enforcement and unrelated task settings are preserved.
+For tagged deployments, the operator verifies every running task against the
+registry index and platform manifest, then pins those same images in the
+nonroot update. The raw tagged baseline and image proof remain bound to local,
+preview and plan evidence. A changed tag or draining task blocks publication.
 
 `scripts/run-service-nonroot.mjs` provides bounded `plan`, `apply` and read-only
 `inspect` operations for an existing service. Apply requires a reviewed source,

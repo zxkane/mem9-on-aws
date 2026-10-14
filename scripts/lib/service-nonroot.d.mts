@@ -3,3 +3,4 @@ export function serviceNonrootHash(value: unknown): string;
 export function hardenServiceContainer<T extends Record<string, unknown>>(value: T): T;
 export function hardenServiceRegistration<T extends {containerDefinitions: Record<string, unknown>[]}>(value: T): T;
 export function registrationInput(value: unknown): Record<string, unknown>;
+export function frozenServiceRegistration(value: unknown): Record<string, unknown>;

@@ -3,7 +3,7 @@ import {constants} from 'node:fs';
 import {resolve, join} from 'node:path';
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
-import {registrationInput, hardenServiceRegistration, serviceNonrootHash as hash} from './service-nonroot.mjs';
+import {registrationInput, frozenServiceRegistration, hardenServiceRegistration, serviceNonrootHash as hash} from './service-nonroot.mjs';
 
 const need = (value, code) => {if (!value) throw Error('ServiceEvidence' + code);};
 const equal = (a, b, code) => need(isDeepStrictEqual(a, b), code);
@@ -89,13 +89,21 @@ function previewOriginal(p, old, plan) {
 export async function validateServiceEvidence(plan, values, {root}) {
   need(typeof root === 'string' && resolve(root) === root && await realpath(root) === root, 'SourceRoot');
   const original = registrationInput(plan.baseline.definition), images = imageMap(plan.target), registrationHash = hash(plan.target);
-  equal(plan.target, hardenServiceRegistration(original), 'ProductionCandidate');
+  if(plan.baseline.definition.imageBindings){
+    const s=plan.baseline.service,b=plan.baseline.definition.imageBindings.service;
+    need(s&&b.clusterArn===plan.scope.clusterArn&&plan.scope.serviceArn===b.clusterArn.replace(':cluster/',':service/')+'/'+b.serviceName,'ImageBindingScope');
+    equal(b,{clusterArn:s.clusterArn,serviceName:s.serviceName,taskDefinition:s.taskDefinition,desiredCount:s.desiredCount},'ImageBindingService');
+  }
+  equal(plan.target, hardenServiceRegistration(frozenServiceRegistration(plan.baseline.definition)), 'ProductionCandidate');
   const local = values.local, preview = values.preview;
   need(local && preview, 'ReceiptsRequired');
   for (const wrapper of [local, preview]) {equal(wrapper.images, images, 'ImageBindings'); equal(wrapper.registrationHash, registrationHash, 'RegistrationBinding');}
   const baseline = await receipt(local.baselinePath, local.baselineHash), suite = await receipt(local.suitePath, local.suiteHash);
   const embedding = await receipt(local.embeddingPath, local.embeddingHash), p = await receipt(preview.receiptPath, preview.receiptHash);
   equal(registrationInput(baseline), original, 'BaselineRegistration'); equal(suite.baselineHash, local.baselineHash, 'SuiteBaseline');
+  equal(baseline.imageBindings,plan.baseline.definition.imageBindings,'BaselineProofBinding');
+  if(baseline.imageBindings){equal(values.images.imageBindings,baseline.imageBindings,'ReviewedImageBindings');equal(p.baselineHash,local.baselineHash,'PreviewBaselineBinding');}
+  equal(frozenServiceRegistration(baseline), frozenServiceRegistration(plan.baseline.definition), 'BaselineImageBindings');
   equal(suite.source?.scriptHash, sha(await readFile(join(root, 'scripts/run-service-nonroot-smoke.mjs'))), 'SmokeSource');
   equal(suite.source?.transformHash, sha(await readFile(join(root, 'scripts/lib/service-nonroot.mjs'))), 'TransformSource');
   equal(suite.source?.runtimeHash, sha(await readFile(join(root, 'scripts/lib/service-nonroot-runtime.mjs'))), 'RuntimeSource');

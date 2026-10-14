@@ -8,7 +8,7 @@ import {readFile, writeFile, mkdir, mkdtemp, lstat, chmod, readdir, rm, realpath
 import {resolve, join, dirname} from 'node:path';
 import {isIP} from 'node:net';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {hardenServiceContainer} from './lib/service-nonroot.mjs';
+import {hardenServiceContainer,frozenServiceRegistration} from './lib/service-nonroot.mjs';
 import {SERVICE_PROCESS_COLLECTOR, inspectServiceProcessOutput} from './lib/service-nonroot-runtime.mjs';
 
 const exec = promisify(execFile);
@@ -30,7 +30,7 @@ export function parseArgs(args) {
 }
 
 export function imageReferences(baseline) {
-  const containers = baseline?.taskDefinition?.containerDefinitions;
+  const containers = frozenServiceRegistration(baseline).containerDefinitions;
   need(Array.isArray(containers) && containers.length === 3 &&
     new Set(containers.map(c => c.name)).size === 3 &&
     ['mnemo-server', 'llm-proxy', 'qwen3-embed'].every(n => containers.some(c => c.name === n)), 'UnexpectedContainerSet');
@@ -286,7 +286,7 @@ export async function runSmoke(options) {
     await docker(['network', 'create', '--internal', '--label', `${LABEL}=${runId}`, network]); networkCreated = true;
     need((await inspect(network)).Internal === true, 'NetworkNotInternal');
     await mark('internalNetwork');
-    const hardened = Object.fromEntries(baseline.taskDefinition.containerDefinitions.filter(c => c.name !== 'qwen3-embed').map(c => [c.name, hardenServiceContainer(c)]));
+    const hardened = Object.fromEntries(frozenServiceRegistration(baseline).containerDefinitions.filter(c => c.name !== 'qwen3-embed').map(c => [c.name, hardenServiceContainer(c)]));
     const fixture = await create('fixture', images['llm-proxy'], ['--user', '1000:1000', '--cap-drop=ALL', '--init'], {},
       ['/usr/bin/setpriv', '--no-new-privs', '--', 'node', '--input-type=module', '-e', `(${fixtureProgram.toString()})();`]);
     await docker(['start', fixture]);

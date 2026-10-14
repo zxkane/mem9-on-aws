@@ -35,6 +35,7 @@ async function assertEvidenceBindings(plan,config,values){
  assert(Array.isArray(values.review.reviewers)&&values.review.reviewers.length>=2&&values.review.reviewers.every(r=>typeof r.identity==='string'&&r.verdict==='PASS'),'IndependentReviewRequired');
  const images=Object.fromEntries(plan.target.containerDefinitions.map(c=>[c.name,c.image]));
  assert.deepEqual(values.images.images,images,'ImageEvidenceChanged');
+ assert.deepEqual(values.images.imageBindings,plan.baseline.definition.imageBindings,'ImageBindingEvidenceChanged');
  await validateServiceEvidence(plan,values,{root});
  assert.equal(values.fences.bucket,config.scope.bucket);assert.equal(values.fences.lockKey,config.scope.lockKey);
  assert.equal(values.fences.sourceTree,plan.source.tree,'FenceCoverageSourceChanged');
@@ -47,9 +48,11 @@ export async function main(args=process.argv.slice(2)){
  const aws=await createServiceNonrootAws({...config,root});
  try{
   if(mode==='plan'){
-   const service=await aws.readService(),definition=await aws.readDefinition(service.taskDefinition),source=await currentSource(root);
+   const service=await aws.readService(),rawDefinition=await aws.readDefinition(service.taskDefinition),source=await currentSource(root),values=await evidenceValues(config);
+   const definition=values.images.imageBindings!==undefined?{...rawDefinition,imageBindings:values.images.imageBindings}:rawDefinition;
    const plan=buildServiceNonrootPlan({scope:aws.scope,source,service,definition,owner:config.operationId,evidence:Object.fromEntries(evidenceKeys.map(k=>[k,config.evidence[k].hash]))});
-   const values=await evidenceValues(config);await assertEvidenceBindings(plan,config,values);
+   await assertEvidenceBindings(plan,config,values);
+   if(definition.imageBindings)await aws.assertImageBindings(plan);
    assert.deepEqual(await aws.pausedSnapshot(),values.maintenance.metadata,'MaintenanceMetadataChanged');
    assert(Date.now()-values.maintenance.audit.observedMs<300000,'FreshMaintenanceAuditRequired');
    await writePrivateJson(resolve(planPath),plan);return {status:'prepared',planHash:plan.hash,expiresAt:plan.expiresAt};

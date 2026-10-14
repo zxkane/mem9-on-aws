@@ -13,10 +13,12 @@ test('baseline permits exactly the known containers and immutable digest referen
   assert.equal(Object.keys(imageReferences(baseline)).length, 2);
   for (const mutate of [b => b.taskDefinition.containerDefinitions.push({name: 'unknown'}),
     b => b.taskDefinition.containerDefinitions[0].image = 'example.com/synthetic:latest',
+    b => b.taskDefinition.containerDefinitions[2].image = 'example.com/synthetic:latest',
     b => b.taskDefinition.containerDefinitions[0].command = ['arbitrary'],
     b => b.taskDefinition.containerDefinitions[0].linuxParameters = {capabilities: {add: ['SYS_ADMIN']}}]) {
     const copy = structuredClone(baseline); mutate(copy); assert.throws(() => imageReferences(copy));
   }
+  for(const imageBindings of [null,false,0,''])assert.throws(()=>imageReferences({...baseline,imageBindings}));
 });
 
 const status = 'Name:\tmnemo-server\nUid:\t1000 1000 1000 1000\nGid:\t1000 1000 1000 1000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\n';

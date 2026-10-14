@@ -3,7 +3,8 @@
 // node scripts/run-service-nonroot-preview.mjs --stage pr-N --ci-run RUN_ID \
 //   --baseline /private/definition.json --baseline-hash RAW_FILE_SHA256 \
 //   --evidence-root /private/evidence [--expected-source FULL_COMMIT_SHA]
-// Baseline: full production DescribeTaskDefinition response including TAGS.
+// Baseline: full production DescribeTaskDefinition response including TAGS;
+// tagged deployments also carry the explicit, reviewed imageBindings proof.
 // Evidence root must be private and outside this checkout. HELD never auto-resumes.
 // CI execution is inside the verified workflow_dispatch preview cutover job,
 // after runtime finalization and before its existing teardown. --ci-run is the
@@ -27,7 +28,7 @@ import {resolveApplicationRegion} from './lib/application-region.mjs';
 import {runtimeServerContract, verifyRuntimeRoles} from './lib/runtime-live-verification.mjs';
 import {verifyServiceRuntime} from './lib/service-nonroot-runtime.mjs';
 import {verifyRuntimeImage} from './run-production-runtime.mjs';
-import {registrationInput, hardenServiceRegistration, SERVICE_CONTAINERS, serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
+import {registrationInput, frozenServiceRegistration, hardenServiceRegistration, SERVICE_CONTAINERS, serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = 'zxkane/mem9-on-aws', exec = promisify(execFile);
 const need = (condition, code) => assert(condition, 'PreviewNonroot' + code);
@@ -163,7 +164,7 @@ export async function runServiceNonrootPreview({stage, baselinePath, baselineHas
     await durable(lock, {stage, runId, output}); locked = true;
     const stat = await lstat(baselinePath); need(stat.isFile() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600 && stat.size <= 8 * 1024 * 1024, 'BaselinePermissions');
     const bytes = await readFile(baselinePath); need(createHash('sha256').update(bytes).digest('hex') === baselineHash, 'BaselineHash');
-    const baseline = JSON.parse(bytes), production = hardenServiceRegistration(registrationInput(baseline));
+    const baseline = JSON.parse(bytes), production = hardenServiceRegistration(frozenServiceRegistration(baseline));
     source = await currentSource(root); need(source.clean && /^[a-f0-9]{40}$/.test(source.commit) && /^[a-f0-9]{40}$/.test(source.tree) && (!expectedSource || expectedSource === source.commit), 'Source');
     await exec('git', ['-C', root, 'ls-files', '--error-unmatch', 'scripts/run-service-nonroot-preview.mjs', 'scripts/lib/service-nonroot-runtime.mjs', 'scripts/lib/service-nonroot.mjs'], {timeout: 10_000});
     report.sourceTree = source.tree; report.source = source; report.github = inCi ? {} : {owner: (await gh('user')).login}; if (!inCi) need(report.github.owner, 'OperatorIdentity'); await ownership(true);

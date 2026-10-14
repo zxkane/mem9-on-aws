@@ -1,5 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
+import {createHash} from 'node:crypto';
+import {taggedServiceDefinition} from './test-fixtures/service-nonroot-images.mjs';
 
 // Exercise the actual adapter; intercept every SDK, filesystem and subprocess
 // boundary. No credentials, network, subprocesses or temporary files are used.
@@ -23,6 +25,7 @@ vi.mock('@aws-sdk/client-s3', () => mocks.sdk('S3Client', ['GetObjectCommand', '
 vi.mock('@aws-sdk/client-ssm', () => mocks.sdk('SSMClient', ['GetParametersCommand']));
 vi.mock('@aws-sdk/client-scheduler', () => mocks.sdk('SchedulerClient', ['ListScheduleGroupsCommand', 'ListSchedulesCommand']));
 vi.mock('@aws-sdk/client-sts', () => mocks.sdk('STSClient', ['GetCallerIdentityCommand']));
+vi.mock('@aws-sdk/client-ecr', () => mocks.sdk('ECRClient', ['BatchGetImageCommand']));
 vi.mock('node:fs/promises', () => mocks.fs);
 vi.mock('node:child_process', () => ({execFile: mocks.execFile}));
 import {createServiceNonrootAws} from './lib/service-nonroot-aws.mjs';
@@ -166,6 +169,41 @@ describe('actual task lifetime inventory',()=>{
  it('rejects an incomplete DescribeTasks response',async()=>{
   const h=await setup([{taskArn:current,group:'service:Mem9Server',lastStatus:'RUNNING'},{taskArn:old,group:'service:Mem9Server',lastStatus:'STOPPED'}],{missing:true});
   await expect(h.io.inventory()).rejects.toThrow('TaskDescribeIncomplete');
+ });
+});
+
+describe('live tagged image proof',()=>{
+ async function setup(){
+  const h=await harness(),ecs=`arn:aws:ecs:${scope.region}:${scope.account}:`,arn=ecs+'task-definition/'+scope.cluster+'-Mem9RuntimeServer:8';
+  h.service={serviceArn:ecs+'service/'+scope.cluster+'/Mem9Server',clusterArn:ecs+'cluster/'+scope.cluster,serviceName:'Mem9Server',taskDefinition:arn,desiredCount:1};
+  const base=taggedServiceDefinition();base.taskDefinition.taskDefinitionArn=arn;base.taskDefinition.family=scope.cluster+'-Mem9RuntimeServer';base.taskDefinition.revision=8;
+  h.definition=taggedServiceDefinition(base,h.service);h.tasks=h.definition.imageBindings.tasks;h.registry=structuredClone(h.definition.imageBindings.images);
+  const fallback=mocks.send.getMockImplementation();
+  mocks.send.mockImplementation(async(kind,input,...rest)=>{
+   if(kind==='DescribeServicesCommand')return {services:[h.service],failures:[]};
+   if(kind==='DescribeTaskDefinitionCommand'){const {imageBindings,...definition}=h.definition;return definition;}
+   if(kind==='ListTasksCommand')return {taskArns:input.desiredStatus==='RUNNING'?h.tasks.map(t=>t.taskArn):[]};
+   if(kind==='DescribeTasksCommand')return {tasks:h.tasks,failures:[]};
+   if(kind==='BatchGetImageCommand'){
+    const e=h.registry[input.repositoryName.split('/').at(-1)],tag=input.imageIds[0].imageTag;
+    return {images:[{registryId:scope.account,repositoryName:input.repositoryName,imageId:{imageDigest:tag?e.registryDigest:e.imageDigest,...(tag?{imageTag:tag}:{})},imageManifest:tag?e.imageManifest:e.leafManifest}],failures:[]};
+   }
+   return fallback(kind,input,...rest);
+  });return h;
+ }
+ it('captures and verifies the complete served inventory and both manifest levels',async()=>{
+  const h=await setup();expect(await h.io.captureImageBindings(h.definition,h.service)).toEqual(h.definition.imageBindings);
+  await expect(h.io.assertImageBindings({baseline:{service:h.service,definition:h.definition}})).resolves.toBeUndefined();
+ });
+ it('rejects a new registry index even when its ARM64 image is unchanged',async()=>{
+  const h=await setup(),e=h.registry['mnemo-server'];e.imageManifest+=' ';e.registryDigest='sha256:'+createHash('sha256').update(e.imageManifest).digest('hex');
+  await expect(h.io.assertImageBindings({baseline:{service:h.service,definition:h.definition}})).rejects.toThrow('ImageTagChanged');
+ });
+ it.each(['draining','extra-task','leaf-body'])('rejects %s in actual AWS observations',async kind=>{
+  const h=await setup();if(kind==='draining')h.tasks[0].desiredStatus='STOPPED';
+  if(kind==='extra-task')h.tasks.push({...h.tasks[0],taskArn:h.tasks[0].taskArn.replace(/a{32}$/,'b'.repeat(32))});
+  if(kind==='leaf-body')h.registry['mnemo-server'].leafManifest+=' ';
+  await expect(h.io.captureImageBindings(h.definition,h.service)).rejects.toThrow();
  });
 });
 
