@@ -84,6 +84,13 @@ and compares the complete task definition before updating the service. Private
 operator inputs and receipts belong in owner-only, gitignored local files and
 the account-owned audit bucket.
 
+Before running frozen-image preview verification, update the existing IAM owner
+stack with `scripts/deploy-github-role.sh`. The preview role needs regional
+schedule inventory and ECS Exec scoped to preview tasks and the three service
+container names. The operator binds its audit bucket to the repository's
+`MEM9_DECISION_ARTIFACT_BUCKET` variable, or the account default when unset, and
+rechecks that binding while holding publication fences.
+
 An ambiguous registration or update requires inspection; repeating `apply`
 cannot issue another request. Automatic rollback to the previous root task is
 disabled. Completion requires healthy tasks, actual application-process
