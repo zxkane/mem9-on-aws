@@ -149,7 +149,7 @@ export function cognito(): CognitoOutputs {
       // Hosted-UI config: an `email` attribute for the login form, no forced
       // re-verification on attribute update.
       schema: [{ name: "email", attributeDataType: "String", mutable: true, required: false }],
-      userAttributeUpdateSettings: { attributesRequireVerificationBeforeUpdate: [] },
+      userAttributeUpdateSettings: { attributesRequireVerificationBeforeUpdates: [] },
       // Auto-verify email so the Hosted-UI ForgotPassword flow can send a
       // recovery code (AccountRecovery defaults to verified_email). Without this,
       // the operator can't reset their password via the browser — reset 503s

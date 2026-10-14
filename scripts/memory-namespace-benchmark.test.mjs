@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { dataCopySources } from "./lib/production-data-build-inputs.mjs";
 
 import {
   M2M_RESOLUTION_QUERY,
@@ -137,9 +138,11 @@ describe("preview benchmark packaging and runner", () => {
       resolve(import.meta.dirname, "../docker/bootstrap/Dockerfile"),
       "utf8",
     );
-    expect(dockerfile).toContain(
-      "COPY scripts/benchmark-memory-namespaces.mjs /bootstrap/operator/scripts/benchmark-memory-namespaces.mjs",
-    );
+    const source = "scripts/benchmark-memory-namespaces.mjs";
+    expect(dataCopySources(dockerfile)).toContain(source);
+    const instruction = dockerfile.split("\n").find(line => line.startsWith("COPY ") && line.split(/\s+/).includes(source));
+    const target = instruction.split(/\s+/).at(-1);
+    expect(target.endsWith("/") ? target + "benchmark-memory-namespaces.mjs" : target).toBe("/bootstrap/operator/scripts/benchmark-memory-namespaces.mjs");
   });
 
   it("uses the stage bootstrap task without retained-role overrides", async () => {
@@ -148,7 +151,11 @@ describe("preview benchmark packaging and runner", () => {
       "utf8",
     );
     expect(runner).toMatch(/\^pr-\[1-9\]\[0-9\]\*\$/u);
-    expect(runner).toContain("MEM9_BOOTSTRAP_OPERATION");
+    expect(runner).toContain("namespace-load");
+    expect(runner).toContain("namespace-recheck");
+    expect(runner).not.toContain('name:"MEM9_BOOTSTRAP_OPERATION"');
+    expect(runner).not.toContain('/task-def-arn');
+    expect(runner).toContain('--disable-execute-command');
     expect(runner).toContain("benchmark");
     expect(runner).toContain("MEM9_NAMESPACE_BENCHMARK_SAMPLES");
     expect(runner).toContain("MEM9_NAMESPACE_BENCHMARK_WARMUPS");

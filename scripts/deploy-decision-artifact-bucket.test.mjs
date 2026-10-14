@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { expectedArchivePolicy } from "./lib/authorization-archive-policy.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const script = resolve(root, "scripts/deploy-decision-artifact-bucket.sh");
@@ -45,6 +46,9 @@ afterEach(() => {
 });
 
 function runFixture({
+  args = [],
+  archivePolicy,
+  tiering = { IsTruncated: false },
   bucket = "absent",
   bucketName = "",
   changeSetMismatch = false,
@@ -294,21 +298,11 @@ switch (command) {
     break;
   case "s3api get-bucket-policy":
     console.log(JSON.stringify({
-      Policy: JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [{
-          Sid: "DenyInsecureTransport",
-          Effect: "Deny",
-          Principal: "*",
-          Action: "s3:*",
-          Resource: [
-            \`arn:aws:s3:::\${option("--bucket")}\`,
-            \`arn:aws:s3:::\${option("--bucket")}/*\`,
-          ],
-          Condition: { Bool: { "aws:SecureTransport": "false" } },
-        }],
-      }),
+      Policy: process.env.MOCK_ARCHIVE_POLICY,
     }));
+    break;
+  case "s3api list-bucket-intelligent-tiering-configurations":
+    console.log(process.env.MOCK_ARCHIVE_TIERING);
     break;
   case "s3api get-bucket-tagging":
     console.log(JSON.stringify({
@@ -332,7 +326,7 @@ switch (command) {
   );
   chmodSync(aws, 0o755);
 
-  const result = spawnSync("bash", [script], {
+  const result = spawnSync("bash", [script, ...args], {
     cwd: root,
     encoding: "utf8",
     env: {
@@ -348,6 +342,8 @@ switch (command) {
       MOCK_IMPORTED: join(directory, "imported"),
       MOCK_RECOVERY_HAS_RESOURCE: String(recoveryHasResource),
       MOCK_STACK: stack,
+      MOCK_ARCHIVE_POLICY: archivePolicy ?? JSON.stringify(expectedArchivePolicy(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucketName) ? bucketName : "mem9-audit-123456789012")),
+      MOCK_ARCHIVE_TIERING: JSON.stringify(tiering),
       MOCK_STACK_BUCKET_NAME: stackBucketName,
       MOCK_STACK_DELETED: join(directory, "stack-deleted"),
       MOCK_STACK_HAS_BUCKET_PARAMETER: String(stackHasBucketParameter),
@@ -381,10 +377,35 @@ const hasMutation = (calls) =>
         "create-stack",
         "execute-change-set",
         "update-stack",
+        "delete-stack",
       ].includes(operation),
   );
 
 describe("decision-artifact bucket bootstrap", () => {
+  it("TC-CONS-WORKER-088 verifies an existing stack without a stack mutation", () => {
+    const { calls, output, result } = runFixture({ stack: "present", bucket: "present", args: ["--verify"] });
+    expect(result.status, output).toBe(0);
+    expect(hasMutation(calls)).toBe(false);
+    expect(calls.some(([service, operation]) => service === "s3api" && operation === "list-bucket-intelligent-tiering-configurations")).toBe(true);
+  });
+  it.each(["REVIEW_IN_PROGRESS", "IMPORT_IN_PROGRESS", "IMPORT_ROLLBACK_COMPLETE"])("TC-CONS-WORKER-088 never repairs %s in verify mode", (stackStatus) => {
+    const { calls, output, result } = runFixture({ stack: "present", bucket: "present", stackStatus, args: ["--verify"] });
+    expect(result.status, output).not.toBe(0);
+    expect(hasMutation(calls)).toBe(false);
+  });
+  it("TC-CONS-WORKER-088 refuses an absent stack in verify mode", () => {
+    const { calls, result } = runFixture({ args: ["--verify"] });
+    expect(result.status).not.toBe(0);expect(hasMutation(calls)).toBe(false);
+  });
+  it("TC-CONS-WORKER-086 rejects raw duplicate policy fields through the bootstrap", () => {
+    const raw = JSON.stringify(expectedArchivePolicy("mem9-audit-123456789012")).replace('"Statement":[', '"Statement":[],"Statement":[');
+    const { calls, output, result } = runFixture({ stack: "present", args: ["--verify"], archivePolicy: raw });
+    expect(result.status).not.toBe(0);expect(output).toMatch(/policy read-back mismatch/u);expect(hasMutation(calls)).toBe(false);
+  });
+  it("TC-CONS-WORKER-087 refuses archival intelligent tiering in verify mode", () => {
+    const { calls, output, result } = runFixture({ stack: "present", args: ["--verify"], tiering: { IsTruncated: false, IntelligentTieringConfigurationList: [{ Id: "archive", Status: "Enabled", Tierings: [{ Days: 90, AccessTier: "ARCHIVE_ACCESS" }] }] } });
+    expect(result.status).not.toBe(0);expect(output).toMatch(/availability verification failed/u);expect(hasMutation(calls)).toBe(false);
+  });
   it("TC-SLACKAPP-220 keeps import limited to the retained bucket", () => {
     const template = parseCloudFormation(importTemplate);
     expect(Object.keys(template.Resources)).toEqual(["DecisionArtifactBucket"]);

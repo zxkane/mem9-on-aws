@@ -7,7 +7,7 @@
 | TC-DEPLOYROLE-003 | Simulate preview access to production resources | Explicit deny for representative SSM, secret, ECS, Lambda, RDS, IAM, and state resources |
 | TC-DEPLOYROLE-004 | Simulate production access to preview resources | Explicit deny for representative `pr-*` resources |
 | TC-DEPLOYROLE-005 | Main change touches only role/workflow/docs/tests | Tests run; ECR build and SST production deployment skip |
-| TC-DEPLOYROLE-006 | Main change touches application IaC only | Production deploy reuses the current deployed image tag |
+| TC-DEPLOYROLE-006 | Main change touches application IaC only | Ordinary deployment builds and smoke-tests this run's image cohort before using its tag; protected security transitions retain the separate control build and frozen data images |
 | TC-DEPLOYROLE-007 | Change touches any workload image input | All four images build under one shared release tag |
 | TC-DEPLOYROLE-008 | Production mutation is ready | Job waits for `prod` Environment approval before AWS credentials |
 | TC-DEPLOYROLE-009 | Fork pull request runs | No repository role secret and no AWS mutation path |

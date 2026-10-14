@@ -1,6 +1,7 @@
 import {describe,it,expect} from 'vitest';
-import {validatePostRuntimeRoute,validatePostRuntimeDefinition,postRuntimeExecutionPolicy,postRuntimeTaskTrust,POST_RUNTIME_OPERATOR} from './lib/post-runtime-preview-route.mjs';
-import {loadPostRuntimeOperator,revalidatePostRuntimeOperator} from './lib/post-runtime-preview-aws.mjs';
+import {validatePostRuntimeRoute,validateGuardedPostRuntimeRoute,bindGuardedPostRuntimeRoute,inspectPostRuntimePurposeMap,selectGuardedPostRuntimeRoute,validatePostRuntimeDefinition,postRuntimeExecutionPolicy,postRuntimeTaskTrust,POST_RUNTIME_OPERATOR} from './lib/post-runtime-preview-route.mjs';
+import {loadPostRuntimeOperator,revalidatePostRuntimeOperator,loadNonrootPreviewBootstrap,revalidateNonrootPreviewBootstrap} from './lib/post-runtime-preview-aws.mjs';
+import {nonrootPreviewFixture,nonrootPostRuntimeFixture} from './nonroot-preview.fixture.mjs';
 const stage='pr-7',account='123456789012',region='ap-northeast-1',generation='a'.repeat(64),context={kind:'post-runtime',runtimeNonce:'b'.repeat(32)},tree='c'.repeat(40);
 const cluster=`mem9-on-aws-${stage}-Cluster-example`,prefix=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/${stage}`;
 const credentials={MEM9_DB_SECRET:prefix+'/runtime/schema-administrator-credential',MEM9_CONSOLIDATION_PREVIEW_CONFIG:prefix+'/consolidation-preview/config',
@@ -21,6 +22,40 @@ const definition=r=>({taskDefinitionArn:r.taskDefinitionArn,networkMode:'awsvpc'
       MEM9_PREVIEW_GENERATION:generation,MEM9_BOOTSTRAP_OPERATION:'consolidation-preview-pause',MEM9_PRODUCTION_RUNTIME_MODE:'active',MEM9_PREVIEW_ACCEPTANCE_CONTEXT:'post-runtime',MEM9_PREVIEW_RUNTIME_NONCE:context.runtimeNonce}).map(([name,value])=>({name,value})),
     secrets:Object.entries(credentials).map(([name,valueFrom])=>({name,valueFrom})),logConfiguration:{logDriver:'awslogs',options:{'awslogs-group':'/sst/mem9-on-aws/pr-7/operator','awslogs-region':region,'awslogs-stream-prefix':'ecs'}}}]});
 describe('post-runtime operator routing boundary',()=>{
+  it('selects five distinct exact revisions and rejects missing, duplicated or foreign purpose bindings',()=>{
+    const f=nonrootPostRuntimeFixture(route()),e=expected();
+    const selected=f.map.bindings.map(b=>selectGuardedPostRuntimeRoute(f.map,e,b.purpose));
+    expect(new Set(selected.map(r=>r.taskDefinitionArn)).size).toBe(5);
+    for(const r of selected)expect(()=>validatePostRuntimeDefinition(f.definitions.get(r.taskDefinitionArn).taskDefinition,r,f.definitions.get(r.taskDefinitionArn))).not.toThrow();
+    for(const change of [m=>m.bindings[1].taskDefinitionArn=m.bindings[0].taskDefinitionArn,m=>m.bindings[1].purpose='bootstrap-admin-probe',
+      m=>m.bindings[1].taskDefinitionArn=m.bindings[1].taskDefinitionArn.replace('Mem9PostFixture','Mem9Bootstrap'),m=>m.command=[]]){
+      const m=structuredClone(f.map);change(m);expect(()=>inspectPostRuntimePurposeMap(m,e)).toThrow();
+    }
+    const missing=structuredClone(f.map);missing.bindings=missing.bindings.filter(b=>b.purpose!=='preview-fixture-setup');
+    expect(()=>selectGuardedPostRuntimeRoute(missing,e,'preview-fixture-setup')).toThrow('NonrootPreviewPurposeUnavailable');
+    expect(()=>selectGuardedPostRuntimeRoute(route(),e,'preview-fixture-setup')).toThrow();
+  });
+  it('requires an explicit v2 full observation for the fixed guarded route and keeps v1 strict',()=>{
+    const r=route(),d=definition(r),c=d.containerDefinitions[0];
+    c.entryPoint=['/bin/setpriv','--no-new-privs','--','/usr/local/bin/node','/bootstrap/nonroot-dispatch.mjs','post-runtime-fixture'];
+    c.command=[];c.user='1000:1000';
+    const family=r.taskDefinitionArn.split('/').at(-1).split(':')[0];
+    const {taskDefinitionArn,...body}=d;
+    const registration={...body,family,tags:[]};
+    const observation={taskDefinition:{...body,family,taskDefinitionArn,revision:7,status:'ACTIVE',
+      registeredAt:'2026-10-08T00:00:00.000Z',registeredBy:`arn:aws:sts::${account}:assumed-role/preview/session`,
+      requiresAttributes:[{name:'ecs.capability.task-eni'}],compatibilities:['FARGATE']},tags:[]};
+    const guarded=bindGuardedPostRuntimeRoute(r,registration,observation);
+    expect(guarded.version).toBe(2);expect(validateGuardedPostRuntimeRoute(guarded,expected())).toEqual(guarded);
+    expect(()=>validatePostRuntimeDefinition(observation.taskDefinition,guarded,observation)).not.toThrow();
+    expect(()=>validateGuardedPostRuntimeRoute(r,expected())).toThrow();
+    expect(()=>validatePostRuntimeDefinition(d,r)).toThrow();
+    expect(()=>validatePostRuntimeDefinition(observation.taskDefinition,guarded)).toThrow();
+    for(const mutate of [o=>o.taskDefinition.containerDefinitions[0].user='root',o=>o.tags.push({key:'other',value:'changed'}),
+      o=>o.taskDefinition.requiresAttributes.push({name:'unreviewed'}),o=>o.taskDefinition.containerDefinitions[0].unknownField=true]){
+      const o=structuredClone(observation);mutate(o);expect(()=>validatePostRuntimeDefinition(o.taskDefinition,guarded,o)).toThrow();
+    }
+  });
   it('admits only the exact completed preview context and dedicated definition',()=>{
     const r=validatePostRuntimeRoute(route(),expected());expect(r.containerName).toBe(POST_RUNTIME_OPERATOR);
     expect(()=>validatePostRuntimeDefinition(definition(r),r)).not.toThrow();
@@ -46,9 +81,10 @@ describe('post-runtime operator routing boundary',()=>{
     expect(postRuntimeTaskTrust(account,region).Statement[0].Condition.StringEquals['aws:SourceAccount']).toBe(account);
   });
   it('loads actual scoped metadata and rejects route or role drift before launch',async()=>{
-    const r=route(),def=definition(r),e=expected();let version=1,extraPolicy=false;const calls=[];
+    const f=nonrootPostRuntimeFixture(route()),r=f.routes.get('preview-fixture-pause'),e=expected();
+    let version=1,extraPolicy=false;const calls=[];
     const values=new Map([
-      ['/mem9-on-aws/pr-7/consolidation-preview/operator',JSON.stringify(r)],
+      ['/mem9-on-aws/pr-7/consolidation-preview/operator',JSON.stringify(f.map)],
       ['/mem9-on-aws/pr-7/runtime/production-state',JSON.stringify(e.runtime)],
       ['/mem9-on-aws/pr-7/runtime/production-manifest',JSON.stringify(e.manifest)],
     ]);
@@ -56,7 +92,7 @@ describe('post-runtime operator routing boundary',()=>{
       const name=command.constructor.name,input=command.input;calls.push(name);
       if(name==='GetCallerIdentityCommand')return {Account:account};
       if(name==='GetParametersCommand')return {Parameters:input.Names.map(Name=>({Name,Value:values.get(Name),Version:version,Type:Name.endsWith('/operator')?'String':'SecureString',ARN:`arn:aws:ssm:${region}:${account}:parameter${Name}`})),InvalidParameters:[]};
-      if(name==='DescribeTaskDefinitionCommand')return {taskDefinition:def};
+      if(name==='DescribeTaskDefinitionCommand')return f.definitions.get(input.taskDefinition);
       const execution=input.RoleName===r.executionRoleArn.split('/').at(-1);
       if(name==='GetRoleCommand')return {Role:{Arn:execution?r.executionRoleArn:r.taskRoleArn,AssumeRolePolicyDocument:JSON.stringify(postRuntimeTaskTrust(account,region)),PermissionsBoundary:{PermissionsBoundaryArn:`arn:aws:iam::${account}:policy/mem9-on-aws-workload-boundary`}}};
       if(name==='ListRolePoliciesCommand')return {PolicyNames:execution?['PostRuntimePreviewSecrets',...(extraPolicy?['unexpected']:[])]:[]};
@@ -68,9 +104,29 @@ describe('post-runtime operator routing boundary',()=>{
     const options={stage,region,generation,context,controlSourceTree:tree};
     const checks={artifact:async()=>({rootDigest:r.image.split('@')[1],arm64Digest:'sha256:'+'e'.repeat(64)}),key:async()=>r.kmsKeyArn};
     const binding=await loadPostRuntimeOperator(clients,options,checks);expect(binding.route).toEqual(r);
+    const setup=await loadPostRuntimeOperator(clients,{...options,purpose:'preview-fixture-setup'},checks);
+    expect(setup.route.taskDefinitionArn).not.toBe(binding.route.taskDefinitionArn);
+    expect(setup.definition.containerDefinitions[0].entryPoint.at(-1)).toBe('preview-fixture-setup');
     await expect(revalidatePostRuntimeOperator(clients,binding,options,checks)).resolves.toBeUndefined();
     version++;await expect(revalidatePostRuntimeOperator(clients,binding,options,checks)).rejects.toThrow('PostRuntimeRouteChanged');
     extraPolicy=true;await expect(loadPostRuntimeOperator(clients,options,checks)).rejects.toThrow('PostRuntimeRoleMismatch');
     expect(calls.every(name=>/^(Get|List|Describe)/.test(name))).toBe(true);
+  });
+  it('loads only the protected exact-purpose bootstrap map and detects a full readback change',async()=>{
+    const f=nonrootPreviewFixture(),calls=[];let changed=false;
+    const client={send:async c=>{calls.push(c.constructor.name);
+      if(c.constructor.name==='GetCallerIdentityCommand')return {Account:f.scope.account};
+      if(c.constructor.name==='GetParametersCommand')return {Parameters:c.input.Names.map(n=>f.parameters.get(n))};
+      if(c.constructor.name==='DescribeTaskDefinitionCommand'){
+        const o=structuredClone(f.definitions.get(c.input.taskDefinition));if(changed)o.taskDefinition.requiresAttributes.push({name:'changed'});return o;
+      }
+      throw Error('UnexpectedMutation');
+    }};
+    const clients={ssm:client,ecs:client,sts:client};
+    const binding=await loadNonrootPreviewBootstrap(clients,{...f.scope,purpose:'bootstrap-admin-probe'});
+    expect(binding.binding.taskDefinitionArn).toBe(f.map.bindings.find(r=>r.purpose==='bootstrap-admin-probe').taskDefinitionArn);
+    await expect(revalidateNonrootPreviewBootstrap(clients,binding)).resolves.toEqual(binding);
+    changed=true;await expect(revalidateNonrootPreviewBootstrap(clients,binding)).rejects.toThrow('NonrootPreviewReadbackChanged');
+    expect(calls.every(n=>/^(Get|Describe)/.test(n))).toBe(true);
   });
 });

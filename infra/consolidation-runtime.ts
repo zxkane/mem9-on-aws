@@ -1,11 +1,14 @@
+import {observerWorkerTemplate,publishObserverTopology} from './observer-topology';
 import type {DbOutputs} from "./db";
 import type {EcsOutputs} from "./ecs";
 import type {MaintenanceIdentityOutputs} from "./namespace-identity";
 import {accountId,applicationRegion,workloadImage} from "./ecr";
 import {disableTaskContainerPseudoTerminal} from "./ecs-task-definition";
+import {applyNonrootDataTask,applyProductionNonrootTask,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 import {isConsolidationPreview,previewGeneration,previewConfiguration,previewAcceptanceContext} from "../scripts/lib/consolidation-preview-config.mjs";
 import {verifiedPostRuntimePreview} from './post-runtime-preview';
 import type {PostRuntimePreviewContext} from '../scripts/lib/consolidation-preview-config.mjs';
+import type {VerifiedDataRelease} from '../scripts/lib/production-data-release.mjs';
 
 type SecretKind="config"|"planner"|"executor"|"backend"|"seed"|"targets"|"tenant";
 export interface ConsolidationPreviewConfig {
@@ -25,7 +28,8 @@ export interface ConsolidationWorker {
   admission?:Output<string>;
   image?:Input<string>;
   sourceTag?:Input<string>;
-  task:sst.aws.Task;
+  dataRelease?:Output<VerifiedDataRelease&{parameterVersion:number}>;
+  task:Pick<sst.aws.Task,'taskDefinition'|'nodes'|'assignPublicIp'|'securityGroups'|'subnets'>;
 }
 export interface ConsolidationWorkerConfig {
   generation:Input<string>;
@@ -36,6 +40,7 @@ export interface ConsolidationWorkerConfig {
   admission?:Output<string>;
   image?:Input<string>;
   sourceTag?:Input<string>;
+  dataRelease?:Output<VerifiedDataRelease&{parameterVersion:number}>;
 }
 export function consolidationPreviewConfig():ConsolidationPreviewConfig|undefined {
   const context=previewAcceptanceContext($app.stage);
@@ -74,7 +79,8 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
   const tags={Project:"mem9-on-aws",Stage:$app.stage,ManagedBy:"sst"};
   const trust=$jsonStringify({Version:"2012-10-17",Statement:[{Effect:"Allow",Principal:{Service:"ecs-tasks.amazonaws.com"},Action:"sts:AssumeRole",
     Condition:{StringEquals:{"aws:SourceAccount":accountId()},ArnLike:{"aws:SourceArn":$interpolate`arn:aws:ecs:${applicationRegion()}:${accountId()}:*`}}}]});
-  return (["planner","executor"] as const).map(kind=>{
+  const observerTemplates:Record<string,Input<string>>={};
+  const workers=(["planner","executor"] as const).map(kind=>{
     const containerName=`Mem9Consolidation${kind==="planner"?"Planner":"Executor"}`;
     const secrets:Record<string,Output<string>>={MEM9_WORKER_TARGETS:config.arns.targets,
       [kind==="planner"?"MEM9_PLANNER_DB_SECRET":"MEM9_EXECUTOR_DB_SECRET"]:config.arns[kind]};
@@ -83,6 +89,7 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
       secrets.MEM9_SERVICE_TRANSPORT_SIGNING_KEYS=identity.serviceParameterArns.consolidation;
     }
     const parameters=Object.values(secrets);
+    let observerTemplateResource:ReturnType<typeof observerWorkerTemplate>|undefined;
     const task=new sst.aws.Task(containerName,{
       cluster:ecs.cluster,architecture:"arm64",cpu:"0.5 vCPU",memory:"1 GB",
       image:config.production?config.image!:workloadImage("llm-proxy",process.env.MEM9_IMAGE_TAG||"latest"),entrypoint:["node"],command:["/app/scripts/consolidation-worker.mjs"],
@@ -94,7 +101,10 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
         MEM9_WORKER_SLICE_SECONDS:config.production?'180':kind==="executor"?"450":"180",
         ...(config.production?{MEM9_WORKER_MAX_SECONDS:kind==='planner'?'780':'240'}:{})},
       ssm:secrets,permissions:[],logging:{retention:"1 month"},
-      transform:{taskDefinition:args=>{disableTaskContainerPseudoTerminal(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};},
+      transform:{taskDefinition:args=>{disableTaskContainerPseudoTerminal(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};
+          if(isConsolidationPreview($app.stage))applyNonrootDataTask(args,kind);
+          applyProductionNonrootTask(args,kind);
+          if(ecs.observerTopology)observerTemplateResource=observerWorkerTemplate(kind,args,ecs.observerTopology);},
         taskRole:args=>{args.assumeRolePolicy=trust;},
         executionRole:args=>{
           args.assumeRolePolicy=trust;
@@ -106,6 +116,14 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
           ]})}];
         }},
     });
-    return {kind,containerName,generation:config.generation,production:config.production,enabled:config.enabled,admission:config.admission,image:config.image,sourceTag:config.sourceTag,task};
+    if(ecs.observerTopology)observerTemplates[kind]=task.nodes.taskDefinition.apply(()=>{
+      if(!observerTemplateResource)throw Error("ObserverTopologyTemplateDependency");
+      return observerTemplateResource.arn;
+    });
+    const invocationTask={taskDefinition:verifiedProductionNonrootTaskArn(task.taskDefinition,kind),nodes:task.nodes,
+      assignPublicIp:task.assignPublicIp,securityGroups:task.securityGroups,subnets:task.subnets};
+    return {kind,containerName,generation:config.generation,production:config.production,enabled:config.enabled,admission:config.admission,image:config.image,sourceTag:config.sourceTag,dataRelease:config.dataRelease,task:invocationTask};
   });
+  if(ecs.observerTopology)publishObserverTopology(ecs.observerTopology,config.generation,observerTemplates);
+  return workers;
 }

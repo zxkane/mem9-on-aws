@@ -1,3 +1,4 @@
+import {normalizeImageDigestResponse,imageResponseFromLegacyEvidence} from './production-image-response.mjs';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
@@ -10,14 +11,7 @@ const fail=()=>{throw Error('DataReleaseArtifactUnverified');};
 const bodyHash=text=>'sha256:'+createHash('sha256').update(text).digest('hex');
 const imageTypes=['application/vnd.oci.image.manifest.v1+json','application/vnd.docker.distribution.manifest.v2+json'];
 function manifest(response,{account,repositoryName,imageDigest}){
-  if(response?.failures?.length||!Array.isArray(response.images)||!response.images.length||response.images.length>100)fail();
-  const bodies=new Set();
-  for(const image of response.images){
-    if(image.registryId!==account||image.repositoryName!==repositoryName||image.imageId?.imageDigest!==imageDigest||
-      typeof image.imageManifest!=='string'||Buffer.byteLength(image.imageManifest)>4194304||bodyHash(image.imageManifest)!==imageDigest)fail();
-    bodies.add(image.imageManifest);
-  }
-  if(bodies.size!==1)fail();try{return JSON.parse([...bodies][0]);}catch{fail();}
+  try{return JSON.parse(normalizeImageDigestResponse(imageResponseFromLegacyEvidence(response),{registryId:account,repositoryName,imageDigest}).raw.toString());}catch{fail();}
 }
 export function verifyDataReleaseArtifact(rootResponse,childResponse,expected){
   const {account,repositoryName,rootDigest,arm64Digest}=expected;

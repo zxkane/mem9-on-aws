@@ -53,46 +53,6 @@ Resources:
       #   - untagged → expire after 3 days (orphaned layers from overwritten
       #     `latest`, which floats to the newest `mem9-*` on each main merge).
       # Rule priority: pr-* first (lowest number = evaluated first).
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Expire pr-<sha> preview images after 7 days (they die with their PR stage).",
-                "selection": {
-                  "tagStatus": "tagged",
-                  "tagPrefixList": ["pr-"],
-                  "countType": "sinceImagePushed",
-                  "countUnit": "days",
-                  "countNumber": 7
-                },
-                "action": { "type": "expire" }
-              },
-              {
-                "rulePriority": 2,
-                "description": "Keep the last 30 mem9-<sha> release images; expire older ones. Prod pins one of these by name — never let preview traffic age it out.",
-                "selection": {
-                  "tagStatus": "tagged",
-                  "tagPrefixList": ["mem9-"],
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 30
-                },
-                "action": { "type": "expire" }
-              },
-              {
-                "rulePriority": 3,
-                "description": "Expire untagged images after 3 days (orphaned layers from overwritten `latest`).",
-                "selection": {
-                  "tagStatus": "untagged",
-                  "countType": "sinceImagePushed",
-                  "countUnit": "days",
-                  "countNumber": 3
-                },
-                "action": { "type": "expire" }
-              }
-            ]
-          }
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -112,21 +72,6 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: AES256
       # Identical policy to mnemo-server: pr-* expire 7d, keep 30 mem9-*, untagged 3d.
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              { "rulePriority": 1, "description": "Expire pr-<sha> preview images after 7 days.",
-                "selection": { "tagStatus": "tagged", "tagPrefixList": ["pr-"], "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 7 },
-                "action": { "type": "expire" } },
-              { "rulePriority": 2, "description": "Keep the last 30 mem9-<sha> release images.",
-                "selection": { "tagStatus": "tagged", "tagPrefixList": ["mem9-"], "countType": "imageCountMoreThan", "countNumber": 30 },
-                "action": { "type": "expire" } },
-              { "rulePriority": 3, "description": "Expire untagged images after 3 days.",
-                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 3 },
-                "action": { "type": "expire" } }
-            ]
-          }
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -178,21 +123,6 @@ Resources:
       ImageTagMutability: MUTABLE
       EncryptionConfiguration:
         EncryptionType: AES256
-      LifecyclePolicy:
-        LifecyclePolicyText: |
-          {
-            "rules": [
-              { "rulePriority": 1, "description": "Expire pr-<sha> preview images after 7 days.",
-                "selection": { "tagStatus": "tagged", "tagPrefixList": ["pr-"], "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 7 },
-                "action": { "type": "expire" } },
-              { "rulePriority": 2, "description": "Keep the last 30 mem9-<sha> release images.",
-                "selection": { "tagStatus": "tagged", "tagPrefixList": ["mem9-"], "countType": "imageCountMoreThan", "countNumber": 30 },
-                "action": { "type": "expire" } },
-              { "rulePriority": 3, "description": "Expire untagged images after 3 days.",
-                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 3 },
-                "action": { "type": "expire" } }
-            ]
-          }
       Tags:
         - Key: Project
           Value: !Ref ProjectName

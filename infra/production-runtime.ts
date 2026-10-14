@@ -2,7 +2,8 @@ import type {RuntimeCredentials} from "./runtime-credentials";
 import type {TenantIdentityOutputs} from "./tenant-identity";
 import type {NamespaceIdentityOutputs,MaintenanceIdentityOutputs} from "./namespace-identity";
 import {accountId,applicationRegion} from "./ecr";
-import {workloadImage} from "./ecr";
+import {workloadImage,selectedNonrootFallbackBinding} from "./ecr";
+import {applyProductionNonrootTask,verifiedProductionNonrootTaskArn,retainedProductionFallbackArgs} from './nonroot-task-definition';
 import type {EcsOutputs} from "./ecs";
 import type {DbOutputs} from "./db";
 import {resolveVpc} from "./vpc";
@@ -132,6 +133,9 @@ export function productionRuntimeResources(existing:RuntimeCredentials|undefined
 export function productionRuntimeTasks(ecs:EcsOutputs,db:DbOutputs,identity:TenantIdentityOutputs,config:ProductionRuntimeResources){
   if(!ecs.serverTaskDefinition)throw Error("RuntimeDefinitionMissing");
   const source=ecs.serverTaskDefinition,stage=$app.stage,tags={Project:"mem9-on-aws",Stage:stage,ManagedBy:"sst"};
+  // The old derivation is reachable only for the legacy route. A v3 fallback
+  // never depends on the newly hardened service's container definitions.
+  const legacyFallback=()=>{
   const fallbackImages=productionFallbackImages();
   const fallbackImage=fallbackImages["mnemo-server"];
   const containers=source.apply(definition=>definition.containerDefinitions.apply(raw=>{
@@ -158,6 +162,31 @@ export function productionRuntimeTasks(ecs:EcsOutputs,db:DbOutputs,identity:Tena
     taskRoleArn:source.apply(d=>d.taskRoleArn),executionRoleArn:config.executionRoleArn,containerDefinitions:containers,
     skipDestroy:true,tags,
   });
+  return {taskDefinitionArn:fallback.arn,images:fallbackImages};
+  };
+  const retained=stage==='prod'?selectedNonrootFallbackBinding():undefined;
+  const selectedFallback=retained?retained.apply(value=>{
+    if(value===undefined)return legacyFallback();
+    const args=retainedProductionFallbackArgs(value);
+    const binding=value as {taskDefinitionArn:string;definition:{containerDefinitions:Array<{name:string;image:string}>}};
+    const containers=binding.definition.containerDefinitions;
+    if(!Array.isArray(containers)||containers.map(c=>c.name).sort().join()!==['llm-proxy','mnemo-server','qwen3-embed'].join()||
+      containers.some(c=>typeof c.image!=='string'||!/@sha256:[a-f0-9]{64}$/.test(c.image)))throw Error('NonrootRetainedFallbackImages');
+    const rejectMutation=()=>{throw Error('NonrootRetainedFallbackMutationDenied');};
+    // This resource is retained, never a recovery destination. The provider
+    // must not recreate it if state or remote material drifts. Pulumi rejects
+    // unsupported resource hooks instead of silently dropping these guards.
+    const resource=new aws.ecs.TaskDefinition('ProductionRuntimeFallback',args as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1],{
+      hooks:{beforeCreate:[rejectMutation],beforeUpdate:[rejectMutation]},
+    });
+    const arn=resource.arn.apply(actual=>{
+      if(actual!==binding.taskDefinitionArn)throw Error('NonrootRetainedFallbackRevisionChanged');return actual;
+    });
+    return {taskDefinitionArn:arn,images:Object.fromEntries(containers.map(c=>[c.name,c.image]))};
+  }):legacyFallback();
+  const fallbackState=$jsonStringify(selectedFallback).apply(raw=>JSON.parse(raw) as {taskDefinitionArn:string;images:Record<string,string>});
+  const fallback={arn:fallbackState.apply(value=>value.taskDefinitionArn)};
+  const fallbackImages=fallbackState.apply(value=>value.images),fallbackImage=fallbackImages.apply(images=>images['mnemo-server']);
   const active=config.mode==="active";
   const references:Record<string,Output<string>>=active?{}:{MEM9_DB_SECRET:db.secretArn,
     MEM9_SCHEMA_ADMIN_CREDENTIAL:config.administratorArn,MEM9_RUNTIME_DB_SECRET:config.runtime.parameterArn,
@@ -168,7 +197,7 @@ export function productionRuntimeTasks(ecs:EcsOutputs,db:DbOutputs,identity:Tena
     command:["/bootstrap/operator/scripts/production-runtime-operator.mjs"],
     environment:{MEM9_STAGE:stage,MEM9_DB_HOST:db.host,MEM9_DB_PORT:db.port.apply(String),MEM9_DB_NAME:db.database,
       MEM9_RUNTIME_OPERATOR_VERSION:"1",MEM9_RUNTIME_OPERATOR_RETIRED:active?"1":"0"},ssm:references,permissions:[],logging:{retention:"1 month"},
-    transform:{taskDefinition:args=>{args.tags={...(args.tags??{}),...tags};},taskRole:args=>{args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());},
+    transform:{taskDefinition:args=>{args.tags={...(args.tags??{}),...tags};applyProductionNonrootTask(args,'transition');},taskRole:args=>{args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());},
       executionRole:args=>{
         args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());
         args.inlinePolicies=[{name:"TransitionSecrets",policy:active?JSON.stringify({Version:"2012-10-17",Statement:[{
@@ -185,7 +214,7 @@ export function productionRuntimeTasks(ecs:EcsOutputs,db:DbOutputs,identity:Tena
       transitionCredential:config.transitionArn,runtimeCredential:config.runtime.parameterArn,tenantSecret:identity.tenantSecretArn,
       runtimeExecutionRole:config.executionRoleArn,bootstrapExecutionRole:config.bootstrapExecutionRoleArn,
       fallbackTaskDefinition:fallback.arn,fallbackImage,fallbackImages,
-      transitionTaskDefinition:transition.taskDefinition,transitionContainer:"TransitionMem9Bootstrap"}),
+      transitionTaskDefinition:verifiedProductionNonrootTaskArn(transition.taskDefinition,'transition'),transitionContainer:"TransitionMem9Bootstrap"}),
   });
   return {fallback,transition,manifest};
 }

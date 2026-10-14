@@ -1,3 +1,4 @@
+import {normalizeImageDigestResponse,imageResponseFromLegacyEvidence} from './production-image-response.mjs';
 import {createHash} from 'node:crypto';
 
 const fail=()=>{throw Error('CanaryMaterialInvalid');};
@@ -17,17 +18,7 @@ export function verifyCanaryFixtureImageIndex(response,expected){
   return verifyImageIndex(response,expected);
 }
 function verifyImageIndex(response,{account,repositoryName,rootDigest}){
-  if(!/^[0-9]{12}$/.test(account??'')||
-    !digest(rootDigest)||response?.failures?.length||!Array.isArray(response?.images)||!response.images.length||response.images.length>100)fail();
-  const bodies=new Set();
-  for(const image of response.images){
-    if(image.registryId!==account||image.repositoryName!==repositoryName||image.imageId?.imageDigest!==rootDigest||
-      typeof image.imageManifest!=='string'||Buffer.byteLength(image.imageManifest)>4194304||
-      'sha256:'+createHash('sha256').update(image.imageManifest).digest('hex')!==rootDigest)fail();
-    bodies.add(image.imageManifest);
-  }
-  if(bodies.size!==1)fail();
-  let index;try{index=JSON.parse([...bodies][0]);}catch{fail();}
+  let index;try{index=JSON.parse(normalizeImageDigestResponse(imageResponseFromLegacyEvidence(response),{registryId:account,repositoryName,imageDigest:rootDigest}).raw.toString());}catch{fail();}
   if(index.schemaVersion!==2||!['application/vnd.oci.image.index.v1+json','application/vnd.docker.distribution.manifest.list.v2+json'].includes(index.mediaType)||!Array.isArray(index.manifests))fail();
   const selected=index.manifests.filter(m=>m?.platform?.os==='linux'&&m.platform.architecture==='arm64');
   if(selected.length!==1||!digest(selected[0].digest)||selected[0].digest===rootDigest||
@@ -62,4 +53,18 @@ export function normalizeCanaryTask(definition,{account,region,images}){
   // Preserve every other field, including unknown future fields. Any residual
   // material difference remains visible to the exact comparison/hash.
   return normalized;
+}
+
+export const CANARY_BACKEND_ADDITIONAL_ATTRIBUTE='com.amazonaws.ecs.capability.docker-remote-api.1.21';
+export const CANARY_BACKEND_COMPATIBILITIES=Object.freeze(['EC2','FARGATE','MANAGED_INSTANCES']);
+/** Configured execution and response metadata are separate outputs. Callers
+ * must authenticate raw self-hashes first and verify the exact permitted
+ * attribute-set transition; this function does not itself approve a change. */
+export function projectConfiguredCanaryBackend(definition,context){
+ const normalized=normalizeCanaryTask(definition,context),list=definition.compatibilities,attributes=definition.requiresAttributes;
+ if(JSON.stringify(definition.requiresCompatibilities)!==JSON.stringify(['FARGATE'])||!Array.isArray(list)||list.length!==3||new Set(list).size!==3||
+   JSON.stringify([...list].sort())!==JSON.stringify(CANARY_BACKEND_COMPATIBILITIES)||!Array.isArray(attributes)||!attributes.length||attributes.length>100||
+   attributes.some(a=>!a||Object.keys(a).sort().join()!=='name'||typeof a.name!=='string'||!a.name||a.name.length>256)||new Set(attributes.map(a=>a.name)).size!==attributes.length)fail();
+ const {requiresAttributes:ignored,...configuration}=normalized;
+ return {configuration:{...configuration,compatibilities:[...list].sort()},metadata:{compatibilities:[...list].sort(),attributeNames:attributes.map(a=>a.name).sort()}};
 }

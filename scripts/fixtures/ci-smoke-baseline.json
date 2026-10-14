@@ -1,0 +1,1370 @@
+{
+  "workflow": {
+    "jobs": {
+      "deploy-preview": {
+        "name": "Deploy PR Preview",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "preview-ci",
+        "needs": [
+          "changes",
+          "application-region",
+          "typecheck",
+          "build-and-push-image",
+          "build-human-acceptance-image"
+        ],
+        "if": "always() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main' && needs.changes.outputs.aws_mutation_required == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success' && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped') && (needs.build-human-acceptance-image.result == 'success' || needs.build-human-acceptance-image.result == 'skipped')",
+        "timeout-minutes": 90,
+        "outputs": {
+          "stage": "${{ steps.deploy.outputs.stage }}"
+        },
+        "permissions": {
+          "id-token": "write",
+          "contents": "read",
+          "pull-requests": "write"
+        },
+        "env": {
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}",
+          "ROLE_NAME": "github-actions-mem9-on-aws-preview",
+          "MEM9_LLM_RESPONSES_REGION": "${{ vars.MEM9_LLM_RESPONSES_REGION }}",
+          "PR_NUMBER": "${{ github.event.pull_request.number }}"
+        },
+        "steps": [
+          {
+            "name": "Deployment maintenance gate",
+            "env": {
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}"
+            },
+            "run": "if [ \"$PAUSED\" = \"true\" ]; then\n  echo \"::error::AWS deployments are paused for guarded IAM maintenance\"\n  exit 1\nfi\n"
+          },
+          {
+            "name": "Gate on AWS_PREVIEW_ROLE_ARN",
+            "id": "gate",
+            "env": {
+              "BOUNDARY_ENFORCED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "HAS_AWS": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}"
+            },
+            "run": "if [ \"$BOUNDARY_ENFORCED\" != \"true\" ]; then\n  echo \"::notice::Guarded workload-boundary migration is incomplete — skipping preview deploy\"\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\nelif [ -z \"$HAS_AWS\" ]; then\n  echo \"::notice::AWS_PREVIEW_ROLE_ARN not configured — skipping preview deploy\"\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\nelse\n  echo \"skip=false\" >> \"$GITHUB_OUTPUT\"\nfi\n"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "with": {
+              "fetch-depth": 0
+            }
+          },
+          {
+            "uses": "pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "with": {
+              "package_json_file": "infra/package.json"
+            }
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "with": {
+              "node-version": 24,
+              "cache": "pnpm",
+              "cache-dependency-path": "infra/pnpm-lock.yaml"
+            }
+          },
+          {
+            "name": "Install infra dependencies",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "run": "pnpm -C infra install --frozen-lockfile"
+          },
+          {
+            "name": "Install preview acceptance dependencies",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "run": "npm ci"
+          },
+          {
+            "name": "Configure AWS credentials (OIDC)",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
+              "aws-region": "${{ env.AWS_REGION }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Preflight — verify role is assumable",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "env": {
+              "WORKLOAD_BOUNDARY_BASE_REF": "${{ github.event.pull_request.base.sha || '' }}"
+            },
+            "shell": "bash",
+            "run": "set -euo pipefail\nif ! aws sts get-caller-identity >/dev/null 2>&1; then\n  echo \"::error::OIDC role assumed but STS is unusable — check AWS_PREVIEW_ROLE_ARN / trust policy\"\n  exit 1\nfi\nif ! aws iam get-role --role-name \"$ROLE_NAME\" >/dev/null 2>&1; then\n  echo \"::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it\"\n  exit 1\nfi\nif ! WORKLOAD_BOUNDARY_SKIP_DOTENV=true \\\n  scripts/deploy-workload-permissions-boundary.sh --verify-only; then\n  echo \"::error::Workload boundary preflight failed; see the diagnostic above\"\n  exit 1\nfi\necho \"Preflight OK: OIDC deploy role assumed\"\n"
+          },
+          {
+            "name": "Verify preview role isolation",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "env": {
+              "MEM9_PROD_HOSTED_ZONE_ID": "${{ secrets.MEM9_PROD_HOSTED_ZONE_ID }}"
+            },
+            "run": "bash scripts/verify-deploy-role-isolation.sh preview"
+          },
+          {
+            "name": "Remove conflicting Pulumi installation",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "run": "# SST bundles its own Pulumi runtime; a globally-installed Pulumi can\n# win the PATH lookup and produce a version mismatch. Persistent\n# self-hosted runners can also cache stale provider binaries whose\n# schemas lag the AWS SDK.\nsudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true\nrm -rf ~/.pulumi/plugins/ 2>/dev/null || true\nrm -rf ~/.config/sst/bin/ 2>/dev/null || true\nrm -rf ~/.config/sst/plugins/ 2>/dev/null || true\n"
+          },
+          {
+            "name": "Deploy PR stage",
+            "id": "deploy",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "shell": "bash",
+            "env": {
+              "MEM9_IMAGE_TAG": "${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}",
+              "MEM9_ECR_NAMESPACE": "${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}",
+              "MEM9_BEDROCK_PROJECT": "${{ vars.MEM9_BEDROCK_PROJECT }}",
+              "MEM9_BEDROCK_PROJECT_OPENAI": "${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}",
+              "MEM9_LLM_MODEL": "${{ vars.MEM9_LLM_MODEL }}",
+              "MEM9_DURABLE_INGEST_ENABLED": "1",
+              "MEM9_DEPLOY_COMMIT": "${{ github.sha }}",
+              "MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG": "${{ needs.build-human-acceptance-image.outputs.image_tag }}",
+              "MEM9_RUNTIME_READY": "0",
+              "MEM9_NAMESPACE_REQUIRED": "0"
+            },
+            "run": "# PR_NUMBER comes from GitHub's pull_request payload (integer);\n# validate to short-circuit any injection risk.\nif ! [[ \"$PR_NUMBER\" =~ ^[0-9]+$ ]]; then\n  echo \"::error::Invalid PR number: $PR_NUMBER\"\n  exit 1\nfi\nSTAGE=\"pr-${PR_NUMBER}\"\necho \"stage=$STAGE\" >> \"$GITHUB_OUTPUT\"\necho \"Deploying to stage: $STAGE\"\n\n# Detect namespace-aware metadata without launching its cached task.\n# The new owner bootstrap runs only after this deployment and drain.\nPARAMETER_ERROR=$(mktemp)\ntrap 'rm -f \"$PARAMETER_ERROR\"' EXIT\nset +e\nEXISTING_TASK_DEF=$(aws ssm get-parameter \\\n  --name \"/mem9-on-aws/${STAGE}/bootstrap/task-def-arn\" \\\n  --region \"$AWS_REGION\" \\\n  --query Parameter.Value \\\n  --output text 2>\"$PARAMETER_ERROR\")\nPARAMETER_STATUS=$?\nset -e\nif [ \"$PARAMETER_STATUS\" -eq 0 ]; then\n  BOOTSTRAP_VERSION=$(aws ecs describe-task-definition \\\n    --task-definition \"$EXISTING_TASK_DEF\" \\\n    --region \"$AWS_REGION\" \\\n    --query \"taskDefinition.containerDefinitions[0].environment[?name=='MEM9_NAMESPACE_BOOTSTRAP_VERSION'].value | [0]\" \\\n    --output text)\n  if [ \"$BOOTSTRAP_VERSION\" = \"1\" ]; then\n    echo \"Namespace-aware preview detected\"\n    export MEM9_NAMESPACE_REQUIRED=\"1\"\n  else\n    echo \"Legacy preview detected; deploying namespace compatibility first\"\n    export MEM9_NAMESPACE_REQUIRED=\"0\"\n  fi\nelif grep -q \"ParameterNotFound\" \"$PARAMETER_ERROR\"; then\n  export MEM9_NAMESPACE_REQUIRED=\"0\"\nelse\n  echo \"::error::Could not determine whether preview stage exists: $(head -c 400 \"$PARAMETER_ERROR\")\"\n  exit \"$PARAMETER_STATUS\"\nfi\necho \"initial_namespace_required=$MEM9_NAMESPACE_REQUIRED\" >> \"$GITHUB_OUTPUT\"\n\n# Clear any stale SST state lock left by a cancelled previous run.\npnpm -C infra exec sst unlock --stage \"$STAGE\" 2>&1 || true\n\nset +e\npnpm -C infra exec sst deploy --stage \"$STAGE\" --print-logs 2>&1 | tee sst-deploy.log\nEXIT=${PIPESTATUS[0]}\nset -e\nif [ \"$EXIT\" -ne 0 ]; then\n  echo \"::error::SST deployment failed (exit $EXIT)\"\n  exit \"$EXIT\"\nfi\n"
+          },
+          {
+            "name": "Drain preview service and previous bootstrap tasks",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "node scripts/run-runtime-preview.mjs drain"
+          },
+          {
+            "name": "Run schema-bootstrap task (preview)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "shell": "bash",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "node scripts/run-runtime-preview.mjs bootstrap"
+          },
+          {
+            "name": "Deploy PR namespace enforcement",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "shell": "bash",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}",
+              "MEM9_IMAGE_TAG": "${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}",
+              "MEM9_ECR_NAMESPACE": "${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}",
+              "MEM9_BEDROCK_PROJECT": "${{ vars.MEM9_BEDROCK_PROJECT }}",
+              "MEM9_BEDROCK_PROJECT_OPENAI": "${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}",
+              "MEM9_LLM_MODEL": "${{ vars.MEM9_LLM_MODEL }}",
+              "MEM9_DURABLE_INGEST_ENABLED": "1",
+              "MEM9_DEPLOY_COMMIT": "${{ github.sha }}",
+              "MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG": "${{ needs.build-human-acceptance-image.outputs.image_tag }}",
+              "MEM9_NAMESPACE_REQUIRED": "1",
+              "MEM9_RUNTIME_READY": "1"
+            },
+            "run": "pnpm -C infra exec sst deploy --stage \"$STAGE\" --print-logs\n"
+          },
+          {
+            "name": "Reconcile namespace-enforced preview ECS deployment",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "node scripts/reconcile-ecs-deployment.mjs --stage \"$STAGE\""
+          },
+          {
+            "name": "Verify preview runtime credentials (hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "node scripts/run-runtime-preview.mjs verify"
+          },
+          {
+            "name": "Aurora administrator authority (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "node scripts/run-runtime-preview.mjs admin-probe"
+          },
+          {
+            "name": "Continuous consolidation Scheduler E2E (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}",
+              "MEM9_DEPLOY_COMMIT": "${{ github.sha }}"
+            },
+            "run": "node scripts/consolidation-scheduler-e2e.mjs"
+          },
+          {
+            "name": "Canary continuation fixture (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && needs.build-and-push-image.result == 'success'",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}",
+              "MEM9_FIXTURE_SOURCE_COMMIT": "${{ github.event.pull_request.head.sha }}",
+              "EXPECTED_IMAGE_TAG": "${{ needs.build-and-push-image.outputs.image_tag }}",
+              "EXPECTED_BOOTSTRAP_DIGEST": "${{ needs.build-and-push-image.outputs.bootstrap_digest }}",
+              "EXPECTED_FIXTURE_RUNNER_DIGEST": "${{ needs.build-and-push-image.outputs.fixture_runner_digest }}",
+              "EXPECTED_FIXTURE_DATABASE_DIGEST": "${{ needs.build-and-push-image.outputs.fixture_database_digest }}"
+            },
+            "run": "node scripts/canary-fixture-e2e.mjs"
+          },
+          {
+            "name": "MCP write-search E2E (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "shell": "bash",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "bash scripts/run-mcp-e2e.sh"
+          },
+          {
+            "name": "Namespace connection attribution E2E (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "shell": "bash",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "bash scripts/run-memory-namespace-connection-e2e.sh"
+          },
+          {
+            "name": "Namespace performance E2E (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "shell": "bash",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "bash scripts/run-memory-namespace-benchmark.sh"
+          },
+          {
+            "name": "OAuth façade smoke (preview)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "bash scripts/run-oauth-facade-smoke.sh"
+          },
+          {
+            "name": "Human namespace OAuth E2E (preview, hard)",
+            "if": "steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}",
+              "EXPECTED_HUMAN_IMAGE_TAG": "${{ needs.build-human-acceptance-image.outputs.image_tag }}"
+            },
+            "run": "bash scripts/run-human-namespace-preview-e2e.sh"
+          },
+          {
+            "name": "Cancel outstanding runtime bootstrap invocations",
+            "if": "always() && (failure() || cancelled()) && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}"
+            },
+            "run": "node scripts/run-runtime-preview.mjs cancel"
+          },
+          {
+            "name": "Comment deploy status",
+            "if": "always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''",
+            "uses": "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3",
+            "env": {
+              "STAGE": "${{ steps.deploy.outputs.stage }}",
+              "DEPLOY_STATUS": "${{ job.status }}"
+            },
+            "with": {
+              "script": "const pr = context.payload.pull_request.number;\nconst stage = process.env.STAGE;\nconst status = process.env.DEPLOY_STATUS;\nconst runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;\nconst icon = status === 'success' ? '✅' : '❌';\nconst body = [\n  `## ${icon} Preview Deployment`,\n  '',\n  `| Item | Value |`,\n  `|------|-------|`,\n  `| Stage | \\`${stage}\\` |`,\n  `| Status | ${status} |`,\n  `| Region | \\`${process.env.AWS_REGION}\\` |`,\n  `| Run | [View logs](${runUrl}) |`,\n  '',\n  `SSM parameters deployed by this stage: \\`/mem9-on-aws/${stage}/...\\``,\n  '',\n  `*The preview is removed automatically when the PR is closed.*`,\n].join('\\n');\nconst { data: comments } = await github.rest.issues.listComments({\n  owner: context.repo.owner,\n  repo: context.repo.repo,\n  issue_number: pr,\n});\nconst existing = comments.find(c =>\n  c.user.type === 'Bot' && c.body.includes('Preview Deployment')\n);\nif (existing) {\n  await github.rest.issues.updateComment({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    comment_id: existing.id,\n    body,\n  });\n} else {\n  await github.rest.issues.createComment({\n    owner: context.repo.owner,\n    repo: context.repo.repo,\n    issue_number: pr,\n    body,\n  });\n}\n"
+            }
+          }
+        ]
+      },
+      "deploy-prod": {
+        "name": "Deploy prod",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "prod",
+        "needs": [
+          "changes",
+          "application-region",
+          "typecheck",
+          "build-and-push-image",
+          "verify-production-image-transition",
+          "build-image-transition-control"
+        ],
+        "if": "always() && !inputs.runtime_cutover && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.changes.outputs.aws_mutation_required == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success' && needs.verify-production-image-transition.result == 'success' && (\n  (needs.verify-production-image-transition.outputs.image_transition == 'true' && needs.build-image-transition-control.result == 'success' && needs.build-and-push-image.result == 'skipped')\n  || (needs.verify-production-image-transition.outputs.image_transition == 'false' && needs.build-image-transition-control.result == 'skipped' && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped'))\n)",
+        "timeout-minutes": 75,
+        "permissions": {
+          "id-token": "write",
+          "contents": "read",
+          "actions": "read",
+          "pull-requests": "read"
+        },
+        "env": {
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}",
+          "ROLE_NAME": "github-actions-mem9-on-aws-prod",
+          "MEM9_EXPECT_IMAGE_TRANSITION": "${{ needs.verify-production-image-transition.outputs.image_transition }}",
+          "MEM9_LLM_RESPONSES_REGION": "${{ vars.MEM9_LLM_RESPONSES_REGION }}",
+          "MEM9_AUTH_MODE": "${{ secrets.MEM9_AUTH_MODE || 'managed' }}",
+          "MEM9_OIDC_ISSUER": "${{ secrets.MEM9_OIDC_ISSUER }}",
+          "MEM9_OIDC_CLIENT_ID": "${{ secrets.MEM9_OIDC_CLIENT_ID }}",
+          "SST_SECRET_OidcClientSecret": "${{ secrets.MEM9_OIDC_CLIENT_SECRET }}",
+          "MEM9_OIDC_TOKEN_AUTH_METHOD": "${{ secrets.MEM9_OIDC_TOKEN_AUTH_METHOD }}",
+          "MEM9_OIDC_M2M_CLIENT_ID": "${{ secrets.MEM9_OIDC_M2M_CLIENT_ID }}",
+          "SST_SECRET_OidcM2mClientSecret": "${{ secrets.MEM9_OIDC_M2M_CLIENT_SECRET }}",
+          "MEM9_OIDC_AUDIENCE": "${{ secrets.MEM9_OIDC_AUDIENCE }}",
+          "MEM9_OIDC_CLIENT_ID_CLAIM": "${{ secrets.MEM9_OIDC_CLIENT_ID_CLAIM }}",
+          "MEM9_AUTH_REQUIRED_GROUP": "${{ secrets.MEM9_AUTH_REQUIRED_GROUP }}",
+          "MEM9_AUTH_GROUP_CLAIM": "${{ secrets.MEM9_AUTH_GROUP_CLAIM }}",
+          "MEM9_RETAIN_MANAGED_AUTH": "${{ secrets.MEM9_RETAIN_MANAGED_AUTH }}"
+        },
+        "steps": [
+          {
+            "name": "Deployment maintenance gate",
+            "env": {
+              "BOUNDARY_ENFORCED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}"
+            },
+            "run": "if [ \"$PAUSED\" = \"true\" ]; then\n  echo \"::error::AWS deployments are paused for guarded IAM maintenance\"\n  exit 1\nfi\nif [ \"$BOUNDARY_ENFORCED\" != \"true\" ]; then\n  echo \"::error::Guarded workload-boundary migration is incomplete — refusing prod deployment\"\n  exit 1\nfi\n"
+          },
+          {
+            "name": "Gate on AWS_PROD_ROLE_ARN (hard-fail)",
+            "env": {
+              "HAS_AWS": "${{ secrets.AWS_PROD_ROLE_ARN }}"
+            },
+            "run": "if [ -z \"$HAS_AWS\" ]; then\n  echo \"::error::AWS_PROD_ROLE_ARN not configured — cannot deploy prod.\"\n  exit 1\nfi\n"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {
+              "fetch-depth": 0
+            }
+          },
+          {
+            "uses": "pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86",
+            "with": {
+              "package_json_file": "infra/package.json"
+            }
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "with": {
+              "node-version": 24,
+              "cache": "pnpm",
+              "cache-dependency-path": "infra/pnpm-lock.yaml"
+            }
+          },
+          {
+            "name": "Resolve Cloudflare account ID",
+            "shell": "bash",
+            "env": {
+              "MEM9_FACADE_CUSTOM_DOMAIN": "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
+              "CLOUDFLARE_API_TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+              "CLOUDFLARE_ZONE_ID": "${{ secrets.CLOUDFLARE_ZONE_ID }}"
+            },
+            "run": "node scripts/resolve-cloudflare-account.mjs"
+          },
+          {
+            "name": "Install infra dependencies",
+            "run": "pnpm -C infra install --frozen-lockfile"
+          },
+          {
+            "name": "Install production runtime operator dependencies",
+            "run": "npm ci"
+          },
+          {
+            "name": "Configure AWS credentials (OIDC)",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "aws-region": "${{ env.AWS_REGION }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Verify protected image upgrade source",
+            "env": {
+              "STAGE": "prod",
+              "MEM9_DEPLOY_ROLE_ARN": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "MEM9_DECISION_ARTIFACT_BUCKET": "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/verify-image-security-deployment.mjs"
+          },
+          {
+            "name": "Preflight — verify role is assumable",
+            "env": {
+              "WORKLOAD_BOUNDARY_BASE_REF": "${{ github.event.pull_request.base.sha || '' }}"
+            },
+            "shell": "bash",
+            "run": "set -euo pipefail\nif ! aws sts get-caller-identity >/dev/null 2>&1; then\n  echo \"::error::OIDC role assumed but STS is unusable — check AWS_PROD_ROLE_ARN / trust policy\"\n  exit 1\nfi\nif ! aws iam get-role --role-name \"$ROLE_NAME\" >/dev/null 2>&1; then\n  echo \"::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it\"\n  exit 1\nfi\nif ! WORKLOAD_BOUNDARY_SKIP_DOTENV=true \\\n  scripts/deploy-workload-permissions-boundary.sh --verify-only; then\n  echo \"::error::Workload boundary preflight failed; see the diagnostic above\"\n  exit 1\nfi\necho \"Preflight OK: OIDC deploy role assumed\"\n"
+          },
+          {
+            "name": "Verify production role isolation",
+            "run": "bash scripts/verify-deploy-role-isolation.sh production"
+          },
+          {
+            "name": "Resolve deployed image tag",
+            "id": "deploy-image",
+            "env": {
+              "IMAGE_TRANSITION": "${{ needs.verify-production-image-transition.outputs.image_transition }}",
+              "BUILT_IMAGE_TAG": "${{ needs.build-and-push-image.outputs.image_tag }}",
+              "CONTROL_IMAGE_TAG": "${{ needs.build-image-transition-control.outputs.image_tag }}",
+              "CONTROL_IMAGE_DIGEST": "${{ needs.build-image-transition-control.outputs.bootstrap_digest }}"
+            },
+            "run": "image_tag=\"$BUILT_IMAGE_TAG\"\nif [[ \"$IMAGE_TRANSITION\" == 'true' ]]; then\n  if ! [[ \"$CONTROL_IMAGE_TAG\" =~ ^mem9-[0-9a-f]{7}$ ]] || ! [[ \"$CONTROL_IMAGE_DIGEST\" =~ ^sha256:[0-9a-f]{64}$ ]]; then\n    echo \"::error::Verified control build output is missing\"\n    exit 1\n  fi\n  image_tag=\"$CONTROL_IMAGE_TAG\"\nelif [[ \"$IMAGE_TRANSITION\" != 'false' ]]; then\n  echo \"::error::Verified image transition selection is missing\"\n  exit 1\nfi\nif [[ -z \"$image_tag\" ]]; then\n  image_tag=$(aws ssm get-parameter \\\n    --name /mem9-on-aws/prod/ecs/image-tag \\\n    --region \"$AWS_REGION\" \\\n    --query Parameter.Value \\\n    --output text)\nfi\nif ! [[ \"$image_tag\" =~ ^mem9-[0-9a-f]{7}$ ]]; then\n  echo \"::error::Production image tag is unavailable or malformed\"\n  exit 1\nfi\necho \"image_tag=$image_tag\" >> \"$GITHUB_OUTPUT\"\n"
+          },
+          {
+            "name": "Remove conflicting Pulumi installation",
+            "run": "sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true\nrm -rf ~/.pulumi/plugins/ 2>/dev/null || true\nrm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true\n"
+          },
+          {
+            "name": "Verify namespace cutover phase",
+            "if": "vars.MEM9_NAMESPACE_REQUIRED == '1'",
+            "shell": "bash",
+            "env": {
+              "STAGE": "prod"
+            },
+            "run": "bash scripts/run-memory-namespace-task.sh assert-phase --expected-phase constraints_complete"
+          },
+          {
+            "name": "Recover stale SST prod lock",
+            "shell": "bash",
+            "env": {
+              "STALE_LOCK_AGE_MINUTES": "30"
+            },
+            "run": "set -euo pipefail\nBOOTSTRAP_JSON=$(aws ssm get-parameter \\\n  --name /sst/bootstrap \\\n  --query Parameter.Value \\\n  --output text 2>/dev/null || true)\nif [[ -z \"$BOOTSTRAP_JSON\" ]]; then\n  echo \"::notice::No /sst/bootstrap in ${AWS_REGION} — first prod deploy, no lock to recover\"\n  exit 0\nfi\nSTATE_BUCKET=$(echo \"$BOOTSTRAP_JSON\" | python3 -c \"import json,sys; print(json.load(sys.stdin).get('state',''))\")\nif [[ -z \"$STATE_BUCKET\" ]]; then\n  echo \"::error::Could not parse 'state' from /sst/bootstrap\"\n  exit 1\nfi\n# SST's lock key layout has varied across versions; probe the common\n# variants and unlock via the CLI (which knows the real key) if any\n# is present + stale.\nLAST_MODIFIED=\"\"\nfor LOCK_KEY in \"app/mem9-on-aws/.lock/prod.json\" \"lock/mem9-on-aws/prod.json\"; do\n  LAST_MODIFIED=$(aws s3api head-object --bucket \"$STATE_BUCKET\" --key \"$LOCK_KEY\" \\\n    --query LastModified --output text 2>/dev/null || true)\n  [[ -n \"$LAST_MODIFIED\" ]] && break\ndone\nif [[ -z \"$LAST_MODIFIED\" ]]; then\n  echo \"No lock object — proceeding with deploy\"\n  exit 0\nfi\n# One-liner python3 -c (no heredoc): a `<<'PY'` heredoc inside a YAML\n# `run: |` block keeps the closing PY indented, so bash never sees the\n# column-0 terminator and the step dies with \"unexpected EOF\" the first\n# time a lock exists. Semicolon form has no indentation-significant body.\nAGE_MINUTES=$(python3 -c 'import sys; from datetime import datetime, timezone; last = datetime.fromisoformat(sys.argv[1].replace(\"Z\", \"+00:00\")); print(f\"{(datetime.now(timezone.utc) - last).total_seconds() / 60:.1f}\")' \"$LAST_MODIFIED\")\necho \"Lock LastModified: $LAST_MODIFIED (age ${AGE_MINUTES} min)\"\nif ! [[ \"$AGE_MINUTES\" =~ ^[0-9]+(\\.[0-9]+)?$ ]]; then\n  echo \"::error::Could not parse lock age: '${AGE_MINUTES}'\"; exit 1\nfi\nif awk \"BEGIN { exit !(${AGE_MINUTES} > ${STALE_LOCK_AGE_MINUTES}) }\"; then\n  echo \"::warning::Stale prod lock (age ${AGE_MINUTES} min > ${STALE_LOCK_AGE_MINUTES}). Auto-unlocking.\"\n  pnpm -C infra exec sst unlock --stage prod\nelse\n  echo \"::error::prod lock is fresh (age ${AGE_MINUTES} min <= ${STALE_LOCK_AGE_MINUTES}). Refusing to unlock — a concurrent deploy may be running.\"\n  exit 1\nfi\n"
+          },
+          {
+            "name": "Seed OAuth HMAC key (workflow_dispatch only)",
+            "if": "github.event_name == 'workflow_dispatch' && inputs.seed_oauth_hmac",
+            "shell": "bash",
+            "run": "set -euo pipefail\nKEY=$(openssl rand -base64 32)\npnpm -C infra exec sst secret set OauthStateHmacKey \"$KEY\" --stage prod\necho \"::notice::OauthStateHmacKey seeded for prod (re-linked by the deploy below)\"\n"
+          },
+          {
+            "name": "Refresh image upgrade authorization before configure",
+            "env": {
+              "STAGE": "prod",
+              "MEM9_DEPLOY_ROLE_ARN": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "MEM9_DECISION_ARTIFACT_BUCKET": "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/verify-image-security-deployment.mjs --deploy"
+          },
+          {
+            "name": "Resolve production runtime deployment mode",
+            "env": {
+              "STAGE": "prod"
+            },
+            "run": "node scripts/run-production-runtime.mjs configure"
+          },
+          {
+            "name": "Refresh image upgrade authorization before SST",
+            "env": {
+              "STAGE": "prod",
+              "MEM9_DEPLOY_ROLE_ARN": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "MEM9_DECISION_ARTIFACT_BUCKET": "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/verify-image-security-deployment.mjs --deploy"
+          },
+          {
+            "name": "Deploy prod stage",
+            "shell": "bash",
+            "env": {
+              "MEM9_IMAGE_TAG": "${{ steps.deploy-image.outputs.image_tag }}",
+              "MEM9_EXPECTED_BOOTSTRAP_DIGEST": "${{ needs.build-image-transition-control.outputs.bootstrap_digest }}",
+              "MEM9_ECR_NAMESPACE": "mem9-on-aws",
+              "MEM9_CONSOLIDATION_SCHEDULE_ENABLED": "${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}",
+              "MEM9_COGNITO_DOMAIN_PREFIX": "${{ vars.MEM9_COGNITO_DOMAIN_PREFIX }}",
+              "MEM9_BEDROCK_PROJECT": "${{ vars.MEM9_BEDROCK_PROJECT }}",
+              "MEM9_BEDROCK_PROJECT_OPENAI": "${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}",
+              "MEM9_LLM_MODEL": "${{ vars.MEM9_LLM_MODEL }}",
+              "WORKLOAD_BOUNDARY_PROD_ENABLED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "MEM9_DURABLE_INGEST_ENABLED": "1",
+              "MEM9_NAMESPACE_REQUIRED": "${{ vars.MEM9_NAMESPACE_REQUIRED }}",
+              "MEM9_FACADE_CUSTOM_DOMAIN": "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
+              "CLOUDFLARE_API_TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+              "CLOUDFLARE_ZONE_ID": "${{ secrets.CLOUDFLARE_ZONE_ID }}",
+              "SST_SECRET_SlackWebhookUrl": "${{ secrets.SLACK_WEBHOOK_URL }}"
+            },
+            "run": "set +e\npnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log\nEXIT=${PIPESTATUS[0]}\nset -e\nif [ \"$EXIT\" -ne 0 ]; then\n  echo \"::error::SST prod deployment failed (exit $EXIT)\"\n  exit \"$EXIT\"\nfi\n"
+          },
+          {
+            "name": "Reconcile prod ECS deployment",
+            "env": {
+              "STAGE": "prod"
+            },
+            "run": "node scripts/reconcile-ecs-deployment.mjs --stage \"$STAGE\""
+          },
+          {
+            "name": "Run schema-bootstrap task (prod)",
+            "shell": "bash",
+            "env": {
+              "STAGE": "prod"
+            },
+            "run": "bash scripts/run-bootstrap-task.sh"
+          },
+          {
+            "name": "MCP write-search E2E (prod, hard)",
+            "shell": "bash",
+            "env": {
+              "STAGE": "prod"
+            },
+            "run": "bash scripts/run-mcp-e2e.sh"
+          },
+          {
+            "name": "OAuth façade smoke (prod)",
+            "env": {
+              "STAGE": "prod"
+            },
+            "run": "bash scripts/run-oauth-facade-smoke.sh"
+          },
+          {
+            "name": "Remove private image transition bundle",
+            "if": "always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''",
+            "run": "node scripts/verify-image-security-deployment.mjs --cleanup"
+          }
+        ]
+      },
+      "runtime-cutover-prod": {
+        "name": "Production runtime credential cutover",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "prod",
+        "needs": [
+          "application-region",
+          "typecheck"
+        ],
+        "if": "github.event_name == 'workflow_dispatch' && inputs.runtime_cutover && inputs.runtime_stage == 'prod'",
+        "timeout-minutes": 180,
+        "permissions": {
+          "id-token": "write",
+          "contents": "read",
+          "actions": "read",
+          "pull-requests": "read"
+        },
+        "env": {
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}",
+          "ROLE_NAME": "github-actions-mem9-on-aws-prod",
+          "MEM9_LLM_RESPONSES_REGION": "${{ vars.MEM9_LLM_RESPONSES_REGION }}",
+          "MEM9_AUTH_MODE": "${{ secrets.MEM9_AUTH_MODE || 'managed' }}",
+          "MEM9_OIDC_ISSUER": "${{ secrets.MEM9_OIDC_ISSUER }}",
+          "MEM9_OIDC_CLIENT_ID": "${{ secrets.MEM9_OIDC_CLIENT_ID }}",
+          "SST_SECRET_OidcClientSecret": "${{ secrets.MEM9_OIDC_CLIENT_SECRET }}",
+          "MEM9_OIDC_TOKEN_AUTH_METHOD": "${{ secrets.MEM9_OIDC_TOKEN_AUTH_METHOD }}",
+          "MEM9_OIDC_M2M_CLIENT_ID": "${{ secrets.MEM9_OIDC_M2M_CLIENT_ID }}",
+          "SST_SECRET_OidcM2mClientSecret": "${{ secrets.MEM9_OIDC_M2M_CLIENT_SECRET }}",
+          "MEM9_OIDC_AUDIENCE": "${{ secrets.MEM9_OIDC_AUDIENCE }}",
+          "MEM9_OIDC_CLIENT_ID_CLAIM": "${{ secrets.MEM9_OIDC_CLIENT_ID_CLAIM }}",
+          "MEM9_AUTH_REQUIRED_GROUP": "${{ secrets.MEM9_AUTH_REQUIRED_GROUP }}",
+          "MEM9_AUTH_GROUP_CLAIM": "${{ secrets.MEM9_AUTH_GROUP_CLAIM }}",
+          "MEM9_RETAIN_MANAGED_AUTH": "${{ secrets.MEM9_RETAIN_MANAGED_AUTH }}",
+          "MEM9_CONSOLIDATION_SCHEDULE_ENABLED": "${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}",
+          "MEM9_COGNITO_DOMAIN_PREFIX": "${{ vars.MEM9_COGNITO_DOMAIN_PREFIX }}",
+          "MEM9_BEDROCK_PROJECT": "${{ vars.MEM9_BEDROCK_PROJECT }}",
+          "MEM9_BEDROCK_PROJECT_OPENAI": "${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}",
+          "MEM9_LLM_MODEL": "${{ vars.MEM9_LLM_MODEL }}",
+          "WORKLOAD_BOUNDARY_PROD_ENABLED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+          "MEM9_DURABLE_INGEST_ENABLED": "1",
+          "MEM9_NAMESPACE_REQUIRED": "1",
+          "MEM9_FACADE_CUSTOM_DOMAIN": "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
+          "CLOUDFLARE_API_TOKEN": "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+          "CLOUDFLARE_ZONE_ID": "${{ secrets.CLOUDFLARE_ZONE_ID }}",
+          "SST_SECRET_SlackWebhookUrl": "${{ secrets.SLACK_WEBHOOK_URL }}",
+          "MEM9_RUNTIME_READY": "1",
+          "STAGE": "${{ inputs.runtime_stage }}"
+        },
+        "steps": [
+          {
+            "name": "Validate maintenance target",
+            "shell": "bash",
+            "env": {
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}",
+              "BOUNDARY": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "CANCELLATION_MODE": "${{ inputs.runtime_cancellation_mode }}"
+            },
+            "run": "set -euo pipefail\nif [[ \"$CANCELLATION_MODE\" != normal ]]; then echo 'Cancellation drill is preview-only'; exit 1; fi\nif [[ \"$PAUSED\" == true || \"$BOUNDARY\" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi\nif [[ \"$STAGE\" == prod ]]; then\n  [[ \"$GITHUB_REF\" == refs/heads/main ]] || { echo 'Production cutover requires main'; exit 1; }\nelse\n  [[ \"$STAGE\" =~ ^pr-[1-9][0-9]*$ ]] || { echo 'Invalid preview stage'; exit 1; }\nfi"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+          },
+          {
+            "uses": "pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86",
+            "with": {
+              "package_json_file": "infra/package.json"
+            }
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "with": {
+              "node-version": 24
+            }
+          },
+          {
+            "name": "Resolve Cloudflare account ID",
+            "run": "node scripts/resolve-cloudflare-account.mjs"
+          },
+          {
+            "name": "Install operator dependencies",
+            "run": "npm ci\npnpm -C infra install --frozen-lockfile"
+          },
+          {
+            "name": "Require the verified deployment revision",
+            "env": {
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "shell": "bash",
+            "run": "node --input-type=module <<'JS'\nimport {execFileSync} from 'node:child_process';\nconst stage=process.env.STAGE,sha=process.env.GITHUB_SHA;\nif(stage!=='prod'){\n  const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));\n  if(pr.isCrossRepository||pr.state!=='OPEN'||pr.headRefOid!==sha)throw Error('PreviewRevisionMismatch');\n}\nconst runs=JSON.parse(execFileSync('gh',['run','list','--workflow','Infra CI','--commit',sha,'--limit','20','--json','databaseId,status,conclusion'],{encoding:'utf8'}));\nlet verified=false;\nfor(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){\n  const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));\n  if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}\n}\nif(!verified)throw Error('VerifiedDeploymentRequired');\nJS"
+          },
+          {
+            "name": "Run guarded runtime cutover",
+            "uses": "./.github/actions/runtime-cutover",
+            "with": {
+              "role-arn": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "region": "${{ needs.application-region.outputs.region }}",
+              "cleanup-preview": "false"
+            }
+          },
+          {
+            "name": "Restore interrupted production runtime",
+            "if": "failure() || cancelled()",
+            "uses": "./.github/actions/runtime-recovery",
+            "with": {
+              "role-arn": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "region": "${{ needs.application-region.outputs.region }}"
+            }
+          }
+        ]
+      },
+      "runtime-cutover-preview": {
+        "name": "Preview runtime credential rehearsal (${{ inputs.runtime_stage }})",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "preview-ci",
+        "needs": [
+          "application-region",
+          "typecheck"
+        ],
+        "if": "github.event_name == 'workflow_dispatch' && inputs.runtime_cutover && inputs.runtime_stage != 'prod'",
+        "timeout-minutes": 180,
+        "permissions": {
+          "id-token": "write",
+          "contents": "read",
+          "actions": "read",
+          "pull-requests": "read"
+        },
+        "env": {
+          "MEM9_NAMESPACE_REQUIRED": "1",
+          "MEM9_RUNTIME_READY": "1",
+          "MEM9_DURABLE_INGEST_ENABLED": "1",
+          "WORKLOAD_BOUNDARY_PROD_ENABLED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+          "MEM9_CONSOLIDATION_SCHEDULE_ENABLED": "0",
+          "MEM9_BEDROCK_PROJECT": "${{ vars.MEM9_BEDROCK_PROJECT }}",
+          "MEM9_BEDROCK_PROJECT_OPENAI": "${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}",
+          "MEM9_LLM_RESPONSES_REGION": "${{ vars.MEM9_LLM_RESPONSES_REGION }}",
+          "MEM9_LLM_MODEL": "${{ vars.MEM9_LLM_MODEL }}",
+          "STAGE": "${{ inputs.runtime_stage }}",
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}"
+        },
+        "steps": [
+          {
+            "name": "Deployment maintenance gate",
+            "shell": "bash",
+            "env": {
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}",
+              "BOUNDARY": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "CANCELLATION_MODE": "${{ inputs.runtime_cancellation_mode }}"
+            },
+            "run": "set -euo pipefail\ncase \"$CANCELLATION_MODE\" in normal|cancel|resume) ;; *) exit 1 ;; esac\nif [ \"$PAUSED\" = \"true\" ]; then\n  echo '::error::AWS deployments are paused for guarded IAM maintenance'\n  exit 1\nfi\nif [[ \"$BOUNDARY\" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi\nif [[ \"$STAGE\" == prod ]]; then\n  [[ \"$GITHUB_REF\" == refs/heads/main ]] || { echo 'Production cutover requires main'; exit 1; }\nelse\n  [[ \"$STAGE\" =~ ^pr-[1-9][0-9]*$ ]] || { echo 'Invalid preview stage'; exit 1; }\nfi"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {
+              "fetch-depth": 0
+            }
+          },
+          {
+            "uses": "pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86",
+            "with": {
+              "package_json_file": "infra/package.json"
+            }
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "with": {
+              "node-version": 24
+            }
+          },
+          {
+            "name": "Install operator dependencies",
+            "run": "npm ci\npnpm -C infra install --frozen-lockfile"
+          },
+          {
+            "name": "Require the verified deployment revision",
+            "env": {
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "shell": "bash",
+            "run": "node --input-type=module <<'JS'\nimport {execFileSync} from 'node:child_process';\nconst stage=process.env.STAGE,sha=process.env.GITHUB_SHA;\nif(stage!=='prod'){\n  const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));\n  if(pr.isCrossRepository||pr.state!=='OPEN'||pr.headRefOid!==sha)throw Error('PreviewRevisionMismatch');\n}\nconst runs=JSON.parse(execFileSync('gh',['run','list','--workflow','Infra CI','--commit',sha,'--limit','20','--json','databaseId,status,conclusion'],{encoding:'utf8'}));\nlet verified=false;\nfor(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){\n  const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));\n  if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}\n}\nif(!verified)throw Error('VerifiedDeploymentRequired');\nJS"
+          },
+          {
+            "name": "Prepare guarded runtime cutover",
+            "if": "inputs.runtime_cancellation_mode != 'resume'",
+            "uses": "./.github/actions/runtime-cutover",
+            "with": {
+              "role-arn": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
+              "region": "${{ needs.application-region.outputs.region }}",
+              "phase": "prepare"
+            }
+          },
+          {
+            "name": "Arm preview cancellation rehearsal",
+            "id": "cancel_arm",
+            "if": "inputs.runtime_cancellation_mode == 'cancel'",
+            "env": {
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/run-production-runtime.mjs arm-cancellation"
+          },
+          {
+            "name": "Refresh preview resume credentials",
+            "if": "inputs.runtime_cancellation_mode == 'resume'",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
+              "aws-region": "${{ needs.application-region.outputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Resume verified cancellation rehearsal",
+            "if": "inputs.runtime_cancellation_mode == 'resume'",
+            "env": {
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/run-production-runtime.mjs resume"
+          },
+          {
+            "name": "Finish guarded runtime cutover",
+            "uses": "./.github/actions/runtime-cutover",
+            "env": {
+              "MEM9_RUNTIME_CANCELLATION_DRILL": "${{ inputs.runtime_cancellation_mode == 'cancel' && '1' || '0' }}",
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "with": {
+              "role-arn": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
+              "region": "${{ needs.application-region.outputs.region }}",
+              "phase": "finish",
+              "cleanup-preview": "true"
+            }
+          },
+          {
+            "name": "Retained data and current control acceptance (preview, hard)",
+            "if": "success() && inputs.runtime_retained_data_run != ''",
+            "env": {
+              "GH_TOKEN": "${{ github.token }}",
+              "MEM9_RETAINED_PREVIEW_DATA_RUN_ID": "${{ inputs.runtime_retained_data_run }}"
+            },
+            "run": "node scripts/run-retained-data-preview.mjs"
+          },
+          {
+            "name": "Restore interrupted preview runtime",
+            "if": "(failure() || cancelled()) && !(cancelled() && steps.cancel_arm.outputs.armed == 'true')",
+            "uses": "./.github/actions/runtime-recovery",
+            "with": {
+              "role-arn": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
+              "region": "${{ needs.application-region.outputs.region }}"
+            }
+          },
+          {
+            "name": "Remove disposable rehearsal",
+            "if": "always() && !(cancelled() && steps.cancel_arm.outputs.armed == 'true') && (inputs.runtime_cancellation_mode != 'resume' || success())",
+            "uses": "./.github/actions/runtime-cleanup",
+            "with": {
+              "role-arn": "${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
+              "region": "${{ needs.application-region.outputs.region }}"
+            }
+          }
+        ]
+      },
+      "verify-production-image-transition": {
+        "name": "Verify production image source",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "prod",
+        "needs": [
+          "changes",
+          "application-region",
+          "typecheck"
+        ],
+        "if": "!inputs.runtime_cutover && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.changes.outputs.workload_changed == 'true' || needs.changes.outputs.aws_mutation_required == 'true')",
+        "timeout-minutes": 10,
+        "permissions": {
+          "id-token": "write",
+          "contents": "read",
+          "actions": "read",
+          "pull-requests": "read"
+        },
+        "env": {
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}"
+        },
+        "outputs": {
+          "image_transition": "${{ steps.source.outputs.image_transition }}"
+        },
+        "steps": [
+          {
+            "name": "Deployment maintenance gate",
+            "env": {
+              "BOUNDARY_ENFORCED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}",
+              "HAS_AWS": "${{ secrets.AWS_PROD_ROLE_ARN }}"
+            },
+            "run": "if [ \"$PAUSED\" = \"true\" ]; then\n  echo \"::error::AWS deployments are paused for guarded IAM maintenance\"\n  exit 1\nfi\nif [ \"$BOUNDARY_ENFORCED\" != \"true\" ]; then\n  echo \"::error::Guarded workload-boundary migration is incomplete — refusing prod deployment\"\n  exit 1\nfi\nif [ -z \"$HAS_AWS\" ]; then\n  echo \"::error::Production image verification requires the active isolated deployment role\"\n  exit 1\nfi\n"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {
+              "fetch-depth": 0
+            }
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "with": {
+              "node-version": 24
+            }
+          },
+          {
+            "name": "Install production image verifier dependencies",
+            "run": "npm ci"
+          },
+          {
+            "name": "Configure AWS credentials (OIDC)",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "aws-region": "${{ env.AWS_REGION }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Verify protected image upgrade source",
+            "id": "source",
+            "env": {
+              "STAGE": "prod",
+              "MEM9_DEPLOY_ROLE_ARN": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "MEM9_DECISION_ARTIFACT_BUCKET": "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/verify-image-security-deployment.mjs"
+          },
+          {
+            "name": "Remove private image transition bundle",
+            "if": "always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''",
+            "run": "node scripts/verify-image-security-deployment.mjs --cleanup"
+          }
+        ]
+      },
+      "build-image-transition-control": {
+        "name": "Build image transition control",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "prod",
+        "needs": [
+          "application-region",
+          "verify-production-image-transition"
+        ],
+        "if": "needs.verify-production-image-transition.result == 'success' && needs.verify-production-image-transition.outputs.image_transition == 'true'",
+        "timeout-minutes": 30,
+        "permissions": {
+          "id-token": "write",
+          "contents": "read",
+          "actions": "read",
+          "pull-requests": "read"
+        },
+        "env": {
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}"
+        },
+        "outputs": {
+          "image_tag": "${{ steps.tag.outputs.image_tag }}",
+          "bootstrap_digest": "${{ steps.bootstrap.outputs.digest }}"
+        },
+        "steps": [
+          {
+            "name": "Deployment maintenance gate",
+            "env": {
+              "BOUNDARY_ENFORCED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}",
+              "HAS_AWS": "${{ secrets.AWS_PROD_ROLE_ARN }}"
+            },
+            "run": "if [ \"$PAUSED\" = \"true\" ]; then\n  echo \"::error::AWS deployments are paused for guarded IAM maintenance\"\n  exit 1\nfi\nif [ \"$BOUNDARY_ENFORCED\" != \"true\" ]; then\n  echo \"::error::Guarded workload-boundary migration is incomplete — refusing prod deployment\"\n  exit 1\nfi\nif [ -z \"$HAS_AWS\" ]; then\n  echo \"::error::Production image verification requires the active isolated deployment role\"\n  exit 1\nfi\n"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "with": {
+              "fetch-depth": 0
+            }
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "with": {
+              "node-version": 24
+            }
+          },
+          {
+            "name": "Install production image verifier dependencies",
+            "run": "npm ci"
+          },
+          {
+            "name": "Configure AWS credentials (OIDC)",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "aws-region": "${{ env.AWS_REGION }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Resolve image tag",
+            "id": "tag",
+            "env": {
+              "EVENT_NAME": "${{ github.event_name }}"
+            },
+            "run": "node scripts/image-tags.mjs"
+          },
+          {
+            "name": "Log in to Amazon ECR",
+            "id": "ecr-login",
+            "uses": "aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd"
+          },
+          {
+            "name": "Set up QEMU",
+            "uses": "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1",
+            "with": {
+              "platforms": "arm64"
+            }
+          },
+          {
+            "name": "Set up Docker Buildx",
+            "uses": "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069"
+          },
+          {
+            "name": "Verify protected image upgrade source",
+            "id": "source",
+            "env": {
+              "STAGE": "prod",
+              "MEM9_DEPLOY_ROLE_ARN": "${{ secrets.AWS_PROD_ROLE_ARN }}",
+              "MEM9_DECISION_ARTIFACT_BUCKET": "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "run": "node scripts/verify-image-security-deployment.mjs --build"
+          },
+          {
+            "name": "Build & push image transition bootstrap (arm64)",
+            "id": "bootstrap",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/bootstrap/Dockerfile",
+              "pull": true,
+              "no-cache-filters": "runtime",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.ecr-login.outputs.registry }}/mem9-on-aws/bootstrap:${{ steps.tag.outputs.image_tag }}",
+              "cache-from": "type=gha,scope=bootstrap",
+              "cache-to": "type=gha,mode=max,scope=bootstrap"
+            }
+          },
+          {
+            "name": "Remove private image transition bundle",
+            "if": "always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''",
+            "run": "node scripts/verify-image-security-deployment.mjs --cleanup"
+          }
+        ]
+      },
+      "build-and-push-image": {
+        "name": "Build & push workload images",
+        "runs-on": "${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}",
+        "environment": "${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}",
+        "needs": [
+          "changes",
+          "application-region",
+          "typecheck",
+          "verify-production-image-transition"
+        ],
+        "if": "always() && !inputs.runtime_cutover && needs.changes.outputs.workload_changed == 'true' && needs.application-region.result == 'success' && needs.typecheck.result == 'success' && (github.event_name == 'pull_request' || (needs.verify-production-image-transition.result == 'success' && needs.verify-production-image-transition.outputs.image_transition == 'false')) && (\n  github.event_name == 'push'\n  || github.event_name == 'workflow_dispatch'\n  || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')\n)",
+        "timeout-minutes": 30,
+        "permissions": {
+          "id-token": "write",
+          "contents": "read"
+        },
+        "env": {
+          "AWS_REGION": "${{ needs.application-region.outputs.region }}",
+          "ROLE_NAME": "${{ github.event_name == 'pull_request' && 'github-actions-mem9-on-aws-preview' || 'github-actions-mem9-on-aws-prod' }}",
+          "ECR_NS": "${{ github.event_name == 'pull_request' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}"
+        },
+        "outputs": {
+          "image_tag": "${{ steps.tag.outputs.image_tag }}",
+          "bootstrap_digest": "${{ steps.bootstrap.outputs.digest }}",
+          "fixture_runner_digest": "${{ steps.canary-runner.outputs.digest }}",
+          "fixture_database_digest": "${{ steps.canary-database.outputs.digest }}"
+        },
+        "steps": [
+          {
+            "name": "Deployment maintenance gate",
+            "env": {
+              "PAUSED": "${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}"
+            },
+            "run": "if [ \"$PAUSED\" = \"true\" ]; then\n  echo \"::error::AWS deployments are paused for guarded IAM maintenance\"\n  exit 1\nfi\n"
+          },
+          {
+            "name": "Gate on scope-specific AWS role",
+            "id": "gate",
+            "env": {
+              "BOUNDARY_ENFORCED": "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
+              "HAS_AWS": "${{ github.event_name == 'pull_request' && secrets.AWS_PREVIEW_ROLE_ARN || secrets.AWS_PROD_ROLE_ARN }}",
+              "EVENT_NAME": "${{ github.event_name }}"
+            },
+            "run": "if [ \"$BOUNDARY_ENFORCED\" != \"true\" ]; then\n  if [ \"$EVENT_NAME\" != \"pull_request\" ]; then\n    echo \"::error::Guarded workload-boundary migration is incomplete — refusing AWS image publication\"\n    exit 1\n  fi\n  echo \"::notice::Guarded workload-boundary migration is incomplete — skipping preview image builds\"\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\nelif [ -z \"$HAS_AWS\" ]; then\n  if [ \"$EVENT_NAME\" != \"pull_request\" ]; then\n    echo \"::error::AWS_PROD_ROLE_ARN not configured — cannot build/push workload images for prod.\"\n    exit 1\n  fi\n  echo \"::notice::AWS_PREVIEW_ROLE_ARN not configured — skipping preview image builds\"\n  echo \"skip=true\" >> \"$GITHUB_OUTPUT\"\nelse\n  echo \"skip=false\" >> \"$GITHUB_OUTPUT\"\nfi\n"
+          },
+          {
+            "uses": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "if": "steps.gate.outputs.skip != 'true'"
+          },
+          {
+            "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "with": {
+              "node-version": 24
+            }
+          },
+          {
+            "name": "Resolve image tag",
+            "id": "tag",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "env": {
+              "EVENT_NAME": "${{ github.event_name }}"
+            },
+            "run": "node scripts/image-tags.mjs"
+          },
+          {
+            "name": "Configure AWS credentials (OIDC)",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ github.event_name == 'pull_request' && secrets.AWS_PREVIEW_ROLE_ARN || secrets.AWS_PROD_ROLE_ARN }}",
+              "aws-region": "${{ env.AWS_REGION }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Log in to Amazon ECR",
+            "id": "ecr-login",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd"
+          },
+          {
+            "name": "Resolve per-image tag lists",
+            "id": "tags",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "run": "emit() { # $1 = image name (repo leaf), $2 = output key\n  {\n    echo \"$2<<EOF\"\n    while IFS= read -r tag; do\n      [ -n \"$tag\" ] && echo \"${REGISTRY}/${ECR_NS}/$1:${tag}\"\n    done <<< \"$IMAGE_TAGS\"\n    echo \"EOF\"\n  } >> \"$GITHUB_OUTPUT\"\n}\nemit mnemo-server mnemo_tags\nemit qwen3-embed  embed_tags\nemit bootstrap    bootstrap_tags\nemit llm-proxy    llm_proxy_tags\n",
+            "env": {
+              "REGISTRY": "${{ steps.ecr-login.outputs.registry }}",
+              "IMAGE_TAGS": "${{ steps.tag.outputs.image_tags }}"
+            }
+          },
+          {
+            "name": "Set up QEMU",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1",
+            "with": {
+              "platforms": "arm64"
+            }
+          },
+          {
+            "name": "Set up Docker Buildx",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069"
+          },
+          {
+            "name": "Build & push mnemo-server (arm64)",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/mnemo-server/Dockerfile",
+              "pull": true,
+              "no-cache-filters": "builder,runtime",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.tags.outputs.mnemo_tags }}",
+              "cache-from": "type=gha,scope=mnemo-server",
+              "cache-to": "type=gha,mode=max,scope=mnemo-server"
+            }
+          },
+          {
+            "name": "Smoke test mnemo-server EMF framing (non-TTY)",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "env": {
+              "MNEMO_IMAGE": "${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/mnemo-server:${{ steps.tag.outputs.image_tag }}"
+            },
+            "run": "bash scripts/run-mnemo-emf-smoke.sh"
+          },
+          {
+            "name": "Build & push qwen3-embed (arm64)",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/qwen3-embed/Dockerfile",
+              "pull": true,
+              "no-cache-filters": "runtime",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.tags.outputs.embed_tags }}",
+              "cache-from": "type=gha,scope=qwen3-embed",
+              "cache-to": "type=gha,mode=max,scope=qwen3-embed"
+            }
+          },
+          {
+            "name": "Build & push bootstrap (arm64)",
+            "id": "bootstrap",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/bootstrap/Dockerfile",
+              "pull": true,
+              "no-cache-filters": "runtime",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.tags.outputs.bootstrap_tags }}",
+              "cache-from": "type=gha,scope=bootstrap",
+              "cache-to": "type=gha,mode=max,scope=bootstrap"
+            }
+          },
+          {
+            "name": "Build & push canary fixture database (arm64)",
+            "id": "canary-database",
+            "if": "steps.gate.outputs.skip != 'true' && github.event_name == 'pull_request'",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/canary-fixture/database.Dockerfile",
+              "pull": true,
+              "no-cache-filters": "runtime",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap:${{ steps.tag.outputs.image_tag }}-canary-db",
+              "cache-from": "type=gha,scope=canary-fixture-database",
+              "cache-to": "type=gha,mode=max,scope=canary-fixture-database"
+            }
+          },
+          {
+            "name": "Build & push canary fixture runner (arm64)",
+            "id": "canary-runner",
+            "if": "steps.gate.outputs.skip != 'true' && github.event_name == 'pull_request'",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/canary-fixture/runner.Dockerfile",
+              "pull": true,
+              "no-cache-filters": "runtime",
+              "build-args": "BOOTSTRAP_IMAGE=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap@${{ steps.bootstrap.outputs.digest }}",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap:${{ steps.tag.outputs.image_tag }}-canary-runner",
+              "cache-from": "type=gha,scope=canary-fixture-runner",
+              "cache-to": "type=gha,mode=max,scope=canary-fixture-runner"
+            }
+          },
+          {
+            "name": "Build & push llm-proxy (arm64)",
+            "if": "steps.gate.outputs.skip != 'true'",
+            "uses": "docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc",
+            "with": {
+              "context": ".",
+              "file": "docker/llm-proxy/Dockerfile",
+              "pull": true,
+              "no-cache-filters": "runtime",
+              "platforms": "linux/arm64",
+              "push": true,
+              "tags": "${{ steps.tags.outputs.llm_proxy_tags }}",
+              "cache-from": "type=gha,scope=llm-proxy",
+              "cache-to": "type=gha,mode=max,scope=llm-proxy"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "actions": {
+    ".github/actions/runtime-cutover/action.yml": {
+      "name": "Guarded runtime credential cutover",
+      "description": "Prepare, apply and verify the reviewed stage runtime migration; the caller owns recovery and cleanup.",
+      "inputs": {
+        "role-arn": {
+          "required": true,
+          "description": "Existing stage-scoped deployment role"
+        },
+        "region": {
+          "required": true,
+          "description": "Application region"
+        },
+        "cleanup-preview": {
+          "default": "false",
+          "description": "Verify the disposable preview administrator after completion"
+        },
+        "phase": {
+          "default": "all",
+          "description": "all, prepare, or finish"
+        }
+      },
+      "runs": {
+        "using": "composite",
+        "steps": [
+          {
+            "name": "Validate cutover phase",
+            "shell": "bash",
+            "env": {
+              "PHASE": "${{ inputs.phase }}"
+            },
+            "run": "case \"$PHASE\" in all|prepare|finish) ;; *) exit 1 ;; esac"
+          },
+          {
+            "name": "Refresh preparation credentials",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ inputs.role-arn }}",
+              "aws-region": "${{ inputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Verify deployed operator image",
+            "env": {
+              "GH_TOKEN": "${{ github.token }}"
+            },
+            "shell": "bash",
+            "run": "node scripts/run-production-runtime.mjs image"
+          },
+          {
+            "name": "Prepare credentials and pinned fallback",
+            "if": "inputs.phase != 'finish'",
+            "shell": "bash",
+            "run": "timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs prepare"
+          },
+          {
+            "name": "Refresh cutover credentials",
+            "if": "inputs.phase != 'prepare'",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ inputs.role-arn }}",
+              "aws-region": "${{ inputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Apply bounded credential cutover",
+            "if": "inputs.phase != 'prepare'",
+            "shell": "bash",
+            "run": "timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs apply"
+          },
+          {
+            "name": "Refresh finalization credentials",
+            "if": "inputs.phase != 'prepare'",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ inputs.role-arn }}",
+              "aws-region": "${{ inputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Converge infrastructure and verify retirement",
+            "if": "inputs.phase != 'prepare'",
+            "shell": "bash",
+            "run": "node scripts/run-production-runtime.mjs finalize"
+          },
+          {
+            "name": "Verify ordinary deployment bootstrap invocation",
+            "if": "inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'",
+            "shell": "bash",
+            "run": "bash scripts/run-bootstrap-task.sh"
+          },
+          {
+            "name": "Refresh preview rehearsal credentials",
+            "if": "inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'",
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ inputs.role-arn }}",
+              "aws-region": "${{ inputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "name": "Verify preview extension upgrade and administrator backup recovery",
+            "if": "inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'",
+            "shell": "bash",
+            "run": "timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs rehearse"
+          }
+        ]
+      }
+    },
+    ".github/actions/runtime-cleanup/action.yml": {
+      "name": "Remove runtime rehearsal",
+      "description": "Refresh preview credentials and remove only the disposable rehearsal stage.",
+      "inputs": {
+        "role-arn": {
+          "required": true,
+          "description": "Existing preview deployment role"
+        },
+        "region": {
+          "required": true,
+          "description": "Application region"
+        }
+      },
+      "runs": {
+        "using": "composite",
+        "steps": [
+          {
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ inputs.role-arn }}",
+              "aws-region": "${{ inputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "shell": "bash",
+            "run": "node scripts/run-production-runtime.mjs cleanup-preview"
+          }
+        ]
+      }
+    },
+    ".github/actions/runtime-recovery/action.yml": {
+      "name": "Restore interrupted runtime",
+      "description": "Refresh stage credentials and run the bounded runtime recovery.",
+      "inputs": {
+        "role-arn": {
+          "required": true,
+          "description": "Existing stage deployment role"
+        },
+        "region": {
+          "required": true,
+          "description": "Application region"
+        }
+      },
+      "runs": {
+        "using": "composite",
+        "steps": [
+          {
+            "uses": "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            "with": {
+              "role-to-assume": "${{ inputs.role-arn }}",
+              "aws-region": "${{ inputs.region }}",
+              "mask-aws-account-id": true
+            }
+          },
+          {
+            "shell": "bash",
+            "run": "timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs recover"
+          }
+        ]
+      }
+    }
+  }
+}

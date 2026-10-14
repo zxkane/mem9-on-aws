@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handler } from "./handler";
+let handler: typeof import("./handler").handler;
+vi.mock("@aws-sdk/client-ssm", async importOriginal => ({...await importOriginal<object>(), SSMClient: class { async send(command: {input:{Names:string[]}}) { return {Parameters:[{ARN:command.input.Names[0],Name:"/mem9-on-aws/prod/observability/slack-webhook-url",Type:"SecureString",Value:WEBHOOK_URL}]}; } }}));
 
 const WEBHOOK_URL = "https://example.com/hooks/test-webhook-secret";
 const ALARM_MARKER = "SensitiveAlarmFieldMarker";
@@ -17,12 +18,17 @@ function capturedOutput(...spies: ReturnType<typeof vi.spyOn>[]): string {
 }
 
 describe("alert-router handler", () => {
-  beforeEach(() => {
-    process.env.SLACK_WEBHOOK_URL = WEBHOOK_URL;
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.stubEnv("STAGE", "prod");
+    vi.stubEnv("AWS_REGION", "ap-northeast-1");
+    vi.stubEnv("MEM9_SECRET_ACCOUNT_ID", "123456789012");
+    vi.stubEnv("SLACK_WEBHOOK_URL_PARAMETER_ARN", "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/observability/slack-webhook-url");
+    ({handler}=await import("./handler"));
   });
 
   afterEach(() => {
-    delete process.env.SLACK_WEBHOOK_URL;
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -85,14 +91,14 @@ describe("alert-router handler", () => {
     expect(output).not.toContain(ALARM_MARKER);
   });
 
-  it("TC-ALERT-005: rejects when SLACK_WEBHOOK_URL is unset", async () => {
-    delete process.env.SLACK_WEBHOOK_URL;
+  it("TC-ALERT-005: rejects when the webhook reference is unset", async () => {
+    delete process.env.SLACK_WEBHOOK_URL_PARAMETER_ARN;
     const fetchMock = vi
       .spyOn(globalThis, "fetch");
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     await expect(handler(snsEvent("{}"))).rejects.toThrow(
-      "SLACK_WEBHOOK_URL is not configured",
+      "Slack webhook configuration is unavailable",
     );
     expect(fetchMock).not.toHaveBeenCalled();
     expect(capturedOutput(errSpy)).not.toContain(WEBHOOK_URL);

@@ -104,10 +104,9 @@ Resources:
         - Key: ManagedBy
           Value: cloudformation
 
-  # S3 has no bucket-level "require TLS" setting; `aws:SecureTransport` in a
-  # bucket policy is the mechanism. This is the ONE statement — it constrains the
-  # transport and grants nothing, so it does not widen who can reach the artifact.
-  # The two reader/writer principals are admitted by their IDENTITY policies.
+  # Transport and append-only archive controls grant no access. Reader/writer
+  # principals must still be admitted by their independently scoped identity
+  # policies. Configuration-mutator governance is an additional admission check.
   DecisionArtifactBucketPolicy:
     Type: AWS::S3::BucketPolicy
     # Retain with the bucket it constrains, on both policies for the same reason
@@ -136,6 +135,46 @@ Resources:
             Condition:
               Bool:
                 aws:SecureTransport: "false"
+          # Authorization history is append-only. The bounded writer uses
+          # direct conditional PutObject; ordinary application/lock prefixes
+          # retain their existing behavior. These statements grant no access.
+          - Sid: DenyAuthorizationArchiveMissingCondition
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub ${DecisionArtifactBucket.Arn}/data-authorizations/*
+            Condition:
+              "Null":
+                s3:if-none-match: "true"
+          - Sid: DenyAuthorizationArchiveWrongCondition
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub ${DecisionArtifactBucket.Arn}/data-authorizations/*
+            Condition:
+              "Null":
+                s3:if-none-match: "false"
+              StringNotEquals:
+                s3:if-none-match: "*"
+          - Sid: DenyAuthorizationArchiveDestructiveChanges
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:ReplicateObject
+              - s3:ReplicateDelete
+              - s3:PutObjectAcl
+              - s3:PutObjectVersionAcl
+            Resource: !Sub ${DecisionArtifactBucket.Arn}/data-authorizations/*
+          - Sid: DenyAuthorizationArchiveCopy
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource: !Sub ${DecisionArtifactBucket.Arn}/data-authorizations/*
+            Condition:
+              "Null":
+                s3:x-amz-copy-source: "false"
 
 # Deliberately NO Outputs. The external setting is the source of truth for the
 # owner stack, boundary, SST, CI, and E2E; exporting a second value would invite

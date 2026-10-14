@@ -69,6 +69,8 @@ export default $config({
     };
   },
   async run() {
+    const {installNonrootDeploymentCapture}=await import('./infra/nonroot-deployment-capture');
+    const nonrootDeploymentCapture=installNonrootDeploymentCapture();
     const { assertSupportedMaintenanceConfiguration } = await import("./infra/maintenance-config");
     assertSupportedMaintenanceConfiguration();
     const { resolveAuthConfig } = await import("./infra/auth-config");
@@ -190,6 +192,6 @@ export default $config({
       standaloneCleanupTask(ecsOut, dbOut, identityOut, maintenanceIdentityOut);
     }
 
-    return {};
+    return nonrootDeploymentCapture?{nonrootDeploymentArtifactHash:await nonrootDeploymentCapture.complete()}:{};
   },
 });

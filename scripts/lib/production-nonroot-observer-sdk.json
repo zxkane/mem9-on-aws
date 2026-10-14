@@ -1,0 +1,1345 @@
+{
+  "version": 1,
+  "kind": "observer-sdk-codec-toolchain",
+  "nodeMajor": 24,
+  "bundler": {
+    "name": "rolldown",
+    "version": "1.2.13",
+    "integrity": "sha512-/5apOkwWxtACcQtZ5WlrAsKS4JwXVThQPJZ3RqIruRY9UG9M8e0VlXN068xum/JRKA4aIUoJ13ghe/kGCvidiQ==",
+    "builderSourceHash": "7ed875ccdd3edc66fa7099554c213a3c082e853809d9851b6c73f19e37d68def"
+  },
+  "packageLockHash": "e60858264abb7fa0e0f899283f895682c5720975d3360068e226a8e9f241678b",
+  "entry": "scripts/lib/production-nonroot-observer-sdk-source.mjs",
+  "inputs": [
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/commandBuilder.js",
+      "sha256": "8fc9ffe0de14afaf270e27dac8eb0dc4c3e1b91fd340163c3e53c37496fcbf42",
+      "bytesLength": 359,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch-logs",
+        "version": "3.1134.0",
+        "integrity": "sha512-ZyMDF3uh/5njAeOKVOy2gNX966vx+yilHAllSUuLv4qwAJKFgXoObOqba5b511KkQsUsYbkZYnCzmJV3Ql9j0w=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/commands/FilterLogEventsCommand.js",
+      "sha256": "8746d0cbbd586c2940bb3e77e6a7b5721f382a77d2a057ef5085d90f6e1f05d5",
+      "bytesLength": 219,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch-logs",
+        "version": "3.1134.0",
+        "integrity": "sha512-ZyMDF3uh/5njAeOKVOy2gNX966vx+yilHAllSUuLv4qwAJKFgXoObOqba5b511KkQsUsYbkZYnCzmJV3Ql9j0w=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/endpoint/EndpointParameters.js",
+      "sha256": "976b3df4a84ccc209d3451c318ba48db9a52f38e2a66f59a399f62b6edfc1b5f",
+      "bytesLength": 560,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch-logs",
+        "version": "3.1134.0",
+        "integrity": "sha512-ZyMDF3uh/5njAeOKVOy2gNX966vx+yilHAllSUuLv4qwAJKFgXoObOqba5b511KkQsUsYbkZYnCzmJV3Ql9j0w=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/models/CloudWatchLogsServiceException.js",
+      "sha256": "a6e3258db6f76c61b03a1d26ce2450f20a559974079586b6a1ce9d37af932bca",
+      "bytesLength": 321,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch-logs",
+        "version": "3.1134.0",
+        "integrity": "sha512-ZyMDF3uh/5njAeOKVOy2gNX966vx+yilHAllSUuLv4qwAJKFgXoObOqba5b511KkQsUsYbkZYnCzmJV3Ql9j0w=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/models/errors.js",
+      "sha256": "8765ab489d07499508727279ffc88e54f91ae3db926d68bda7f3678d4739ff03",
+      "bytesLength": 7923,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch-logs",
+        "version": "3.1134.0",
+        "integrity": "sha512-ZyMDF3uh/5njAeOKVOy2gNX966vx+yilHAllSUuLv4qwAJKFgXoObOqba5b511KkQsUsYbkZYnCzmJV3Ql9j0w=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch-logs/dist-es/schemas/schemas_0.js",
+      "sha256": "bc758aa0b6635aed02a3188923d76ed38081a79d8aa777fb3c3aab6db5373156",
+      "bytesLength": 94748,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch-logs",
+        "version": "3.1134.0",
+        "integrity": "sha512-ZyMDF3uh/5njAeOKVOy2gNX966vx+yilHAllSUuLv4qwAJKFgXoObOqba5b511KkQsUsYbkZYnCzmJV3Ql9j0w=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch/dist-es/commandBuilder.js",
+      "sha256": "3d5e10f08e5cd2ea2de672bff72d16cba3377580e87880e59cd0c01e1b08753c",
+      "bytesLength": 567,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch",
+        "version": "3.1142.0",
+        "integrity": "sha512-JAJ4pT5i1VpoY+XTwvYJSaLiXp8369mNBuWCgoKvncphDCf/Gu3P3qQaEA3TUOn7goZSqL5q8/klxSgoOAMiCg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch/dist-es/commands/GetMetricStatisticsCommand.js",
+      "sha256": "36579f9c5aaf5343ef43a3cc2778b9b49fbddd79c93d528355e421f796976883",
+      "bytesLength": 235,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch",
+        "version": "3.1142.0",
+        "integrity": "sha512-JAJ4pT5i1VpoY+XTwvYJSaLiXp8369mNBuWCgoKvncphDCf/Gu3P3qQaEA3TUOn7goZSqL5q8/klxSgoOAMiCg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch/dist-es/endpoint/EndpointParameters.js",
+      "sha256": "8090a35032d721dff7ac58dc09c0027998bcb318b47a227e564517325f5cf451",
+      "bytesLength": 566,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch",
+        "version": "3.1142.0",
+        "integrity": "sha512-JAJ4pT5i1VpoY+XTwvYJSaLiXp8369mNBuWCgoKvncphDCf/Gu3P3qQaEA3TUOn7goZSqL5q8/klxSgoOAMiCg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch/dist-es/models/CloudWatchServiceException.js",
+      "sha256": "7af69e94f852912e6152e0a956013530627843096caea62a4f8fc308ec1833ac",
+      "bytesLength": 313,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch",
+        "version": "3.1142.0",
+        "integrity": "sha512-JAJ4pT5i1VpoY+XTwvYJSaLiXp8369mNBuWCgoKvncphDCf/Gu3P3qQaEA3TUOn7goZSqL5q8/klxSgoOAMiCg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch/dist-es/models/errors.js",
+      "sha256": "c4a8b579856f753335b331b3c22fc7bc7c2db7adf03165b7c64e8039a90c82c3",
+      "bytesLength": 7408,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch",
+        "version": "3.1142.0",
+        "integrity": "sha512-JAJ4pT5i1VpoY+XTwvYJSaLiXp8369mNBuWCgoKvncphDCf/Gu3P3qQaEA3TUOn7goZSqL5q8/klxSgoOAMiCg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-cloudwatch/dist-es/schemas/schemas_0.js",
+      "sha256": "8a35cc3c667845de5c1cc40865a81cdb8e132f5bc150dc7468f02f541e184df2",
+      "bytesLength": 50039,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-cloudwatch",
+        "version": "3.1142.0",
+        "integrity": "sha512-JAJ4pT5i1VpoY+XTwvYJSaLiXp8369mNBuWCgoKvncphDCf/Gu3P3qQaEA3TUOn7goZSqL5q8/klxSgoOAMiCg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commandBuilder.js",
+      "sha256": "f1da0647b0b14c112ebf826a7ff0bd1df872cf62c64e5aed9d9ac25641d494c4",
+      "bytesLength": 369,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/CreateServiceCommand.js",
+      "sha256": "bef3230e63bbfb02a00890d8500173558aecd667fb7642a12707e9102963b365",
+      "bytesLength": 211,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/DeleteServiceCommand.js",
+      "sha256": "69bc1a2dfd60d5d1cdc4d7b6109c96265faee44d296b2745d1590833a27d75fd",
+      "bytesLength": 211,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/DeleteTaskDefinitionsCommand.js",
+      "sha256": "060732c8782556d7bc177e7a959b3ef8eacd5f1212e099aa73c2c762b7805f8d",
+      "bytesLength": 243,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/DeregisterTaskDefinitionCommand.js",
+      "sha256": "2109ee3fbb2a670b21cc31d0541c46f55b461120a65f049ab097320cf9ce70bf",
+      "bytesLength": 255,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/DescribeServicesCommand.js",
+      "sha256": "a5cdd6b8dbd43c4be02108ee067ab01518b28953a0e78dfe248e388011f708f5",
+      "bytesLength": 223,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/DescribeTaskDefinitionCommand.js",
+      "sha256": "66456b2127e44c468768872123bff022a93c12512c9958a91abd1be4b4608866",
+      "bytesLength": 247,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/DescribeTasksCommand.js",
+      "sha256": "45bbf1f59fa3878d5d625335d2b69ba4f1f0a2d919de63b4ea6330cf455531c9",
+      "bytesLength": 211,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/ListTasksCommand.js",
+      "sha256": "58be7102fd71af89fbd2a03eba891ad197069def6481a65b1c41f7241a485c57",
+      "bytesLength": 195,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/RegisterTaskDefinitionCommand.js",
+      "sha256": "f0379fe790cdd0add7998f6cc125d7fa1c919cad56af01b10cd7003a1201a09b",
+      "bytesLength": 247,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/RunTaskCommand.js",
+      "sha256": "b69307078e0d0d5f9c4e97bd01605ee284b109334561b6008cafe31bcccd9896",
+      "bytesLength": 187,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/StopTaskCommand.js",
+      "sha256": "4ae698ca66647ff181057dff0673ea0ad7e31e0df86a47e7912011a8ddba75e7",
+      "bytesLength": 191,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/commands/UpdateServiceCommand.js",
+      "sha256": "9ef6f9d47115df3fc5de4798b726c824d025ec579637f9026c3967963a53431c",
+      "bytesLength": 211,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/endpoint/EndpointParameters.js",
+      "sha256": "13e47779e108bdd4b031e3401ee3807e8a75d8afb947689b2372498a3f82f856",
+      "bytesLength": 559,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/models/ECSServiceException.js",
+      "sha256": "53d93cbfb22ddd8584137f928bb666fdbe3652264a1f5514c78299b092bba139",
+      "bytesLength": 299,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/models/errors.js",
+      "sha256": "4f644fee40bc7a496f6404a9dbc74f6cd0123cb783233c7a041b1eb1ff16affc",
+      "bytesLength": 11050,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ecs/dist-es/schemas/schemas_0.js",
+      "sha256": "954031b1452f5887afd616bd1af7d43cf29f4e2c6b2c713c8385f0d95a105535",
+      "bytesLength": 116007,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ecs",
+        "version": "3.1142.0",
+        "integrity": "sha512-u7q7YNQlC9BQRxrneJmIUaFANmINJGWGF7M1DkjSJauwsx4mNXS08DrP7egbeafdMndsQyWsEITHAJoTVU6dDg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-service-quotas/dist-es/commandBuilder.js",
+      "sha256": "15cd57f0d05f167041e7d527c230a150d74f1761c017ebf8a7a39eeee7c0099d",
+      "bytesLength": 367,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-service-quotas",
+        "version": "3.1142.0",
+        "integrity": "sha512-Ek7r08/HSbaLA2j4gyWtBJFaP7HqzwZdxVX/TLiWK0i5uF/UbPQZ7AHd+mmhyxxtRwxktLW1RUr30rcaIjzQyg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-service-quotas/dist-es/commands/GetServiceQuotaCommand.js",
+      "sha256": "3b040d78ce3086741c8abc72cde062e8900a190a85889ad777422550354122d4",
+      "bytesLength": 219,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-service-quotas",
+        "version": "3.1142.0",
+        "integrity": "sha512-Ek7r08/HSbaLA2j4gyWtBJFaP7HqzwZdxVX/TLiWK0i5uF/UbPQZ7AHd+mmhyxxtRwxktLW1RUr30rcaIjzQyg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-service-quotas/dist-es/endpoint/EndpointParameters.js",
+      "sha256": "bd8614131c175185fdb75eb145b7c84797224df657f38d58867590d11f840262",
+      "bytesLength": 569,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-service-quotas",
+        "version": "3.1142.0",
+        "integrity": "sha512-Ek7r08/HSbaLA2j4gyWtBJFaP7HqzwZdxVX/TLiWK0i5uF/UbPQZ7AHd+mmhyxxtRwxktLW1RUr30rcaIjzQyg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-service-quotas/dist-es/models/ServiceQuotasServiceException.js",
+      "sha256": "46a1fa48697ec9585ac1234bb848fc937475c7fea450ca1ef51e06f5bcd68164",
+      "bytesLength": 319,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-service-quotas",
+        "version": "3.1142.0",
+        "integrity": "sha512-Ek7r08/HSbaLA2j4gyWtBJFaP7HqzwZdxVX/TLiWK0i5uF/UbPQZ7AHd+mmhyxxtRwxktLW1RUr30rcaIjzQyg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-service-quotas/dist-es/models/errors.js",
+      "sha256": "75ca0759900e43d07e0ece20bdecc46f2b9f9d8ac2a97a35a6a3dea1b7ca2178",
+      "bytesLength": 7294,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-service-quotas",
+        "version": "3.1142.0",
+        "integrity": "sha512-Ek7r08/HSbaLA2j4gyWtBJFaP7HqzwZdxVX/TLiWK0i5uF/UbPQZ7AHd+mmhyxxtRwxktLW1RUr30rcaIjzQyg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-service-quotas/dist-es/schemas/schemas_0.js",
+      "sha256": "0f37a8975534b82c163c391fc95c71fe1188b8faee70e477d6948241c1586557",
+      "bytesLength": 24158,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-service-quotas",
+        "version": "3.1142.0",
+        "integrity": "sha512-Ek7r08/HSbaLA2j4gyWtBJFaP7HqzwZdxVX/TLiWK0i5uF/UbPQZ7AHd+mmhyxxtRwxktLW1RUr30rcaIjzQyg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/commandBuilder.js",
+      "sha256": "624b310e2e8679f7a7980d54d17419b3efc102f722c55ad73c47db50220bffcf",
+      "bytesLength": 375,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/commands/GetServiceCommand.js",
+      "sha256": "a06f8da384f348d23c8543bbf8332e2be6f1b0d34df9376930489359b89c5dbc",
+      "bytesLength": 199,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/commands/ListInstancesCommand.js",
+      "sha256": "e9134218760a92f50c22aa7f17261b9c74c8567b9b00b7c623f1c1cade50a0e5",
+      "bytesLength": 211,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/endpoint/EndpointParameters.js",
+      "sha256": "fa99864e3159da9b9aa5f07f45a916a17457e6ecbb728df75b890acb4bcc0497",
+      "bytesLength": 572,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/models/ServiceDiscoveryServiceException.js",
+      "sha256": "e2edc7f29cbb2139be6bd742099558d089f113caf30d0dac92111949b164db0e",
+      "bytesLength": 325,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/models/errors.js",
+      "sha256": "bb086557f5280d26042965655e7400c46e625611f0c983165db683f61e0ceb6d",
+      "bytesLength": 6413,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-servicediscovery/dist-es/schemas/schemas_0.js",
+      "sha256": "93db2ea25a4f003933c8c926b5f8257f233ff277eb7bb27e9595cf333df0f779",
+      "bytesLength": 26251,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-servicediscovery",
+        "version": "3.1109.0",
+        "integrity": "sha512-JIEmplFC6iCpINYp27oSBh9ixsrLKE5Pg/ZN9eqx1Ks2RqeCCCdoNUuohyHRbb6ZgL1wFuF0BO8gBFKD05On3A=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ssm/dist-es/commandBuilder.js",
+      "sha256": "c5e68cefc26e3c760da21ec885ac09ac56e61a7357bb99ed6374af14fb7b73c4",
+      "bytesLength": 344,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ssm",
+        "version": "3.1109.0",
+        "integrity": "sha512-NEDfBCd+bJwwnKLJdKYphFs8OWuG18UQr+tAzZSV/OFxtCX/XDIGvbG8Xacug6gv7K07uvq8MrAwKQSFAV3tmQ=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ssm/dist-es/commands/GetParameterCommand.js",
+      "sha256": "e4e4263133396aa4906fc0698a22f7b3d4fc33e0bb241c23f65a3b85dedebe6c",
+      "bytesLength": 207,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ssm",
+        "version": "3.1109.0",
+        "integrity": "sha512-NEDfBCd+bJwwnKLJdKYphFs8OWuG18UQr+tAzZSV/OFxtCX/XDIGvbG8Xacug6gv7K07uvq8MrAwKQSFAV3tmQ=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ssm/dist-es/endpoint/EndpointParameters.js",
+      "sha256": "cb59949b8668dc5a29f48f60425cdd447a34b73c9a34fe047abb7af5b5a07b1c",
+      "bytesLength": 559,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ssm",
+        "version": "3.1109.0",
+        "integrity": "sha512-NEDfBCd+bJwwnKLJdKYphFs8OWuG18UQr+tAzZSV/OFxtCX/XDIGvbG8Xacug6gv7K07uvq8MrAwKQSFAV3tmQ=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ssm/dist-es/models/SSMServiceException.js",
+      "sha256": "dbc2989adf09f90ea57207a1bbfe079fc7b7c5656ec00547daa975133e3fb417",
+      "bytesLength": 299,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ssm",
+        "version": "3.1109.0",
+        "integrity": "sha512-NEDfBCd+bJwwnKLJdKYphFs8OWuG18UQr+tAzZSV/OFxtCX/XDIGvbG8Xacug6gv7K07uvq8MrAwKQSFAV3tmQ=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ssm/dist-es/models/errors.js",
+      "sha256": "62ef0c48012a742a99ef0f709d37461aad76508c9b7f1095fc5bd73ba7ac4bb9",
+      "bytesLength": 57782,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ssm",
+        "version": "3.1109.0",
+        "integrity": "sha512-NEDfBCd+bJwwnKLJdKYphFs8OWuG18UQr+tAzZSV/OFxtCX/XDIGvbG8Xacug6gv7K07uvq8MrAwKQSFAV3tmQ=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/client-ssm/dist-es/schemas/schemas_0.js",
+      "sha256": "7ab055b4041cf14008ec61a320d2a484a7be1bdf62ce2460bcb76abe9e66a9ab",
+      "bytesLength": 197705,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/client-ssm",
+        "version": "3.1109.0",
+        "integrity": "sha512-NEDfBCd+bJwwnKLJdKYphFs8OWuG18UQr+tAzZSV/OFxtCX/XDIGvbG8Xacug6gv7K07uvq8MrAwKQSFAV3tmQ=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/ConfigurableSerdeContext.js",
+      "sha256": "e35e37c863fee753f36c943c7ba9d2cd6ef31bcc26634acf1fa885d7a96e4c15",
+      "bytesLength": 138,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/UnionSerde.js",
+      "sha256": "9bef04bc32ed77b2f62ecb6151d5751805daba19cd05cbeac16a2ba009a1956b",
+      "bytesLength": 625,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/common.js",
+      "sha256": "415e24f7ecc8f8f80554835dd85db9cef609a5c0f258f6c40fb2cd3e26708e49",
+      "bytesLength": 246,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/index.js",
+      "sha256": "6b7d2f09ab1d9cf8c89c56f2fab3405935eb9d5849bf102cd3965c6ad7943854",
+      "bytesLength": 1528,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/codec-v2/JsonBytesStringAdapter.js",
+      "sha256": "a2ec07809f31b2c276a46688416f1e6fd73b621bb992df5f359dcadd05f16556",
+      "bytesLength": 3212,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/codec-v2/JsonCodec2.js",
+      "sha256": "39aa636ad3896d36bd1ee5af4426de78410333260aa70b0d941df72ca6e7b708",
+      "bytesLength": 725,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/codec-v2/JsonShapeDeserializer2.js",
+      "sha256": "10da8e599c36ab00181a4e3c0fae7e4c2b68c4b0871c52d91ca3f5379bdc1861",
+      "bytesLength": 7460,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/codec-v2/JsonShapeSerializer2.js",
+      "sha256": "94955598d93530a63b1a0084d92e498c0aff30f8ae11d31d777c03e6092667d3",
+      "bytesLength": 18031,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/detectBufferParsing.js",
+      "sha256": "b4ca3f6b734f9bed1db26d642d6014bd951ebf6b98c8cdbfd3859513d0d16640",
+      "bytesLength": 506,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/jsonReviver.js",
+      "sha256": "ff676cc50ed28e942f6d08b5909a622a7de15ca6778366ff713d9732b2063c03",
+      "bytesLength": 3994,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/needsReviver.js",
+      "sha256": "ce84fe8e0d7a635fb4bb673d46deaefc5157eb3f4c6d7bde5d5b764a163aac15",
+      "bytesLength": 1163,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/json/parseJsonBody.js",
+      "sha256": "649779085944a8f39e18b985e16b0656a8174abfda715a095745e635fc18a04c",
+      "bytesLength": 3311,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@aws-sdk/core/dist-es/submodules/protocols/writeKey.js",
+      "sha256": "33b24e0615b11c9745f8a21ffa6c86775a44c7f16b6627a0ca7a552effa9b49c",
+      "bytesLength": 155,
+      "packagePin": {
+        "key": "node_modules/@aws-sdk/core",
+        "version": "3.978.1",
+        "integrity": "sha512-LbY9aGsEiznDWmUc30Nwv3aIX/+dbwTx8KfS0yOC3NPYMO+O91e6jkT1azf34FwjOndq8/Q+RcVVZz5xnerwdg=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/client/index.js",
+      "sha256": "448be5fc1c12166139a35add4363415d18a520ca9eff7e92b9ba8424f025c112",
+      "bytesLength": 2135,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/client/middleware-stack/MiddlewareStack.js",
+      "sha256": "f42af4aef1b6582c76f7ebfc3ec350ac85db5f7f74ba04e5f0dd6f3530f47008",
+      "bytesLength": 11543,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/client/smithy-client/client-command-builder.js",
+      "sha256": "0b35bfe414ae3124af3036f7912a6fa273d345e80350430dd159e9e1cb8ec6cd",
+      "bytesLength": 742,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/client/smithy-client/command.js",
+      "sha256": "b1f2b9f760a088a735f312826199079dee851be01ae0e8a18c4386d92bf91e92",
+      "bytesLength": 5039,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/client/smithy-client/exceptions.js",
+      "sha256": "08faa62f21eca1cd5622927f359e324cb71fd0a784f10115f3088706d5d17bd0",
+      "bytesLength": 2252,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/client/smithy-client/schemaLogFilter.js",
+      "sha256": "7df786e7c7bd56bb8b9741a8941018bb797b3abcba92e44866bf841b8593ac41",
+      "bytesLength": 1149,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/index.js",
+      "sha256": "b3508217d0cd3a81e49bb1f4aa568428e2f8b058e5c718ffef08a0b51f86d1dd",
+      "bytesLength": 2652,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/node-config-provider/configLoader.js",
+      "sha256": "52d078dae8acaf82da89c16c94bb6b0a7f6e60ddac4662289e9154fe581a03fa",
+      "bytesLength": 644,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/node-config-provider/fromEnv.js",
+      "sha256": "5f3a6ce8d3c5188471dc7a6c0783f668f14f632b16a336c4c672c55267f4053b",
+      "bytesLength": 564,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/node-config-provider/fromSharedConfigFiles.js",
+      "sha256": "2a225eb2b92529c0ffa3773bfd5dcbf41d8320d855bccf286dd2755b7bb68482",
+      "bytesLength": 1329,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/node-config-provider/fromStatic.js",
+      "sha256": "483b8df11c559ac98282a547a771a8e6693cfe3963126cc28191979f1c1021fa",
+      "bytesLength": 248,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/node-config-provider/getSelectorName.js",
+      "sha256": "fa8415cbce82ace8cb6becf56f6a30a5ae438054da339cd2712bcc53fba2548b",
+      "bytesLength": 383,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/property-provider/CredentialsProviderError.js",
+      "sha256": "617f7019b3f2b886e2f7ce1268f29a1b4c5397504da2b60ecd2cb8ad2258dd34",
+      "bytesLength": 307,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/property-provider/ProviderError.js",
+      "sha256": "909894f441e3dab7af577c86c45a16bcd17746d6ebc0c3fe15dd6e1d96beef32",
+      "bytesLength": 820,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/property-provider/chain.js",
+      "sha256": "5b15c72a0bc6fe43e789b53f4f932b99ff495f8b5ef7b8b0861e1adb4434839a",
+      "bytesLength": 579,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/property-provider/fromValue.js",
+      "sha256": "e5235e65c784464057858c1178a89960e36348a53f36a05698817fc799bd6ea1",
+      "bytesLength": 78,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/property-provider/memoize.js",
+      "sha256": "31b31dcd1eb235d912cc5eefb36fc57305e55ea9975ff3f6c5ab0e3c2e8d349e",
+      "bytesLength": 1201,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/constants.js",
+      "sha256": "1e369aefe122f677b41844b862357bfeac3e723d892b6d1182350f21ffcc0c39",
+      "bytesLength": 44,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/getConfigData.js",
+      "sha256": "35894afdd799e077acdee8c9e47b9f98169906be68361b01689ffffc76f19590",
+      "bytesLength": 748,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/getConfigFilepath.js",
+      "sha256": "97b4a9cc73f8bbed9c990c0960f70e30807a7f641f3215a92954c9981dac0ba7",
+      "bytesLength": 236,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/getCredentialsFilepath.js",
+      "sha256": "eaa8f74562459dcb899e1ee85c3fdbff70a9df7074b42ef711d9f176cc28797e",
+      "bytesLength": 268,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/getHomeDir.js",
+      "sha256": "1f07188d27fbdfa5c11d78950489a9c711a4f7aee0dbc96a2c4d89c2130851cd",
+      "bytesLength": 681,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/getProfileName.js",
+      "sha256": "8b6c9314a92f1cc72bbaa45caf0115497ae478f272d32e7b992d557919fdc449",
+      "bytesLength": 185,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/loadSharedConfigFiles.js",
+      "sha256": "6254ceb3bfa2d608c8b279c0171e80bc10025994dfad05dc978e597aa3471876",
+      "bytesLength": 1489,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/parseIni.js",
+      "sha256": "86c7fdb64c2c62078391c000676131e6e5a163dbad1dfbe93d71991ec657b7f1",
+      "bytesLength": 2262,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/shared-ini-file-loader/readFile.js",
+      "sha256": "eee0d043d18804efe2e066dab0f51f7c631eb84490840ea8cab9d4cce0993482",
+      "bytesLength": 406,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/util-config-provider/booleanSelector.js",
+      "sha256": "051dd6f06872d6fe04427157824f7dae0499ec7a31790c64cf3a7e17effd5f25",
+      "bytesLength": 306,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/config/util-config-provider/types.js",
+      "sha256": "296552af7079d0f6022148f7d6d44e611170ab0626ac71a3fee5e329083ef2e6",
+      "bytesLength": 178,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/index.js",
+      "sha256": "fbebe46ce4d4210e86b62c8461ecb434d347faf8f62a3f974090260365adb47d",
+      "bytesLength": 1804,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/adaptors/createConfigValueProvider.js",
+      "sha256": "33b30756ca8300b37e5365e41e0b6f5fcf7b43d52fcf98df76a5a36d052fde9d",
+      "bytesLength": 2199,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/adaptors/getEndpointFromConfig.js",
+      "sha256": "32fbb2eefc219a4d0b24d0e7cc0cb7c72a3390fa88a8c58716d0eef5c8471161",
+      "bytesLength": 471,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/adaptors/getEndpointFromInstructions.js",
+      "sha256": "e081e7c361d398bb9868bf3e35cb56f244a8255e436169d436b91932c0117738",
+      "bytesLength": 3238,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/adaptors/getEndpointUrlConfig.js",
+      "sha256": "f90b13b6c30d211f7b46d095e3bc800eaa3f86ba6a1f5feaa08fbe2cd2f383da",
+      "bytesLength": 1595,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/adaptors/getIgnoreConfiguredEndpointUrls.js",
+      "sha256": "175bbb2e3d22f5a299af0389a112c8ad39e3f00e98809767c225d35848c9c168",
+      "bytesLength": 575,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/adaptors/toEndpointV1.js",
+      "sha256": "6ff032d516e82cdc104ede5ca8dff25dc6eb34064f8c6a82cfdcd674b8c46244",
+      "bytesLength": 55,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/endpointMiddleware.js",
+      "sha256": "e0d03d523e8b7f848b29fb19b1f43f2b9940cf5ab7184f0709d3fb61381819b0",
+      "bytesLength": 2200,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/getEndpointPlugin.js",
+      "sha256": "fc8b400bc842e13c01382cae0c618b23144322a0813da9bfa1aa5f3bd940d207",
+      "bytesLength": 866,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/resolveEndpointConfig.js",
+      "sha256": "85bc51e0a2e0cdbd80e222c4f9f8b3271d1d04dad1d1ab100457802c798fff18",
+      "bytesLength": 1272,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/service-customizations/index.js",
+      "sha256": "31d56b8e7f69c0656cd411edea5ff9e0b1cba44f1321065a7d51629ea2cb2bc6",
+      "bytesLength": 121,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/endpoints/middleware-endpoint/service-customizations/s3.js",
+      "sha256": "e2df99b94810a69b4d4385d4aaceda3d954ed662c48d66adfafa8296906d5f23",
+      "bytesLength": 1773,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/protocols/collect-stream-body.js",
+      "sha256": "86b348bba3213d8987189e06de2a327f76ab3e9d5f0c62a201b6955d556ef4b0",
+      "bytesLength": 462,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/protocols/index.js",
+      "sha256": "5026fd8c31d56dfa7f662e9e7e158058aba49373d49ec8cf943269cc0ffd5229",
+      "bytesLength": 1735,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/protocols/serde/determineTimestampFormat.js",
+      "sha256": "bb2b7625e69a7708ddc819942fc63929c16f640614b59da52367520397efbdaa",
+      "bytesLength": 722,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/schema/TypeRegistry.js",
+      "sha256": "6a783840721161ff40b79cc7477c03acc9b7ea7a4e35f9e789f249a797598546",
+      "bytesLength": 3469,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/schema/deref.js",
+      "sha256": "6e996e1191654f49b5d89252f79f24b02b6d818a378048a0a834e4f7b86fe472",
+      "bytesLength": 140,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/schema/index.js",
+      "sha256": "f2d5fcaf1bc1f50df8a9605413065cbd815505004026f1a15e733949dac4c76a",
+      "bytesLength": 921,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/schema/schemas/NormalizedSchema.js",
+      "sha256": "7891746d10a9e4ebed9709f293ecd5ce90e582c65ae3b11d9652e9222d33ef56",
+      "bytesLength": 9738,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/schema/schemas/translateTraits.js",
+      "sha256": "226f58eeaeb4b07149cebaa1a592b05df4027a2ce658d5cd292341c2ed32600e",
+      "bytesLength": 643,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/date-utils.js",
+      "sha256": "9b64f13c90463b44c0183721802eb8e482f3207d12b4f397c92a9da9ed688590",
+      "bytesLength": 8773,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/index.js",
+      "sha256": "d5aa832be47d888b3b6c7a43061ea9b682bcfe25043e43aa2aa0f68996587a86",
+      "bytesLength": 3116,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/is-array-buffer/is-array-buffer.js",
+      "sha256": "1cadc42bc291fb5519761d6d6f99634a0d032fc9190f9754ae995cd656f451e7",
+      "bytesLength": 175,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/lazy-json.js",
+      "sha256": "119ec70e7dd90c1333b1207531c9de0f9dbad2a120952e82396bdb17cb12b37c",
+      "bytesLength": 781,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/parse-utils.js",
+      "sha256": "79e7add3b12e9e81a6fdb260aa6953f593a0772b10cfa45596352b2fd6e53377",
+      "bytesLength": 7538,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/util-base64/fromBase64.js",
+      "sha256": "40969ef2ac8d1ee68269739beb545cbf7da6170ef7f745b5be26c30fea5dfeb2",
+      "bytesLength": 491,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/util-base64/toBase64.js",
+      "sha256": "57813a013bf8e078782e0ef845f81075216db0b2ba57b198d9341ea8e73e13e5",
+      "bytesLength": 621,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/util-buffer-from/buffer-from.js",
+      "sha256": "67233738743fe391f82356fd8f5bd398eb9833ddae652188326c8fd08d3fdeb3",
+      "bytesLength": 650,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/util-stream/blob/Uint8ArrayBlobAdapter.js",
+      "sha256": "4cfbdc372b08a9b962f3617a3974d5e40128e7a84f00d765d1783ca241a41a9b",
+      "bytesLength": 923,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/util-utf8/fromUtf8.js",
+      "sha256": "f148ed9ef862006e884891fbc8997f3785fc04d38659c722b0d15e35de74b3ef",
+      "bytesLength": 247,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/util-utf8/toUtf8.js",
+      "sha256": "82e14f8b0be03a3b7154116e1ab0a48f279c54313af9cecd89901b664dc76770",
+      "bytesLength": 493,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/uuid/v4.js",
+      "sha256": "a350c133f995aec4f692dc67df2d4992499d9b4b6f97f7ad7b0bdac03de798e2",
+      "bytesLength": 1111,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/serde/value/NumericValue.js",
+      "sha256": "40648a94225e90efb6c66bdd918881089bdc2c18ff64572842d4016b95458806",
+      "bytesLength": 822,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/getSmithyContext.js",
+      "sha256": "88d85f910cd00073aabb21d7ac7a148fc4f84397a470cb4330a6b7994956ba00",
+      "bytesLength": 164,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/hasOwn.js",
+      "sha256": "25e5de9d2bee6ebd411d91987f9fdfb4f790d0cb4ed6bb56cf3d5e9a7932ba5f",
+      "bytesLength": 88,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/index.js",
+      "sha256": "32a64e94aa2d1e085dad7dcda18c8e440eb2068c3a4bfb1daaab0e0fbff7490f",
+      "bytesLength": 488,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/normalizeProvider.js",
+      "sha256": "e927e9b665c202b4703bfedb3ed09a8ec8b9c9ef22d18c4e496585b16483307d",
+      "bytesLength": 186,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/parseQueryString.js",
+      "sha256": "0fd6e80e261f30666311ae321611388ec5cc1889510e194edc24e87fcc292633",
+      "bytesLength": 692,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/parseUrl.js",
+      "sha256": "b981a24f81594ec898f1fdc00ba3723868cdec522d3485a10c25ce0a4a23f24a",
+      "bytesLength": 462,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/core/dist-es/submodules/transport/toEndpointV1.js",
+      "sha256": "d5e8fd8df4e90b4a59035655c7b757371bd0561bbcf5d0d9bb4cba9c066b10c5",
+      "bytesLength": 703,
+      "packagePin": {
+        "key": "node_modules/@smithy/core",
+        "version": "3.35.0",
+        "integrity": "sha512-zRMhfkByhT2snNdr1si24vJitU6Cr9ix2MikUfWmkAgp4jrNP0GcKSP5YvwQ+TlI8AZXER5QOGJn3JsVtSD9/A=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/types/dist-es/index.js",
+      "sha256": "aaf24cff96c78f4914448cd789f397984b630e2447d0f3ab40c16bc20fb9b791",
+      "bytesLength": 407,
+      "packagePin": {
+        "key": "node_modules/@smithy/types",
+        "version": "4.19.0",
+        "integrity": "sha512-r7jh49VJxGerfAcTQA6gXcKc+98zOp/tqRwzYjgOE+iSQsP6cEU1hq2QzbuipmP68QtYdY9wKEhiCQZIzHgZ4Q=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/types/dist-es/middleware.js",
+      "sha256": "bfda1be10e13adffd26eed0fcd011fb30cdfdd1eddc1f033bc141e40a2f735a9",
+      "bytesLength": 54,
+      "packagePin": {
+        "key": "node_modules/@smithy/types",
+        "version": "4.19.0",
+        "integrity": "sha512-r7jh49VJxGerfAcTQA6gXcKc+98zOp/tqRwzYjgOE+iSQsP6cEU1hq2QzbuipmP68QtYdY9wKEhiCQZIzHgZ4Q=="
+      }
+    },
+    {
+      "path": "node_modules/@smithy/types/dist-es/profile.js",
+      "sha256": "dc07bada1d339c032d2ae663f9a6dbf717af0d7e9aee8f12f782613ac4dfc6be",
+      "bytesLength": 240,
+      "packagePin": {
+        "key": "node_modules/@smithy/types",
+        "version": "4.19.0",
+        "integrity": "sha512-r7jh49VJxGerfAcTQA6gXcKc+98zOp/tqRwzYjgOE+iSQsP6cEU1hq2QzbuipmP68QtYdY9wKEhiCQZIzHgZ4Q=="
+      }
+    },
+    {
+      "path": "scripts/lib/production-nonroot-observer-sdk-source.mjs",
+      "sha256": "484385e491e37fcadf21301be6c0b19f240c981e4ad5225f571ac8419192214f",
+      "bytesLength": 2232
+    }
+  ],
+  "output": {
+    "path": "scripts/lib/production-nonroot-observer-sdk.mjs",
+    "sha256": "4760fbba2accf061c21a85e4a74b195c20d9b8760e12ad9f09de2190998cac70",
+    "bytesLength": 329539
+  }
+}

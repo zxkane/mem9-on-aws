@@ -1,19 +1,21 @@
 import {describe,it,expect} from 'vitest';
 import {policyForAction,simulationDecisions,auditAdditionalCredentialReaders,compactWriterInventory} from './lib/production-runtime-aws.mjs';
 
+import {expectedGatewayBoundaryPolicyDocument,gatewayBoundaryArn} from './lib/gateway-workload-boundary.mjs';
+
 const account='123456789012',region='ap-northeast-1',stage='prod';
 const role={RoleName:'mem9-on-aws-prod-SyntheticRole',Arn:`arn:aws:iam::${account}:role/mem9-on-aws-prod-SyntheticRole`};
 const boundaryArn=`arn:aws:iam::${account}:policy/mem9-on-aws-workload-boundary`;
 const document=Statement=>({Version:'2012-10-17',Statement});
 const allow={Effect:'Allow',Action:'ssm:GetParameters',Resource:'*'};
-function fixture(statements,{decision='implicitDeny',missing=[],boundary=document([allow]),perResource}={}){
+function fixture(statements,{decision='implicitDeny',missing=[],boundary=document([allow]),perResource,selectedRole=role,selectedBoundary=boundaryArn,tags=[]}={}){
   const calls=[];
   const send=async command=>{
     const {input}=command,name=command.constructor.name;calls.push({name,input});
     if(name==='GetPolicyCommand')return {Policy:{DefaultVersionId:'v1'}};
     if(name==='GetPolicyVersionCommand')return {PolicyVersion:{Document:boundary}};
-    if(name==='ListRolesCommand')return {Roles:[role]};
-    if(name==='GetRoleCommand')return {Role:{...role,PermissionsBoundary:{PermissionsBoundaryArn:boundaryArn}}};
+    if(name==='ListRolesCommand')return {Roles:[selectedRole]};
+    if(name==='GetRoleCommand')return {Role:{...selectedRole,Tags:tags,PermissionsBoundary:{PermissionsBoundaryArn:selectedBoundary}}};
     if(name==='ListRolePoliciesCommand')return {PolicyNames:['synthetic']};
     if(name==='ListAttachedRolePoliciesCommand')return {AttachedPolicies:[]};
     if(name==='GetRolePolicyCommand')return {PolicyDocument:document(statements)};
@@ -41,6 +43,25 @@ describe('credential reader policy audit',()=>{
     expect(policyForAction(document([pass,wildcard,inverse]),'ssm:GetParameters').Statement).toEqual([wildcard,inverse]);
     expect(policyForAction(document([{...inverse,NotAction:'ssm:Get*'}]),'ssm:GetParameters')).toBeNull();
     expect(()=>policyForAction(document([{...allow,NotAction:'iam:*'}]),'ssm:GetParameters')).toThrow('InvalidCredentialReaderPolicy');
+  });
+  it('audits Gateway using its actual dedicated boundary and native tags',async()=>{
+    const name='mem9-on-aws-prod-Mem9ProxyFnRole-fixture',selectedBoundary=gatewayBoundaryArn({partition:'aws',accountId:account});
+    const f=fixture([allow],{selectedRole:{RoleName:name,Arn:`arn:aws:iam::${account}:role/${name}`},selectedBoundary,
+      tags:[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:stage}],
+      boundary:expectedGatewayBoundaryPolicyDocument({partition:'aws',accountId:account,applicationRegion:region})});
+    await auditAdditionalCredentialReaders(f.clients,{stage,region,account},{roles:[]});
+    expect(f.calls.filter(c=>c.name==='GetPolicyCommand'&&c.input.PolicyArn===selectedBoundary)).toHaveLength(2);
+    expect(f.calls.find(c=>c.name==='SimulateCustomPolicyCommand').input.ContextEntries).toEqual(expect.arrayContaining([
+      {ContextKeyName:'aws:PrincipalTag/Stage',ContextKeyType:'string',ContextKeyValues:[stage]},
+      {ContextKeyName:'aws:PrincipalTag/Project',ContextKeyType:'string',ContextKeyValues:['mem9-on-aws']},
+    ]));
+  });
+  it.each([[],[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:'pr-7'}]].map(tags=>({tags})))('rejects missing or wrong Gateway tags',async ({tags})=>{
+    const name='mem9-on-aws-prod-Mem9ProxyFnRole-fixture';
+    const f=fixture([allow],{selectedRole:{RoleName:name,Arn:`arn:aws:iam::${account}:role/${name}`},tags,
+      selectedBoundary:gatewayBoundaryArn({partition:'aws',accountId:account})});
+    await expect(auditAdditionalCredentialReaders(f.clients,{stage,region,account},{roles:[]})).rejects.toThrow('CredentialReaderBoundaryMismatch');
+    expect(f.calls.some(c=>c.name==='SimulateCustomPolicyCommand')).toBe(false);
   });
   it('does not simulate a role with only unrelated conditional permissions',async()=>{
     const f=fixture([{Effect:'Allow',Action:'iam:PassRole',Resource:'*',Condition:{StringEquals:{'iam:PassedToService':'ecs-tasks.amazonaws.com'}}}]);

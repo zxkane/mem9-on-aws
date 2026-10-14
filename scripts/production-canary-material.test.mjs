@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {createHash} from 'node:crypto';
-import {verifyCanaryImageIndex,normalizeCanaryTask} from './lib/production-canary-material.mjs';
+import {verifyCanaryImageIndex,normalizeCanaryTask,projectConfiguredCanaryBackend,CANARY_BACKEND_ADDITIONAL_ATTRIBUTE} from './lib/production-canary-material.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 
 const account='123456789012',region='ap-northeast-1',registry=account+'.dkr.ecr.'+region+'.amazonaws.com';
@@ -52,4 +52,19 @@ describe('actual canary image and material comparison',()=>{
       const f=fixture();change(f);expect(()=>normalizeCanaryTask(f.current,f.context)).toThrow();
     }
   });
+});
+
+describe('configured backend projection keeps service metadata separate',()=>{
+ it('retains every execution field while sorting compatibility metadata and exposing the complete attribute set',()=>{
+  const f=fixture();for(const d of [f.definition,f.current])Object.assign(d,{compatibilities:['MANAGED_INSTANCES','EC2','FARGATE'],requiresAttributes:[{name:'ecs.capability.task-eni'}]});
+  f.current.requiresAttributes.push({name:CANARY_BACKEND_ADDITIONAL_ATTRIBUTE});
+  const before=structuredClone(f.definition),a=projectConfiguredCanaryBackend(f.definition,f.context),b=projectConfiguredCanaryBackend(f.current,f.context);
+  expect(a.configuration).toEqual(b.configuration);expect(a.metadata.attributeNames).not.toEqual(b.metadata.attributeNames);expect(f.definition).toEqual(before);
+  f.current.futureExecutionField=true;expect(projectConfiguredCanaryBackend(f.current,f.context).configuration).not.toEqual(a.configuration);
+ });
+ it.each(['duplicate-compatibility','missing-compatibility','different-platform','duplicate-attribute','attribute-extra-field','requires-compatibility'])('rejects %s',kind=>{
+  const f=fixture(),d=f.definition;Object.assign(d,{compatibilities:['EC2','FARGATE','MANAGED_INSTANCES'],requiresAttributes:[{name:'ecs.capability.task-eni'}]});
+  if(kind==='duplicate-compatibility')d.compatibilities[2]='EC2';if(kind==='missing-compatibility')d.compatibilities.pop();if(kind==='different-platform')d.runtimePlatform.cpuArchitecture='X86_64';if(kind==='duplicate-attribute')d.requiresAttributes.push(d.requiresAttributes[0]);if(kind==='attribute-extra-field')d.requiresAttributes[0].value='unrecognized';if(kind==='requires-compatibility')d.requiresCompatibilities.push('EC2');
+  expect(()=>projectConfiguredCanaryBackend(d,f.context)).toThrow();
+ });
 });

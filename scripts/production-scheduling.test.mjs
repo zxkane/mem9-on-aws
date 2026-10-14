@@ -2,6 +2,7 @@ import {describe,it,expect} from 'vitest';
 import {activateProductionScheduling,verifyProductionScheduling,disableProductionScheduling,enableProductionScheduling,captureProductionBackend} from './lib/production-scheduling.mjs';
 import {productionArtifactAdmission,bindProductionBackend,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
 import {productionRecurringEnvironment} from './lib/production-scheduler-context.mjs';
+import {requireMaintenanceAdmission,installMaintenanceAdmission} from './lib/production-maintenance-admission.mjs';
 
 const revision='a'.repeat(40),admission='b'.repeat(64),account='123456789012',region='ap-northeast-1';
 function deployment(){
@@ -36,6 +37,18 @@ function deployment(){
   return {targets,calls,server,clients:{ecs:{send},scheduler:{send}}};
 }
 describe('production scheduling admission and deployment',()=>{
+  it('cached schedule targets cannot bypass a required transition gate',async()=>{
+    const f=deployment(),activationSeed='f'.repeat(64);requireMaintenanceAdmission(f.clients);
+    const token=productionArtifactAdmission(activationSeed,f.targets[0].sourceTag,f.targets[0].image);
+    await expect(enableProductionScheduling(f.clients,f.targets,{admission:token,activationSeed,assertRelease:async()=>{}})).rejects.toThrow('MaintenanceAdmissionRequired');
+    expect(f.calls.filter(c=>c.constructor.name==='UpdateScheduleCommand')).toEqual([]);
+  });
+  it('activation settings are checked after current-main verification and before each setting mutation',async()=>{
+    let phase='ready',writes=0,mint;const clients={},binding={owner:'a'.repeat(32),operationHash:'b'.repeat(64),fenceHash:'c'.repeat(64),sourceTree:'d'.repeat(40)};
+    mint=installMaintenanceAdmission(clients,{binding,assertCurrent:()=>{},verify:async event=>mint(event,{...binding,phase,observedMs:Date.now(),expiresMs:Date.now()+200000})});
+    const deps={clients,currentMain:async()=>revision,setSecret:async()=>{writes++;phase='before-witness';},enable:async()=>{throw Error('MustNotEnable');},verify:async()=>{}};
+    await expect(activateProductionScheduling(deps,{revision,admission,activationSeed:'e'.repeat(64)})).rejects.toThrow('MaintenancePhaseDenied');expect(writes).toBe(1);
+  });
   it('checks retained data roots independently of the current control revision',async()=>{
     const f=deployment(),selected=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/mnemo-server@sha256:${'e'.repeat(64)}`;
     for(const target of f.targets)target.dataRelease={images:{'mnemo-server':selected}};

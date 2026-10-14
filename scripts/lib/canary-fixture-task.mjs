@@ -1,6 +1,7 @@
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {parseCanaryFixtureIdentity,fixtureCaseNames} from '../canary-fixture-runner.mjs';
 import {verifyCanaryFixtureEvidence} from './production-canary-fixture-evidence.mjs';
+import {controlLaunchPolicy} from './production-nonroot-launch.mjs';
 const fail=()=>{throw Error('CanaryFixtureTaskInvalid');};
 const digest=value=>/^sha256:[a-f0-9]{64}$/.test(value??'');
 const names=['CanaryPostgres','Mem9CanaryFixture'];
@@ -24,10 +25,10 @@ export function createCanaryFixtureDefinition(meta,images,identity){
   return {family:meta.cluster+'-CanaryFixture-'+identity.nonce,networkMode:'awsvpc',requiresCompatibilities:['FARGATE'],
     runtimePlatform:{cpuArchitecture:'ARM64',operatingSystemFamily:'LINUX'},executionRoleArn:meta.executionRoleArn,cpu:'1024',memory:'2048',volumes:[],
     containerDefinitions:[
-      {...structuredClone(common),name:'Mem9CanaryFixture',image:images.runner.image,user:'1000:1000',cpu:768,memory:1024,
+      controlLaunchPolicy('canary-fixture',{...structuredClone(common),name:'Mem9CanaryFixture',image:images.runner.image,user:'1000:1000',cpu:768,memory:1024,
         entryPoint:['node'],command:['/bootstrap/operator/scripts/canary-fixture-runner.mjs'],
         environment:[{name:'MEM9_STAGE',value:meta.stage},{name:'MEM9_CANARY_FIXTURE_IDENTITY',value:JSON.stringify(identity)}],
-        dependsOn:[{containerName:'CanaryPostgres',condition:'HEALTHY'}]},
+        dependsOn:[{containerName:'CanaryPostgres',condition:'HEALTHY'}]}),
       {...structuredClone(common),name:'CanaryPostgres',image:images.database.image,user:'999:999',cpu:256,memory:1024,
         entryPoint:['docker-entrypoint.sh'],command:['postgres','-c','listen_addresses=127.0.0.1','-c','hba_file=/fixture-pg-hba.conf','-c','log_min_error_statement=panic','-c','log_error_verbosity=terse'],environment:[],
         healthCheck:{command:['CMD','pg_isready','-h','127.0.0.1','-U','postgres','-d','runtime_credentials_test'],interval:5,timeout:5,retries:3,startPeriod:30}},

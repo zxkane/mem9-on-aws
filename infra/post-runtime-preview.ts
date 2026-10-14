@@ -5,7 +5,12 @@ import type {ProductionRuntimeResources} from './production-runtime';
 import {accountId,applicationRegion,selectedDataRelease} from './ecr';
 import {resolveVpc} from './vpc';
 import {isConsolidationPreview,validatePreviewContext} from '../scripts/lib/consolidation-preview-config.mjs';
-import {POST_RUNTIME_OPERATOR,postRuntimeTaskTrust,postRuntimeExecutionPolicy,postRuntimeCredentialReferences,postRuntimeOperatorEnvironment} from '../scripts/lib/post-runtime-preview-route.mjs';
+import {POST_RUNTIME_OPERATOR,POST_RUNTIME_PURPOSES,postRuntimeTaskTrust,postRuntimeExecutionPolicy,postRuntimeCredentialReferences,postRuntimeOperatorEnvironment,bindPostRuntimePurposeMap} from '../scripts/lib/post-runtime-preview-route.mjs';
+import {controlLaunchPolicy} from '../scripts/lib/production-nonroot-launch.mjs';
+import {ECSClient,DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
+import {applyNonrootControlTask} from './nonroot-task-definition';
+import {previewRegistrationFromProviderArgs} from '../scripts/lib/nonroot-preview-source.mjs';
+import {parseNonrootJson} from '../scripts/lib/production-nonroot-contracts.mjs';
 
 export function verifiedPostRuntimePreview(stage:string,context:{kind:string;runtimeNonce:string},generation:string):Output<any>{
   if(!isConsolidationPreview(stage))throw Error('InvalidPostRuntimePreviewContext');
@@ -46,6 +51,7 @@ export function postRuntimePreviewOperator(ecs:EcsOutputs,db:DbOutputs,config:Co
     return {...value,account:proof.account,region:proof.region,controlSourceTree:proof.controlSourceTree,
       image:`${proof.account}.dkr.ecr.${proof.region}.amazonaws.com/mem9-on-aws/preview/bootstrap@${value.rootDigest}`};
   });
+  let generatedRegistration:Output<string>|undefined;
   const task=new sst.aws.Task(POST_RUNTIME_OPERATOR,{cluster:ecs.cluster,architecture:'arm64',cpu:'0.25 vCPU',memory:'0.5 GB',
     image:inputs.apply(v=>v.image),entrypoint:['node'],command:['/bootstrap/operator/scripts/consolidation-preview-fixture.mjs'],
     environment:inputs.apply(v=>postRuntimeOperatorEnvironment({...v,stage,generation:config.generation,context:config.context})),
@@ -63,22 +69,59 @@ export function postRuntimePreviewOperator(ecs:EcsOutputs,db:DbOutputs,config:Co
         args.inlinePolicies=[{name:'PostRuntimePreviewSecrets',policy:inputs.apply(v=>JSON.stringify(postRuntimeExecutionPolicy(Object.values(v.credentials) as string[],v.kmsKeyArn,v.region)))}];
       },
       taskDefinition:args=>{
-        args.tags={...(args.tags as Record<string,string>??{}),...tags};
+        args.tags={...(args.tags as Record<string,string>??{}),...tags,'sst:app':$app.name,'sst:stage':$app.stage};
+        args.trackLatest=false;
         const definitions=args.containerDefinitions as Output<string>;
         if(!definitions||typeof definitions.apply!=='function')throw Error('InvalidPostRuntimePreviewDefinition');
         args.containerDefinitions=definitions.apply(raw=>{
-          const values=JSON.parse(raw);if(values.length!==1||values[0].name!==POST_RUNTIME_OPERATOR)throw Error('InvalidPostRuntimePreviewDefinition');
-          Object.assign(values[0],{user:'node',readonlyRootFilesystem:true,pseudoTerminal:false,linuxParameters:{capabilities:{drop:['ALL']}}});
+          const values=structuredClone(parseNonrootJson(raw)) as Array<Record<string,unknown>>;
+          if(!Array.isArray(values)||values.length!==1||values[0].name!==POST_RUNTIME_OPERATOR)throw Error('InvalidPostRuntimePreviewDefinition');
+          Object.assign(values[0],{readonlyRootFilesystem:true,pseudoTerminal:false});
           return JSON.stringify(values);
         });
+        applyNonrootControlTask(args,POST_RUNTIME_OPERATOR,'post-runtime-fixture');
+        generatedRegistration=$jsonStringify({...args});
       },
     },
   });
-  new aws.ssm.Parameter('PostRuntimePreviewOperator',{name:`/mem9-on-aws/${stage}/consolidation-preview/operator`,type:'String',tags,
-    value:$jsonStringify({version:1,kind:'post-runtime-preview-operator',stage,account,region,generation:config.generation,context:config.context,
+  const route=$jsonStringify({version:1,kind:'post-runtime-preview-operator',stage,account,region,generation:config.generation,context:config.context,
       controlSourceTree:inputs.apply(v=>v.controlSourceTree),clusterArn:inputs.apply(v=>v.proof.manifest.clusterArn),taskDefinitionArn:task.taskDefinition,
       containerName:POST_RUNTIME_OPERATOR,image:inputs.apply(v=>v.image),taskRoleArn:task.nodes.taskRole.arn,executionRoleArn:task.nodes.executionRole.arn,
-      subnets:inputs.apply(v=>v.subnets),securityGroup:db.taskSecurityGroupId,host:db.host,port:db.port,database:db.database,kmsKeyArn:key.arn,credentials:references}),
+      subnets:inputs.apply(v=>v.subnets),securityGroup:db.taskSecurityGroupId,host:db.host,port:db.port,database:db.database,kmsKeyArn:key.arn,credentials:references});
+  const guardedRoute=task.nodes.taskDefinition.apply(definition=>{
+    if(!generatedRegistration)throw Error('NonrootPreviewGeneratedDefinitionMissing');
+    return generatedRegistration.apply(raw=>route.apply(routeText=>{
+      const value=JSON.parse(routeText),registration=previewRegistrationFromProviderArgs(JSON.parse(raw));
+      // Keep the base pause definition first in the dependency chain even
+      // when its purpose appears later in the map's preserved order.
+      let previousDefinition=definition;
+      const records=POST_RUNTIME_PURPOSES.map(purpose=>{
+        const target:Record<string,unknown>=structuredClone(registration);
+        if(purpose!=='preview-fixture-pause'){
+          const c=(target.containerDefinitions as Array<Record<string,unknown>>)[0];
+          c.environment=(c.environment as Array<{name:string;value:string}>).map(e=>e.name==='MEM9_BOOTSTRAP_OPERATION'?{...e,value:'consolidation-preview-'+purpose.slice('preview-fixture-'.length)}:e);
+          target.containerDefinitions=[controlLaunchPolicy(purpose,c)];
+        }
+        const {containerDefinitions,tags:definitionTags,...fields}=target;
+        let arn=task.taskDefinition;
+        if(purpose!=='preview-fixture-pause'){
+          const additional=new aws.ecs.TaskDefinition('Mem9PostFixturePurpose'+purpose.split('-').map(p=>p[0].toUpperCase()+p.slice(1)).join(''),{
+            ...fields,containerDefinitions:JSON.stringify(containerDefinitions),tags:Object.fromEntries((definitionTags as Array<{key:string;value:string}>).map(t=>[t.key,t.value])),
+            trackLatest:false,skipDestroy:true,
+          } as ConstructorParameters<typeof aws.ecs.TaskDefinition>[1],{dependsOn:[previousDefinition]});
+          previousDefinition=additional;arn=additional.arn;
+        }
+        return arn.apply(async taskDefinition=>{
+          const client=new ECSClient({region:value.region});
+          try{
+            const response=await client.send(new DescribeTaskDefinitionCommand({taskDefinition,include:['TAGS']}),{abortSignal:AbortSignal.timeout(30000)});
+            return {purpose,registration:target,observation:JSON.parse(JSON.stringify({taskDefinition:response.taskDefinition,tags:response.tags}))};
+          }finally{client.destroy();}
+        });
+      });
+      return $jsonStringify(records).apply(text=>JSON.stringify(bindPostRuntimePurposeMap(value,JSON.parse(text))));
+    }));
   });
+  new aws.ssm.Parameter('PostRuntimePreviewOperator',{name:`/mem9-on-aws/${stage}/consolidation-preview/operator`,type:'String',tags,value:guardedRoute});
   return task;
 }

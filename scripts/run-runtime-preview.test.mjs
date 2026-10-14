@@ -5,6 +5,7 @@ import {createServer} from 'node:http';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
+import {nonrootPreviewFixture} from './nonroot-preview.fixture.mjs';
 
 const stage='pr-7',region='ap-northeast-1',account='123456789012';
 const cluster='mem9-on-aws-pr-7-Mem9Cluster-abc',clusterArn=`arn:aws:ecs:${region}:${account}:cluster/${cluster}`;
@@ -12,10 +13,14 @@ const family=cluster+'-Mem9Bootstrap',taskDefinition=`arn:aws:ecs:${region}:${ac
 const prefix='/mem9-on-aws/pr-7';
 const serverTaskDefinition=`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-Mem9Server:9`;
 const tenantSecret=`arn:aws:secretsmanager:${region}:${account}:secret:mem9-on-aws-pr-7-tenant-api-key-abc`;
-const shape={cluster,taskDefinition,securityGroup:'sg-abc',subnets:['subnet-abc'],service:'Mem9Server'};
+const shape={cluster,taskDefinition,securityGroup:'sg-0123456789abcdef0',subnets:['subnet-0123456789abcdef0'],service:'Mem9Server'};
 function harness(){
   let time=1000000,sequence=0;const calls=[],journals=new Map(),tasks=[];
   const state={desiredCount:0,runningCount:0,pendingCount:0,loseRunResponse:false,wrongRevision:false};
+  const guarded=nonrootPreviewFixture({stage,region,account,cluster,secrets:[
+    {name:'MEM9_RUNTIME_DB_SECRET',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/database-credential`},
+    {name:'MEM9_PROBE_ADMIN_CREDENTIAL',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/admin-probe-credential`},
+    {name:'MEM9_TENANT_ID',valueFrom:tenantSecret}]});
   const serverDefinition={taskDefinitionArn:serverTaskDefinition,family:cluster+'-Mem9Server',
     taskRoleArn:`arn:aws:iam::${account}:role/mem9-on-aws-pr-7-Mem9ServerTaskRole-role`,
     executionRoleArn:`arn:aws:iam::${account}:role/mem9-on-aws-pr-7-Mem9ServerExecutionRole-role`,
@@ -32,7 +37,11 @@ function harness(){
   const send=async command=>{
     const name=command.constructor.name,input=command.input;calls.push({name,input});
     switch(name){
-      case 'GetParametersCommand':return {Parameters:input.Names.map(Name=>({Name,Value:{
+      case 'GetCallerIdentityCommand':return {Account:account};
+      case 'GetParametersCommand':if(input.Names[0].endsWith('/purpose-bindings'))return {Parameters:input.Names.map(Name=>{
+        const p=structuredClone(guarded.parameters.get(Name));if(state.changedMapAfterJournal&&journals.size&&Name.endsWith('/purpose-bindings'))p.Version++;return p;
+      }),...(state.missingMap?{InvalidParameters:[input.Names[0]]}:{})};
+      return {Parameters:input.Names.map(Name=>({Name,Value:{
         'bootstrap/cluster-name':cluster,'bootstrap/task-def-arn':taskDefinition,'bootstrap/task-sg-id':shape.securityGroup,
         'bootstrap/subnet-ids':shape.subnets.join(','),'ecs/service-name':shape.service,'ecs/task-definition':serverTaskDefinition}[Name.slice(prefix.length+1)]}))};
       case 'GetParametersByPathCommand':return {Parameters:[...journals].map(([Name,Value])=>({Name,Value}))};
@@ -45,14 +54,15 @@ function harness(){
         if(t.automatic)t.lastStatus='STOPPED';return {...t};
       })};
       case 'StopTaskCommand':tasks.find(t=>t.taskArn===input.task).lastStatus='STOPPED';return {};
-      case 'DescribeTaskDefinitionCommand':if(input.taskDefinition===serverTaskDefinition)return {taskDefinition:serverDefinition};return {taskDefinition:{family,containerDefinitions:[{name:'Mem9Bootstrap',environment:[
-        {name:'MEM9_STAGE',value:stage},{name:'MEM9_RUNTIME_BOOTSTRAP_VERSION',value:state.wrongRevision?'0':'1'}],
-        secrets:[{name:'MEM9_RUNTIME_DB_SECRET',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/database-credential`},
-          {name:'MEM9_PROBE_ADMIN_CREDENTIAL',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/${state.wrongProbeReference?'wrong':'admin-probe-credential'}`},
-          {name:'MEM9_TENANT_ID',valueFrom:tenantSecret}],
-        logConfiguration:{options:{'awslogs-group':'/sst/synthetic','awslogs-stream-prefix':'bootstrap'}}}]}};
+      case 'DescribeTaskDefinitionCommand':{
+        if(input.taskDefinition===serverTaskDefinition)return {taskDefinition:serverDefinition};
+        const observed=structuredClone(guarded.definitions.get(input.taskDefinition));
+        if(state.wrongRevision)observed.taskDefinition.containerDefinitions[0].environment.find(e=>e.name==='MEM9_RUNTIME_BOOTSTRAP_VERSION').value='0';
+        if(state.wrongProbeReference)observed.taskDefinition.containerDefinitions[0].secrets.find(e=>e.name==='MEM9_PROBE_ADMIN_CREDENTIAL').valueFrom+='-wrong';
+        return observed;
+      }
       case 'RunTaskCommand':{
-        const task={taskArn:`arn:aws:ecs:${region}:${account}:task/${cluster}/task-${++sequence}`,clusterArn,taskDefinitionArn:taskDefinition,
+        const task={taskArn:`arn:aws:ecs:${region}:${account}:task/${cluster}/task-${++sequence}`,clusterArn,taskDefinitionArn:input.taskDefinition,
           overrides:input.overrides,lastStatus:'PENDING',automatic:!state.loseRunResponse,containers:[{name:'Mem9Bootstrap',exitCode:0}]};
         tasks.push(task);if(state.loseRunResponse)throw Error('SyntheticLostResponse');return {tasks:[task]};
       }
@@ -72,7 +82,7 @@ function harness(){
       default:throw Error('UnexpectedCommand '+name);
     }
   };
-  return {state,calls,journals,tasks,ready,serverDefinition,contract,now:()=>time,run:operation=>runRuntimePreview({clients:{ssm:{send},ecs:{send},logs:{send},iam:{send}},stage,region,operation,
+  return {state,calls,journals,tasks,ready,serverDefinition,contract,guarded,now:()=>time,run:operation=>runRuntimePreview({clients:{ssm:{send},ecs:{send},logs:{send},iam:{send},sts:{send}},stage,region,operation,sourceTree:guarded.scope.sourceTree,
     now:()=>time,sleep:async ms=>{time+=ms;},progress:()=>{}})};
 }
 describe('preview runtime deployment orchestration',()=>{
@@ -144,13 +154,26 @@ describe('preview runtime deployment orchestration',()=>{
   });
   it('RUNTIME-009: never launches a cached owner bootstrap lacking the runtime marker',async()=>{
     const f=harness();f.state.wrongRevision=true;
-    await expect(f.run('bootstrap')).rejects.toThrow('RuntimeBootstrapRevisionMismatch');
+    await expect(f.run('bootstrap')).rejects.toThrow('NonrootPreviewReadbackChanged');
     expect(f.calls.some(c=>c.name==='RunTaskCommand')).toBe(false);
   });
   it('refuses an administrator probe with a foreign credential reference before launch',async()=>{
     const f=harness();f.state.wrongProbeReference=true;
-    await expect(f.run('admin-probe')).rejects.toThrow('AdminProbeCredentialMismatch');
+    await expect(f.run('admin-probe')).rejects.toThrow('NonrootPreviewReadbackChanged');
     expect(f.calls.some(c=>c.name==='RunTaskCommand')).toBe(false);
+  });
+  it('requires the purpose map and rechecks its version after journal writes without a legacy launch fallback',async()=>{
+    for(const key of ['missingMap','changedMapAfterJournal']){
+      const f=harness();f.state[key]=true;await expect(f.run('bootstrap')).rejects.toThrow(/NonrootPreviewBindings/);
+      expect(f.calls.some(c=>c.name==='RunTaskCommand')).toBe(false);
+    }
+  });
+  it('selects different exact revisions for bootstrap and administrator cleanup',async()=>{
+    const f=harness();await f.run('bootstrap');await f.run('admin-probe-cleanup');
+    const runs=f.calls.filter(c=>c.name==='RunTaskCommand');expect(runs).toHaveLength(2);
+    expect(runs[0].input.taskDefinition).toBe(f.guarded.map.bindings.find(b=>b.purpose==='bootstrap-runtime-bootstrap').taskDefinitionArn);
+    expect(runs[1].input.taskDefinition).toBe(f.guarded.map.bindings.find(b=>b.purpose==='bootstrap-admin-probe-cleanup').taskDefinitionArn);
+    expect(runs.every(r=>r.input.enableExecuteCommand===false&&!Object.hasOwn(r.input.overrides.containerOverrides[0],'command'))).toBe(true);
   });
   it.each([false,true])('retains interrupted probe tracking until role cleanup is proven (failure=%s)',async failCleanup=>{
     const f=harness(),nonce='a'.repeat(32),path=prefix+'/runtime/invocations/'+nonce,start=f.now();

@@ -248,10 +248,9 @@ describe("cognito stack", () => {
     expect(schema).toContainEqual(
       expect.objectContaining({ name: "email", mutable: true, required: false }),
     );
-    const updateSettings = poolArgs.userAttributeUpdateSettings as {
-      attributesRequireVerificationBeforeUpdate: unknown[];
-    };
-    expect(updateSettings.attributesRequireVerificationBeforeUpdate).toEqual([]);
+    expect(poolArgs.userAttributeUpdateSettings).toEqual({
+      attributesRequireVerificationBeforeUpdates: [],
+    });
   });
 
   it("auto-verifies email so ForgotPassword recovery works", async () => {

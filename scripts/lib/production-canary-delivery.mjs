@@ -11,10 +11,30 @@ import {requireNamespaceId} from './maintenance-scope.mjs';
 import {discoverSchedulerTasks} from '../consolidation-scheduler-e2e.mjs';
 import {loadWorkerDataRelease} from './production-data-release-loader.mjs';
 import {productionSourceTree} from '../run-production-runtime.mjs';
+import {sendMaintenanceCommand,maintenanceWorkerTarget} from './production-maintenance-admission.mjs';
+import {dataLaunchPolicy,NONROOT_FORBIDDEN_ENVIRONMENT} from './production-nonroot-launch.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=()=>{throw Error('ProductionCanaryDeliveryFailed');};
 const env=container=>Object.fromEntries((container?.environment??[]).map(item=>[item.name,item.value]));
+
+function validWorkerLaunch(definition,container,kind,dataRelease){
+  if(dataRelease?.data.version!==3)return container?.entryPoint?.join()==='node';
+  if(!container||definition.runtimePlatform?.operatingSystemFamily!=='LINUX')return false;
+  try{
+    if(canaryEvidenceHash(container)!==canaryEvidenceHash(dataLaunchPolicy(kind,container)))return false;
+    const names=new Set();
+    for(const [rows,field]of [[container.environment??[],'value'],[container.secrets??[],'valueFrom']]){
+      if(!Array.isArray(rows))return false;
+      for(const row of rows){
+        if(!row||Object.keys(row).sort().join()!==['name',field].sort().join()||typeof row.name!=='string'||typeof row[field]!=='string'||
+          names.has(row.name)||row.name.startsWith('LD_')||NONROOT_FORBIDDEN_ENVIRONMENT.includes(row.name))return false;
+        names.add(row.name);
+      }
+    }
+    return true;
+  }catch{return false;}
+}
 
 export function productionCanarySchedule(template,target,{wave,nonce,when,actions,admission}){
   if(!['plan','apply','repeat-a','repeat-b'].includes(wave)||!/^[a-f0-9]{32}$/.test(nonce??'')||!Number.isSafeInteger(when)||
@@ -68,13 +88,15 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
   const parameters=new Map(result.Parameters.map(parameter=>[parameter.Name,JSON.parse(parameter.Value)]));
   const approved=validateProductionWorkerTarget(parameters.get(operatorName),{region,account});
   const dataRelease=await loadWorkerDataRelease(clients,approved,{controlRevision:revision,
-    controlSourceTree:approved.version===2?(controlSourceTree??await productionSourceTree()):undefined});
+    controlSourceTree:approved.version>=2?(controlSourceTree??await productionSourceTree()):undefined});
   const manifest=parameters.get(name),prefix=`arn:aws:ecs:${region}:${account}:cluster/`;
-  if(manifest.version!==1||manifest.stage!=='prod'||!/^[a-f0-9]{64}$/.test(manifest.generation??'')||
+  if(manifest.version!==(approved.version===3?2:1)||manifest.stage!=='prod'||!/^[a-f0-9]{64}$/.test(manifest.generation??'')||
     !manifest.clusterArn?.startsWith(prefix+'mem9-on-aws-prod-')||!/^mem9-on-aws-prod-consolidation-[A-Za-z0-9-]+$/.test(manifest.groupName??'')||
     manifest.roleArn!==`arn:aws:iam::${account}:role/mem9-on-aws-prod-Mem9ConsolidationSchedulerRole-role`||
     !Array.isArray(manifest.workers)||manifest.workers.length!==2||new Set(manifest.workers.map(worker=>worker.kind)).size!==2||
     manifest.clusterArn!==approved.clusterArn||manifest.generation!==approved.generation)fail();
+  if(approved.version===3&&(manifest.dataReleaseHash!==approved.dataReleaseHash||manifest.dataReleaseParameterVersion!==approved.dataReleaseParameterVersion)||
+    approved.version!==3&&(manifest.dataReleaseHash!==undefined||manifest.dataReleaseParameterVersion!==undefined))fail();
   const worker=manifest.workers.find(worker=>worker.kind===kind),cluster=manifest.clusterArn.slice(prefix.length);
   const containerName=`Mem9Consolidation${kind==='planner'?'Planner':'Executor'}`;
   if(worker?.containerName!==containerName||worker.sourceTag!==approved.sourceTag||worker.image!==approved.workerImage||
@@ -87,7 +109,7 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
   const actual=Object.fromEntries((container?.secrets??[]).map(secret=>[secret.name,secret.valueFrom]));
   if(definition?.taskDefinitionArn!==worker.taskDefinitionArn||definition.containerDefinitions?.length!==1||container.name!==containerName||
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||container.environmentFiles?.length||
-    container.entryPoint?.join()!=='node'||container.command?.join()!=='/app/scripts/consolidation-worker.mjs'||
+    !validWorkerLaunch(definition,container,kind,dataRelease)||container.command?.join()!=='/app/scripts/consolidation-worker.mjs'||
     container.image!==worker.image||
     values.MEM9_STAGE!=='prod'||values.MEM9_WORKER_KIND!==kind||values.MEM9_WORKER_GENERATION!==manifest.generation||
     values.MEM9_DB_HOST!==approved.host||values.MEM9_DB_NAME!==approved.database||values.MEM9_DB_PORT!==String(approved.port)||
@@ -167,9 +189,10 @@ export async function runProductionCanaryWake(clients,target,{wave,actions,onInt
     overridesHash:canaryEvidenceHash(JSON.parse(request.Target.Input)),targetHash:canaryEvidenceHash(request.Target)};
   const journalPath='/mem9-on-aws/prod/consolidation-runtime/canary-deliveries/'+nonce;
   await onIntent(structuredClone(journal));signal?.throwIfAborted();if(now()>=when)fail();
-  await send(clients.ssm,new PutParameterCommand({Name:journalPath,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}));
+  const dispatch={kind:'wake',operation:wave,target:maintenanceWorkerTarget(target)};
+  await sendMaintenanceCommand(clients,'ssm',new PutParameterCommand({Name:journalPath,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}),dispatch,{...(signal?{abortSignal:signal}:{})});
   signal?.throwIfAborted();if(now()>=when)fail();
-  await send(clients.scheduler,new CreateScheduleCommand(request));
+  await sendMaintenanceCommand(clients,'scheduler',new CreateScheduleCommand(request),dispatch,{...(signal?{abortSignal:signal}:{})});
   let terminal,started=false;
   while(now()<deadline){
     signal?.throwIfAborted();

@@ -3,8 +3,8 @@ import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import {posix} from 'node:path';
 import {parseDocument} from 'yaml';
-import {DATA_COMPONENTS} from './production-data-release.mjs';
-import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
+import {DATA_COMPONENTS} from "./production-data-release.mjs";
+import {canaryEvidenceHash as hash} from "./production-canary-verification.mjs";
 
 const execute=promisify(execFile);
 const fail=()=>{throw Error('DataBuildInputsUnverified');};
@@ -35,17 +35,19 @@ export function dataCopySources(dockerfile){
 }
 
 /** Declared source recipe only; it does NOT claim reproducible remote resolution. */
-export async function describeDataBuildInputs(entries,readBlob){
+export async function describeDataBuildInputs(entries,readBlob,{assertCurrent}={}){
+  const resume=value=>{if(assertCurrent!==undefined){if(typeof assertCurrent!=='function')fail();const checked=assertCurrent();if(checked&&typeof checked.then==='function'){Promise.resolve(checked).catch(()=>{});fail();}if(checked!==undefined)fail();}return value;};
+  resume();
   if(!Array.isArray(entries)||!entries.length||entries.length>20000||new Set(entries.map(e=>e.path)).size!==entries.length)fail();
   const files=new Map(entries.map(entry=>[entry.path,entry]));
   const file=async(path,optional=false)=>{
     const entry=files.get(path);
     if(!entry){if(optional)return null;fail();}
     if(entry.type!=='blob'||!['100644','100755'].includes(entry.mode)||!/^[a-f0-9]{40}$/.test(entry.oid??''))fail();
-    const bytes=await readBlob(entry.oid);if(!Buffer.isBuffer(bytes)||bytes.length>16*1024*1024)fail();
+    const bytes=resume(await readBlob(entry.oid));if(!Buffer.isBuffer(bytes)||bytes.length>16*1024*1024)fail();
     return {path,mode:entry.mode,sha256:sha(bytes),bytes};
   };
-  const workflow=await file('.github/workflows/infra-ci.yml');
+  const workflow=resume(await file('.github/workflows/infra-ci.yml'));
   const doc=parseDocument(workflow.bytes.toString('utf8'),{uniqueKeys:true});if(doc.errors.length)fail();
   const document=doc.toJS(),job=document?.jobs?.['build-and-push-image'];
   if(!job||!Array.isArray(job.steps))fail();
@@ -80,13 +82,13 @@ export async function describeDataBuildInputs(entries,readBlob){
   while(pending.length){
     const path=pending.pop();if(preparationScripts.has(path))continue;
     if(!safePath(path)||preparationScripts.size>=100)fail();
-    const script=await file(path);preparationScripts.set(path,identity(script));discover(script.bytes.toString('utf8'),path);
+    const script=resume(await file(path));preparationScripts.set(path,identity(script));discover(script.bytes.toString('utf8'),path);
   }
   const preparation={workflowEnvironment:document.env??{},jobEnvironment:job.env??{},defaults:job.defaults??{},
     runner:job['runs-on']??null,container:job.container??null,steps:preparationSteps,scripts:[...preparationScripts.values()].sort((a,b)=>a.path.localeCompare(b.path))};
   const components={};
   for(const name of DATA_COMPONENTS){
-    const path='docker/'+name+'/Dockerfile',dockerfile=await file(path);
+    const path='docker/'+name+'/Dockerfile',dockerfile=resume(await file(path));
     const steps=job.steps.filter(s=>s?.with?.file===path);
     if(steps.length!==1)fail();const step=steps[0],options=step.with;
     if(!/^docker\/build-push-action@[a-f0-9]{40}$/.test(step.uses??'')||step.env||
@@ -98,9 +100,9 @@ export async function describeDataBuildInputs(entries,readBlob){
       const matched=entries.filter(e=>source.endsWith('/')?e.path.startsWith(source):pattern.test(e.path));
       if(!matched.length)fail();for(const entry of matched)paths.add(entry.path);
     }
-    const context=[];for(const selected of [...paths].sort())context.push(identity(await file(selected)));
+    const context=[];for(const selected of [...paths].sort())context.push(identity(resume(await file(selected))));
     const ignores=[];
-    for(const ignore of ['.dockerignore',path+'.dockerignore']){const selected=await file(ignore,true);ignores.push(selected?identity(selected):{path:ignore,absent:true});}
+    for(const ignore of ['.dockerignore',path+'.dockerignore']){const selected=resume(await file(ignore,true));ignores.push(selected?identity(selected):{path:ignore,absent:true});}
     // Preserve all step inputs, including cache/pull settings. Tags are fixed
     // workflow expressions; no current environment is substituted into a recipe.
     components[name]={dockerfile:identity(dockerfile),context,ignores,build:{uses:step.uses,with:options}};

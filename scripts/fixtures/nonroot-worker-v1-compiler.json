@@ -1,0 +1,366 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "results": [
+    {
+      "role": "planner",
+      "input": {
+        "plan": {
+          "version": 1,
+          "kind": "bounded-data-observation",
+          "owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "launchNonce": "cccccccccccccccccccccccccccccccc",
+          "sourceTree": "dddddddddddddddddddddddddddddddddddddddd",
+          "role": "planner",
+          "image": {
+            "rootDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "arm64Digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "configDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "startedMs": 1000,
+          "latestArmMs": 1100,
+          "observationEndMs": 1700,
+          "deadlineMs": 1800,
+          "armingLimitMs": 25,
+          "cleanupReserveMs": 100,
+          "episodes": [
+            {
+              "index": 0,
+              "offsetMs": 200,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            },
+            {
+              "index": 1,
+              "offsetMs": 400,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            }
+          ],
+          "limits": {
+            "readBytes": 268435456,
+            "rawBytes": 1048576,
+            "initialProcesses": 128,
+            "finalProcesses": 128,
+            "combinedIdentities": 256
+          }
+        },
+        "original": {
+          "name": "Mem9ConsolidationPlanner",
+          "image": "example.com/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "linuxParameters": {
+            "initProcessEnabled": true
+          },
+          "readonlyRootFilesystem": true,
+          "environment": [
+            {
+              "name": "SYNTHETIC_APPLICATION_SETTING",
+              "value": "retained"
+            }
+          ]
+        },
+        "files": [
+          {
+            "path": "/usr/local/bin/node",
+            "resolvedPath": "/usr/local/bin/node",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "path": "/app/scripts/consolidation-worker.mjs",
+            "resolvedPath": "/app/scripts/consolidation-worker.mjs",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          }
+        ]
+      },
+      "compiledHash": "0902908988b78e627e57921734b1fc0b3fe9c3c4339103102af9b66d8ec0fa94"
+    },
+    {
+      "role": "executor",
+      "input": {
+        "plan": {
+          "version": 1,
+          "kind": "bounded-data-observation",
+          "owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "launchNonce": "cccccccccccccccccccccccccccccccc",
+          "sourceTree": "dddddddddddddddddddddddddddddddddddddddd",
+          "role": "executor",
+          "image": {
+            "rootDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "arm64Digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "configDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "startedMs": 1000,
+          "latestArmMs": 1100,
+          "observationEndMs": 1700,
+          "deadlineMs": 1800,
+          "armingLimitMs": 25,
+          "cleanupReserveMs": 100,
+          "episodes": [
+            {
+              "index": 0,
+              "offsetMs": 200,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            },
+            {
+              "index": 1,
+              "offsetMs": 400,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            }
+          ],
+          "limits": {
+            "readBytes": 268435456,
+            "rawBytes": 1048576,
+            "initialProcesses": 128,
+            "finalProcesses": 128,
+            "combinedIdentities": 256
+          }
+        },
+        "original": {
+          "name": "Mem9ConsolidationExecutor",
+          "image": "example.com/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "linuxParameters": {
+            "initProcessEnabled": true
+          },
+          "readonlyRootFilesystem": true,
+          "environment": [
+            {
+              "name": "SYNTHETIC_APPLICATION_SETTING",
+              "value": "retained"
+            }
+          ]
+        },
+        "files": [
+          {
+            "path": "/usr/local/bin/node",
+            "resolvedPath": "/usr/local/bin/node",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "path": "/app/scripts/consolidation-worker.mjs",
+            "resolvedPath": "/app/scripts/consolidation-worker.mjs",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          }
+        ]
+      },
+      "compiledHash": "7a81e73d24fd2622d0f42652b5deae6f79d21935f1337adf885b8e7b5a3d6bee"
+    },
+    {
+      "role": "llm-proxy",
+      "input": {
+        "plan": {
+          "version": 1,
+          "kind": "bounded-data-observation",
+          "owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "launchNonce": "cccccccccccccccccccccccccccccccc",
+          "sourceTree": "dddddddddddddddddddddddddddddddddddddddd",
+          "role": "llm-proxy",
+          "image": {
+            "rootDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "arm64Digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "configDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "startedMs": 1000,
+          "latestArmMs": 1100,
+          "observationEndMs": 1700,
+          "deadlineMs": 1800,
+          "armingLimitMs": 25,
+          "cleanupReserveMs": 100,
+          "episodes": [
+            {
+              "index": 0,
+              "offsetMs": 200,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            },
+            {
+              "index": 1,
+              "offsetMs": 400,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            }
+          ],
+          "limits": {
+            "readBytes": 268435456,
+            "rawBytes": 1048576,
+            "initialProcesses": 128,
+            "finalProcesses": 128,
+            "combinedIdentities": 256
+          }
+        },
+        "original": {
+          "name": "llm-proxy",
+          "image": "example.com/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "linuxParameters": {
+            "initProcessEnabled": true
+          },
+          "readonlyRootFilesystem": true,
+          "environment": [
+            {
+              "name": "SYNTHETIC_APPLICATION_SETTING",
+              "value": "retained"
+            }
+          ],
+          "healthCheck": {
+            "command": [
+              "CMD",
+              "node",
+              "/app/healthcheck.mjs",
+              "http://localhost:8082/health"
+            ],
+            "interval": 30
+          }
+        },
+        "files": [
+          {
+            "path": "/usr/local/bin/node",
+            "resolvedPath": "/usr/local/bin/node",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "path": "/app/server.mjs",
+            "resolvedPath": "/app/server.mjs",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "path": "/app/healthcheck.mjs",
+            "resolvedPath": "/app/healthcheck.mjs",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          }
+        ]
+      },
+      "compiledHash": "af52ad0eed7bf88698fe6d57bf36629ee60011a20056583a577325fb08c71768"
+    },
+    {
+      "role": "qwen3-embed",
+      "input": {
+        "plan": {
+          "version": 1,
+          "kind": "bounded-data-observation",
+          "owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "launchNonce": "cccccccccccccccccccccccccccccccc",
+          "sourceTree": "dddddddddddddddddddddddddddddddddddddddd",
+          "role": "qwen3-embed",
+          "image": {
+            "rootDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "arm64Digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "configDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "startedMs": 1000,
+          "latestArmMs": 1100,
+          "observationEndMs": 1700,
+          "deadlineMs": 1800,
+          "armingLimitMs": 25,
+          "cleanupReserveMs": 100,
+          "episodes": [
+            {
+              "index": 0,
+              "offsetMs": 200,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            },
+            {
+              "index": 1,
+              "offsetMs": 400,
+              "durationMs": 100,
+              "sampleEveryMs": 50
+            }
+          ],
+          "limits": {
+            "readBytes": 268435456,
+            "rawBytes": 1048576,
+            "initialProcesses": 128,
+            "finalProcesses": 128,
+            "combinedIdentities": 256
+          }
+        },
+        "original": {
+          "name": "qwen3-embed",
+          "image": "example.com/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "linuxParameters": {
+            "initProcessEnabled": true
+          },
+          "readonlyRootFilesystem": true,
+          "environment": [
+            {
+              "name": "SYNTHETIC_APPLICATION_SETTING",
+              "value": "retained"
+            }
+          ],
+          "healthCheck": {
+            "command": [
+              "CMD",
+              "node",
+              "/app/healthcheck.mjs",
+              "http://localhost:8081/health"
+            ],
+            "interval": 30
+          }
+        },
+        "files": [
+          {
+            "path": "/usr/local/bin/node",
+            "resolvedPath": "/usr/local/bin/node",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "path": "/app/server.mjs",
+            "resolvedPath": "/app/server.mjs",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          },
+          {
+            "path": "/app/healthcheck.mjs",
+            "resolvedPath": "/app/healthcheck.mjs",
+            "sha256": "39066d9fe612725391ceee497dde349d160f4c4e8f963ec5a3007e283d594082",
+            "size": 23,
+            "mode": 493,
+            "uid": 0,
+            "gid": 0
+          }
+        ]
+      },
+      "compiledHash": "f22fc1e77b2c79767d209298faa1b2c4459d9ffe718ba9842cdf3045fe8049cc"
+    }
+  ]
+}

@@ -85,10 +85,18 @@ export async function productionCoordinatorDigest(){
     'scripts/lib/production-canary-continuation.mjs','scripts/lib/production-canary-snapshot.mjs',
     'scripts/lib/production-canary-compatibility.mjs','scripts/lib/production-canary-paused-audit.mjs',
     'scripts/lib/production-canary-material.mjs','scripts/lib/production-canary-producer.mjs',
+    'scripts/lib/production-canary-transition.mjs','scripts/lib/production-canary-material-transition.mjs',
+    'scripts/lib/production-canary-material-integrity.mjs','scripts/lib/production-maintenance-admission.mjs',
     'scripts/lib/production-canary-fixture-evidence.mjs',
     'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs',
     'scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs',
     'scripts/lib/production-data-authorization.mjs','scripts/lib/production-data-issuance.mjs',
+    'scripts/lib/production-image-transition.mjs','scripts/lib/production-image-transition-proof.mjs',
+    'scripts/lib/production-image-graph.mjs','scripts/lib/production-image-filesystem.mjs','scripts/lib/production-image-copy.mjs',
+    'scripts/lib/production-image-admission.mjs','scripts/lib/production-image-supersession.mjs',
+    'scripts/lib/production-image-custody.mjs','scripts/lib/production-image-restoration.mjs','scripts/lib/production-image-archive.mjs',
+    'scripts/lib/production-image-deployment.mjs','scripts/lib/production-image-deployment-reader.mjs','scripts/lib/production-image-deployment-bundle.mjs',
+    'scripts/lib/production-current-capacity.mjs','scripts/verify-image-security-deployment.mjs',
     'scripts/lib/production-scheduler-context.mjs',
     'scripts/lib/production-canary-continuation-flow.mjs','scripts/lib/production-canary-continuation-proof.mjs',
     'scripts/lib/production-recurring-verification.mjs','scripts/lib/production-recurring-observer.mjs',
@@ -107,15 +115,26 @@ export async function productionCoordinatorDigest(){
 }
 
 export async function retainedDeploymentEnvironment(clients,context,{captureBuild=captureDataReleaseBuild}={}){
+  context={...context,env:context.env??process.env};
   const selected=await loadDeploymentDataRelease(clients,context);
-  if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none'};
-  const evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
+  if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',MEM9_RETAINED_DATA_RELEASE_VERSION:'0'};
+  let evidence;
+  if(selected.data.version===3){
+    // This phase already replayed the reviewed recipe amendment and acquired
+    // current image bindings. The legacy equality-only reader neither accepts
+    // that amendment nor consumes the phase's prepaid network allocation.
+    const {nonrootAuthorizationBindings,nonrootDeploymentPhaseEvidence}=await import('./lib/production-nonroot-proof.mjs');
+    const phase=nonrootDeploymentPhaseEvidence(selected.nonrootDeploymentContext,{phase:'preconfigure',now:Date.now()});
+    const bound=nonrootAuthorizationBindings(selected.nonrootDeploymentContext);
+    if(phase.descriptorHash!==selected.hash||phase.parameterVersion!==selected.parameterVersion||bound.control.sourceTree!==context.controlSourceTree)throw Error('DataReleaseBuildEvidenceMismatch');
+    evidence={buildInputsHash:bound.buildInputsHash};
+  }else evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
   if(evidence.buildInputsHash!==selected.data.buildInputsHash)throw Error('DataReleaseBuildEvidenceMismatch');
   // Source/registry reads can take time. Do not export a revoked, replaced or
   // expired authorization after those independent checks have completed.
   const fresh=await loadDeploymentDataRelease(clients,{...context,now:Date.now()});
   if(fresh?.hash!==selected.hash||fresh.parameterVersion!==selected.parameterVersion)throw Error('DataReleaseSelectionChanged');
-  return {MEM9_RETAINED_DATA_RELEASE:JSON.stringify(selected.data),MEM9_RETAINED_DATA_RELEASE_HASH:selected.hash};
+  return {MEM9_RETAINED_DATA_RELEASE:JSON.stringify(selected.data),MEM9_RETAINED_DATA_RELEASE_HASH:selected.hash,MEM9_RETAINED_DATA_RELEASE_VERSION:String(selected.parameterVersion)};
 }
 
 export async function productionSourceTree(){
@@ -252,7 +271,7 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     const pending=plan?.clusterArn?await cancelProductionInvocations(clients,plan):[];
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
       env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
-        MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',
+        MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',MEM9_RETAINED_DATA_RELEASE_VERSION:'0',
         MEM9_PREVIEW_ACCEPTANCE_CONTEXT:undefined,MEM9_PREVIEW_RUNTIME_NONCE:undefined,
         ...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});

@@ -1,3 +1,4 @@
+import {observerTopologyResources,type ObserverTopology} from './observer-topology';
 /**
  * `ecs` stack — ECS Fargate cluster + service running the REAL mnemo-server.
  *
@@ -55,7 +56,8 @@ import { workloadImage, accountId, applicationRegion, selectedDataSourceTag, sel
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
-import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
+import {applyNonrootDataTask,applyProductionNonrootTask,applyProductionNonrootService,verifiedProductionNonrootTaskArn} from './nonroot-task-definition';
 import {productionRuntimeEnabled,protectLegacyRuntimeCredentials} from "./production-runtime";
 import { RECALL_TIMEOUT_MS, RECALL_RESPONSE_RESERVE_MS } from "./gateway/request-limits.mjs";
 
@@ -131,6 +133,7 @@ export interface RuntimeTaskDefinitionView {
 }
 
 export interface EcsOutputs {
+  observerTopology?:ObserverTopology;
   ssmPrefix: string;
   cluster: sst.aws.Cluster; // shared with bootstrap() so the one-shot task reuses it
   clusterName: Output<string>;
@@ -253,6 +256,7 @@ export function ecs(
     tags,
   });
   const serviceDnsName = $interpolate`mnemo.mem9-${$app.stage}.local`;
+  const observerTopology=observerTopologyResources(namespace);
 
   // Cold-start ordering fix: on a FRESH deploy, ECS CreateService validates its
   // serviceRegistries against Route53 and fails with "ServiceNotFound" if the
@@ -398,7 +402,7 @@ export function ecs(
           MNEMO_NAMESPACE_REQUIRED: runtime ? "1" : NAMESPACE_REQUIRED,
           ...(runtime ? {MNEMO_SCHEMA_MODE: "verify", MEM9_STAGE: $app.stage} : {}),
           MNEMO_CONSOLIDATION_EXECUTION_ENABLED: /^pr-[1-9][0-9]*$/.test($app.stage) && NAMESPACE_REQUIRED === "1" ? "true" : productionExecution??"false",
-          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "25000",
+          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "30000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
           MNEMO_TRANSPORT_ISSUER: "gateway-target",
           // Non-secret keyring digest. SSM values are injected only when a task
@@ -503,11 +507,18 @@ export function ecs(
     ],
     transform: {
       taskDefinition: (args) => {
-        disableMnemoServerPseudoTerminal(args);
+        for (const name of ["mnemo-server", "qwen3-embed", "llm-proxy"]) {
+          disableTaskContainerPseudoTerminal(args, name);
+        }
         if(runtime?.executionRoleArn){
           args.executionRoleArn=runtime.executionRoleArn;
           args.family=$interpolate`${cluster.nodes.cluster.name}-Mem9RuntimeServer`;
         }
+        if(/^pr-[1-9][0-9]*$/.test($app.stage)){
+          for(const component of ['mnemo-server','qwen3-embed','llm-proxy'] as const)applyNonrootDataTask(args,component);
+          args.trackLatest=false;
+        }
+        applyProductionNonrootTask(args,'backend');
       },
       ...(runtime||productionRuntimeEnabled() ? {executionRole: (args: Record<string, any>) => {
         if(runtime?.executionRoleArn){
@@ -546,6 +557,10 @@ export function ecs(
         args.tags = { ...(args.tags ?? {}), ...tags };
         if (runtime) args.desiredCount = runtime.ready ? 1 : 0;
         if(runtime?.executionRoleArn)args.deploymentCircuitBreaker={enable:true,rollback:process.env.MEM9_PRODUCTION_RUNTIME_MODE==="active"};
+        if(/^pr-[1-9][0-9]*$/.test($app.stage)){
+          args.deploymentCircuitBreaker={enable:true,rollback:false};
+          args.enableExecuteCommand=false;
+        }
         // Fargate compute is billed to tasks, not just to this tagged Service.
         // Propagate Project/Stage to every new task so Cost Explorer can
         // attribute vCPU and memory charges. Managed tags add the ECS
@@ -578,13 +593,14 @@ export function ecs(
         // registry before Route53 has propagated the Cloud Map service (fixes the
         // cold-deploy "ServiceNotFound").
         opts.dependsOn = [...(opts.dependsOn ?? []), discoverySettle];
+        applyProductionNonrootService(args);
       },
     },
   });
-  const taskDefinitionArn = service.nodes.taskDefinition.apply(
+  const taskDefinitionArn = verifiedProductionNonrootTaskArn(service.nodes.taskDefinition.apply(
     (taskDefinition) =>
       (taskDefinition as { arn: Output<string> }).arn,
-  ) as Output<string>;
+  ) as Output<string>,'backend');
 
   new aws.ssm.Parameter("EcsClusterName", {
     name: `${prefix}/ecs/cluster-name`,
@@ -672,6 +688,7 @@ export function ecs(
     serviceName: service.nodes.service.name,
     image: mnemoImage,
     serviceDnsName,
+    observerTopology,
     taskSecurityGroupId: taskSgId,
     alertsTopicArn: observabilityOut.alertsTopicArn,
     serverTaskDefinition:service.nodes.taskDefinition as Output<RuntimeTaskDefinitionView>,

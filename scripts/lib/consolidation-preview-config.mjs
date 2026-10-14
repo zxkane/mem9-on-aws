@@ -17,7 +17,11 @@ export function previewGeneration(stage,env=process.env){
   if(!isConsolidationPreview(stage)||!/^[a-f0-9]{40}$/.test(env.MEM9_DEPLOY_COMMIT||'')||
     !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID||'')||!/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT||''))throw Error('InvalidPreviewGeneration');
   const base=hash([stage,env.MEM9_DEPLOY_COMMIT,env.GITHUB_RUN_ID,env.GITHUB_RUN_ATTEMPT].join('\n'));
-  const context=previewAcceptanceContext(stage,env);
+  const context=previewAcceptanceContext(stage,env),observerNonce=env.MEM9_PREVIEW_OBSERVER_NONCE;
+  if(observerNonce!==undefined){
+    if(context||typeof observerNonce!=='string'||!/^[a-f0-9]{32}$/.test(observerNonce))throw Error('InvalidObserverPreviewGeneration');
+    return hash([base,'observer-preview',observerNonce].join('\n'));
+  }
   return context?hash([base,context.kind,context.runtimeNonce].join('\n')):base;
 }
 export function previewUuid(generation,label){

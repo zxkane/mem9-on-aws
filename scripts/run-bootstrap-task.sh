@@ -30,6 +30,16 @@ TASK_DEF=$(aws ssm get-parameter --name "${PREFIX}/task-def-arn" --region "$REGI
 TASK_SG=$(aws ssm get-parameter --name "${PREFIX}/task-sg-id" --region "$REGION" --query Parameter.Value --output text)
 # subnet-ids is a StringList → comma-joined; run-task wants a JSON array.
 SUBNETS_CSV=$(aws ssm get-parameter --name "${PREFIX}/subnet-ids" --region "$REGION" --query Parameter.Value --output text)
+PREVIEW_BINDING_JSON=""
+PREVIEW_PURPOSE=""
+if [[ "$STAGE" =~ ^pr-[1-9][0-9]*$ ]]; then
+  PREVIEW_BINDING_JSON=$(AWS_REGION="$REGION" node "$REPO_ROOT/scripts/lib/post-runtime-preview-aws.mjs" bootstrap-load)
+  CLUSTER=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.cluster')
+  TASK_DEF=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.binding.taskDefinitionArn')
+  TASK_SG=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.securityGroup')
+  SUBNETS_CSV=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.subnets | join(",")')
+  PREVIEW_PURPOSE=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -er '.purpose')
+fi
 
 if [[ -z "$CLUSTER" || -z "$TASK_DEF" || -z "$TASK_SG" || -z "$SUBNETS_CSV" ]]; then
   echo "::error::missing bootstrap SSM params under ${PREFIX} — has sst deploy run for this stage?"
@@ -40,7 +50,9 @@ fi
 # starting the task. The deploy role already has DescribeTaskDefinition and
 # FilterLogEvents; using these values avoids broad log-group discovery and does
 # not require DescribeLogStreams/GetLogEvents.
-if ! TASK_DEF_JSON=$(aws ecs describe-task-definition \
+if [[ -n "$PREVIEW_BINDING_JSON" ]]; then
+  TASK_DEF_JSON=$(printf '%s' "$PREVIEW_BINDING_JSON" | jq -c '.observation')
+elif ! TASK_DEF_JSON=$(aws ecs describe-task-definition \
   --task-definition "$TASK_DEF" \
   --region "$REGION" \
   --output json 2>/dev/null); then
@@ -65,7 +77,7 @@ RUNTIME_VERIFY=$(printf '%s' "$TASK_DEF_JSON" | jq -r '
   any(.taskDefinition.containerDefinitions[0].environment[]?;
     .name == "MEM9_BOOTSTRAP_OPERATION" and .value == "runtime-verify")
 ')
-if [[ "$RUNTIME_VERIFY" == true ]]; then
+if [[ "$RUNTIME_VERIFY" == true || "$PREVIEW_PURPOSE" == bootstrap-runtime-bootstrap ]]; then
   if ! [[ "$STAGE" == prod || "$STAGE" =~ ^pr-[1-9][0-9]*$ ]] ||
     ! printf '%s' "$TASK_DEF_JSON" | jq -e --arg stage "$STAGE" '
       .taskDefinition.containerDefinitions[0].environment |
@@ -100,7 +112,8 @@ echo "run-bootstrap: run-task on cluster ${CLUSTER} (task-def ${TASK_DEF##*/})"
 # credential cutover. Keep one minute of headroom below the container's 15-minute
 # ceiling. The nonce correlates retries; it does not grant authorization.
 RUN_CONTEXT=()
-if [[ "$RUNTIME_VERIFY" == true ]]; then
+VERIFY_OVERRIDES=""
+if [[ "$RUNTIME_VERIFY" == true || "$PREVIEW_PURPOSE" == bootstrap-runtime-bootstrap ]]; then
   read -r INVOCATION VERIFY_DEADLINE < <(node --input-type=module -e '
     import {randomUUID} from "node:crypto";
     console.log(randomUUID().replaceAll("-", ""), Date.now() + 840000);
@@ -113,6 +126,15 @@ if [[ "$RUNTIME_VERIFY" == true ]]; then
     ]}]}
   ')
   RUN_CONTEXT=(--client-token "$INVOCATION" --overrides "$VERIFY_OVERRIDES")
+fi
+if [[ -n "$PREVIEW_BINDING_JSON" ]]; then
+  PREVIEW_OVERRIDES='{"containerOverrides":[{"name":"Mem9Bootstrap","environment":[]}]}'
+  if [[ -n "$VERIFY_OVERRIDES" ]]; then PREVIEW_OVERRIDES=$VERIFY_OVERRIDES; fi
+  # Recheck the protected map and full exact revision after context creation.
+  # No command override or alternate legacy revision is accepted on this path.
+  jq -cn --argjson binding "$PREVIEW_BINDING_JSON" --argjson overrides "$PREVIEW_OVERRIDES" \
+    '{binding:$binding,overrides:$overrides}' | AWS_REGION="$REGION" node "$REPO_ROOT/scripts/lib/post-runtime-preview-aws.mjs" bootstrap-recheck
+  RUN_CONTEXT+=(--disable-execute-command)
 fi
 # Capture the FULL run-task response ONCE (tasks[] + failures[]) so a failure path
 # never re-invokes run-task (which would start a second task). Parse the task ARN

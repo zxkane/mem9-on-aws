@@ -1,15 +1,62 @@
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+import {readFile} from 'node:fs/promises';
 import {GetParametersCommand} from '@aws-sdk/client-ssm';
 import {DescribeTaskDefinitionCommand} from '@aws-sdk/client-ecs';
 import {GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {GetRoleCommand,ListRolePoliciesCommand,ListAttachedRolePoliciesCommand,GetRolePolicyCommand} from '@aws-sdk/client-iam';
-import {validatePostRuntimeRoute,validatePostRuntimeDefinition,postRuntimeTaskTrust,postRuntimeExecutionPolicy} from './post-runtime-preview-route.mjs';
+import {inspectPostRuntimePurposeMap,selectGuardedPostRuntimeRoute,validatePostRuntimeDefinition,postRuntimeTaskTrust,postRuntimeExecutionPolicy} from './post-runtime-preview-route.mjs';
+import {inspectNonrootPreviewPurposeMap,selectNonrootPreviewPurpose,verifyNonrootPreviewPurposeReadback,validateNonrootPreviewOverrides,previewBootstrapPurposeForOperation} from './nonroot-preview-source.mjs';
+import {parseNonrootJson,copyNonrootJson} from './production-nonroot-contracts.mjs';
 import {verifyCanaryFixtureImageIndex} from './production-canary-material.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 
 const execute=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
+export async function nonrootPreviewSourceTree(){
+  const cwd=fileURLToPath(new URL('../../',import.meta.url)),options={cwd,encoding:'utf8',timeout:10000};
+  await execute('git',['ls-files','--error-unmatch','scripts/lib/nonroot-preview-source.mjs'],options);
+  await execute('git',['diff','--quiet'],options);await execute('git',['diff','--cached','--quiet'],options);
+  const tree=(await execute('git',['rev-parse','HEAD^{tree}'],options)).stdout.trim();
+  if(!/^[a-f0-9]{40}$/.test(tree))fail('NonrootPreviewSource');return tree;
+}
+/** Canonicalize only the SDK/CLI representation of the service timestamp.
+ * Every task field and tag remains part of the authenticated observation. */
+export function nonrootPreviewObservation(response){
+  const taskDefinition={...response.taskDefinition};
+  if(taskDefinition.registeredAt!==undefined)taskDefinition.registeredAt=new Date(taskDefinition.registeredAt).toISOString();
+  return copyNonrootJson(JSON.parse(JSON.stringify({taskDefinition,tags:response.tags})));
+}
+export async function loadNonrootPreviewBootstrap(clients,{stage,region,purpose,sourceTree}){
+  if(!/^pr-[1-9][0-9]*$/.test(stage??'')||!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region??''))fail('NonrootPreviewScope');
+  const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
+  const scope={stage,region,account,sourceTree:sourceTree??await nonrootPreviewSourceTree()};
+  const prefix=`/mem9-on-aws/${stage}/bootstrap/`,names=['purpose-bindings','cluster-name','subnet-ids','task-sg-id'].map(n=>prefix+n);
+  const result=await send(clients.ssm,new GetParametersCommand({Names:names,WithDecryption:false}));
+  if(result.InvalidParameters?.length||result.Parameters?.length!==names.length)fail('NonrootPreviewBindingsMissing');
+  const values=new Map();
+  for(const p of result.Parameters){
+    if(!names.includes(p.Name)||values.has(p.Name)||p.ARN!==`arn:aws:ssm:${region}:${account}:parameter${p.Name}`||
+      !Number.isSafeInteger(p.Version)||p.Version<1||p.Type!==(p.Name===names[2]?'StringList':'String')||typeof p.Value!=='string')fail('NonrootPreviewBindingsMissing');
+    values.set(p.Name,p);
+  }
+  const map=inspectNonrootPreviewPurposeMap(values.get(names[0]).Value,scope),selected=purpose??map.defaultPurpose;
+  const binding=selectNonrootPreviewPurpose(map,selected,scope),cluster=values.get(names[1]).Value;
+  const subnets=values.get(names[2]).Value.split(','),securityGroup=values.get(names[3]).Value;
+  if(map.family!==cluster+'-Mem9Bootstrap'||!new RegExp('^mem9-on-aws-'+stage+'-[A-Za-z0-9_-]+$').test(cluster)||
+    subnets.length<1||subnets.length>16||new Set(subnets).size!==subnets.length||subnets.some(s=>!/^subnet-(?:[a-f0-9]{8}|[a-f0-9]{17})$/.test(s))||
+    !/^sg-(?:[a-f0-9]{8}|[a-f0-9]{17})$/.test(securityGroup))fail('NonrootPreviewNetwork');
+  const observation=nonrootPreviewObservation(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition:binding.taskDefinitionArn,include:['TAGS']})));
+  verifyNonrootPreviewPurposeReadback(map,selected,observation,scope);
+  const parameters=names.map(name=>({name,version:values.get(name).Version,valueHash:hash(values.get(name).Value)}));
+  const resultBinding={scope,purpose:selected,binding,map,observation,cluster,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/${cluster}`,subnets,securityGroup,parameters};
+  return copyNonrootJson({...resultBinding,snapshotHash:hash(resultBinding)});
+}
+export async function revalidateNonrootPreviewBootstrap(clients,binding){
+  const current=await loadNonrootPreviewBootstrap(clients,{...binding.scope,purpose:binding.purpose});
+  if(current.snapshotHash!==binding.snapshotHash)fail('NonrootPreviewBindingsChanged');return current;
+}
 function document(value){
   if(value&&typeof value==='object'&&!Array.isArray(value))return value;
   try{return JSON.parse(String(value).trim().startsWith('{')?value:decodeURIComponent(value));}catch{fail('PostRuntimeRoleMismatch');}
@@ -57,18 +104,47 @@ export async function loadPostRuntimeOperator(clients,options,{artifact=controlA
       !Number.isSafeInteger(p.Version)||p.Version<1||p.Type!==(p.Name===names[0]?'String':'SecureString')||typeof p.Value!=='string')fail('PostRuntimeRouteMissing');
     let value;try{value=JSON.parse(p.Value);}catch{fail('PostRuntimeRouteMissing');}values.set(p.Name,{parameter:p,value});
   }
-  const route=validatePostRuntimeRoute(values.get(names[0]).value,{...options,account,runtime:values.get(names[1]).value,manifest:values.get(names[2]).value});
-  const definition=(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition:route.taskDefinitionArn}))).taskDefinition;
-  validatePostRuntimeDefinition(definition,route);
+  const map=inspectPostRuntimePurposeMap(values.get(names[0]).value,{...options,account}),purpose=options.purpose??'preview-fixture-pause';
+  const route=selectGuardedPostRuntimeRoute(map,{...options,account,runtime:values.get(names[1]).value,manifest:values.get(names[2]).value},purpose);
+  const observation=nonrootPreviewObservation(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition:route.taskDefinitionArn,include:['TAGS']})));
+  const definition=observation.taskDefinition;validatePostRuntimeDefinition(definition,route,observation);
   const roles=[await roleMaterial(clients.iam,route,route.taskRoleArn,false),await roleMaterial(clients.iam,route,route.executionRoleArn,true)];
   const image=await artifact(route);
   if(image.rootDigest!==route.image.split('@')[1]||!/^sha256:[a-f0-9]{64}$/.test(image.arm64Digest??'')||image.arm64Digest===image.rootDigest||await key(route)!==route.kmsKeyArn)fail('PostRuntimeArtifactMismatch');
   const parameters=names.map(name=>{const p=values.get(name).parameter;return {name,version:p.Version,valueHash:hash(p.Value)};});
-  const snapshotHash=hash({route,definition:JSON.parse(JSON.stringify(definition)),roles,parameters,image});
-  return {route,definition,image,snapshotHash,parameters};
+  const snapshotHash=hash({route,observation,roles,parameters,image});
+  return {route,purpose,purposeBindings:map.bindings,definition,observation,image,snapshotHash,parameters};
 }
 
 export async function revalidatePostRuntimeOperator(clients,binding,options,checks){
-  const current=await loadPostRuntimeOperator(clients,options,checks);
+  const current=await loadPostRuntimeOperator(clients,{...options,purpose:binding.purpose},checks);
   if(current.snapshotHash!==binding.snapshotHash)fail('PostRuntimeRouteChanged');
 }
+
+// Read-only CLI bridge for the existing Bash runner, using its AWS CLI/profile.
+// The operation catalog is fixed; stdin never supplies arbitrary CLI arguments.
+async function bootstrapCli(){
+  const region=process.env.AWS_REGION,stage=process.env.STAGE,mode=process.argv[2];
+  if(process.argv.length!==3||!['bootstrap-load','bootstrap-recheck','namespace-load','namespace-recheck'].includes(mode))fail('NonrootPreviewCommand');
+  let namespacePurpose;
+  if(mode.startsWith('namespace-')){
+    const operation=process.env.MEM9_PREVIEW_OBSERVATION_OPERATION;
+    if(!['benchmark','connection-snapshot'].includes(operation))fail('NonrootPreviewCommand');
+    namespacePurpose=previewBootstrapPurposeForOperation(operation);
+  }
+  const clients={
+    sts:{send:()=>cli(['sts','get-caller-identity','--region',region])},
+    ssm:{send:c=>cli(['ssm','get-parameters','--names',...c.input.Names,'--no-with-decryption','--region',region])},
+    ecs:{send:c=>cli(['ecs','describe-task-definition','--task-definition',c.input.taskDefinition,'--include','TAGS','--region',region])},
+  };
+  const sourceTree=await nonrootPreviewSourceTree();
+  if(mode==='bootstrap-load'||mode==='namespace-load'){
+    process.stdout.write(JSON.stringify(await loadNonrootPreviewBootstrap(clients,{stage,region,sourceTree,...(namespacePurpose?{purpose:namespacePurpose}:{})})));return;
+  }
+  const input=parseNonrootJson(await readFile('/dev/stdin','utf8'));
+  if(!input||Object.keys(input).sort().join()!=='binding,overrides'||input.binding.scope.stage!==stage||input.binding.scope.region!==region||input.binding.scope.sourceTree!==sourceTree)fail('NonrootPreviewScope');
+  if(namespacePurpose&&input.binding.purpose!==namespacePurpose)fail('NonrootPreviewPurpose');
+  validateNonrootPreviewOverrides(input.binding.purpose,input.overrides);
+  await revalidateNonrootPreviewBootstrap(clients,input.binding);
+}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)bootstrapCli().catch(()=>{process.stderr.write('NonrootPreviewRejected\n');process.exitCode=1;});

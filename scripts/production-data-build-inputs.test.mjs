@@ -4,6 +4,8 @@ import {stringify,parse} from 'yaml';
 import {dataCopySources,describeDataBuildInputs,compareDataBuildInputs,captureDataBuildInputs} from './lib/production-data-build-inputs.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 import {execFileSync} from 'node:child_process';
+import {readFileSync} from 'node:fs';
+import {isolateDataRecipe,verifyIsolatedDataRecipe} from './lib/ci-smoke-isolation.mjs';
 
 function fixture(){
   const files=new Map(),names=['llm-proxy','mnemo-server','qwen3-embed'];
@@ -28,6 +30,39 @@ it('binds all matching lockfiles, directory members, Dockerfile bytes and ignore
 });
 it('does not mistake control source edits for data recipe changes',async()=>{
   const f=fixture(),before=await f.describe();f.files.set('scripts/operator.mjs','new control');expect(compareDataBuildInputs(before,await f.describe())).toBe(before.hash);
+});
+it('preserves the authenticated benchmark recipe while capacity configuration changes outside DATA',async()=>{
+  const f=fixture(),path='docker/mnemo-server/patches/0020-namespace-performance-gates.patch';
+  const patch=readFileSync(new URL('../'+path,import.meta.url),'utf8');
+  f.files.set(path,patch);
+  f.files.set('docker/mnemo-server/Dockerfile',f.files.get('docker/mnemo-server/Dockerfile')+'COPY docker/mnemo-server/patches/ /patches/\n');
+  const workflow=parse(f.files.get('.github/workflows/infra-ci.yml')),steps=workflow.jobs['build-and-push-image'].steps;
+  const build=steps.find(step=>step.with?.file==='docker/mnemo-server/Dockerfile');
+  build.name='Build & push mnemo-server (arm64)';
+  const smoke={name:'Smoke test mnemo-server EMF framing (non-TTY)',if:"steps.gate.outputs.skip != 'true'",run:'echo synthetic-smoke'};
+  steps.push(smoke);f.files.set('.github/workflows/infra-ci.yml',stringify(workflow));
+  const origin=(await f.describe()).recipe;
+  // This public source pin is the reviewed 25k test fixture, not a runtime cap.
+  // Test-only bytes copied into an image remain part of its exact DATA recipe.
+  origin.components['mnemo-server'].context.find(row=>row.path===path).sha256='8696f3ca3ecc244bbfbfb785ff17dba65c4c1414760e21b7437c555b0b6f5944';
+  smoke.if=false;build.id='mnemo';f.files.set('.github/workflows/infra-ci.yml',stringify(workflow));
+  const current=(await f.describe()).recipe,originHash=hash(origin);
+  expect(verifyIsolatedDataRecipe(origin,current,{originHash,candidateHash:hash(current)})).toEqual({originHash,candidateHash:hash(current)});
+  expect(current).toEqual(isolateDataRecipe(origin));
+  f.files.set('infra/ecs.ts',readFileSync(new URL('../infra/ecs.ts',import.meta.url),'utf8'));
+  expect((await f.describe()).recipe).toEqual(current);
+  const changed=patch.replace('+const namespaceBenchmarkRows = 25000\n','+const namespaceBenchmarkRows = 30000\n');
+  expect(changed).not.toBe(patch);f.files.set(path,changed);
+  const altered=(await f.describe()).recipe;
+  expect(()=>verifyIsolatedDataRecipe(origin,altered,{originHash,candidateHash:hash(altered)})).toThrow('CiSmokeRecipeChanged');
+});
+it('keeps a separate prerequisite source-verifier job outside the data build recipe',async()=>{
+ const f=fixture(),before=await f.describe(),workflow=parse(f.files.get('.github/workflows/infra-ci.yml'));
+ workflow.jobs['verify-production-image-transition']={steps:[{run:'node scripts/verify-image-security-deployment.mjs'}]};
+ workflow.jobs['build-and-push-image'].needs=['verify-production-image-transition'];
+ workflow.jobs['build-and-push-image'].if="needs.verify-production-image-transition.result == 'success'";
+ f.files.set('.github/workflows/infra-ci.yml',stringify(workflow));f.files.set('scripts/verify-image-security-deployment.mjs','throw Error("synthetic source hold");');
+ expect(compareDataBuildInputs(before,await f.describe())).toBe(before.hash);
 });
 it('fingerprints context preparation and its transitive local scripts',async()=>{
   const f=fixture(),before=await f.describe(),workflow=parse(f.files.get('.github/workflows/infra-ci.yml'));

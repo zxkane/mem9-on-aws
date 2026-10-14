@@ -1,0 +1,12 @@
+name: CI smoke gate
+description: Verify the current job's source or target in the action process
+inputs:
+  mode:
+    description: source or target
+    required: true
+  phase:
+    description: Required target phase; empty for source
+    required: false
+runs:
+  using: node24
+  main: index.mjs

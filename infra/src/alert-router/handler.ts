@@ -2,7 +2,7 @@
  * AlertRouter Lambda — SNS → Slack webhook bridge (mem9 observability).
  *
  * Subscribed directly to the production `Mem9AlertsTopic` SNS topic. POSTs
- * Block-Kit messages to the Slack incoming webhook URL in `SLACK_WEBHOOK_URL`.
+ * Block-Kit messages using the exact stage-scoped webhook SecureString.
  *
  * Direct SNS→Lambda (no delay queue): mem9's alarms carry everything needed
  * in the alarm payload itself — no CloudWatch Logs Insights enrichment, so
@@ -15,6 +15,9 @@
  */
 
 import { formatAlarmMessage } from "./slack-formatter";
+import { createRuntimeSecretReader } from "../../gateway/runtime-secrets.mjs";
+
+const readSecret = createRuntimeSecretReader();
 
 interface SnsRecord {
   Sns?: { Message?: string };
@@ -25,10 +28,11 @@ interface SnsEvent {
 }
 
 export async function handler(event: SnsEvent): Promise<void> {
-  const webhookUrl = process.env.SLACK_WEBHOOK_URL ?? "";
-  if (!webhookUrl) {
-    console.error("alert-router: webhook configuration is missing");
-    throw new Error("SLACK_WEBHOOK_URL is not configured");
+  let webhookUrl: string;
+  try { webhookUrl = await readSecret("webhook"); }
+  catch {
+    console.error("alert-router: webhook configuration is unavailable");
+    throw new Error("Slack webhook configuration is unavailable");
   }
 
   for (const record of event.Records ?? []) {
