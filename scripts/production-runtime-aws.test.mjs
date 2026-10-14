@@ -6,14 +6,15 @@ const role={RoleName:'mem9-on-aws-prod-SyntheticRole',Arn:`arn:aws:iam::${accoun
 const boundaryArn=`arn:aws:iam::${account}:policy/mem9-on-aws-workload-boundary`;
 const document=Statement=>({Version:'2012-10-17',Statement});
 const allow={Effect:'Allow',Action:'ssm:GetParameters',Resource:'*'};
-function fixture(statements,{decision='implicitDeny',missing=[],boundary=document([allow]),perResource}={}){
+function fixture(statements,{decision='implicitDeny',missing=[],boundary=document([allow]),perResource,selectedRole=role,selectedBoundary=boundaryArn,tags=[],boundaryChanged=false}={}){
   const calls=[];
+  const reads=new Map();
   const send=async command=>{
     const {input}=command,name=command.constructor.name;calls.push({name,input});
-    if(name==='GetPolicyCommand')return {Policy:{DefaultVersionId:'v1'}};
+    if(name==='GetPolicyCommand'){const count=(reads.get(input.PolicyArn)??0)+1;reads.set(input.PolicyArn,count);return {Policy:{DefaultVersionId:(boundaryChanged===true||boundaryChanged===input.PolicyArn)&&count>1?'v2':'v1'}};}
     if(name==='GetPolicyVersionCommand')return {PolicyVersion:{Document:boundary}};
-    if(name==='ListRolesCommand')return {Roles:[role]};
-    if(name==='GetRoleCommand')return {Role:{...role,PermissionsBoundary:{PermissionsBoundaryArn:boundaryArn}}};
+    if(name==='ListRolesCommand')return {Roles:[selectedRole]};
+    if(name==='GetRoleCommand')return {Role:{...selectedRole,Tags:tags,PermissionsBoundary:{PermissionsBoundaryArn:selectedBoundary}}};
     if(name==='ListRolePoliciesCommand')return {PolicyNames:['synthetic']};
     if(name==='ListAttachedRolePoliciesCommand')return {AttachedPolicies:[]};
     if(name==='GetRolePolicyCommand')return {PolicyDocument:document(statements)};
@@ -25,6 +26,38 @@ function fixture(statements,{decision='implicitDeny',missing=[],boundary=documen
 }
 
 describe('credential reader policy audit',()=>{
+  const gatewayBoundary=`arn:aws:iam::${account}:policy/mem9-on-aws-gateway-boundary`;
+  const gatewayRole=token=>({RoleName:`mem9-on-aws-prod-${token}-fixture`,Arn:`arn:aws:iam::${account}:role/mem9-on-aws-prod-${token}-fixture`});
+  const gatewayTags=[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:stage}];
+  it.each(['Mem9IdentityInterceptorFnRole','Mem9ProxyFnRole'])('audits the existing dedicated boundary for %s without exempting its policies',async token=>{
+    const f=fixture([allow],{selectedRole:gatewayRole(token),selectedBoundary:gatewayBoundary,tags:gatewayTags,decision:'explicitDeny'});
+    await auditAdditionalCredentialReaders(f.clients,{stage,region,account},{roles:[]});
+    expect(f.calls.filter(c=>c.name==='GetPolicyCommand').map(c=>c.input.PolicyArn)).toContain(gatewayBoundary);
+    expect(f.calls.some(c=>c.name==='GetRolePolicyCommand')).toBe(true);
+    expect(f.calls.some(c=>c.name==='SimulateCustomPolicyCommand')).toBe(true);
+  });
+  it.each(['unrelated-role','wrong-stage','wrong-project','missing-tags','duplicate-stage','unknown-boundary'])('rejects a dedicated boundary with %s',kind=>{
+    const options={selectedRole:gatewayRole('Mem9ProxyFnRole'),selectedBoundary:gatewayBoundary,tags:gatewayTags};
+    if(kind==='unrelated-role')options.selectedRole=role;
+    if(kind==='wrong-stage')options.tags=[gatewayTags[0],{Key:'Stage',Value:'pr-7'}];
+    if(kind==='wrong-project')options.tags=[{Key:'Project',Value:'other'},gatewayTags[1]];
+    if(kind==='missing-tags')options.tags=[];
+    if(kind==='duplicate-stage')options.tags=[...gatewayTags,gatewayTags[1]];
+    if(kind==='unknown-boundary')options.selectedBoundary=gatewayBoundary+'-other';
+    const f=fixture([allow],options);
+    return expect(auditAdditionalCredentialReaders(f.clients,{stage,region,account},{roles:[]})).rejects.toThrow('CredentialReaderBoundaryMismatch');
+  });
+  it('still rejects a Gateway role allowed to read administrator credentials',async()=>{
+    const f=fixture([allow],{selectedRole:gatewayRole('Mem9ProxyFnRole'),selectedBoundary:gatewayBoundary,tags:gatewayTags,decision:'allowed'});
+    await expect(auditAdditionalCredentialReaders(f.clients,{stage,region,account},{roles:[]})).rejects.toThrow('UninventoriedCredentialReader');
+    const calls=f.calls.filter(c=>c.name==='SimulateCustomPolicyCommand');
+    expect(calls.at(-1).input.PermissionsBoundaryPolicyInputList).toEqual([JSON.stringify(document([allow]))]);
+    expect(calls.at(-1).input.ContextEntries).toEqual(expect.arrayContaining(gatewayTags.map(t=>({ContextKeyName:'aws:PrincipalTag/'+t.Key,ContextKeyType:'string',ContextKeyValues:[t.Value]}))));
+  });
+  it('rejects a boundary revision changed during the audit',async()=>{
+    const f=fixture([],{selectedRole:gatewayRole('Mem9ProxyFnRole'),selectedBoundary:gatewayBoundary,tags:gatewayTags,boundaryChanged:gatewayBoundary});
+    await expect(auditAdditionalCredentialReaders(f.clients,{stage,region,account},{roles:[]})).rejects.toThrow('CredentialBoundaryChanged');
+  });
   it('keeps hundreds of historical definitions out of bounded routing metadata while binding their complete digest',()=>{
     const definitions=Array.from({length:400},(_,i)=>`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-prod-SyntheticMem9Bootstrap:${i+1}`);
     const inventory={definitions,roles:[role.Arn],families:['synthetic'],clusters:['synthetic']};
