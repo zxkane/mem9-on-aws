@@ -89,7 +89,9 @@ export async function runServiceNonrootAudit({scope,phase,operationId,persistOnc
  const config={region:selected.region,maxAttempts:1},clients={ecs:new ECSClient(config),ssm:new SSMClient(config),sts:new STSClient(config),ecr:new ECRClient(config),logs:new CloudWatchLogsClient(config)};
  const stem='service-nonroot-audit-'+phase+'-'+operationId;let taskArn,taskDefinitionArn,candidate,stopped=false,registered=false,launchAttempted=false,cleanupComplete=false;
  const check=async()=>{await assertCurrent();same(selected,{account:scope.account,region:scope.region,cluster:scope.cluster,service:scope.service});need(Date.now()<deadline,'ServiceNonrootAuditExpired');};
- const send=async(client,command)=>{await check();return clients[client].send(command,{abortSignal:AbortSignal.timeout(Math.min(30000,deadline-Date.now()))});};
+ // SDK timestamps are Dates; hash the same JSON values the durable journal
+ // stores, including task-definition and task evidence timestamps.
+ const send=async(client,command)=>{await check();return JSON.parse(JSON.stringify(await clients[client].send(command,{abortSignal:AbortSignal.timeout(Math.min(30000,deadline-Date.now()))})));};
  const persist=async(suffix,value)=>{await check();const key=stem+'-'+suffix+'.json';need(await persistOnce(key,value)===true,'ServiceNonrootAuditAlreadyAttempted');same(await readRecord(key),value);await check();};
  const describe=arn=>send('ecs',new DescribeTaskDefinitionCommand({taskDefinition:arn,include:['TAGS']}));
  const manifest=async()=>{const r=await send('ssm',new GetParametersCommand({Names:[parameterName],WithDecryption:true}));need(!r.InvalidParameters?.length&&r.Parameters?.length===1);const p=r.Parameters[0];need(p.Name===parameterName&&p.ARN===`arn:aws:ssm:${selected.region}:${selected.account}:parameter${parameterName}`&&p.Type==='SecureString'&&Number.isSafeInteger(p.Version)&&p.Version>0&&Buffer.byteLength(p.Value)<=16384);return {Name:p.Name,ARN:p.ARN,Type:p.Type,Version:p.Version,Value:p.Value};};

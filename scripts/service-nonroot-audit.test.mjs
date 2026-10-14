@@ -53,6 +53,17 @@ describe('fixed nonroot audit adapter',()=>{
   expect(h.calls.filter(x=>x.kind==='DeregisterTaskDefinitionCommand').map(x=>x.input.taskDefinition)).toEqual([h.newArn]);expect([...h.records.keys()].some(k=>k.endsWith('-plan.json'))).toBe(true);expect(mock.configs.every(c=>c.maxAttempts===1)).toBe(true);expect(mock.destroyed).toBe(5);
   expect(Buffer.byteLength(SERVICE_NONROOT_AUDIT_SOURCE)).toBeLessThan(16384);expect(sha(SERVICE_NONROOT_AUDIT_SOURCE)).toBe(SERVICE_NONROOT_AUDIT_SCRIPT_HASH);
  });
+ it.each(['plan','evidence'])('round-trips SDK dates through the durable JSON %s record',async suffix=>{
+  const h=harness(),send=mock.send.getMockImplementation(),registeredAt=new Date('2026-01-01T00:00:00.000Z');
+  if(suffix==='plan')mock.send.mockImplementation(async(k,i,o)=>{const r=await send(k,i,o);if(k==='DescribeTaskDefinitionCommand')r.taskDefinition.registeredAt=registeredAt;return r;});
+  h.io.persistOnce=async(name,value)=>{if(h.records.has(name))return false;h.records.set(name,JSON.parse(JSON.stringify(value)));return true;};
+  await expect(h.run()).resolves.toMatchObject({projection:h.projection});
+  const record=[...h.records].find(([name])=>name.endsWith('-'+suffix+'.json'))[1];
+  if(suffix==='plan')expect(record.baseline.taskDefinition.registeredAt).toBe(registeredAt.toISOString());
+  else for(const key of ['startedAt','stoppedAt'])expect(record.task[key]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  expect(h.calls.filter(c=>c.kind==='RunTaskCommand')).toHaveLength(1);
+  expect(h.calls.filter(c=>c.kind==='DeregisterTaskDefinitionCommand')).toHaveLength(1);
+ });
  it.each(['account','cluster','service','phase','operationId'])('rejects malformed %s before SDK IO',async key=>{const h=harness();if(key in h.scope)h.scope[key]='bad';else h.io[key]='bad';await expect(h.run()).rejects.toThrow();expect(h.calls).toHaveLength(0);});
  it('requires an expected before projection for after',async()=>{const h=harness();h.io.phase='after';await expect(h.run()).rejects.toThrow();expect(h.calls).toHaveLength(0);});
  it.each(['before','after'])('compares %s against the baseline with a distinct immutable identity',async phase=>{const h=harness();h.io.phase=phase;h.io.expectedProjection=copy(h.projection);await expect(h.run()).resolves.toMatchObject({projection:h.projection});expect(h.calls.find(c=>c.kind==='RunTaskCommand').input.clientToken).toBe('nonroot-audit-'+phase+'-'+h.operationId);});
