@@ -13,6 +13,7 @@ const env={MEM9_LLM_MODEL:'openai.gpt-example',AWS_REGION:'ap-northeast-1',MEM9_
   MEM9_BEDROCK_PROJECT:'proj_app',MEM9_BEDROCK_PROJECT_OPENAI:'proj_responses'};
 const contract=plannerEvaluationContract(env,{adapter:'mantle-responses-total-v1'});
 const perfect=fixture.cases.map(c=>({id:c.id,expect:c.expect,verdict:c.expect==='MERGE'?'MERGE':'REVIEW'}));
+const three=verdicts=>[verdicts,verdicts,verdicts];
 const now=1800000000000;
 
 describe('planner model certification',()=>{
@@ -23,27 +24,31 @@ describe('planner model certification',()=>{
     expect(()=>plannerEvaluationContract(env,{adapter:'other'})).toThrow('InvalidPlannerAdapter');
   });
   it('certifies only zero false merges, zero errors and the recall floor',()=>{
-    const passed=buildPlannerCertificate({fixture,contract,verdicts:perfect,evaluatedMs:now});
+    const passed=buildPlannerCertificate({fixture,contract,runs:three(perfect),evaluatedMs:now});
     expect(passed.passed).toBe(true);
     expect(certifiedPlannerContract(passed,{fixture,now})).toEqual({...contract,proof:hash(passed)});
     const falseMerge=perfect.map(v=>v.expect==='NOT_MERGE'&&v.id===perfect.find(x=>x.expect==='NOT_MERGE').id?{...v,verdict:'MERGE'}:v);
-    expect(buildPlannerCertificate({fixture,contract,verdicts:falseMerge,evaluatedMs:now}).passed).toBe(false);
-    expect(buildPlannerCertificate({fixture,contract,verdicts:perfect.map((v,i)=>i?v:{...v,verdict:'ERROR'}),evaluatedMs:now}).passed).toBe(false);
+    expect(buildPlannerCertificate({fixture,contract,runs:[perfect,falseMerge,perfect],evaluatedMs:now}).passed).toBe(false);
+    expect(buildPlannerCertificate({fixture,contract,runs:[perfect,perfect,perfect.map((v,i)=>i?v:{...v,verdict:'ERROR'})],evaluatedMs:now}).passed).toBe(false);
     const merges=perfect.filter(v=>v.expect==='MERGE').length,floor=Math.ceil(merges*PLANNER_CERTIFICATE_POLICY.minMergeRecall);
     let kept=0;const sparse=perfect.map(v=>v.expect!=='MERGE'?v:kept++<floor?v:{...v,verdict:'REVIEW'});
-    expect(buildPlannerCertificate({fixture,contract,verdicts:sparse,evaluatedMs:now}).passed).toBe(true);
+    expect(buildPlannerCertificate({fixture,contract,runs:three(sparse),evaluatedMs:now}).passed).toBe(true);
     let fewer=0;const below=perfect.map(v=>v.expect!=='MERGE'?v:fewer++<floor-1?v:{...v,verdict:'KEEP'});
-    expect(buildPlannerCertificate({fixture,contract,verdicts:below,evaluatedMs:now}).passed).toBe(false);
+    expect(buildPlannerCertificate({fixture,contract,runs:[perfect,below,perfect],evaluatedMs:now}).passed).toBe(false);
+    const either=perfect.map(v=>v.expect==='EITHER'?{...v,verdict:'MERGE'}:v);
+    expect(fixture.cases.some(c=>c.expect==='EITHER')).toBe(true);
+    expect(buildPlannerCertificate({fixture,contract,runs:three(either),evaluatedMs:now}).passed).toBe(true);
+    expect(()=>buildPlannerCertificate({fixture,contract,runs:[perfect,perfect],evaluatedMs:now})).toThrow('PlannerModelCertificateInvalid');
   });
   it('rejects stale, tampered or differently bound certificates',()=>{
-    const certificate=buildPlannerCertificate({fixture,contract,verdicts:perfect,evaluatedMs:now});
+    const certificate=buildPlannerCertificate({fixture,contract,runs:three(perfect),evaluatedMs:now});
     for(const [value,options] of [
       [{...certificate,passed:false},{}],
       [{...certificate,promptHash:'0'.repeat(64)},{}],
-      [{...certificate,results:{...certificate.results,falseMerges:1}},{}],
-      [{...certificate,results:{...certificate.results,falseMerges:Number.NaN}},{}],
-      [{...certificate,verdicts:certificate.verdicts.map(v=>v.id===certificate.verdicts.find(x=>x.expect==='NOT_MERGE').id?{...v,verdict:'MERGE'}:v)},{}],
-      [{...certificate,verdicts:certificate.verdicts.slice(1)},{}],
+      [{...certificate,results:{...certificate.results,runs:certificate.results.runs.map(r=>({...r,falseMerges:1}))}},{}],
+      [{...certificate,results:{...certificate.results,cases:Number.NaN}},{}],
+      [{...certificate,runs:certificate.runs.map((run,i)=>i?run:run.map(v=>v.id===run.find(x=>x.expect==='NOT_MERGE').id?{...v,verdict:'MERGE'}:v))},{}],
+      [{...certificate,runs:certificate.runs.slice(1)},{}],
       [{...certificate,policy:{...certificate.policy,maxFalseMerges:1}},{}],
       [{...certificate,contract:{...contract,extra:1}},{}],
       [certificate,{now:now+PLANNER_CERTIFICATE_POLICY.maxAgeMs+1}],
@@ -63,7 +68,7 @@ describe('planner model certification',()=>{
   it('builds a validated configure-model request from an owner-held certificate',async()=>{
     const directory=await mkdtemp(join(tmpdir(),'planner-certificate-'));
     try{
-      const certificate=buildPlannerCertificate({fixture,contract,verdicts:perfect,evaluatedMs:now}),file=join(directory,'certificate.json');
+      const certificate=buildPlannerCertificate({fixture,contract,runs:three(perfect),evaluatedMs:now}),file=join(directory,'certificate.json');
       await writeFile(file,JSON.stringify(certificate),{mode:0o644});
       await expect(plannerModelRequest({MEM9_PLANNER_CERTIFICATE:file},{now})).rejects.toThrow('PlannerModelCertificateExposed');
       await chmod(file,0o600);

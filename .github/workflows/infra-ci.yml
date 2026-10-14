@@ -1618,15 +1618,6 @@ jobs:
           rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
           rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
 
-      - name: Verify namespace cutover phase
-        if: vars.MEM9_NAMESPACE_REQUIRED == '1'
-        shell: bash
-        env:
-          STAGE: prod
-        run: >-
-          bash scripts/run-memory-namespace-task.sh assert-phase
-          --expected-phase constraints_complete
-
       - name: Recover stale SST prod lock
         # Recovers from "Concurrent update detected" left by a previous
         # `sst deploy` that died without releasing its lock. Policy: only
@@ -1701,6 +1692,20 @@ jobs:
         env:
           STAGE: prod
         run: node scripts/run-production-runtime.mjs configure
+
+      # Deployment roles may not pass the namespace operator role. After the
+      # runtime cutover, server readiness and the runtime-verify bootstrap both
+      # call `mem9_runtime.ready_for`, which requires constraints_complete. A
+      # pre-cutover deployment still runs this gate, and fails closed on that
+      # deny until an operator asserts the phase outside CI.
+      - name: Verify namespace cutover phase
+        if: vars.MEM9_NAMESPACE_REQUIRED == '1' && env.MEM9_PRODUCTION_RUNTIME_MODE != 'active'
+        shell: bash
+        env:
+          STAGE: prod
+        run: >-
+          bash scripts/run-memory-namespace-task.sh assert-phase
+          --expected-phase constraints_complete
 
       - name: Deploy prod stage
         shell: bash

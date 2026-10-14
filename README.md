@@ -1718,9 +1718,10 @@ MEM9_PLANNER_CERTIFICATE="$certificate" \
 STAGE=prod node scripts/run-production-canary.mjs
 ```
 
-The evaluation is a release gate for the exact model contract: zero false
-merges among synthetic contradictions and unrelated records, zero malformed
-answers, and at least half of the expected merges. See the consolidation design
+The evaluation is a release gate for the exact model contract. In each of
+three runs it requires zero false merges among synthetic contradictions,
+unrelated records and injected instructions, zero malformed answers, and at
+least half of the expected merges. See the consolidation design
 for the history record and binding rules.
 
 The initial production canary uses `scripts/run-production-canary.mjs` with
