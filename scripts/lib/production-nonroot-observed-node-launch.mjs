@@ -7,7 +7,7 @@ import {inspectObservationGateFiles,nodeObservationCommonGateSource} from './pro
 import {nodeObservationCollectorSource,nodeWorkerObservationCollectorSource} from './production-nonroot-observation-collector.mjs';
 import {observationNodeOutputSource} from './production-nonroot-observation-node-output.mjs';
 import {createHash} from 'node:crypto';
-import {gzipSync} from 'node:zlib';
+import {gzipSync,brotliCompressSync,constants} from 'node:zlib';
 import * as nodeFs from 'node:fs';
 import * as nodeNet from 'node:net';
 import * as nodeCrypto from 'node:crypto';
@@ -204,6 +204,28 @@ function packedNodeSource(source,argumentCount){
  return {bootstrap,binding:{sourceHash,sourceBytes:bytes.length,compressedBytes:compressed.length,
   compressedHash:sha(compressed),bootstrapHash:sha(Buffer.from(bootstrap)),bootstrapBytes:Buffer.byteLength(bootstrap),cmdlineBytes}};
 }
+// Keep the V1 gzip factory byte-identical for archived launch commitments.
+// V2 workers use fixed built-in Brotli packing; callers cannot select a codec
+// or supply source. The complete expanded program still verifies its loader.
+function fixedBrotliBootstrap(descriptor){
+ return `import {brotliDecompressSync as observationBrotli} from 'node:zlib';
+import {createHash as observationHash} from 'node:crypto';
+try{const descriptor=${JSON.stringify(descriptor)},body=observationBrotli(Buffer.from(descriptor.base64,'base64'),{maxOutputLength:descriptor.bytes});
+if(body.length!==descriptor.bytes||observationHash('sha256').update(body).digest('hex')!==descriptor.sha256)throw Error('DataObservationSourceBinding');
+await (await import('data:text/javascript;base64,'+body.toString('base64'))).runPackedObservation(descriptor);}catch{process.exitCode=1;}`;
+}
+function packedWorkerNodeSource(source,argumentCount){
+ const bytes=Buffer.from(source),compressed=brotliCompressSync(bytes,{params:{
+  [constants.BROTLI_PARAM_QUALITY]:11,[constants.BROTLI_PARAM_MODE]:constants.BROTLI_MODE_TEXT,[constants.BROTLI_PARAM_LGWIN]:18,
+ }}),sourceHash=sha(bytes);
+ const bootstrap=fixedBrotliBootstrap({bytes:bytes.length,sha256:sourceHash,base64:compressed.toString('base64')});
+ // Same cap, including the fixed mode and maximum safe integer arguments,
+ // with one NUL delimiter per argument. No file row is omitted to fit.
+ const cmdlineBytes=Buffer.byteLength(['/usr/local/bin/node','--input-type=module','-e',bootstrap].join('\0')+'\0')+17*argumentCount;
+ if(cmdlineBytes>16384)throw Error('DataObservationSourceArgvBound');
+ return {bootstrap,binding:{sourceHash,sourceBytes:bytes.length,compressedBytes:compressed.length,
+  compressedHash:sha(compressed),bootstrapHash:sha(Buffer.from(bootstrap)),bootstrapBytes:Buffer.byteLength(bootstrap),cmdlineBytes}};
+}
 function sharedSource(pollLimit){return `import * as lifecycleFs from 'node:fs';
 import * as lifecycleNet from 'node:net';
 import * as lifecycleCrypto from 'node:crypto';
@@ -228,7 +250,7 @@ function prepareObservedNodeDataLaunch(input){
  const spec={plan,files,schedule,argv,mainCmdlineHash:sha(Buffer.from(argv.join('\0')+'\0')),healthHashes:health?[sha(Buffer.from(health.slice(4).join('\0')+'\0'))]:[]};
  spec.binding=nonrootHash({planHash:schedule.planHash,normal,files});
  const source=sharedSource(plan.deadlineMs-plan.startedMs)+nodeObservationCommonGateSource()+'\n'+(relative?nodeWorkerObservationCollectorSource():nodeObservationCollectorSource())+'\n'+observationNodeOutputSource()+
-  `\nconst sourceBootstrap=(${Function.prototype.toString.call(fixedPackedBootstrap)});
+  `\nconst sourceBootstrap=(${Function.prototype.toString.call(relative?fixedBrotliBootstrap:fixedPackedBootstrap)});
 const observe=(${Function.prototype.toString.call(relative?workerObserverEntry:observerEntry)});
 const relay=(${Function.prototype.toString.call(relayEntry)});
 const coordinate=(${Function.prototype.toString.call(coordinatorEntry)});
@@ -241,11 +263,11 @@ export async function runPackedObservation(descriptor){
  if(process.argv.length!==1)throw Error('DataObservationSourceMode');
  return coordinate(lifecycleChild,lifecycle,fixedNodeObservationCommonGate,spec,bootstrap)();
 }`;
- const packed=packedNodeSource(source,4);
+ const packed=relative?packedWorkerNodeSource(source,4):packedNodeSource(source,4);
  const target={...normal,entryPoint:[...normal.entryPoint.slice(0,3),'/usr/local/bin/node','--input-type=module','-e',packed.bootstrap],command:[]};
  const contract=copyNonrootJson({version:2,kind:'observed-node-data-launch',plan,normal,target,binding:spec.binding,sourceHash:packed.binding.bootstrapHash,
   sourceBytes:packed.binding.bootstrapBytes,observerSourceHash:packed.binding.sourceHash,relaySourceHash:packed.binding.sourceHash,
-  delivery:{kind:'fixed-gzip-source-v1',...packed.binding,processes:['coordinator','relay','observer'],maximumInvocations:3},snapshotCount:schedule.snapshotCount+plan.episodes.length});
+  delivery:{kind:relative?'fixed-brotli-source-v1':'fixed-gzip-source-v1',...packed.binding,processes:['coordinator','relay','observer'],maximumInvocations:3},snapshotCount:schedule.snapshotCount+plan.episodes.length});
  return {contract,spec,relay:packed.bootstrap};
 }
 export function compileObservedNodeDataLaunch(input){return prepareObservedNodeDataLaunch(input).contract;}
