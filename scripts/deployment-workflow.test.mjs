@@ -373,9 +373,17 @@ describe("workflow integration", () => {
     );
     const phaseGate = steps[phaseGateIndex];
 
+    const modeIndex = steps.findIndex(
+      ({ name }) => name === "Resolve production runtime deployment mode",
+    );
     expect(phaseGateIndex).toBeGreaterThanOrEqual(0);
     expect(phaseGateIndex).toBeLessThan(deployIndex);
-    expect(phaseGate.if).toBe("vars.MEM9_NAMESPACE_REQUIRED == '1'");
+    // The runtime mode decides whether the operator-task gate is needed.
+    expect(modeIndex).toBeGreaterThanOrEqual(0);
+    expect(modeIndex).toBeLessThan(phaseGateIndex);
+    expect(phaseGate.if).toBe("vars.MEM9_NAMESPACE_REQUIRED == '1' && env.MEM9_PRODUCTION_RUNTIME_MODE != 'active'");
+    const contract = readFileSync(resolve(root, "docker/bootstrap/runtime-contract.sql"), "utf8");
+    expect(contract).toContain("FROM public.memory_namespace_migration_state WHERE singleton_id AND phase='constraints_complete'");
     expect(phaseGate.env.STAGE).toBe("prod");
     expect(phaseGate.run).toContain(
       "run-memory-namespace-task.sh assert-phase --expected-phase constraints_complete",
