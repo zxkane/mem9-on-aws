@@ -1,6 +1,6 @@
 {
  "version": 1,
- "description": "Synthetic planner neighborhoods for model certification. All subjects, names and values are fictional. EITHER marks jointly true records that lossless composition preserves.",
+ "description": "Synthetic planner neighborhoods for model certification. All subjects, names and values are fictional. EITHER marks records that are all true at once, which lossless composition preserves; a record whose present-tense fact another record says has changed is NOT_MERGE.",
  "cases": [
   {
    "id": "merge-00",
@@ -1029,8 +1029,8 @@
    ]
   },
   {
-   "id": "review-24",
-   "expect": "NOT_MERGE",
+   "id": "either-24",
+   "expect": "EITHER",
    "members": [
     {
      "memory": {
@@ -1929,8 +1929,8 @@
    ]
   },
   {
-   "id": "either-45",
-   "expect": "EITHER",
+   "id": "review-45",
+   "expect": "NOT_MERGE",
    "members": [
     {
      "memory": {

@@ -8,8 +8,10 @@ import {PLANNER_PROMPT} from './consolidation-model.mjs';
 // A false MERGE bundles an unresolved contradiction, a different subject or an
 // injected instruction, so the gate admits none. A missed MERGE only defers
 // consolidation, so recall has a lower, explicit floor. EITHER cases are
-// jointly true records (a context-specific exception or an explicitly resolved
-// change) that lossless composition preserves, so both answers are acceptable.
+// records that are all true at once, such as a context-specific exception or a
+// past value next to the current one, which lossless composition preserves, so
+// both answers are acceptable. The certificate is owner-generated and unsigned;
+// the run count guards against a lucky pass, not against a forged file.
 export const PLANNER_CERTIFICATE_POLICY=Object.freeze({runs:3,maxFalseMerges:0,maxErrors:0,minMergeRecall:0.5,maxAgeMs:7*86400000});
 const EXPECTATIONS=['MERGE','NOT_MERGE','EITHER'];
 const CONTRACT_KEYS=['adapter','model','region','project','max_input_tokens','max_output_tokens','reasoning','input_bound','output_bound'];
@@ -58,7 +60,7 @@ export function buildPlannerCertificate({fixture,contract,runs,evaluatedMs}){
   if(!exact(contract,CONTRACT_KEYS)||!Number.isSafeInteger(evaluatedMs)||!Array.isArray(runs)||runs.length!==PLANNER_CERTIFICATE_POLICY.runs)fail();
   const scored=runs.map(verdicts=>scoreRun(fixture,verdicts));
   const results={cases:fixture.cases.length,runs:scored.map(({passed,...result})=>result),verdictsHash:hash(runs)};
-  return {version:1,contract,promptHash:plannerPromptHash(),fixtureHash:hash(fixture),policy:{...PLANNER_CERTIFICATE_POLICY},
+  return {version:2,contract,promptHash:plannerPromptHash(),fixtureHash:hash(fixture),policy:{...PLANNER_CERTIFICATE_POLICY},
     runs,results,passed:scored.every(run=>run.passed),evaluatedMs};
 }
 
@@ -68,7 +70,7 @@ export function buildPlannerCertificate({fixture,contract,runs,evaluatedMs}){
  * certificate hash as its proof. Verdicts name synthetic cases only.
  */
 export function certifiedPlannerContract(certificate,{fixture,now=Date.now()}){
-  if(certificate?.version!==1||!exact(certificate,['version','contract','promptHash','fixtureHash','policy','runs','results','passed','evaluatedMs'])||
+  if(certificate?.version!==2||!exact(certificate,['version','contract','promptHash','fixtureHash','policy','runs','results','passed','evaluatedMs'])||
     !Number.isSafeInteger(certificate.evaluatedMs)||certificate.evaluatedMs>now||now-certificate.evaluatedMs>PLANNER_CERTIFICATE_POLICY.maxAgeMs)fail();
   const expected=buildPlannerCertificate({fixture,contract:certificate.contract,runs:certificate.runs,evaluatedMs:certificate.evaluatedMs});
   if(hash(expected)!==hash(certificate)||expected.passed!==true)fail();

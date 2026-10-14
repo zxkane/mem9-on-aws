@@ -1323,16 +1323,22 @@ the existing queue checks. A model never writes replacement text.
 `scripts/test-fixtures/planner-model-evaluation.json` through the production
 planner request path, in three independent runs. The fixture covers paraphrases,
 complementary facts, different subjects, unresolved contradictions, changed
-values, negation and prompt injection. `EITHER` cases are jointly true records,
-such as a context-specific exception or an explicitly stated change, that
-lossless composition preserves; both answers are acceptable there. A
+values, negation and prompt injection. `EITHER` cases are records that are all
+true at once, such as a context-specific exception or a past value next to the
+current one, which lossless composition preserves; both answers are acceptable
+there. A record whose present-tense statement another record says has changed
+must not be merged. A
 certificate passes only when every run has zero false merges, zero malformed
 answers and at least half of the expected merges. It records every synthetic
 verdict, binds the exact contract, the prompt hash and the fixture hash, and
 installation recomputes the outcome from those verdicts. One passing run is not
 enough, because the same model can answer a borderline case differently. The
 certificate is valid for seven days and stays in an owner-only mode-600 file.
-Its hash becomes the contract `proof`.
+It is owner-generated and unsigned: the run count guards against a lucky pass,
+not against a forged file. Its hash becomes the contract `proof`. The deployed
+planner does not re-check the prompt, so a release that changes the prompt or
+the request path is followed by a fresh evaluation and `configure-model`
+before model classification continues.
 
 The owner-only `configure-model` operation re-verifies the certificate. On a
 paused, `prepared` setup it installs the contract and daily stage and namespace
