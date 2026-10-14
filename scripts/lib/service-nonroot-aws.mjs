@@ -9,6 +9,7 @@ import {SSMClient,GetParametersCommand} from '@aws-sdk/client-ssm';
 import {SchedulerClient,ListScheduleGroupsCommand,ListSchedulesCommand} from '@aws-sdk/client-scheduler';
 import {STSClient,GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {serviceNonrootHash as hash} from './service-nonroot.mjs';
+import {validateDecisionArtifactBucketName} from './authorization-maintenance-isolation.mjs';
 
 const exec=promisify(execFile),lockKey='runtime-publication-locks/prod/witness.json';
 const variable='DEPLOYMENT_MAINTENANCE_PAUSED';
@@ -34,7 +35,7 @@ export async function currentSource(root){
 export async function createServiceNonrootAws({scope,directory,root,operationId}){
  assert(/^\d{12}$/.test(scope.account)&&/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(scope.region));
  assert(/^mem9-on-aws-prod-[A-Za-z0-9-]+$/.test(scope.cluster)&&scope.service==='Mem9Server');
- assert(scope.bucket===`mem9-audit-${scope.account}`&&scope.lockKey===lockKey,'ExistingPublicationMutexRequired');
+ validateDecisionArtifactBucketName(scope.bucket);assert(scope.lockKey===lockKey,'ExistingPublicationMutexRequired');
  assert(/^[a-f0-9]{32}$/.test(operationId),'OperationIdentityRequired');
  assert(resolve(directory)===directory&&resolve(root)===root);
  await mkdir(directory,{mode:0o700,recursive:true});const stat=await lstat(directory);assert(stat.isDirectory()&&!stat.isSymbolicLink()&&(stat.mode&0o077)===0);
@@ -49,6 +50,17 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
   if(value!==undefined)args.push('-f','name='+variable,'-f','value='+value);
   const r=await exec('gh',args,{timeout:30000,maxBuffer:4*1024*1024});return r.stdout.trim()?JSON.parse(r.stdout):null;
  };
+ const assertConfiguredBucket=async()=>{
+  // Use the same repository variable as deployment and preview evidence. A
+  // caller-selected bucket must never create a second publication mutex.
+  const r=await gh('actions/variables?per_page=100');
+  assert(Number.isSafeInteger(r.total_count)&&r.total_count>=0&&r.total_count<=100&&Array.isArray(r.variables)&&r.variables.length===r.total_count,'AuditBucketConfigurationIncomplete');
+  const selected=r.variables.filter(v=>v.name==='MEM9_DECISION_ARTIFACT_BUCKET');
+  assert(selected.length<=1&&selected.every(v=>typeof v.value==='string'),'AuditBucketConfigurationIncomplete');
+  const bucket=selected[0]?.value||`mem9-audit-${scope.account}`;
+  validateDecisionArtifactBucketName(bucket);assert.equal(scope.bucket,bucket,'ConfiguredAuditBucketMismatch');
+ };
+ try{await assertConfiguredBucket();}catch(error){Object.values(clients).forEach(client=>client.destroy());throw error;}
  const recordName=name=>{
   assert(/^[a-z][a-z0-9-]*\.json$/.test(name)||/^service-nonroot\/[a-f0-9]{64}\/(register-intent|register-result|update-intent|update-result|complete)$/.test(name));
   return name.includes('/')?name.replaceAll('/','-')+'.json':name;
@@ -86,7 +98,7 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
   try{assert(r.ContentLength>0&&r.ContentLength<=4096&&r.ETag);return {body:await r.Body.transformToString(),etag:r.ETag};}finally{r.Body?.destroy?.();}
  };
  const assertFences=async()=>{
-  assert(fences,'ServiceFenceRequired');const actual=await getMutex();assert.deepEqual(actual,fences.mutex,'ServiceMutexChanged');
+  assert(fences,'ServiceFenceRequired');await assertConfiguredBucket();const actual=await getMutex();assert.deepEqual(actual,fences.mutex,'ServiceMutexChanged');
   const gate=await gh('actions/variables/'+variable);assert.equal(gate.value,'true');assert.equal(gate.updated_at,fences.gate.updated_at,'ServiceGateChanged');await noProductionRuns();
  };
  const readService=async()=>{
@@ -135,6 +147,7 @@ export async function createServiceNonrootAws({scope,directory,root,operationId}
  };
  const acquireFences=async plan=>{
   assert.equal(plan.owner,operationId,'OperationIdentityChanged');
+  await assertConfiguredBucket();
   assert(!await readRecord('mutex-intent.json'),'ExistingOperationRequiresReconciliation');
   const input={Bucket:scope.bucket,ExpectedBucketOwner:scope.account};
   const [block,encryption,lifecycle]=await Promise.all([send(clients.s3,new GetPublicAccessBlockCommand(input)),send(clients.s3,new GetBucketEncryptionCommand(input)),send(clients.s3,new GetBucketLifecycleConfigurationCommand(input))]);

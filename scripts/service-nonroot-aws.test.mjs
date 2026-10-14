@@ -37,10 +37,11 @@ const clone = value => structuredClone(value);
 let active;
 afterEach(() => {active?.close(); active = undefined;});
 
-async function harness() {
+async function harness({bucket=scope.bucket,configuredBucket}={}) {
   vi.clearAllMocks(); mocks.configurations.length = 0;
   const h = {cloud: new Map(), local: new Map(), requests: [], controls: [], events: [], destroyed: [],
-    gate: {name: 'DEPLOYMENT_MAINTENANCE_PAUSED', value: 'false', updated_at: 'before'}, plan: {version: 1, owner: operationId}};
+    gate: {name: 'DEPLOYMENT_MAINTENANCE_PAUSED', value: 'false', updated_at: 'before'}, plan: {version: 1, owner: operationId},
+    variables: configuredBucket===undefined?[]:[{name:'MEM9_DECISION_ARTIFACT_BUCKET',value:configuredBucket}]};
   let sequence = 0;
   h.putCloud = (name, value) => h.cloud.set(journalKey(name), {body: JSON.stringify(value), etag: `fixture-${++sequence}`});
   h.putLocal = (name, value) => h.local.set(localPath(name), JSON.stringify(value));
@@ -70,6 +71,7 @@ async function harness() {
     const path = args.find(arg => arg.startsWith('repos/'));
     let value;
     if (path?.includes('/actions/runs?')) value = {total_count: 0, workflow_runs: []};
+    else if(path?.endsWith('/actions/variables?per_page=100')) value=h.variableResponse??{total_count:h.variables.length,variables:clone(h.variables)};
     else if (path?.endsWith('/actions/variables/DEPLOYMENT_MAINTENANCE_PAUSED')) {
       if (args.includes('PATCH')) {
         const setting = args.find(arg => arg.startsWith('value=')).slice(6);
@@ -86,7 +88,7 @@ async function harness() {
     h.requests.push({kind, input: clone(input)});
     if (h.beforeRequest) await h.beforeRequest(kind, input);
     if (kind === 'GetCallerIdentityCommand') return {Account: scope.account};
-    if (input.Bucket) {expect(input.Bucket).toBe(scope.bucket); expect(input.ExpectedBucketOwner).toBe(scope.account);}
+    if (input.Bucket) {expect(input.Bucket).toBe(bucket); expect(input.ExpectedBucketOwner).toBe(scope.account);}
     if (kind === 'GetPublicAccessBlockCommand') return {PublicAccessBlockConfiguration: {BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true}};
     if (kind === 'GetBucketEncryptionCommand') return {ServerSideEncryptionConfiguration: {Rules: [{ApplyServerSideEncryptionByDefault: {SSEAlgorithm: 'aws:kms'}}]}};
     if (kind === 'GetBucketLifecycleConfigurationCommand') return {Rules: []};
@@ -112,9 +114,36 @@ async function harness() {
     }
     throw Error(`Unexpected mocked AWS operation: ${kind}`);
   });
-  h.io = active = await createServiceNonrootAws({scope: clone(scope), directory, root: '/private/source-fixture', operationId});
+  h.io = active = await createServiceNonrootAws({scope: {...clone(scope),bucket}, directory, root: '/private/source-fixture', operationId});
   return h;
 }
+
+describe('shared configured audit bucket',()=>{
+ it('uses the configured custom bucket for both publication mutex and journal',async()=>{
+  const bucket='fixture-audit-123456789012',h=await harness({bucket,configuredBucket:bucket});
+  await h.io.acquireFences(h.plan);await h.io.releaseFences();
+  const writes=h.requests.filter(r=>r.kind==='PutObjectCommand');
+  expect(writes.some(r=>r.input.Key===lockKey)).toBe(true);
+  expect(writes.some(r=>r.input.Key.startsWith('runtime-service-hardening/'))).toBe(true);
+  expect(writes.every(r=>r.input.Bucket===bucket)).toBe(true);
+ });
+ it('rejects the default bucket when deployment configuration selects another bucket',async()=>{
+  await expect(harness({configuredBucket:'fixture-audit-123456789012'})).rejects.toThrow('ConfiguredAuditBucketMismatch');
+  expect(mocks.send.mock.calls.some(([kind])=>kind==='PutObjectCommand')).toBe(false);
+ });
+ it('does not release fences after the configured bucket changes',async()=>{
+  const h=await harness();await h.io.acquireFences(h.plan);
+  h.variables=[{name:'MEM9_DECISION_ARTIFACT_BUCKET',value:'fixture-audit-123456789012'}];
+  await expect(h.io.assertFences()).rejects.toThrow('ConfiguredAuditBucketMismatch');
+  await expect(h.io.releaseFences()).rejects.toThrow('ConfiguredAuditBucketMismatch');
+  expect(h.gate.value).toBe('true');expect(h.cloud.has(lockKey)).toBe(true);
+ });
+ it('fails closed on incomplete configuration inventory before acquisition',async()=>{
+  const h=await harness();h.variableResponse={total_count:101,variables:[]};
+  await expect(h.io.acquireFences(h.plan)).rejects.toThrow('AuditBucketConfigurationIncomplete');
+  expect(h.controls).toEqual([]);
+ });
+});
 
 describe('actual task lifetime inventory',()=>{
  const current='arn:fixture/current',old='arn:fixture/old';

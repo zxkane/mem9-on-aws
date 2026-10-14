@@ -105,8 +105,17 @@ describe("split GitHub OIDC deployment roles", () => {
   it('keeps preview schedule inventory read-only and application-region scoped',()=>{
     const statements=role('GitHubPreviewActionsRole').Policies.flatMap(policy=>policy.PolicyDocument.Statement);
     const inventory=statements.find(statement=>statement.Sid==='PreviewScheduleInventory');
-    expect(inventory).toMatchObject({Effect:'Allow',Action:'scheduler:ListSchedules',Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'ApplicationRegion'}}});
+    expect(inventory).toEqual({Sid:'PreviewScheduleInventory',Effect:'Allow',Action:['scheduler:ListSchedules','scheduler:ListScheduleGroups'],Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'ApplicationRegion'}}});
     expect(JSON.stringify(role('GitHubProductionActionsRole'))).not.toContain('PreviewScheduleInventory');
+  });
+  it('limits process verification to preview tasks and the three serving containers',()=>{
+    const statements=role('GitHubPreviewActionsRole').Policies.flatMap(policy=>policy.PolicyDocument.Statement);
+    const verification=statements.find(statement=>statement.Sid==='PreviewServiceProcessVerification');
+    expect(verification).toEqual({Sid:'PreviewServiceProcessVerification',Effect:'Allow',Action:'ecs:ExecuteCommand',Resource:[
+      'arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:cluster/${ProjectName}-pr-*',
+      'arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:task/${ProjectName}-pr-*/*',
+    ],Condition:{StringEquals:{'aws:RequestedRegion':'ApplicationRegion','ecs:container-name':['mnemo-server','qwen3-embed','llm-proxy']}}});
+    expect(JSON.stringify(role('GitHubProductionActionsRole'))).not.toContain('PreviewServiceProcessVerification');
   });
   it("TC-DEPLOYROLE-001/002/012/014: defines exact trusts and conditional legacy rollback", () => {
     expect(roleSource).toContain("GitHubPreviewActionsRole:");
