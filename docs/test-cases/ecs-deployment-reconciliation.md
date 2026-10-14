@@ -27,3 +27,16 @@ Design:
 | TC-DEPLOY-020 | A historical `ACTIVE` deployment is `FAILED` while the desired PRIMARY is `IN_PROGRESS` | Reconciliation ignores the historical failure, keeps polling, and succeeds when the desired PRIMARY settles |
 | TC-DEPLOY-021 | Preview deploy fails or exhausts its job timeout after producing a validated `pr-N` stage | An independent 70-minute cleanup job removes stale Pulumi runtimes, then runs a bounded 15-minute remove, 22-minute ENI wait, and 15-minute retry with each `kill-after` allowance covered; same-PR workflows are serialized without cancellation |
 | TC-DEPLOY-022 | Production deploy fails or exhausts its 75-minute timeout | An independent `always()` reporter job creates the failure issue from `needs.deploy-prod.result`; explicit whole-workflow cancellation is not claimed |
+
+## Service nonroot remediation
+
+| ID | Scenario | Required result |
+| --- | --- | --- |
+| TC-NONROOT-001 | Transform the complete three-container service definition | Only the enumerated user, capabilities, application and health launch fields change; repeat transformation is identical |
+| TC-NONROOT-002 | Unexpected command, capability addition, privileged mode or container set | Reject before registration |
+| TC-NONROOT-003 | Changed source, expired plan, changed network or task definition | Reject with no service mutation |
+| TC-NONROOT-004 | Lost registration/update response or repeated operation | Preserve durable intents and owned fences; require inspection without another send |
+| TC-NONROOT-005 | Cloud-only, local-only or conflicting journal record | Recover the authoritative record or reject; never infer an unused mutation slot |
+| TC-NONROOT-006 | Actual immutable images under isolated nonroot execution | Verify process IDs, zero capabilities, no-new-privileges, model/cache access, runtime schema checks and namespace/authentication denial cases |
+| TC-NONROOT-007 | Running production candidate | Verify every task and image, application process attributes and real semantic/keyword queries before releasing fences |
+| TC-NONROOT-008 | Historical maintenance witness after service configuration changes | Witness remains invalid for new maintenance material; original history, receipts and disabled controls are preserved |

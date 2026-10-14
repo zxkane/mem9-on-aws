@@ -55,6 +55,14 @@ jobs:
       MEM9_AUTH_MODE: ${{ secrets.MEM9_AUTH_MODE || 'managed' }}
       MEM9_RUNTIME_RECOVERY_RUN_ID: ${{ needs.source.outputs.run-id }}
     steps:
+      - name: Respect production maintenance ownership
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = true ]; then
+            echo '::error::Production recovery is fenced by an active maintenance operation'
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.source.outputs.sha }}

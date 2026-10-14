@@ -67,6 +67,30 @@ citations.
 | Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
+### Service process hardening
+
+The three memory-service containers run as UID/GID `1000:1000`, drop all Linux
+capabilities, and launch applications and health checks through the image's
+fixed `setpriv --no-new-privs` entrypoint. IaC and the service-remediation tool
+share the same transformation. Image digests, credential references, database
+settings, namespace enforcement and unrelated task settings are preserved.
+
+`scripts/run-service-nonroot.mjs` provides bounded `plan`, `apply` and read-only
+`inspect` operations for an existing service. Apply requires a reviewed source,
+the exact externally selected plan hash, actual-image local and preview
+evidence, and fresh maintenance-state evidence. It acquires the existing
+publication mutex and deployment gate, records each mutation before sending it,
+and compares the complete task definition before updating the service. Private
+operator inputs and receipts belong in owner-only, gitignored local files and
+the account-owned audit bucket.
+
+An ambiguous registration or update requires inspection; repeating `apply`
+cannot issue another request. Automatic rollback to the previous root task is
+disabled. Completion requires healthy tasks, actual application-process
+identity checks, authenticated semantic and keyword queries, and unchanged
+paused maintenance history. This operation does not renew a historical
+maintenance witness or enable a batch.
+
 ### Region topology
 
 This is not a single-region deployment where one `AWS_REGION` applies to every

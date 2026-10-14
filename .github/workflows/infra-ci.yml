@@ -74,6 +74,10 @@ on:
         description: "Preview only: prior successful pull-request CI run supplying retained data images"
         type: string
         default: ""
+      runtime_service_nonroot:
+        description: "Preview only: verify the private, frozen service image baseline after runtime rehearsal"
+        type: boolean
+        default: false
       seed_oauth_hmac:
         description: "Generate + set OauthStateHmacKey before deploying (enables the OAuth browser-login flow)"
         type: boolean
@@ -187,7 +191,12 @@ jobs:
           RETAINED_DATA_RUN_ID: ${{ inputs.runtime_retained_data_run }}
           RUNTIME_CUTOVER: ${{ inputs.runtime_cutover && 'true' || 'false' }}
           RUNTIME_STAGE: ${{ inputs.runtime_stage }}
+          SERVICE_NONROOT: ${{ inputs.runtime_service_nonroot && 'true' || 'false' }}
+          CANCELLATION_MODE: ${{ inputs.runtime_cancellation_mode }}
         run: |
+          if [[ "$SERVICE_NONROOT" == true ]]; then
+            [[ "$RUNTIME_CUTOVER" == true && "$RUNTIME_STAGE" =~ ^pr-[1-9][0-9]*$ && "$CANCELLATION_MODE" == normal && -z "$RETAINED_DATA_RUN_ID" ]] || exit 1
+          fi
           if [[ -n "$RETAINED_DATA_RUN_ID" ]]; then
             [[ "$RUNTIME_CUTOVER" == true && "$RUNTIME_STAGE" =~ ^pr-[1-9][0-9]*$ && "$RETAINED_DATA_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
               echo 'Retained-data rehearsal requires a numeric preview stage and a successful source run ID'
@@ -1998,12 +2007,14 @@ jobs:
           npm ci
           pnpm -C infra install --frozen-lockfile
       - name: Require the verified deployment revision
+        id: verified_deployment
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |-
           node --input-type=module <<'JS'
           import {execFileSync} from 'node:child_process';
+          import {appendFileSync} from 'node:fs';
           const stage=process.env.STAGE,sha=process.env.GITHUB_SHA;
           if(stage!=='prod'){
             const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));
@@ -2013,7 +2024,7 @@ jobs:
           let verified=false;
           for(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){
             const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));
-            if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}
+            if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){appendFileSync(process.env.GITHUB_OUTPUT,'run_id='+run.databaseId+'\n');verified=true;break;}
           }
           if(!verified)throw Error('VerifiedDeploymentRequired');
           JS
@@ -2058,6 +2069,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MEM9_RETAINED_PREVIEW_DATA_RUN_ID: ${{ inputs.runtime_retained_data_run }}
         run: node scripts/run-retained-data-preview.mjs
+      - name: Refresh credentials for frozen service verification
+        if: success() && inputs.runtime_service_nonroot
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ needs.application-region.outputs.region }}
+          mask-aws-account-id: true
+      - name: Verify frozen service images as nonroot (preview, hard)
+        id: service_nonroot
+        if: success() && inputs.runtime_service_nonroot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_SERVICE_NONROOT_BASELINE: ${{ secrets.MEM9_SERVICE_NONROOT_BASELINE }}
+          MEM9_SERVICE_NONROOT_CI_RUN: ${{ steps.verified_deployment.outputs.run_id }}
+        run: node scripts/run-service-nonroot-preview-ci.mjs
       - name: Restore interrupted preview runtime
         if: (failure() || cancelled()) && !(cancelled() && steps.cancel_arm.outputs.armed == 'true')
         uses: ./.github/actions/runtime-recovery
@@ -2065,7 +2091,7 @@ jobs:
           role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
       - name: Remove disposable rehearsal
-        if: always() && !(cancelled() && steps.cancel_arm.outputs.armed == 'true') && (inputs.runtime_cancellation_mode != 'resume' || success())
+        if: always() && !(cancelled() && steps.cancel_arm.outputs.armed == 'true') && (inputs.runtime_cancellation_mode != 'resume' || success()) && (!inputs.runtime_service_nonroot || steps.service_nonroot.outcome == 'skipped' || steps.service_nonroot.outputs.cleanup_authorized == 'true')
         uses: ./.github/actions/runtime-cleanup
         with:
           role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}

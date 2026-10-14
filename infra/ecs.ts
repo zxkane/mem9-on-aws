@@ -55,7 +55,7 @@ import { workloadImage, accountId, applicationRegion, selectedDataSourceTag, sel
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
-import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import { disableMnemoServerPseudoTerminal, hardenMemoryServiceTask } from "./ecs-task-definition";
 import {productionRuntimeEnabled,protectLegacyRuntimeCredentials} from "./production-runtime";
 import { RECALL_TIMEOUT_MS, RECALL_RESPONSE_RESERVE_MS } from "./gateway/request-limits.mjs";
 
@@ -398,7 +398,7 @@ export function ecs(
           MNEMO_NAMESPACE_REQUIRED: runtime ? "1" : NAMESPACE_REQUIRED,
           ...(runtime ? {MNEMO_SCHEMA_MODE: "verify", MEM9_STAGE: $app.stage} : {}),
           MNEMO_CONSOLIDATION_EXECUTION_ENABLED: /^pr-[1-9][0-9]*$/.test($app.stage) && NAMESPACE_REQUIRED === "1" ? "true" : productionExecution??"false",
-          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "25000",
+          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "30000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
           MNEMO_TRANSPORT_ISSUER: "gateway-target",
           // Non-secret keyring digest. SSM values are injected only when a task
@@ -504,6 +504,7 @@ export function ecs(
     transform: {
       taskDefinition: (args) => {
         disableMnemoServerPseudoTerminal(args);
+        hardenMemoryServiceTask(args);
         if(runtime?.executionRoleArn){
           args.executionRoleArn=runtime.executionRoleArn;
           args.family=$interpolate`${cluster.nodes.cluster.name}-Mem9RuntimeServer`;
@@ -545,7 +546,7 @@ export function ecs(
       service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
         if (runtime) args.desiredCount = runtime.ready ? 1 : 0;
-        if(runtime?.executionRoleArn)args.deploymentCircuitBreaker={enable:true,rollback:process.env.MEM9_PRODUCTION_RUNTIME_MODE==="active"};
+        if(runtime?.executionRoleArn)args.deploymentCircuitBreaker={enable:true,rollback:false};
         // Fargate compute is billed to tasks, not just to this tagged Service.
         // Propagate Project/Stage to every new task so Cost Explorer can
         // attribute vCPU and memory charges. Managed tags add the ECS

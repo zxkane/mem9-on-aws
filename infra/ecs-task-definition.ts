@@ -1,3 +1,5 @@
+import {hardenServiceRegistration} from '../scripts/lib/service-nonroot.mjs';
+
 interface StringOutput {
   apply(callback: (value: string) => string): unknown;
 }
@@ -38,4 +40,23 @@ export function disableMnemoServerPseudoTerminal(
   args: Record<string, unknown>,
 ): void {
   disableTaskContainerPseudoTerminal(args, "mnemo-server");
+}
+
+/** The service and the bounded operator use the same complete transformation. */
+export function hardenMemoryServiceTask(args: Record<string, unknown>): void {
+  const definitions = args.containerDefinitions as StringOutput | undefined;
+  if (!definitions || typeof definitions.apply !== 'function') {
+    throw Error('ServiceNonrootContainerDefinitionsRequired');
+  }
+  args.containerDefinitions = definitions.apply(raw => {
+    const containers = JSON.parse(raw) as Record<string, unknown>[];
+    for (const container of containers) {
+      if (Object.hasOwn(container, 'entrypoint')) {
+        if (Object.hasOwn(container, 'entryPoint')) throw Error('ServiceNonrootAmbiguousEntrypoint');
+        container.entryPoint = container.entrypoint;
+        delete container.entrypoint;
+      }
+    }
+    return JSON.stringify(hardenServiceRegistration({containerDefinitions: containers}).containerDefinitions);
+  });
 }
