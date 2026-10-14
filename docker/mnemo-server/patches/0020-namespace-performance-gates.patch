@@ -1,6 +1,6 @@
 diff --git a/server/internal/repository/postgres/namespace_performance_test.go b/server/internal/repository/postgres/namespace_performance_test.go
 new file mode 100644
-index 0000000..d6c7c8c
+index 0000000..deb1f40
 --- /dev/null
 +++ b/server/internal/repository/postgres/namespace_performance_test.go
 @@ -0,0 +1,285 @@
@@ -21,7 +21,7 @@ index 0000000..d6c7c8c
 +	"github.com/qiffang/mnemos/server/internal/testutil"
 +)
 +
-+const namespaceBenchmarkRows = 25000
++const namespaceBenchmarkRows = 30000
 +
 +func seedNamespaceVectorBenchmark(t *testing.T, db *sql.DB) {
 +	t.Helper()
