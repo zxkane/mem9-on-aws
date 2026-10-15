@@ -45,7 +45,9 @@ export function parseProductionConsolidationRequest(raw){
   if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
-    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+  if(request.operation==='readmit'){if(!/^[a-f0-9]{64}$/.test(request.expectedAdmission??''))throw Error('ReadmissionScheduleRequired');}
+  else if(request.expectedAdmission!==undefined)throw Error('UnexpectedReadmission');
   if(request.operation==='configure-model')validatePlannerModel(request.plannerModel);
   else if(request.plannerModel!==undefined)throw Error('UnexpectedPlannerModel');
   if(['begin-continuation','inspect-canary','resume-plan'].includes(request.operation)&&!/^[a-f0-9]{32}$/.test(request.attemptId??''))throw Error('CanaryAttemptRequired');
@@ -201,7 +203,7 @@ export async function consolidationCensus(db,targets){
           SELECT b.classification_id,
             count(DISTINCT coalesce(j->'app_id','null'))>1 AS app,count(DISTINCT coalesce(j->'source','null'))>1 AS source,
             count(DISTINCT coalesce(j->'agent_id','null'))>1 AS agent,count(DISTINCT coalesce(nullif(j->'tags','null'),'[]'))>1 AS tags,
-            count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata','null')) IN ('object',NULL) OR j->'metadata' IS NULL OR j->'metadata'='null'
+            count(DISTINCT CASE WHEN jsonb_typeof(coalesce(nullif(j->'metadata','null'),'{}'))='object'
               THEN coalesce(nullif(j->'metadata','null'),'{}')-ARRAY['source_turns','source_seqs','consolidation'] ELSE j->'metadata' END)>1 AS metadata,
             count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata'->'consolidation','null')) IS DISTINCT FROM 'object' AND nullif(j->'metadata'->'consolidation','null') IS NOT NULL
               THEN j->'metadata'->'consolidation' ELSE coalesce(nullif(j->'metadata'->'consolidation','null'),'{}')-'sources' END)>1 AS consolidation
@@ -340,12 +342,17 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
         const admission=productionArtifactAdmission(promoted.activationSeed,config.sourceTag,config.workerImage);
+        // The deployed schedules must already present this admission, so the
+        // dispatcher never moves to a release its workers do not carry.
+        if(admission!==request.expectedAdmission)throw Error('ReadmissionScheduleMismatch');
         const dispatcher=(await db.query('SELECT enabled,generation_key FROM mem9_maintenance.dispatcher_settings WHERE singleton FOR UPDATE')).rows[0];
         if(!dispatcher)throw Error('ReadmissionRequiresPromotion');
         if(dispatcher.generation_key!==admission){
           await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,$3,$4)',['prod',config.targets,dispatcher.enabled,admission]);
           const readmissions=[...(promoted.readmissions??[]),{sourceTag:config.sourceTag,workerImageHash:hash(config.workerImage),
-            admissionHash:hash(admission),previousAdmissionHash:hash(dispatcher.generation_key),invocation:request.invocation}].slice(-50);
+            admissionHash:hash(admission),previousKeyHash:hash(dispatcher.generation_key),paused:!dispatcher.enabled,
+            recordedMs:Number(await scalar(db,"SELECT floor(extract(epoch FROM clock_timestamp())*1000)::text AS result")),
+            invocation:request.invocation}].slice(-50);
           await db.query('UPDATE mem9_maintenance.production_worker_setup SET promotion_verification=$1 WHERE singleton',
             [{...promoted,admission,readmissions}]);
         }

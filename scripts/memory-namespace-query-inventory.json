@@ -2954,9 +2954,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "18ebc20d49041b29978f",
+      "id": "8d9685c343d0e45481fd",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 182,
+      "line": 184,
       "tables": [
         "memories"
       ],
@@ -2972,14 +2972,14 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "828e00371faf4805ebf4",
+      "id": "bcfa279e96cee67ff638",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 196,
+      "line": 198,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "02ebbd9e599780b9779dc35b16f23b68af028f0a558e6e351e38234dd25163f5",
-      "statement": "WITH blocked AS ( SELECT r.classification_id FROM mem9_maintenance.execution_reviews r JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'), fields AS ( SELECT b.classification_id, count(DISTINCT coalesce(j->'app_id','null'))>1 AS app,count(DISTINCT coalesce(j->'source','null'))>1 AS source, count(DISTINCT coalesce(j->'agent_id','null'))>1 AS agent,count(DISTINCT coalesce(nullif(j->'tags','null'),'[]'))>1 AS tags, count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata','null')) IN ('object',NULL) OR j->'metadata' IS NULL OR j->'metadata'='null' THEN coalesce(nullif(j->'metadata','null'),'{}')-ARRAY['source_turns','source_seqs','consolidation'] ELSE j->'metadata' END)>1 AS metadata, count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata'->'consolidation','null')) IS DISTINCT FROM 'object' AND nullif(j->'metadata'->'consolidation','null') IS NOT NULL THEN j->'metadata'->'consolidation' ELSE coalesce(nullif(j->'metadata'->'consolidation','null'),'{}')-'sources' END)>1 AS consolidation FROM blocked b JOIN mem9_maintenance.classification_members cm ON cm.namespace_id=$1 AND cm.classification_id=b.classification_id JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id CROSS JOIN LATERAL to_jsonb(m) j GROUP BY b.classification_id) SELECT concat_ws('+',CASE WHEN app THEN 'app' END,CASE WHEN source THEN 'source' END,CASE WHEN agent THEN 'agent' END, CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key, count(*) AS count FROM fields GROUP BY 1",
+      "statement_sha256": "41460e7c5962f0731897bf5dc04ac3ab62a6759506013c019f6390fbc9934897",
+      "statement": "WITH blocked AS ( SELECT r.classification_id FROM mem9_maintenance.execution_reviews r JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'), fields AS ( SELECT b.classification_id, count(DISTINCT coalesce(j->'app_id','null'))>1 AS app,count(DISTINCT coalesce(j->'source','null'))>1 AS source, count(DISTINCT coalesce(j->'agent_id','null'))>1 AS agent,count(DISTINCT coalesce(nullif(j->'tags','null'),'[]'))>1 AS tags, count(DISTINCT CASE WHEN jsonb_typeof(coalesce(nullif(j->'metadata','null'),'{}'))='object' THEN coalesce(nullif(j->'metadata','null'),'{}')-ARRAY['source_turns','source_seqs','consolidation'] ELSE j->'metadata' END)>1 AS metadata, count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata'->'consolidation','null')) IS DISTINCT FROM 'object' AND nullif(j->'metadata'->'consolidation','null') IS NOT NULL THEN j->'metadata'->'consolidation' ELSE coalesce(nullif(j->'metadata'->'consolidation','null'),'{}')-'sources' END)>1 AS consolidation FROM blocked b JOIN mem9_maintenance.classification_members cm ON cm.namespace_id=$1 AND cm.classification_id=b.classification_id JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id CROSS JOIN LATERAL to_jsonb(m) j GROUP BY b.classification_id) SELECT concat_ws('+',CASE WHEN app THEN 'app' END,CASE WHEN source THEN 'source' END,CASE WHEN agent THEN 'agent' END, CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key, count(*) AS count FROM fields GROUP BY 1",
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
@@ -2990,9 +2990,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "dc423f2a2b99a4bbc566",
+      "id": "28ee361b9565506ad8a4",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 303,
+      "line": 305,
       "tables": [
         "memories"
       ],
@@ -3008,9 +3008,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "0d1f5eabbbbd67036698",
+      "id": "5d6eb606e3af1403026e",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 376,
+      "line": 383,
       "tables": [
         "memories"
       ],
@@ -3026,9 +3026,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "8215f4544599cc2f4a70",
+      "id": "230b1a9372aca9327ed1",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 388,
+      "line": 395,
       "tables": [
         "memories"
       ],
@@ -3044,9 +3044,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "4087af9215ce71002d1e",
+      "id": "8c6e63335fb14610427d",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 392,
+      "line": 399,
       "tables": [
         "memories"
       ],

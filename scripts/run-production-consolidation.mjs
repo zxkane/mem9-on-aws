@@ -133,7 +133,7 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   return meta;
 }
 
-export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel},{now=Date.now,sleep=delay}={}){
+export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel,expectedAdmission},{now=Date.now,sleep=delay}={}){
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix='/mem9-on-aws/prod/',manifestName=prefix+'consolidation-runtime/operator-manifest';
   const response=await send(clients.ssm,new GetParametersCommand({Names:[manifestName],WithDecryption:true}));
@@ -181,7 +181,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
     ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
     ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{}),
-    ...(plannerModel!==undefined?{plannerModel}:{})};
+    ...(plannerModel!==undefined?{plannerModel}:{}),...(expectedAdmission!==undefined?{expectedAdmission}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
     await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));

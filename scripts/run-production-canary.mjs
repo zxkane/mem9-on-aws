@@ -115,9 +115,14 @@ export async function runProductionCanary({clients,region,dailyRows=6000,basisPo
  */
 export async function readmitProductionRelease(clients,{region}){
   const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
+  if(await gh(['api',`repos/${repository}/commits/main`,'--jq','.sha'])!==revision)throw Error('ProductionReadmissionRequiresMain');
   const targets=[];
   for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
-  const result=await runProductionConsolidationTask(clients,{region,operation:'readmit'});
+  const presented=targets.map(target=>JSON.parse(target.template.Target.Input).containerOverrides?.[0]?.environment
+    ?.find(item=>item.name==='MEM9_WORKER_ADMISSION')?.value);
+  if(!/^[a-f0-9]{64}$/.test(presented[0]??'')||presented[1]!==presented[0])throw Error('ProductionReadmissionScheduleMismatch');
+  const result=await runProductionConsolidationTask(clients,{region,operation:'readmit',expectedAdmission:presented[0]});
+  if(result.admission!==presented[0])throw Error('ProductionReadmissionScheduleMismatch');
   if(!/^[a-f0-9]{64}$/.test(result.admission??''))throw Error('ProductionReadmissionMissing');
   const verified=await verifyProductionScheduling(clients,targets,{enabled:result.enabled,admission:result.admission});
   return {phase:'readmitted',changed:result.changed,enabled:result.enabled,taskDefinitions:verified.taskDefinitions};

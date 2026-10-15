@@ -527,14 +527,17 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
 
   it('re-admits a promoted dispatcher only for the deployed release artifacts',()=>fixture(async f=>{
     await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
-    const readmit=config=>runProductionConsolidation(f.admin,config,{...f.request('readmit'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
-    await expect(readmit(f.config)).rejects.toThrow('ReadmissionRequiresPromotion');
     const seed='e'.repeat(64),old=productionArtifactAdmission(seed,f.config.sourceTag,f.config.workerImage);
+    const readmit=(config,expectedAdmission=productionArtifactAdmission(seed,config.sourceTag,config.workerImage))=>
+      runProductionConsolidation(f.admin,config,{...f.request('readmit'),invocation:randomUUID().replaceAll('-',''),expectedAdmission},{connect:f.connect});
+    await expect(readmit(f.config)).rejects.toThrow('ReadmissionRequiresPromotion');
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote',promotion_verification=$1 WHERE singleton",[{activationSeed:seed,admission:old}]);
     await f.admin.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',f.config.targets,old]);
     expect(await readmit(f.config)).toMatchObject({phase:'readmit',admission:old,enabled:true,changed:false});
     const release={...f.config,sourceTag:'mem9-bbbbbbb',workerImage:f.config.workerImage.replace(/d{64}$/,'e'.repeat(64))};
     const expected=productionArtifactAdmission(seed,release.sourceTag,release.workerImage);
+    await expect(readmit(release,old)).rejects.toThrow('ReadmissionScheduleMismatch');
+    expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(old);
     expect(await readmit(release)).toMatchObject({admission:expected,enabled:true,changed:true});
     expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(expected);
     const setup=(await f.admin.query('SELECT promotion_verification AS v FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0].v;
@@ -542,6 +545,13 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(setup.readmissions).toHaveLength(1);expect(setup.readmissions[0]).toMatchObject({sourceTag:'mem9-bbbbbbb'});
     expect(JSON.stringify(setup.readmissions)).not.toContain(release.workerImage);
     expect((await runProductionConsolidation(f.admin,release,f.request('status'),{connect:f.connect})).admission).toBe(expected);
+    // A paused dispatcher stays paused; only its admission key moves.
+    await runProductionConsolidation(f.admin,release,f.request('pause'),{connect:f.connect});
+    const third={...release,sourceTag:'mem9-ccccccc'};
+    expect(await readmit(third)).toMatchObject({enabled:false,changed:true});
+    expect(await scalar(f.admin,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(false);
+    const paused=(await f.admin.query('SELECT promotion_verification AS v FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0].v;
+    expect(paused.readmissions.at(-1)).toMatchObject({sourceTag:'mem9-ccccccc',paused:true});
   }),60000);
 
   it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
