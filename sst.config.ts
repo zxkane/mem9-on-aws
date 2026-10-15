@@ -81,8 +81,9 @@ export default $config({
       await import("./infra/lambda-execution-role");
     registerLambdaExecutionRoleTrust();
 
-    // Non-production roles always carry an operator-owned boundary: the Gateway
-    // Lambda roles the Gateway boundary, every other role the workload boundary.
+    // Non-production roles always carry an operator-owned boundary. The two
+    // Gateway Lambda roles use their dedicated boundary; other roles use the
+    // workload boundary.
     // Prod is activated only by the release-verification migration after every
     // existing passable role has been bounded; this keeps the implementation
     // push from racing the guarded live-account migration.

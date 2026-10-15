@@ -10,6 +10,7 @@ import { bootstrap } from "../.sst/platform/src/components/aws/helpers/bootstrap
 import {
   disableMnemoServerPseudoTerminal,
   disableTaskContainerPseudoTerminal,
+  hardenMemoryServiceTask,
 } from "./ecs-task-definition";
 
 const registered = [];
@@ -50,6 +51,25 @@ bootstrap.forRegion = async () => ({
 });
 
 describe("real SST task-definition synthesis", () => {
+  it('synthesizes the same nonroot security fields while retaining SST settings', async()=>{
+    registered.length=0;
+    const parent=new ComponentResource('test:index:Parent','nonroot-parent');
+    const containers=['mnemo-server','qwen3-embed','llm-proxy'].map(name=>({name,image:`example.com/${name}:test`,logging:{name:`/fixture/${name}`,retention:'1 month'},environment:{FIXTURE:'preserved'},ssm:{}}));
+    const taskDefinition=createTaskDefinition('NonrootService',{
+      cluster:{nodes:{cluster:{name:output('mem9-cluster')}}},
+      transform:{taskDefinition:args=>{disableMnemoServerPseudoTerminal(args);hardenMemoryServiceTask(args);}},
+    },{},parent,output(containers),output('arm64'),output('2 vCPU'),output('6 GB'),output('20 GB'),
+    {arn:output('arn:aws:iam::123456789012:role/task')},{arn:output('arn:aws:iam::123456789012:role/execution')});
+    const task=await taskDefinition.promise();await task.urn.promise();
+    const resource=registered.find(r=>r.type==='aws:ecs/taskDefinition:TaskDefinition');
+    const definitions=JSON.parse(resource.inputs.containerDefinitions);
+    for(const c of definitions){
+      expect(c.user).toBe('1000:1000');expect(c.linuxParameters).toEqual({initProcessEnabled:true,capabilities:{add:[],drop:['ALL']}});
+      expect(c.entryPoint.slice(1,3)).toEqual(['--no-new-privs','--']);
+      expect(c.environment).toContainEqual({name:'FIXTURE',value:'preserved'});
+      expect(c.pseudoTerminal).toBe(c.name!=='mnemo-server');
+    }
+  });
   it("fails when SST does not expose container definitions as an output", () => {
     expect(() =>
       disableMnemoServerPseudoTerminal({ containerDefinitions: "[]" }),

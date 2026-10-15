@@ -123,6 +123,22 @@ describe('deployment authorization maintenance exclusions', () => {
 
   it('preserves the prior template apart from approved isolation additions', () => {
     const { template } = render();
+    // Verify and reverse only the reviewed service-verification grants. Keep
+    // both historical hashes below so unrelated IAM changes still fail closed.
+    const preview = template.Resources.GitHubPreviewActionsRole.Properties.Policies
+      .find(policy => policy.PolicyName === 'preview-stage-isolation').PolicyDocument.Statement;
+    const inventory = preview.filter(statement => statement.Sid === 'PreviewScheduleInventory');
+    expect(inventory).toEqual([{Sid:'PreviewScheduleInventory',Effect:'Allow',
+      Action:['scheduler:ListSchedules','scheduler:ListScheduleGroups'],Resource:'*',
+      Condition:{StringEquals:{'aws:RequestedRegion':{Ref:'ApplicationRegion'}}}}]);
+    inventory[0].Action = 'scheduler:ListSchedules';
+    const process = preview.filter(statement => statement.Sid === 'PreviewServiceProcessVerification');
+    expect(process).toEqual([{Sid:'PreviewServiceProcessVerification',Effect:'Allow',Action:'ecs:ExecuteCommand',
+      Resource:[{Sub:'arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:cluster/${ProjectName}-pr-*'},
+        {Sub:'arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:task/${ProjectName}-pr-*/*'}],
+      Condition:{StringEquals:{'aws:RequestedRegion':{Ref:'ApplicationRegion'},
+        'ecs:container-name':['mnemo-server','qwen3-embed','llm-proxy']}}}]);
+    preview.splice(preview.indexOf(process[0]),1);
     for (const [logical, role] of [['LegacyRetainedOperatorProtection','GitHubActionsRole'],
       ['PreviewRetainedOperatorProtection','GitHubPreviewActionsRole'],['ProductionRetainedOperatorProtection','GitHubProductionActionsRole']]) {
       expect(template.Resources[logical]).toMatchObject({Type:'AWS::IAM::Policy',Properties:{Roles:[{Ref:role}]}});

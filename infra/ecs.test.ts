@@ -709,7 +709,7 @@ describe("ecs stack", () => {
     const transform = services[0].args.transform as Record<string, unknown>;
     const taskArgs: Record<string, unknown> = {
       containerDefinitions: out(
-        JSON.stringify([{ name: "mnemo-server", pseudoTerminal: true }]),
+        JSON.stringify(['mnemo-server','qwen3-embed','llm-proxy'].map(name=>({name,pseudoTerminal:true}))),
       ),
     };
     (
@@ -722,6 +722,7 @@ describe("ecs stack", () => {
       String(materialize(taskArgs.containerDefinitions)),
     ) as Record<string, unknown>[];
     expect(definitions[0].pseudoTerminal).toBe(false);
+    expect(definitions.map(c=>c.user)).toEqual(['1000:1000','1000:1000','1000:1000']);
   });
 
   it("keeps durable ingest disabled unless the deploy explicitly enables it", async () => {

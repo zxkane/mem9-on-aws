@@ -24,9 +24,15 @@ process.env.MEM9_CLIENT_REGISTRY = JSON.stringify({
   m2m: ["m2m-client"],
 });
 process.env.MEM9_IDENTITY_JWKS_URI = JWKS_URI;
-process.env.MEM9_IDENTITY_SIGNING_KEYS = JSON.stringify({
+const identitySecret = JSON.stringify({
   current: Buffer.alloc(32, 3).toString("base64url"),
 });
+
+process.env.STAGE = "test";
+process.env.AWS_REGION = "ap-northeast-1";
+process.env.MEM9_SECRET_ACCOUNT_ID = "123456789012";
+process.env.MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-test-identity-signing-keys-resource-AbCd12";
+vi.mock("@aws-sdk/client-secrets-manager", async importOriginal => ({...await importOriginal(), SecretsManagerClient: class { async send(command) { return {ARN:command.input.SecretId,VersionStages:["AWSCURRENT"],SecretString:identitySecret}; } }}));
 
 let handler;
 beforeAll(async () => {

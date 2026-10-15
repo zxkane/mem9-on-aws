@@ -56,4 +56,10 @@ describe('canary continuation compatibility certificate',()=>{
       expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
     }
   });
+  it('does not let a service security update renew a historical maintenance witness',()=>{
+    const f=fixture();
+    f.certificate.material.backend.current=hash({user:'1000:1000',capabilities:{drop:['ALL']}});
+    f.config.acceptance.continuation.certificateHash=hash(f.certificate);
+    expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow('CanaryCompatibilityInvalid');
+  });
 });

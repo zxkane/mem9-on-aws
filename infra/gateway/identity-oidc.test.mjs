@@ -1,6 +1,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, sign } from "node:crypto";
 
+vi.mock("@aws-sdk/client-secrets-manager", async importOriginal => ({...await importOriginal(), SecretsManagerClient: class { async send(command) { return {ARN:command.input.SecretId,VersionStages:["AWSCURRENT"],SecretString:JSON.stringify({current:"k".repeat(64)})}; } }}));
+
 const signingPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const JWKS_URI = "https://keys.example.com/external-jwks";
 
@@ -39,10 +41,10 @@ beforeEach(() => {
     "MEM9_TOOL_SCOPES",
     JSON.stringify({ search_memories: "mem9-mcp/read" }),
   );
-  vi.stubEnv(
-    "MEM9_IDENTITY_SIGNING_KEYS",
-    JSON.stringify({ current: "k".repeat(64) }),
-  );
+  vi.stubEnv("STAGE", "test");
+  vi.stubEnv("AWS_REGION", "ap-northeast-1");
+  vi.stubEnv("MEM9_SECRET_ACCOUNT_ID", "123456789012");
+  vi.stubEnv("MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN", "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-test-identity-signing-keys-resource-AbCd12");
 });
 afterEach(() => {
   vi.unstubAllEnvs();

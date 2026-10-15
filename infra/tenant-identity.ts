@@ -2,11 +2,12 @@
  * Stable single-tenant identity shared by bootstrap, mnemo-server, and Gateway.
  *
  * The random tenant id is also the X-API-Key. Secrets Manager is the runtime
- * source for ECS containers; `tenantId` is a Pulumi Output used only to configure
- * the private Gateway proxy Lambda.
+ * source for ECS containers and the private Gateway proxy Lambda. `tenantId`
+ * remains an IaC output; Lambda receives only `tenantSecretArn`.
  */
 export interface TenantIdentityOutputs {
   tenantSecretArn: Output<string>;
+  tenantKmsKeyId?: Output<string>;
   tenantId: Output<string>;
 }
 
@@ -38,5 +39,5 @@ export function tenantIdentity(): TenantIdentityOutputs {
     value: tenantSecretArn,
     tags,
   });
-  return { tenantSecretArn, tenantId: tenantId.hex };
+  return { tenantSecretArn, tenantKmsKeyId: (tenantSecret as unknown as {kmsKeyId:Output<string>}).kmsKeyId, tenantId: tenantId.hex };
 }

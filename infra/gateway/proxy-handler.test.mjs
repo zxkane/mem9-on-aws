@@ -1,7 +1,7 @@
 // Unit tests for the AgentCore Gateway → mnemo-server proxy Lambda handler.
 //
-// The handler reads MEM9_SERVER_BASE_URL / MEM9_API_KEY at module load, so we set
-// them before a dynamic import, then drive the exported `handler` with a mocked
+// The handler reads exact secret references through mocked SDK clients.
+// We drive the exported `handler` with a mocked
 // global `fetch` and a fake Lambda context (clientContext.Custom carries the
 // AgentCore `${target}___${tool}` name). We assert the outbound request shape for
 // each tool WITHOUT touching AWS, DNS, or a live mnemo-server.
@@ -18,18 +18,27 @@ import {
 } from "./namespace-auth.mjs";
 
 process.env.MEM9_SERVER_BASE_URL = "http://mnemo.mem9-test.local:8080";
-process.env.MEM9_API_KEY = "test-tenant-id";
-process.env.MEM9_IDENTITY_SIGNING_KEYS = JSON.stringify({
+const tenantSecret = "test-tenant-id";
+const identitySecret = JSON.stringify({
   current: Buffer.alloc(32, 4).toString("base64url"),
 });
-process.env.MEM9_TRANSPORT_SIGNING_KEYS = JSON.stringify({
+const transportSecret = JSON.stringify({
   active: "a",
   a: Buffer.alloc(32, 5).toString("base64url"),
   b: Buffer.alloc(32, 6).toString("base64url"),
 });
 process.env.MEM9_TRANSPORT_ISSUER = "gateway-target";
 
-const identityKeys = parseSigningKeys(process.env.MEM9_IDENTITY_SIGNING_KEYS);
+process.env.STAGE = "test";
+process.env.AWS_REGION = "ap-northeast-1";
+process.env.MEM9_SECRET_ACCOUNT_ID = "123456789012";
+process.env.MEM9_API_KEY_SECRET_ARN = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-test-tenant-api-key-resource-AbCd12";
+process.env.MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN = "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-test-identity-signing-keys-resource-AbCd12";
+process.env.MEM9_TRANSPORT_SIGNING_KEYS_PARAMETER_ARN = "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/test/namespace/keys-unused".replace("keys-unused", "transport-signing-keys");
+vi.mock("@aws-sdk/client-secrets-manager", async importOriginal => ({...await importOriginal(), SecretsManagerClient: class { async send(command) { return {ARN:command.input.SecretId,VersionStages:["AWSCURRENT"],SecretString:command.input.SecretId.includes("tenant-api-key")?tenantSecret:identitySecret}; } }}));
+vi.mock("@aws-sdk/client-ssm", async importOriginal => ({...await importOriginal(), SSMClient: class { async send(command) { return {Parameters:[{ARN:command.input.Names[0],Name:"/mem9-on-aws/test/namespace/transport-signing-keys",Type:"SecureString",Value:transportSecret}]}; } }}));
+
+const identityKeys = parseSigningKeys(identitySecret);
 let rawHandler;
 let handler;
 beforeAll(async () => {
@@ -82,6 +91,30 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+it.each(["read-failure", "invalid-key"])("rejects %s without forwarding or exposing secret data", async fault => {
+  vi.resetModules();
+  const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager");
+  const send = vi.spyOn(SecretsManagerClient.prototype, "send");
+  if (fault === "read-failure") {
+    send.mockRejectedValue(new Error("LEAK-secret-provider-detail"));
+  } else {
+    send.mockImplementation(async command => ({
+      ARN: command.input.SecretId,
+      VersionStages: ["AWSCURRENT"],
+      SecretString: "LEAK-malformed-key-json",
+    }));
+  }
+  const { handler: freshHandler } = await import("./proxy-handler.mjs");
+  const fetcher = mockFetchOk();
+  const pending = freshHandler({}, ctx("search_memories"));
+  await expect(pending).rejects.toThrow("GatewaySecretConfigurationUnavailable");
+  await pending.catch(error => {
+    expect(String(error)).not.toContain("LEAK");
+    expect(error.cause).toBeUndefined();
+  });
+  expect(fetcher).not.toHaveBeenCalled();
 });
 
 describe("proxy total request budget (TC-UPSTREAM-002/003/004)", () => {

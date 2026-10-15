@@ -7,6 +7,7 @@ import {GetRoleCommand,PutRolePolicyCommand,GetRolePolicyCommand,SimulateCustomP
 import {setTimeout as delay} from 'node:timers/promises';
 import {createHash} from 'node:crypto';
 import {rolloutStage} from './production-runtime-config.mjs';
+import {gatewayBoundaryArn,gatewayRoleStage} from './gateway-workload-boundary.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
@@ -166,9 +167,18 @@ export async function fenceLegacyRoles(clients,meta,inventory,{retired=false}={}
 
 export async function auditAdditionalCredentialReaders(clients,meta,inventory){
   const boundaryArn=`arn:aws:iam::${meta.account}:policy/mem9-on-aws-workload-boundary`;
-  const boundary=(await send(clients.iam,new GetPolicyCommand({PolicyArn:boundaryArn}))).Policy;
-  const version=(await send(clients.iam,new GetPolicyVersionCommand({PolicyArn:boundaryArn,VersionId:boundary.DefaultVersionId}))).PolicyVersion;
-  const boundaryDocument=decode(version.Document),known=new Set(inventory.roles),roles=[];
+  const gatewayArn=gatewayBoundaryArn({partition:'aws',accountId:meta.account});
+  const boundaries=new Map();
+  const readBoundary=async arn=>{
+    if(!boundaries.has(arn)){
+      const boundary=(await send(clients.iam,new GetPolicyCommand({PolicyArn:arn}))).Policy;
+      const version=(await send(clients.iam,new GetPolicyVersionCommand({PolicyArn:arn,VersionId:boundary.DefaultVersionId}))).PolicyVersion;
+      boundaries.set(arn,{version:boundary.DefaultVersionId,document:decode(version.Document)});
+    }
+    return boundaries.get(arn).document;
+  };
+  await readBoundary(boundaryArn);
+  const known=new Set(inventory.roles),roles=[];
   let Marker;
   for(let page=0;page<100;page++){
     const result=await send(clients.iam,new ListRolesCommand({MaxItems:100,Marker}));
@@ -185,7 +195,19 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
     // This audit runs before creating the new consumers. A role name alone is
     // never authority to exclude an existing principal from discovery.
     const full=(await send(clients.iam,new GetRoleCommand({RoleName:role.RoleName}))).Role;
-    if(full.PermissionsBoundary?.PermissionsBoundaryArn!==boundaryArn)fail('CredentialReaderBoundaryMismatch');
+    if(full.Arn!==role.Arn||full.RoleName!==role.RoleName)fail('CredentialReaderBoundaryMismatch');
+    const selected=full.PermissionsBoundary?.PermissionsBoundaryArn;
+    const gateway=selected===gatewayArn,context=[];
+    if(gateway){
+      const tags=full.Tags??[];
+      if(gatewayRoleStage(full.RoleName)!==meta.stage||full.Arn!==`arn:aws:iam::${meta.account}:role/${full.RoleName}`||
+        tags.filter(t=>t.Key==='Project').length!==1||tags.find(t=>t.Key==='Project')?.Value!=='mem9-on-aws'||
+        tags.filter(t=>t.Key==='Stage').length!==1||tags.find(t=>t.Key==='Stage')?.Value!==meta.stage)fail('CredentialReaderBoundaryMismatch');
+      for(const key of ['Project','Stage'])context.push({ContextKeyName:'aws:PrincipalTag/'+key,ContextKeyType:'string',ContextKeyValues:[tags.find(t=>t.Key===key).Value]});
+    }else if(selected!==boundaryArn)fail('CredentialReaderBoundaryMismatch');
+    // Dedicated Gateway roles remain in the policy inventory and credential
+    // simulations. Select their actual reviewed boundary; never exempt them.
+    const boundaryDocument=await readBoundary(selected);
     const policies=[],attached=[];
     for(const [Command,key,destination] of [[ListRolePoliciesCommand,'PolicyNames',policies],[ListAttachedRolePoliciesCommand,'AttachedPolicies',attached]]){
       let marker;
@@ -203,7 +225,7 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
     if(!applicable.some(document=>document.Statement.some(s=>s.Effect==='Allow')))continue;
     const input={PolicyInputList:applicable.map(document=>JSON.stringify(document)),ActionNames:[action],ResourceArns:resources,
       ContextEntries:[{ContextKeyName:'aws:RequestedRegion',ContextKeyType:'string',ContextKeyValues:[meta.region]},
-        {ContextKeyName:'aws:PrincipalArn',ContextKeyType:'string',ContextKeyValues:[role.Arn]}]};
+        {ContextKeyName:'aws:PrincipalArn',ContextKeyType:'string',ContextKeyValues:[role.Arn]},...context]};
     const identity=await send(clients.iam,new SimulateCustomPolicyCommand(input));
     // A boundary cannot add an identity allow. Avoid manufacturing ambiguity
     // from its unrelated KMS/Lambda condition keys for roles with no SSM grant.
@@ -216,7 +238,9 @@ export async function auditAdditionalCredentialReaders(clients,meta,inventory){
       r.decision==='allowed'||(r.decision!=='explicitDeny'&&r.missing.length)))fail('UninventoriedCredentialReader');
     }
   }
-  if((await send(clients.iam,new GetPolicyCommand({PolicyArn:boundaryArn}))).Policy.DefaultVersionId!==boundary.DefaultVersionId)fail('CredentialBoundaryChanged');
+  for(const [arn,boundary] of boundaries){
+    if((await send(clients.iam,new GetPolicyCommand({PolicyArn:arn}))).Policy.DefaultVersionId!==boundary.version)fail('CredentialBoundaryChanged');
+  }
 }
 
 export async function stopLegacyWriters(clients,meta,inventory,{deadline=Date.now()+600000,sleep=delay}={}){

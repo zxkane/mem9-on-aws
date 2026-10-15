@@ -21,17 +21,20 @@ function materialize(value: unknown): unknown {
   if (typeof value === "object" && value && "value" in value) {
     return materialize((value as { value: unknown }).value);
   }
+  if (Array.isArray(value)) return value.map(materialize);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, materialize(entry)]));
   return value;
 }
 
 describe("workload role boundary transform", () => {
-  let roleTransform: ((args: Record<string, unknown>, opts?: unknown, name?: string) => void) | undefined;
+  type RoleTransform = (args: Record<string, unknown>, opts: Record<string, unknown>, name: string) => void;
+  let roleTransform: RoleTransform | undefined;
 
   beforeEach(() => {
     vi.resetModules();
     roleTransform = undefined;
-    (globalThis as Record<string, unknown>).$app = {stage:"prod"};
-    (globalThis as Record<string, unknown>).$jsonStringify = (value:unknown) => out(JSON.stringify(materialize(value)));
+    (globalThis as Record<string, unknown>).$app = { stage: "pr-7" };
+    (globalThis as Record<string, unknown>).$jsonStringify = (value: unknown) => out(JSON.stringify(materialize(value)));
     (globalThis as Record<string, unknown>).aws = {
       getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
       getPartitionOutput: () => ({ partition: out("aws") }),
@@ -52,7 +55,7 @@ describe("workload role boundary transform", () => {
       );
     (globalThis as Record<string, unknown>).$transform = (
       resource: unknown,
-      transform: (args: Record<string, unknown>) => void,
+      transform: RoleTransform,
     ) => {
       const aws = (globalThis as Record<string, any>).aws as Record<
         string,
@@ -66,7 +69,7 @@ describe("workload role boundary transform", () => {
     };
   });
 
-  it("sets the exact partition/account-derived ARN on every role input", () => {
+  it("sets the exact partition/account-derived workload ARN on other role inputs", () => {
     registerWorkloadRoleBoundary();
     expect(roleTransform).toBeTypeOf("function");
 
@@ -77,12 +80,52 @@ describe("workload role boundary transform", () => {
       name: "mem9-on-aws-prod-gateway-service-role",
       permissionsBoundary: "arn:aws:iam::123456789012:policy/wrong-explicit",
     };
-    roleTransform?.(implicitRole);
-    roleTransform?.(explicitRole);
+    roleTransform?.(implicitRole, {}, "Mem9ServerTaskRole");
+    roleTransform?.(explicitRole, {}, "Mem9GatewayServiceRole");
 
     const expected = `arn:aws:iam::123456789012:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
     expect(materialize(implicitRole.permissionsBoundary)).toBe(expected);
     expect(materialize(explicitRole.permissionsBoundary)).toBe(expected);
+  });
+
+  it.each(["Mem9ProxyFnRole", "Mem9IdentityInterceptorFnRole"])(
+    "assigns the existing Gateway boundary to logical role %s without changing its permissions or trust",
+    (name) => {
+      registerWorkloadRoleBoundary();
+      const args: Record<string, unknown> = {
+        permissionsBoundary: "wrong",
+        assumeRolePolicy: "unchanged-trust",
+        inlinePolicies: [{ name: "unchanged", policy: "unchanged-permissions" }],
+        name: "provider-generated-name",
+        tags: out({ Project: "wrong", Stage: "wrong", Retained: out("unchanged") }),
+      };
+      const expected = { ...args, permissionsBoundary: "arn:aws:iam::123456789012:policy/mem9-on-aws-gateway-boundary",
+        tags: { Project: "mem9-on-aws", Stage: "pr-7", Retained: "unchanged" } };
+      roleTransform?.(args, {}, name);
+      expect(materialize(args)).toEqual(expected);
+    },
+  );
+
+  it.each(["Mem9GatewayServiceRole", "Mem9OauthFacadeFnRole", "Mem9ServerTaskRole",
+    "Mem9ProxyFnRoleLookalike", "Mem9ProxyFnRole-extra", "OtherMem9IdentityInterceptorFnRole",
+    "mem9-on-aws-pr-7-Mem9ProxyFnRole-example"])(
+    "does not assign the Gateway boundary to %s",
+    (name) => {
+      registerWorkloadRoleBoundary();
+      const tags = out({ Stage: "unchanged", Project: "unchanged" });
+      const args: Record<string, unknown> = { permissionsBoundary: "arn:aws:iam::123456789012:policy/mem9-on-aws-gateway-boundary", tags };
+      roleTransform?.(args, {}, name);
+      expect(materialize(args.permissionsBoundary)).toBe(`arn:aws:iam::123456789012:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`);
+      expect(args.tags).toBe(tags);
+    },
+  );
+
+  it.each(["prod", "pr-7"])("sets required Gateway tags from the registered %s stage when none were supplied", stage => {
+    (globalThis as Record<string, unknown>).$app = { stage };
+    registerWorkloadRoleBoundary();
+    const args: Record<string, unknown> = {};
+    roleTransform?.(args, {}, "Mem9ProxyFnRole");
+    expect(materialize(args.tags)).toEqual({ Project: "mem9-on-aws", Stage: stage });
   });
 
   it.each(["prod", "pr-7"])("selects Gateway only by fixed logical role and binds stage %s", stage => {

@@ -29,6 +29,17 @@ interface Rec {
 }
 let created: Rec[];
 let params: { name: string }[];
+const region = "ap-northeast-1";
+const accountId = "123456789012";
+const ssmKeyArn = `arn:aws:kms:${region}:${accountId}:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`;
+const secretsKeyArn = `arn:aws:kms:${region}:${accountId}:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff`;
+const tenantCustomKeyArn = `arn:aws:kms:${region}:${accountId}:key/cccccccc-dddd-eeee-ffff-aaaaaaaaaaaa`;
+const identityCustomKeyArn = `arn:aws:kms:${region}:${accountId}:key/dddddddd-eeee-ffff-aaaa-bbbbbbbbbbbb`;
+const secretArns = (stage: string) => ({
+  tenant: `arn:aws:secretsmanager:${region}:${accountId}:secret:mem9-on-aws-${stage}-tenant-api-key-fixture-AbCd12`,
+  identity: `arn:aws:secretsmanager:${region}:${accountId}:secret:mem9-on-aws-${stage}-identity-signing-keys-fixture-AbCd12`,
+  transport: `arn:aws:ssm:${region}:${accountId}:parameter/mem9-on-aws/${stage}/namespace/transport-signing-keys`,
+});
 
 // Unwrap the loose out<T> mock (and plain values) recursively — the target
 // Command's `create`/`delete`/`environment` come through the out<T> mock.
@@ -71,6 +82,11 @@ function makeCtor(kind: string) {
       apply: (fn: (v: string) => unknown) => out(fn(`arn:${kind}`) as never),
     };
     id = out(`${kind}-id`);
+    nodes = { role: { arn: out("arn:aws:iam::123456789012:role/mem9-on-aws-prod-proxy") } };
+    addEnvironment(environment: unknown) {
+      created.push({ kind: "LateEnvironment", args: { environment } });
+      return { id: out("late-environment") };
+    }
     gatewayId = out("gw-123");
     gatewayUrl = out("https://gateway.example.com/mcp");
     constructor(
@@ -90,6 +106,13 @@ function installGlobals(stage: string) {
     out(JSON.stringify(unwrap(value)));
   (globalThis as Record<string, unknown>).aws = {
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    getCallerIdentityOutput: () => ({accountId: out("123456789012")}),
+    kms: {getKeyOutput: (input: {keyId:string;region:unknown}) => {
+      expect(unwrap(input.region)).toBe(region);
+      const keys:Record<string,string> = {"alias/aws/ssm":ssmKeyArn,"alias/aws/secretsmanager":secretsKeyArn,[tenantCustomKeyArn]:tenantCustomKeyArn,[identityCustomKeyArn]:identityCustomKeyArn};
+      expect(keys).toHaveProperty(input.keyId);
+      return {arn:out(keys[input.keyId])};
+    }},
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({
@@ -97,6 +120,15 @@ function installGlobals(stage: string) {
       }),
       SecurityGroup: makeCtor("SecurityGroup"),
       SecurityGroupRule: makeCtor("SecurityGroupRule"),
+      VpcEndpoint: class {
+        id = out("vpce-0123456789abcdef0");
+        dnsEntries: ReturnType<typeof out>;
+        constructor(_name: string, args: Record<string, unknown>) {
+          const service = String(unwrap(args.serviceName)).split(".").at(-1);
+          this.dnsEntries = out([{ dnsName: `vpce-0123456789abcdef0-fixture.${service}.ap-northeast-1.vpce.amazonaws.com` }]);
+          created.push({ kind: "VpcEndpoint", args });
+        }
+      },
     },
     iam: { Role: makeCtor("Role"), RolePolicy: makeCtor("RolePolicy") },
     bedrock: {
@@ -169,14 +201,15 @@ function fakeEcs(): EcsOutputs {
     taskSecurityGroupId: out("sg-task"),
   } as unknown as EcsOutputs;
 }
-function fakeIdentity(): TenantIdentityOutputs {
+function fakeIdentity(stage = "prod"): TenantIdentityOutputs {
   return {
     tenantId: out("deadbeefTENANTID"),
-    tenantSecretArn: out("arn:secret"),
+    tenantSecretArn: out(secretArns(stage).tenant),
   } as unknown as TenantIdentityOutputs;
 }
-function fakeNamespaceIdentity(): NamespaceIdentityOutputs {
+function fakeNamespaceIdentity(stage = "prod"): NamespaceIdentityOutputs {
   return {
+    identitySigningSecretArn: out(secretArns(stage).identity),
     identitySigningKeys: out(
       JSON.stringify({ current: Buffer.alloc(32, 4).toString("base64url") }),
     ),
@@ -187,7 +220,7 @@ function fakeNamespaceIdentity(): NamespaceIdentityOutputs {
         b: Buffer.alloc(32, 6).toString("base64url"),
       }),
     ),
-    transportSigningParameterArn: out("arn:transport-parameter"),
+    transportSigningParameterArn: out(secretArns(stage).transport),
     transportSigningRevision: out("transport-revision"),
   } as unknown as NamespaceIdentityOutputs;
 }
@@ -200,6 +233,40 @@ function only(kind: string) {
 function all(kind: string) {
   return created.filter((r) => r.kind === kind).map((r) => r.args);
 }
+
+it.each([ ["prod", false], ["pr-42", false], ["prod", true] ] as const)("keeps Lambda secrets as exact existing references with only scoped runtime reads (%s, custom key=%s)", async (stage, customKey) => {
+  installGlobals(stage);
+  const gateway=await loadGateway(),tenantInput=fakeIdentity(stage),namespaceInput=fakeNamespaceIdentity(stage),arns=secretArns(stage);
+  if(customKey){tenantInput.tenantKmsKeyId=out(tenantCustomKeyArn) as never;namespaceInput.identitySigningKmsKeyId=out(identityCustomKeyArn) as never;}
+  gateway(fakeCognito(),fakeEcs(),tenantInput,out("reader") as never,namespaceInput);
+  const functions=all("SstFunction").map(unwrap) as Array<{handler:string;environment:Record<string,string>;permissions:Array<{actions:string[];resources:string[];conditions?:unknown[]}>}>;
+  for(const fn of functions){
+    expect(fn.environment.STAGE).toBe(stage);expect(fn.environment.MEM9_SECRET_ACCOUNT_ID).toBe(accountId);
+    for(const key of ["MEM9_API_KEY","MEM9_IDENTITY_SIGNING_KEYS","MEM9_TRANSPORT_SIGNING_KEYS"])expect(fn.environment).not.toHaveProperty(key);
+    expect(fn.permissions.flatMap(p=>p.actions).some(a=>/Put|List|Delete|Update/.test(a))).toBe(false);
+    for(const value of [unwrap(tenantInput.tenantId),unwrap(namespaceInput.identitySigningKeys),unwrap(namespaceInput.transportSigningKeys)])expect(JSON.stringify(fn.environment)).not.toContain(value);
+  }
+  const identity=functions.find(f=>f.handler.includes("identity-interceptor"))!,proxy=functions.find(f=>f.handler.includes("proxy-handler"))!;
+  expect(identity.environment.MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN).toBe(arns.identity);
+  expect(identity.environment).not.toHaveProperty("MEM9_API_KEY_SECRET_ARN");
+  expect(identity.environment).not.toHaveProperty("MEM9_TRANSPORT_SIGNING_KEYS_PARAMETER_ARN");
+  expect(proxy.environment).toMatchObject({MEM9_API_KEY_SECRET_ARN:arns.tenant,MEM9_IDENTITY_SIGNING_KEYS_SECRET_ARN:arns.identity,MEM9_TRANSPORT_SIGNING_KEYS_PARAMETER_ARN:arns.transport});
+  const decrypt=(service:string,context:string,arn:string,key:string)=>({actions:["kms:Decrypt"],resources:[key],conditions:[
+    {test:"StringEquals",variable:"kms:ViaService",values:[`${service}.${region}.amazonaws.com`]},
+    {test:"ArnEquals",variable:`kms:EncryptionContext:${context}`,values:[arn]},
+  ]});
+  expect(identity.permissions).toEqual([
+    {actions:["secretsmanager:GetSecretValue"],resources:[arns.identity]},
+    decrypt("secretsmanager","SecretARN",arns.identity,customKey?identityCustomKeyArn:secretsKeyArn),
+  ]);
+  expect(proxy.permissions).toEqual([
+    {actions:["secretsmanager:GetSecretValue"],resources:[arns.tenant,arns.identity]},
+    decrypt("secretsmanager","SecretARN",arns.tenant,customKey?tenantCustomKeyArn:secretsKeyArn),
+    decrypt("secretsmanager","SecretARN",arns.identity,customKey?identityCustomKeyArn:secretsKeyArn),
+    {actions:["ssm:GetParameters"],resources:[arns.transport]},
+    decrypt("ssm","PARAMETER_ARN",arns.transport,ssmKeyArn),
+  ]);
+});
 
 describe("gateway stack", () => {
   it("creates a CUSTOM_JWT MCP gateway matching on allowedClients (not aud)", async () => {
@@ -286,9 +353,10 @@ describe("gateway stack", () => {
     expect(vpc.privateSubnets).toBeDefined();
     expect(vpc.securityGroups).toBeDefined();
     expect(unwrap(vpc.securityGroups)).toEqual(["SecurityGroup-id"]);
-    const proxySg = only("SecurityGroup");
-    expect(proxySg.description).toContain("Gateway proxy");
-    const proxyRule = only("SecurityGroupRule");
+    const proxySg = all("SecurityGroup").find(group => String(group.description).includes("Gateway proxy Lambda"))!;
+    expect(proxySg).toBeDefined();
+    const proxyRule = all("SecurityGroupRule").find(rule => rule.fromPort === 8080)!;
+    expect(proxyRule).toBeDefined();
     expect(proxyRule.type).toBe("ingress");
     expect(proxyRule.fromPort).toBe(8080);
     expect(unwrap(proxyRule.securityGroupId)).toBe("sg-task");
@@ -315,8 +383,8 @@ describe("gateway stack", () => {
     expect(
       String((env.MEM9_SERVER_BASE_URL as { value?: string }).value),
     ).toContain(":8080");
-    expect(String((env.MEM9_API_KEY as { value?: string }).value)).toBe(
-      "deadbeefTENANTID",
+    expect(String((env.MEM9_API_KEY_SECRET_ARN as { value?: string }).value)).toBe(
+      secretArns("prod").tenant,
     );
     expect(
       Object.keys(env).filter((name) => name.startsWith("MEM9_DB_")),

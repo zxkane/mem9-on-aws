@@ -8,6 +8,8 @@ import { createHash } from "node:crypto";
  */
 export interface NamespaceIdentityOutputs {
   identitySigningKeys: Output<string>;
+  identitySigningSecretArn: Output<string>;
+  identitySigningKmsKeyId?: Output<string>;
   transportSigningKeys: Output<string>;
   transportSigningParameterArn: Output<string>;
   transportSigningRevision: Output<string>;
@@ -97,7 +99,7 @@ function signingSecret(
   logicalName: string,
   nameSuffix: string,
   description: string,
-): { value: Output<string>; arn: Output<string> } {
+): { value: Output<string>; arn: Output<string>; kmsKeyId: Output<string> } {
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
   const secret = new aws.secretsmanager.Secret(logicalName, {
     namePrefix: `mem9-on-aws-${$app.stage}-${nameSuffix}-`,
@@ -122,6 +124,7 @@ function signingSecret(
   return {
     value,
     arn: version.arn.apply(() => secret.arn),
+    kmsKeyId: (secret as unknown as {kmsKeyId:Output<string>}).kmsKeyId,
   };
 }
 
@@ -177,6 +180,8 @@ export function namespaceIdentity(): NamespaceIdentityOutputs {
   );
   return {
     identitySigningKeys: identity.value,
+    identitySigningSecretArn: identity.arn,
+    identitySigningKmsKeyId: identity.kmsKeyId,
     transportSigningKeys,
     transportSigningParameterArn: transportParameter.arn,
     transportSigningRevision,

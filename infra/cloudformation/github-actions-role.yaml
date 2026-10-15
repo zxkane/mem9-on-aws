@@ -1722,13 +1722,28 @@ Resources:
             Statement:
               - Sid: PreviewScheduleInventory
                 Effect: Allow
-                Action: scheduler:ListSchedules
-                # This list operation has no resource-level scope. The caller
+                Action:
+                  - scheduler:ListSchedules
+                  - scheduler:ListScheduleGroups
+                # These list operations have no resource-level scope. The caller
                 # validates the exact preview group before requesting inventory.
                 Resource: "*"
                 Condition:
                   StringEquals:
                     aws:RequestedRegion: !Ref ApplicationRegion
+              - Sid: PreviewServiceProcessVerification
+                Effect: Allow
+                Action: ecs:ExecuteCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:cluster/${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:task/${ProjectName}-pr-*/*
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ApplicationRegion
+                    ecs:container-name:
+                      - mnemo-server
+                      - qwen3-embed
+                      - llm-proxy
               - Sid: PreviewConsolidationDatabaseLogRead
                 Effect: Allow
                 Action:
