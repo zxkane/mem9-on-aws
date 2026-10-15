@@ -31,6 +31,7 @@ const FIXED_AUDIT_FUNCTION=String.raw`async function fixedAudit(){
  const {createRequire}=await import('node:module'),pg=createRequire('/bootstrap/operator/package.json')('pg');
  const {readRolloutState,withRolloutLock}=await import('/bootstrap/operator/scripts/lib/production-runtime-state.mjs');
  const {canaryRootIdentity,currentCanaryAttempt,readCanaryAttempt}=await import('/bootstrap/operator/scripts/lib/production-canary-continuation.mjs');
+ const {productionArtifactAdmission}=await import('/bootstrap/operator/scripts/lib/production-artifacts.mjs');
  const env=process.env,credential=JSON.parse(env.MEM9_DB_SECRET);delete env.MEM9_DB_SECRET;
  check(typeof credential.username==='string'&&typeof credential.password==='string'&&env.MEM9_STAGE==='prod');
  const db=new pg.Client({host:env.MEM9_DB_HOST,port:Number(env.MEM9_DB_PORT),database:env.MEM9_DB_NAME,user:credential.username,password:credential.password,ssl:{rejectUnauthorized:true},connectionTimeoutMillis:10000,
@@ -47,19 +48,29 @@ const FIXED_AUDIT_FUNCTION=String.raw`async function fixedAudit(){
     check(state?.identity.stage==='prod'&&state.phase==='complete'&&state.status==='running'&&state.proofs.retired_credentials&&Number(session.oid)===state.identity.administratorRoleOid);
     check(state.identity.writerEndpoint===env.MEM9_DB_HOST&&state.identity.database===env.MEM9_DB_NAME&&state.identity.clusterArn==='arn:aws:ecs:'+context.scope.region+':'+context.scope.account+':cluster/'+context.scope.cluster);
     const setupRows=(await db.query('SELECT to_jsonb(s) AS value FROM mem9_maintenance.production_worker_setup s WHERE singleton')).rows;check(setupRows.length===1);const setup=setupRows[0].value;
-    check(setup.phase==='canary'&&setup.generation===env.MEM9_WORKER_GENERATION&&Number.isInteger(setup.canary_used)&&setup.canary_used>0&&setup.canary_used<20&&!setup.promotion_verification);
+    const promoted=setup.phase==='promote';
+    check((setup.phase==='canary'||promoted)&&setup.generation===env.MEM9_WORKER_GENERATION&&Number.isInteger(setup.canary_used)&&setup.canary_used>0&&setup.canary_used<=20);
+    if(promoted){
+     // Bind the existing promotion to its activation and workload; setupHash
+     // below retains the complete proof, budget and historical setup.
+     const proof=setup.promotion_verification;
+     check(proof&&typeof proof==='object'&&!Array.isArray(proof)&&['releaseHash','reportHash','activationSeed','admission'].every(k=>typeof proof[k]==='string'&&/^[a-f0-9]{64}$/.test(proof[k])));
+     check(typeof proof.activationNonce==='string'&&/^[a-f0-9]{32}$/.test(proof.activationNonce)&&typeof setup.validation_id==='string'&&/^[a-f0-9]{32}$/.test(setup.validation_id)&&proof.budget&&typeof proof.budget==='object'&&!Array.isArray(proof.budget));
+     check(proof.activationSeed===digest(setup.generation+'/running/'+setup.validation_id+'/'+proof.releaseHash+'/'+proof.activationNonce));
+     check(proof.admission===productionArtifactAdmission(proof.activationSeed,env.MEM9_WORKER_SOURCE_TAG,env.MEM9_WORKER_IMAGE));
+    }else check(setup.canary_used<20&&!setup.promotion_verification);
     const control=(await db.query('SELECT to_jsonb(c) AS value FROM mem9_maintenance.execution_control c WHERE singleton')).rows;
     const dispatcher=(await db.query('SELECT to_jsonb(d) AS value FROM mem9_maintenance.dispatcher_settings d WHERE singleton')).rows;
     check(control.length===1&&dispatcher.length===1&&control[0].value.enabled===false&&dispatcher[0].value.enabled===false);
     const queued=Number((await db.query("SELECT count(*)::text AS result FROM mem9_maintenance.action_state WHERE status='queued'")).rows[0].result);check(queued===0);
-    const active=await currentCanaryAttempt(db);check(!active||active.frozen&&!active.promoted);
+    const active=await currentCanaryAttempt(db);check(!active||active.frozen&&active.promoted===promoted);
     const present=(await db.query("SELECT to_regclass('mem9_maintenance.production_canary_validation_attempts') IS NOT NULL AS present")).rows[0].present;
     const attempts=present?(await db.query('SELECT attempt_id FROM mem9_maintenance.production_canary_validation_attempts ORDER BY validation_id,ordinal LIMIT 1001')).rows:[];check(attempts.length<=1000);
     const histories=[];for(const row of attempts){const a=await readCanaryAttempt(db,row.attempt_id);check(a.frozen||a.phase==='failed');histories.push({row:a.row,events:a.events,lastHash:a.lastHash});}
     const receipt=(await db.query("SELECT count(*)::text AS count,encode(sha256(convert_to(coalesce(jsonb_agg(value ORDER BY namespace_id,action_id),'[]'::jsonb)::text,'UTF8')),'hex') AS hash FROM (SELECT namespace_id,action_id,to_jsonb(r) AS value FROM mem9_maintenance.receipts r ORDER BY namespace_id,action_id LIMIT 10001) bounded")).rows[0];
     check(Number(receipt.count)>0&&Number(receipt.count)<=10000&&/^[a-f0-9]{64}$/.test(receipt.hash));
     const rootHash=await canaryRootIdentity(db,state);check(!active||active.row.header.rootIdentity===rootHash);
-    const projection={version:1,rootHash,setupHash:digest(setup),receiptsHash:receipt.hash,runtimeHistoryHash:state.last_hash,attemptsHash:digest({current:active?.row.attempt_id??null,histories}),controlsHash:digest({control:control[0].value,dispatcher:dispatcher[0].value}),spent:setup.canary_used,receiptCount:Number(receipt.count),executionEnabled:false,dispatcherEnabled:false,queuedActions:queued,activeAttempts:0};
+    const projection={version:2,maintenancePhase:setup.phase,rootHash,setupHash:digest(setup),receiptsHash:receipt.hash,runtimeHistoryHash:state.last_hash,attemptsHash:digest({current:active?.row.attempt_id??null,histories}),controlsHash:digest({control:control[0].value,dispatcher:dispatcher[0].value}),spent:setup.canary_used,receiptCount:Number(receipt.count),executionEnabled:false,dispatcherEnabled:false,queuedActions:queued,activeAttempts:0};
     await owns();check(Date.now()<context.deadline);result={projection,projectionHash:digest(projection),observedMs:Number(session.observed_ms)};
    }finally{await db.query('ROLLBACK');}
   });
@@ -70,8 +81,8 @@ const FIXED_AUDIT_FUNCTION=String.raw`async function fixedAudit(){
 export const SERVICE_NONROOT_AUDIT_SOURCE=`await (${FIXED_AUDIT_FUNCTION})().catch(()=>{console.error('ServiceNonrootAuditFailed');process.exitCode=1;});`;
 export const SERVICE_NONROOT_AUDIT_SCRIPT_HASH=sha(SERVICE_NONROOT_AUDIT_SOURCE);
 function projectionShape(p){
- need(exact(p,['version','rootHash','setupHash','receiptsHash','runtimeHistoryHash','attemptsHash','controlsHash','spent','receiptCount','executionEnabled','dispatcherEnabled','queuedActions','activeAttempts']));
- need(p.version===1&&['rootHash','setupHash','receiptsHash','runtimeHistoryHash','attemptsHash','controlsHash'].every(k=>hex(p[k]))&&Number.isInteger(p.spent)&&p.spent>0&&p.spent<20&&Number.isInteger(p.receiptCount)&&p.receiptCount>0&&p.receiptCount<=10000);
+ need(exact(p,['version','maintenancePhase','rootHash','setupHash','receiptsHash','runtimeHistoryHash','attemptsHash','controlsHash','spent','receiptCount','executionEnabled','dispatcherEnabled','queuedActions','activeAttempts']));
+ need(p.version===2&&['canary','promote'].includes(p.maintenancePhase)&&['rootHash','setupHash','receiptsHash','runtimeHistoryHash','attemptsHash','controlsHash'].every(k=>hex(p[k]))&&Number.isInteger(p.spent)&&p.spent>0&&p.spent<=20&&(p.maintenancePhase==='promote'||p.spent<20)&&Number.isInteger(p.receiptCount)&&p.receiptCount>0&&p.receiptCount<=10000);
  need(p.executionEnabled===false&&p.dispatcherEnabled===false&&p.queuedActions===0&&p.activeAttempts===0);return p;
 }
 
