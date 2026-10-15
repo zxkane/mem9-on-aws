@@ -133,7 +133,7 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   return meta;
 }
 
-export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel},{now=Date.now,sleep=delay}={}){
+export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel,expectedAdmission},{now=Date.now,sleep=delay}={}){
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix='/mem9-on-aws/prod/',manifestName=prefix+'consolidation-runtime/operator-manifest';
   const response=await send(clients.ssm,new GetParametersCommand({Names:[manifestName],WithDecryption:true}));
@@ -160,9 +160,9 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     env.MEM9_DB_PORT!==String(meta.port)||env.MEM9_PRODUCTION_WORKER_OPERATOR!==kind||Object.keys(actual).length!==Object.keys(secrets).length||
     Object.entries(secrets).some(([key,value])=>actual[key]!==value))fail('ProductionWorkerOperatorDefinitionMismatch');
   await verifyProductionTaskRoles(clients,meta,definition,name,secrets);
-  if(operation!=='status')await stopPreviousProductionAdministration(clients,meta,{now,sleep});
+  if(!['status','census'].includes(operation))await stopPreviousProductionAdministration(clients,meta,{now,sleep});
   let acceptance;
-  if(!['pause','status'].includes(operation)){
+  if(!['pause','status','census'].includes(operation)){
     const proof=await send(clients.ssm,new GetParametersCommand({Names:[prefix+'runtime/rehearsal-acceptance'],WithDecryption:true}));
     if(proof.InvalidParameters?.length||proof.Parameters?.length!==1)fail('ProductionWorkerRehearsalRequired');
     try{acceptance=JSON.parse(proof.Parameters[0].Value);}catch{fail('ProductionWorkerRehearsalRequired');}
@@ -172,7 +172,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
-    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model'].includes(operation)?'admission':'inspection';
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit'].includes(operation)?'admission':'inspection';
     const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
@@ -181,7 +181,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
     ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
     ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{}),
-    ...(plannerModel!==undefined?{plannerModel}:{})};
+    ...(plannerModel!==undefined?{plannerModel}:{}),...(expectedAdmission!==undefined?{expectedAdmission}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
     await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));

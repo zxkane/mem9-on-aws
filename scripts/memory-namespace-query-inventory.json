@@ -2954,9 +2954,45 @@
       "namespace_evidence": null
     },
     {
-      "id": "148f0e350b9b081ffae7",
+      "id": "8d9685c343d0e45481fd",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 249,
+      "line": 184,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "48c6584faec1d49e89d0b9f059d767a12d4b4e25b171d7aa9d4c20f2fab8b8f9",
+      "statement": "SELECT CASE WHEN state IN ('active','deleted','archived') THEN state ELSE 'other' END||'/'|| CASE WHEN memory_type IN ('insight','pinned','session') THEN memory_type ELSE 'other' END AS key,count(*) AS count FROM public.memories WHERE namespace_id=$1 GROUP BY 1",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "bcfa279e96cee67ff638",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 198,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "41460e7c5962f0731897bf5dc04ac3ab62a6759506013c019f6390fbc9934897",
+      "statement": "WITH blocked AS ( SELECT r.classification_id FROM mem9_maintenance.execution_reviews r JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'), fields AS ( SELECT b.classification_id, count(DISTINCT coalesce(j->'app_id','null'))>1 AS app,count(DISTINCT coalesce(j->'source','null'))>1 AS source, count(DISTINCT coalesce(j->'agent_id','null'))>1 AS agent,count(DISTINCT coalesce(nullif(j->'tags','null'),'[]'))>1 AS tags, count(DISTINCT CASE WHEN jsonb_typeof(coalesce(nullif(j->'metadata','null'),'{}'))='object' THEN coalesce(nullif(j->'metadata','null'),'{}')-ARRAY['source_turns','source_seqs','consolidation'] ELSE j->'metadata' END)>1 AS metadata, count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata'->'consolidation','null')) IS DISTINCT FROM 'object' AND nullif(j->'metadata'->'consolidation','null') IS NOT NULL THEN j->'metadata'->'consolidation' ELSE coalesce(nullif(j->'metadata'->'consolidation','null'),'{}')-'sources' END)>1 AS consolidation FROM blocked b JOIN mem9_maintenance.classification_members cm ON cm.namespace_id=$1 AND cm.classification_id=b.classification_id JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id CROSS JOIN LATERAL to_jsonb(m) j GROUP BY b.classification_id) SELECT concat_ws('+',CASE WHEN app THEN 'app' END,CASE WHEN source THEN 'source' END,CASE WHEN agent THEN 'agent' END, CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key, count(*) AS count FROM fields GROUP BY 1",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "28ee361b9565506ad8a4",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 305,
       "tables": [
         "memories"
       ],
@@ -2972,9 +3008,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "15b9f2287c35644cbca7",
+      "id": "5d6eb606e3af1403026e",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 298,
+      "line": 383,
       "tables": [
         "memories"
       ],
@@ -2990,9 +3026,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "ac5f01c4a8e60e3b1749",
+      "id": "230b1a9372aca9327ed1",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 310,
+      "line": 395,
       "tables": [
         "memories"
       ],
@@ -3008,9 +3044,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "1af86d90babb9f3c978c",
+      "id": "8c6e63335fb14610427d",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 314,
+      "line": 399,
       "tables": [
         "memories"
       ],

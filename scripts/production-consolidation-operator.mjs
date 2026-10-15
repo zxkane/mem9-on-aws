@@ -42,10 +42,12 @@ export function validatePlannerModel(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
-    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+  if(request.operation==='readmit'){if(!/^[a-f0-9]{64}$/.test(request.expectedAdmission??''))throw Error('ReadmissionScheduleRequired');}
+  else if(request.expectedAdmission!==undefined)throw Error('UnexpectedReadmission');
   if(request.operation==='configure-model')validatePlannerModel(request.plannerModel);
   else if(request.plannerModel!==undefined)throw Error('UnexpectedPlannerModel');
   if(['begin-continuation','inspect-canary','resume-plan'].includes(request.operation)&&!/^[a-f0-9]{32}$/.test(request.attemptId??''))throw Error('CanaryAttemptRequired');
@@ -84,7 +86,7 @@ export function productionConsolidationConfig(env,request){
     !Array.isArray(targets)||(request.operation==='prepare'&&!targets.length)||targets.length>32||new Set(targets).size!==targets.length||
     !Number.isInteger(Number(env.MEM9_DB_PORT))||Number(env.MEM9_DB_PORT)<1||Number(env.MEM9_DB_PORT)>65535)throw Error('InvalidProductionWorkerConfiguration');
   targets=targets.map(requireNamespaceId).sort();
-  if(!['pause','status'].includes(request.operation)&&(!/^mem9-[a-f0-9]{7}$/.test(env.MEM9_WORKER_SOURCE_TAG??'')||!/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/mem9-on-aws\/llm-proxy@sha256:[a-f0-9]{64}$/.test(env.MEM9_WORKER_IMAGE??'')))throw Error('ProductionWorkerArtifactRequired');
+  if(!['pause','status','census'].includes(request.operation)&&(!/^mem9-[a-f0-9]{7}$/.test(env.MEM9_WORKER_SOURCE_TAG??'')||!/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/mem9-on-aws\/llm-proxy@sha256:[a-f0-9]{64}$/.test(env.MEM9_WORKER_IMAGE??'')))throw Error('ProductionWorkerArtifactRequired');
   if(request.operation==='prepare')for(const [kind,credential] of Object.entries({planner,executor}))if(credential?.username!==names[kind]||
     !/^[A-Za-z0-9]{32,128}$/.test(credential.password??'')||!/^[A-Za-z0-9]{16,128}$/.test(credential.salt??''))throw Error('InvalidProductionWorkerCredential');
   let dataRelease;
@@ -165,14 +167,67 @@ async function servicePrincipal(db,service){
   if(row?.principal_type!=='service'||row.status!=='active')throw Error('ProductionServicePrincipalMismatch');return row.principal_id;
 }
 
+const CONTEXT_FIELDS=['app','source','agent','tags','metadata','consolidation'];
+/**
+ * Content-free counts that explain where consolidation stops: memory state,
+ * classification results, review reasons, action outcomes and, for MERGE
+ * verdicts blocked by context_conflict, which member fields disagree.
+ */
+export async function consolidationCensus(db,targets){
+  const total={},add=(bucket,list)=>{for(const r of list)total[bucket][r.key]=(total[bucket][r.key]??0)+Number(r.count);};
+  for(const bucket of ['memories','classifications','reviews','actions','conflicts','receipts'])total[bucket]={};
+  await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  try{
+    for(const namespace of targets){
+      const rows=async sql=>(await db.query(sql,[namespace])).rows;
+      // Only known enum values become keys; anything else is counted as other.
+      add('memories',await rows(`SELECT CASE WHEN state IN ('active','deleted','archived') THEN state ELSE 'other' END||'/'||
+        CASE WHEN memory_type IN ('insight','pinned','session') THEN memory_type ELSE 'other' END AS key,count(*) AS count FROM public.memories
+        WHERE namespace_id=$1 GROUP BY 1`));
+      add('classifications',await rows(`SELECT c.result AS key,count(*) AS count FROM mem9_maintenance.classifications c
+        JOIN mem9_maintenance.namespace_state s ON s.namespace_id=c.namespace_id AND s.context_hash=c.context_hash WHERE c.namespace_id=$1 GROUP BY 1`));
+      add('reviews',await rows(`SELECT c.result||'/'||r.reason AS key,count(*) AS count FROM mem9_maintenance.execution_reviews r
+        JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id
+        WHERE r.namespace_id=$1 GROUP BY 1`));
+      add('actions',await rows(`SELECT a.kind||'/'||s.status AS key,count(*) AS count FROM mem9_maintenance.action_state s
+        JOIN mem9_maintenance.actions a ON a.namespace_id=s.namespace_id AND a.action_id=s.action_id WHERE s.namespace_id=$1 GROUP BY 1`));
+      add('receipts',await rows(`SELECT k AS key,v AS count FROM (SELECT count(*) AS receipts,coalesce(sum((result->>'changed_rows')::bigint),0) AS changed_rows
+        FROM mem9_maintenance.receipts WHERE namespace_id=$1) t,LATERAL (VALUES ('count',t.receipts),('changedRows',t.changed_rows)) v(k,v)`));
+      // Per blocked MERGE verdict, mark each context field whose values differ
+      // across members. Only booleans leave the database.
+      add('conflicts',await rows(`WITH blocked AS (
+          SELECT r.classification_id FROM mem9_maintenance.execution_reviews r
+          JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id
+          WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'),
+        fields AS (
+          SELECT b.classification_id,
+            count(DISTINCT coalesce(j->'app_id','null'))>1 AS app,count(DISTINCT coalesce(j->'source','null'))>1 AS source,
+            count(DISTINCT coalesce(j->'agent_id','null'))>1 AS agent,count(DISTINCT coalesce(nullif(j->'tags','null'),'[]'))>1 AS tags,
+            count(DISTINCT CASE WHEN jsonb_typeof(coalesce(nullif(j->'metadata','null'),'{}'))='object'
+              THEN coalesce(nullif(j->'metadata','null'),'{}')-ARRAY['source_turns','source_seqs','consolidation'] ELSE j->'metadata' END)>1 AS metadata,
+            count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata'->'consolidation','null')) IS DISTINCT FROM 'object' AND nullif(j->'metadata'->'consolidation','null') IS NOT NULL
+              THEN j->'metadata'->'consolidation' ELSE coalesce(nullif(j->'metadata'->'consolidation','null'),'{}')-'sources' END)>1 AS consolidation
+          FROM blocked b JOIN mem9_maintenance.classification_members cm ON cm.namespace_id=$1 AND cm.classification_id=b.classification_id
+          JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id CROSS JOIN LATERAL to_jsonb(m) j GROUP BY b.classification_id)
+        SELECT concat_ws('+',CASE WHEN app THEN 'app' END,CASE WHEN source THEN 'source' END,CASE WHEN agent THEN 'agent' END,
+          CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key,
+          count(*) AS count FROM fields GROUP BY 1`));
+    }
+  }finally{await db.query('ROLLBACK');}
+  const differing=Object.fromEntries(CONTEXT_FIELDS.map(field=>[field,Object.entries(total.conflicts)
+    .filter(([key])=>key.split('+').includes(field)).reduce((sum,[,count])=>sum+count,0)]));
+  return {memories:total.memories,classifications:total.classifications,reviews:total.reviews,actions:total.actions,
+    receipts:{count:total.receipts.count??0,changedRows:total.receipts.changedRows??0},contextConflicts:{combinations:total.conflicts,differing}};
+}
+
 export async function runProductionConsolidation(db,config,request,{connect}={}){
   return withRolloutLock(db,'prod',async owns=>{
     const checkpoint=async()=>{
       await owns();if(!await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[request.deadline]))throw Error('ProductionWorkerDeadline');
-      const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status'].includes(request.operation)});
-      if(config.dataRelease&&!['pause','status'].includes(request.operation)){
+      const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
+      if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -186,10 +241,10 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     if(request.operation!=='prepare'){
       const setup=currentSetup;
       config={...config,targets:(setup?.targets??[]).map(requireNamespaceId).sort()};
-      if(!['status','pause'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
+      if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -200,6 +255,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           !canaryWitnessMatches(config.acceptance,active.row.header.certificateHash,active.row.header.parentProofHash))throw Error('CanaryAttemptReleaseMismatch');
       }
     }
+    if(request.operation==='census')return {phase:'census',...await consolidationCensus(db,config.targets)};
     if(request.operation==='status')return {phase:'status',setupPhase:currentSetup?.phase,validationId:currentSetup?.validation_id,canaryUsed:currentSetup?.canary_used,
       backendBinding:active?.row.header.backendBinding??currentSetup?.backend_binding,
       ...(active?{attempt:{id:active.row.attempt_id,ordinal:active.row.ordinal,phase:active.phase,frozen:active.frozen,parentProofHash:active.row.header.parentProofHash}}:{}),
@@ -272,6 +328,35 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
         responseEvidence=await closeCanaryValidation(db,config,state,setup,request.invocation);
+      }else if(request.operation==='readmit'){
+        // A new release derives a new worker admission from the promoted
+        // activation seed, so deployed schedules stop matching the dispatcher.
+        // Re-admit only the release this operator itself was deployed with;
+        // budgets, receipts and the promotion record are otherwise unchanged.
+        await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
+        const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        const promoted=setup?.promotion_verification;
+        if(setup?.phase!=='promote'||setup.generation!==config.generation||!/^[a-f0-9]{64}$/.test(promoted?.activationSeed??''))throw Error('ReadmissionRequiresPromotion');
+        for(const kind of ['planner','executor']){
+          if(Number(await scalar(db,'SELECT $1::regrole::oid AS result',[config[kind].username]))!==Number(setup[kind+'_oid']))throw Error('CanaryWorkerIdentityChanged');
+          await verifyWorkerPrivileges(db,config[kind].username,kind);
+        }
+        const admission=productionArtifactAdmission(promoted.activationSeed,config.sourceTag,config.workerImage);
+        // The deployed schedules must already present this admission, so the
+        // dispatcher never moves to a release its workers do not carry.
+        if(admission!==request.expectedAdmission)throw Error('ReadmissionScheduleMismatch');
+        const dispatcher=(await db.query('SELECT enabled,generation_key FROM mem9_maintenance.dispatcher_settings WHERE singleton FOR UPDATE')).rows[0];
+        if(!dispatcher)throw Error('ReadmissionRequiresPromotion');
+        if(dispatcher.generation_key!==admission){
+          await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,$3,$4)',['prod',config.targets,dispatcher.enabled,admission]);
+          const readmissions=[...(promoted.readmissions??[]),{sourceTag:config.sourceTag,workerImageHash:hash(config.workerImage),
+            admissionHash:hash(admission),previousKeyHash:hash(dispatcher.generation_key),paused:!dispatcher.enabled,
+            recordedMs:Number(await scalar(db,"SELECT floor(extract(epoch FROM clock_timestamp())*1000)::text AS result")),
+            invocation:request.invocation}].slice(-50);
+          await db.query('UPDATE mem9_maintenance.production_worker_setup SET promotion_verification=$1 WHERE singleton',
+            [{...promoted,admission,readmissions}]);
+        }
+        responseEvidence={admission,enabled:dispatcher.enabled,changed:dispatcher.generation_key!==admission};
       }else if(request.operation==='configure-model'){
         // Model classification changes the planner context, so every target is
         // re-planned from current rows. Only a fresh, paused validation may change it.

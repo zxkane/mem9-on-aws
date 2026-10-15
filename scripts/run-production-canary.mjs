@@ -107,8 +107,37 @@ export async function runProductionCanary({clients,region,dailyRows=6000,basisPo
   return runProductionCanaryFlow(dependencies,{dailyRows,basisPoints,planningWaves});
 }
 
+/**
+ * After a release deploys, bind the promoted dispatcher to the new worker
+ * artifacts. The host first verifies both worker targets for this checkout,
+ * the database derives the admission from the promoted activation seed, and
+ * the deployed schedules must then carry exactly that admission.
+ */
+export async function readmitProductionRelease(clients,{region}){
+  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
+  if(await gh(['api',`repos/${repository}/commits/main`,'--jq','.sha'])!==revision)throw Error('ProductionReadmissionRequiresMain');
+  const targets=[];
+  for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
+  const presented=targets.map(target=>JSON.parse(target.template.Target.Input).containerOverrides?.[0]?.environment
+    ?.find(item=>item.name==='MEM9_WORKER_ADMISSION')?.value);
+  if(!/^[a-f0-9]{64}$/.test(presented[0]??'')||presented[1]!==presented[0])throw Error('ProductionReadmissionScheduleMismatch');
+  const result=await runProductionConsolidationTask(clients,{region,operation:'readmit',expectedAdmission:presented[0]});
+  if(result.admission!==presented[0])throw Error('ProductionReadmissionScheduleMismatch');
+  if(!/^[a-f0-9]{64}$/.test(result.admission??''))throw Error('ProductionReadmissionMissing');
+  const verified=await verifyProductionScheduling(clients,targets,{enabled:result.enabled,admission:result.admission});
+  return {phase:'readmitted',changed:result.changed,enabled:result.enabled,taskDefinitions:verified.taskDefinitions};
+}
+
 async function main(){
   if(process.env.STAGE!=='prod')throw Error('ProductionCanaryStageRequired');
+  if(process.argv[2]==='readmit'){
+    const region=process.env.AWS_REGION||await resolveApplicationRegion();
+    const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region:'us-east-1'}),sts:new STSClient({region}),
+      scheduler:new SchedulerClient({region}),logs:new CloudWatchLogsClient({region})};
+    try{process.stdout.write(JSON.stringify({event:'production_canary',...await readmitProductionRelease(clients,{region})})+'\n');}
+    finally{Object.values(clients).forEach(client=>client.destroy());}
+    return;
+  }
   const region=process.env.AWS_REGION||await resolveApplicationRegion();
   const directory=await mkdtemp(join(tmpdir(),'mem9-production-canary-'));await chmod(directory,0o700);
   const file=join(directory,'run.local.json');

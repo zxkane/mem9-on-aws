@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url';
 import pg from 'pg';
 import {describe,it,expect,vi} from 'vitest';
 import {runProductionConsolidation,verifyWorkerPrivileges} from './production-consolidation-operator.mjs';
+import {productionArtifactAdmission} from './lib/production-artifacts.mjs';
 import {bootstrapRuntime} from './runtime-bootstrap.mjs';
 import {applyBootstrapSchema,runtimeRoleName,runtimeSchemaDigest} from './lib/runtime-credentials.mjs';
 import {schemaAdministratorRole} from './lib/production-runtime-config.mjs';
@@ -502,6 +503,55 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await runProductionConsolidation(f.admin,f.config,f.request('baseline'),{connect:f.connect});
     await expect(configure()).rejects.toThrow('PlannerModelRequiresPreparedSetup');
     await expect(runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel:{...plannerModel,contract:{...contract,adapter:'other'}}},{connect:f.connect})).rejects.toThrow();
+  }),60000);
+
+  it('reports content-free census counts and the fields behind blocked merges',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const ids=[randomUUID(),randomUUID()].sort(),classId='9'.repeat(64);
+    for(const [i,id] of ids.entries())await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,agent_id,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic census fact','census-fixture',$4,$5,$6,'insight')`,[id,f.namespace,f.principal,'agent-'+i,JSON.stringify(i?['b']:['a']),i?'null':'{}']);
+    const context=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    await f.admin.query("INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until) VALUES($1,$2,$2,$3,'MERGE','{}',clock_timestamp()+interval '1 hour')",[f.namespace,classId,context]);
+    for(const id of ids)await f.admin.query("INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint) VALUES($1,$2,$3,1,$4)",[f.namespace,classId,id,'0'.repeat(64)]);
+    await f.admin.query("INSERT INTO mem9_maintenance.execution_reviews(namespace_id,classification_id,reason) VALUES($1,$2,'context_conflict')",[f.namespace,classId]);
+    const census=await runProductionConsolidation(f.admin,f.config,f.request('census'),{connect:f.connect});
+    expect(census.phase).toBe('census');
+    expect(census.memories['active/insight']).toBeGreaterThanOrEqual(2);
+    expect(census.classifications.MERGE).toBe(1);
+    expect(census.reviews['MERGE/context_conflict']).toBe(1);
+    expect(census.contextConflicts.combinations).toEqual({'agent+tags':1});
+    expect(census.contextConflicts.differing).toMatchObject({agent:1,tags:1,source:0,metadata:0});
+    expect(JSON.stringify(census)).not.toContain('Synthetic census fact');
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.execution_reviews')).toBe(1);
+  }),60000);
+
+  it('re-admits a promoted dispatcher only for the deployed release artifacts',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const seed='e'.repeat(64),old=productionArtifactAdmission(seed,f.config.sourceTag,f.config.workerImage);
+    const readmit=(config,expectedAdmission=productionArtifactAdmission(seed,config.sourceTag,config.workerImage))=>
+      runProductionConsolidation(f.admin,config,{...f.request('readmit'),invocation:randomUUID().replaceAll('-',''),expectedAdmission},{connect:f.connect});
+    await expect(readmit(f.config)).rejects.toThrow('ReadmissionRequiresPromotion');
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote',promotion_verification=$1 WHERE singleton",[{activationSeed:seed,admission:old}]);
+    await f.admin.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',f.config.targets,old]);
+    expect(await readmit(f.config)).toMatchObject({phase:'readmit',admission:old,enabled:true,changed:false});
+    const release={...f.config,sourceTag:'mem9-bbbbbbb',workerImage:f.config.workerImage.replace(/d{64}$/,'e'.repeat(64))};
+    const expected=productionArtifactAdmission(seed,release.sourceTag,release.workerImage);
+    await expect(readmit(release,old)).rejects.toThrow('ReadmissionScheduleMismatch');
+    expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(old);
+    expect(await readmit(release)).toMatchObject({admission:expected,enabled:true,changed:true});
+    expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(expected);
+    const setup=(await f.admin.query('SELECT promotion_verification AS v FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0].v;
+    expect(setup).toMatchObject({activationSeed:seed,admission:expected});
+    expect(setup.readmissions).toHaveLength(1);expect(setup.readmissions[0]).toMatchObject({sourceTag:'mem9-bbbbbbb'});
+    expect(JSON.stringify(setup.readmissions)).not.toContain(release.workerImage);
+    expect((await runProductionConsolidation(f.admin,release,f.request('status'),{connect:f.connect})).admission).toBe(expected);
+    // A paused dispatcher stays paused; only its admission key moves.
+    await runProductionConsolidation(f.admin,release,f.request('pause'),{connect:f.connect});
+    const third={...release,sourceTag:'mem9-ccccccc'};
+    expect(await readmit(third)).toMatchObject({enabled:false,changed:true});
+    expect(await scalar(f.admin,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(false);
+    const paused=(await f.admin.query('SELECT promotion_verification AS v FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0].v;
+    expect(paused.readmissions.at(-1)).toMatchObject({sourceTag:'mem9-ccccccc',paused:true});
   }),60000);
 
   it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
