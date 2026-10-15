@@ -1725,8 +1725,18 @@ STAGE=prod node scripts/run-production-canary.mjs
 `STAGE=prod node scripts/run-production-consolidation.mjs census` reports
 content-free counts: memory states, current classification results, review
 reasons, action outcomes, receipts, and which member fields (app, source,
-agent, tags, metadata) differ in MERGE verdicts held back as `context_conflict`.
-It runs in a read-only transaction and needs no release evidence.
+agent, tags, metadata, consolidation) currently differ in MERGE verdicts held
+back as `context_conflict`. Classifications count the current planner context;
+review counts include earlier contexts. It runs in a read-only transaction and
+needs no release evidence.
+
+After every production release, re-admit the promoted dispatcher to the new
+worker artifacts; until then scheduled workers stop with
+`dispatcher configuration changed`:
+
+```bash
+STAGE=prod node scripts/run-production-canary.mjs readmit
+```
 
 The evaluation is a release gate for the exact model contract. In each of
 three runs it requires zero false merges among synthetic contradictions,

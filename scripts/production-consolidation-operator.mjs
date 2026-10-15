@@ -42,7 +42,7 @@ export function validatePlannerModel(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -178,7 +178,9 @@ export async function consolidationCensus(db,targets){
   try{
     for(const namespace of targets){
       const rows=async sql=>(await db.query(sql,[namespace])).rows;
-      add('memories',await rows(`SELECT state||'/'||coalesce(memory_type,'none') AS key,count(*) AS count FROM public.memories
+      // Only known enum values become keys; anything else is counted as other.
+      add('memories',await rows(`SELECT CASE WHEN state IN ('active','deleted','archived') THEN state ELSE 'other' END||'/'||
+        CASE WHEN memory_type IN ('insight','pinned','session') THEN memory_type ELSE 'other' END AS key,count(*) AS count FROM public.memories
         WHERE namespace_id=$1 GROUP BY 1`));
       add('classifications',await rows(`SELECT c.result AS key,count(*) AS count FROM mem9_maintenance.classifications c
         JOIN mem9_maintenance.namespace_state s ON s.namespace_id=c.namespace_id AND s.context_hash=c.context_hash WHERE c.namespace_id=$1 GROUP BY 1`));
@@ -197,12 +199,14 @@ export async function consolidationCensus(db,targets){
           WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'),
         fields AS (
           SELECT b.classification_id,
-            count(DISTINCT coalesce(m.app_id::text,''))>1 AS app,count(DISTINCT coalesce(m.source::text,''))>1 AS source,
-            count(DISTINCT coalesce(m.agent_id::text,''))>1 AS agent,count(DISTINCT coalesce(m.tags::text,'[]'))>1 AS tags,
-            count(DISTINCT (coalesce(m.metadata,'{}'::jsonb)-ARRAY['source_turns','source_seqs','consolidation'])::text)>1 AS metadata,
-            count(DISTINCT (coalesce(m.metadata->'consolidation','{}'::jsonb)-'sources')::text)>1 AS consolidation
+            count(DISTINCT coalesce(j->'app_id','null'))>1 AS app,count(DISTINCT coalesce(j->'source','null'))>1 AS source,
+            count(DISTINCT coalesce(j->'agent_id','null'))>1 AS agent,count(DISTINCT coalesce(nullif(j->'tags','null'),'[]'))>1 AS tags,
+            count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata','null')) IN ('object',NULL) OR j->'metadata' IS NULL OR j->'metadata'='null'
+              THEN coalesce(nullif(j->'metadata','null'),'{}')-ARRAY['source_turns','source_seqs','consolidation'] ELSE j->'metadata' END)>1 AS metadata,
+            count(DISTINCT CASE WHEN jsonb_typeof(nullif(j->'metadata'->'consolidation','null')) IS DISTINCT FROM 'object' AND nullif(j->'metadata'->'consolidation','null') IS NOT NULL
+              THEN j->'metadata'->'consolidation' ELSE coalesce(nullif(j->'metadata'->'consolidation','null'),'{}')-'sources' END)>1 AS consolidation
           FROM blocked b JOIN mem9_maintenance.classification_members cm ON cm.namespace_id=$1 AND cm.classification_id=b.classification_id
-          JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id GROUP BY b.classification_id)
+          JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id CROSS JOIN LATERAL to_jsonb(m) j GROUP BY b.classification_id)
         SELECT concat_ws('+',CASE WHEN app THEN 'app' END,CASE WHEN source THEN 'source' END,CASE WHEN agent THEN 'agent' END,
           CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key,
           count(*) AS count FROM fields GROUP BY 1`));
@@ -221,7 +225,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -238,7 +242,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -322,6 +326,30 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
         responseEvidence=await closeCanaryValidation(db,config,state,setup,request.invocation);
+      }else if(request.operation==='readmit'){
+        // A new release derives a new worker admission from the promoted
+        // activation seed, so deployed schedules stop matching the dispatcher.
+        // Re-admit only the release this operator itself was deployed with;
+        // budgets, receipts and the promotion record are otherwise unchanged.
+        await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
+        const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        const promoted=setup?.promotion_verification;
+        if(setup?.phase!=='promote'||setup.generation!==config.generation||!/^[a-f0-9]{64}$/.test(promoted?.activationSeed??''))throw Error('ReadmissionRequiresPromotion');
+        for(const kind of ['planner','executor']){
+          if(Number(await scalar(db,'SELECT $1::regrole::oid AS result',[config[kind].username]))!==Number(setup[kind+'_oid']))throw Error('CanaryWorkerIdentityChanged');
+          await verifyWorkerPrivileges(db,config[kind].username,kind);
+        }
+        const admission=productionArtifactAdmission(promoted.activationSeed,config.sourceTag,config.workerImage);
+        const dispatcher=(await db.query('SELECT enabled,generation_key FROM mem9_maintenance.dispatcher_settings WHERE singleton FOR UPDATE')).rows[0];
+        if(!dispatcher)throw Error('ReadmissionRequiresPromotion');
+        if(dispatcher.generation_key!==admission){
+          await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,$3,$4)',['prod',config.targets,dispatcher.enabled,admission]);
+          const readmissions=[...(promoted.readmissions??[]),{sourceTag:config.sourceTag,workerImageHash:hash(config.workerImage),
+            admissionHash:hash(admission),previousAdmissionHash:hash(dispatcher.generation_key),invocation:request.invocation}].slice(-50);
+          await db.query('UPDATE mem9_maintenance.production_worker_setup SET promotion_verification=$1 WHERE singleton',
+            [{...promoted,admission,readmissions}]);
+        }
+        responseEvidence={admission,enabled:dispatcher.enabled,changed:dispatcher.generation_key!==admission};
       }else if(request.operation==='configure-model'){
         // Model classification changes the planner context, so every target is
         // re-planned from current rows. Only a fresh, paused validation may change it.

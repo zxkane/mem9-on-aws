@@ -32,6 +32,7 @@ export const fixtureCaseNames=Object.freeze([
   'installs a certified planner model and budgets only on a paused, prepared setup',
   'closes an open continuation attempt without rewriting its ledger',
   'reports content-free census counts and the fields behind blocked merges',
+  're-admits a promoted dispatcher only for the deployed release artifacts',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;
