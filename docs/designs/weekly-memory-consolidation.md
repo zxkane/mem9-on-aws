@@ -1802,7 +1802,7 @@ file, its runner and test dependencies. Packaged SQL is mapped into the test's
 expected paths; another application source tree must not replace the inherited
 modules. A digest-pinned PostgreSQL sidecar listens only on loopback and receives
 no Aurora, tenant or production credentials. Both containers run as non-root.
-The runner requires all 20 named cases, zero skipped/failed cases and a successful
+The runner requires all 21 named cases, zero skipped/failed cases and a successful
 test process, then removes the four shared fixture roles and proves zero fixture
 database/role residue before PostgreSQL exits. The host may emit the final
 marked preview evidence only after verifying the actual images, task completion

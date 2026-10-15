@@ -31,6 +31,7 @@ export const fixtureCaseNames=Object.freeze([
   'closes an unpromoted canary into immutable history and admits a fresh validation',
   'installs a certified planner model and budgets only on a paused, prepared setup',
   'closes an open continuation attempt without rewriting its ledger',
+  'reports content-free census counts and the fields behind blocked merges',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;

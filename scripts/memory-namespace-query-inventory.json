@@ -2954,9 +2954,45 @@
       "namespace_evidence": null
     },
     {
-      "id": "148f0e350b9b081ffae7",
+      "id": "28588a8798011eae0277",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 249,
+      "line": 181,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "9cae60056c64041b738221e7ebc4b1984b48954f9b9182c3c14824ecc1b6888b",
+      "statement": "SELECT state||'/'||coalesce(memory_type,'none') AS key,count(*) AS count FROM public.memories WHERE namespace_id=$1 GROUP BY 1",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "ad02adc0dcaa4ea978af",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 194,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "c31573da43fc9a5ea6871171a9cda0eb746319d21d9d82f70cad386237a669e9",
+      "statement": "WITH blocked AS ( SELECT r.classification_id FROM mem9_maintenance.execution_reviews r JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'), fields AS ( SELECT b.classification_id, count(DISTINCT coalesce(m.app_id::text,''))>1 AS app,count(DISTINCT coalesce(m.source::text,''))>1 AS source, count(DISTINCT coalesce(m.agent_id::text,''))>1 AS agent,count(DISTINCT coalesce(m.tags::text,'[]'))>1 AS tags, count(DISTINCT (coalesce(m.metadata,'{}'::jsonb)-ARRAY['source_turns','source_seqs','consolidation'])::text)>1 AS metadata, count(DISTINCT (coalesce(m.metadata->'consolidation','{}'::jsonb)-'sources')::text)>1 AS consolidation FROM blocked b JOIN mem9_maintenance.classification_members cm ON cm.namespace_id=$1 AND cm.classification_id=b.classification_id JOIN public.memories m ON m.namespace_id=$1 AND m.id=cm.memory_id GROUP BY b.classification_id) SELECT concat_ws('+',CASE WHEN app THEN 'app' END,CASE WHEN source THEN 'source' END,CASE WHEN agent THEN 'agent' END, CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key, count(*) AS count FROM fields GROUP BY 1",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "fc241afbb1d030f8ce78",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 299,
       "tables": [
         "memories"
       ],
@@ -2972,9 +3008,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "15b9f2287c35644cbca7",
+      "id": "3981b1ec3db10a364949",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 298,
+      "line": 348,
       "tables": [
         "memories"
       ],
@@ -2990,9 +3026,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "ac5f01c4a8e60e3b1749",
+      "id": "e4dacc010321f94426b9",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 310,
+      "line": 360,
       "tables": [
         "memories"
       ],
@@ -3008,9 +3044,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "1af86d90babb9f3c978c",
+      "id": "7bd0caed979310d24eca",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 314,
+      "line": 364,
       "tables": [
         "memories"
       ],

@@ -1722,6 +1722,12 @@ MEM9_PLANNER_CERTIFICATE="$certificate" \
 STAGE=prod node scripts/run-production-canary.mjs
 ```
 
+`STAGE=prod node scripts/run-production-consolidation.mjs census` reports
+content-free counts: memory states, current classification results, review
+reasons, action outcomes, receipts, and which member fields (app, source,
+agent, tags, metadata) differ in MERGE verdicts held back as `context_conflict`.
+It runs in a read-only transaction and needs no release evidence.
+
 The evaluation is a release gate for the exact model contract. In each of
 three runs it requires zero false merges among synthetic contradictions,
 unrelated records and injected instructions, zero malformed answers, and at

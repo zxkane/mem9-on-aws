@@ -504,6 +504,26 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await expect(runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel:{...plannerModel,contract:{...contract,adapter:'other'}}},{connect:f.connect})).rejects.toThrow();
   }),60000);
 
+  it('reports content-free census counts and the fields behind blocked merges',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const ids=[randomUUID(),randomUUID()].sort(),classId='9'.repeat(64);
+    for(const [i,id] of ids.entries())await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,agent_id,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic census fact','census-fixture',$4,$5,'{}','insight')`,[id,f.namespace,f.principal,'agent-'+i,JSON.stringify(i?['b']:['a'])]);
+    const context=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    await f.admin.query("INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until) VALUES($1,$2,$2,$3,'MERGE','{}',clock_timestamp()+interval '1 hour')",[f.namespace,classId,context]);
+    for(const id of ids)await f.admin.query("INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint) VALUES($1,$2,$3,1,$4)",[f.namespace,classId,id,'0'.repeat(64)]);
+    await f.admin.query("INSERT INTO mem9_maintenance.execution_reviews(namespace_id,classification_id,reason) VALUES($1,$2,'context_conflict')",[f.namespace,classId]);
+    const census=await runProductionConsolidation(f.admin,f.config,f.request('census'),{connect:f.connect});
+    expect(census.phase).toBe('census');
+    expect(census.memories['active/insight']).toBeGreaterThanOrEqual(2);
+    expect(census.classifications.MERGE).toBe(1);
+    expect(census.reviews['MERGE/context_conflict']).toBe(1);
+    expect(census.contextConflicts.combinations).toEqual({'agent+tags':1});
+    expect(census.contextConflicts.differing).toMatchObject({agent:1,tags:1,source:0,metadata:0});
+    expect(JSON.stringify(census)).not.toContain('Synthetic census fact');
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.execution_reviews')).toBe(1);
+  }),60000);
+
   it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
     const {child}=await admittedContinuation(f,{admit:false});
     await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});

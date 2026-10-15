@@ -160,9 +160,9 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     env.MEM9_DB_PORT!==String(meta.port)||env.MEM9_PRODUCTION_WORKER_OPERATOR!==kind||Object.keys(actual).length!==Object.keys(secrets).length||
     Object.entries(secrets).some(([key,value])=>actual[key]!==value))fail('ProductionWorkerOperatorDefinitionMismatch');
   await verifyProductionTaskRoles(clients,meta,definition,name,secrets);
-  if(operation!=='status')await stopPreviousProductionAdministration(clients,meta,{now,sleep});
+  if(!['status','census'].includes(operation))await stopPreviousProductionAdministration(clients,meta,{now,sleep});
   let acceptance;
-  if(!['pause','status'].includes(operation)){
+  if(!['pause','status','census'].includes(operation)){
     const proof=await send(clients.ssm,new GetParametersCommand({Names:[prefix+'runtime/rehearsal-acceptance'],WithDecryption:true}));
     if(proof.InvalidParameters?.length||proof.Parameters?.length!==1)fail('ProductionWorkerRehearsalRequired');
     try{acceptance=JSON.parse(proof.Parameters[0].Value);}catch{fail('ProductionWorkerRehearsalRequired');}
