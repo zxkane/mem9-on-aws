@@ -18,8 +18,9 @@ function inputs() {
     definition: {taskDefinition: {taskDefinitionArn: oldArn, family: 'fixture-runtime', revision: 7, status: 'ACTIVE', cpu: '2048', memory: '6144', networkMode: 'awsvpc', containerDefinitions: ['mnemo-server', 'qwen3-embed', 'llm-proxy'].map((name, i) => ({name, image: `example.invalid/${name}@sha256:${String(i + 1).repeat(64)}`, linuxParameters: {initProcessEnabled: true}, environment: [{name: 'MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS', value: '30000'}, {name: 'MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT', value: '2s'}]}))}, tags: [{key: 'fixture', value: 'preserved'}]},
   };
 }
-function harness({tagged=false}={}) {
+function harness({tagged=false, deploymentObservations=false}={}) {
   const input = inputs();if(tagged)input.definition=taggedServiceDefinition(input.definition,input.service);
+  if(deploymentObservations)input.service.currentServiceRevisions=[{arn:`${root}service-revision/fixture/Mem9Server/old`,requestedTaskCount:1,runningTaskCount:1,pendingTaskCount:0}];
   const plan = buildServiceNonrootPlan(input), records = new Map(), calls = [];
   let service = copy(input.service), registered, clock = stamp, currentSource = copy(source);
   const io = {
@@ -34,7 +35,8 @@ function harness({tagged=false}={}) {
     acquireFences: async () => {calls.push('acquire');},
     assertFences: async () => {calls.push('fences');},
     register: async target => {calls.push('register'); const {tags, ...d} = copy(target); registered = {taskDefinition: {...d, taskDefinitionArn: newArn, status: 'ACTIVE', revision: 8}, tags}; return newArn;},
-    update: async (arn, {deploymentConfiguration}) => {calls.push('update'); service = {...service, taskDefinition: arn, deploymentConfiguration: copy(deploymentConfiguration), deployments: [deployment(arn)]};},
+    update: async (arn, {deploymentConfiguration}) => {calls.push('update'); service = {...service, taskDefinition: arn, deploymentConfiguration: copy(deploymentConfiguration), deployments: [deployment(arn)]};
+      if(deploymentObservations){service.currentServiceDeployment=`${root}service-deployment/fixture/Mem9Server/new`;service.currentServiceRevisions=[{arn:`${root}service-revision/fixture/Mem9Server/new`,requestedTaskCount:1,runningTaskCount:1,pendingTaskCount:0},{arn:`${root}service-revision/fixture/Mem9Server/old`,requestedTaskCount:0,runningTaskCount:0,pendingTaskCount:0}];}},
     verifyRuntime: async arn => {calls.push('runtime'); return {evidenceHash: 'e'.repeat(64), tasks: [{taskArn: `${root}task/fixture/new-task`, taskDefinitionArn: arn, lastStatus: 'RUNNING', healthStatus: 'HEALTHY', containers: plan.target.containerDefinitions.map(c => ({name: c.name, image: c.image, imageDigest: c.image.split('@')[1], lastStatus: 'RUNNING', healthStatus: 'HEALTHY'}))}]};},
     wait: async ms => {clock += ms;},
     releaseFences: async () => {calls.push('release');},
@@ -44,6 +46,24 @@ function harness({tagged=false}={}) {
 }
 
 describe('bounded service nonroot operation', () => {
+  it('accepts changing ECS deployment and revision observations while verifying the replacement tasks',async()=>{
+    const h=harness({deploymentObservations:true});
+    await expect(h.apply()).resolves.toMatchObject({status:'remediated'});
+    expect(h.calls).toContain('runtime');expect(h.calls).toContain('release');
+    expect(h.plan.baseline.service.currentServiceRevisions).toHaveLength(1);
+    expect(h.service.currentServiceRevisions).toHaveLength(2);
+  });
+  it.each(['network','desired','unknown','circuit-breaker','failed-deployment'])('still holds %s drift alongside changing deployment observations',async kind=>{
+    const h=harness({deploymentObservations:true}),update=h.io.update;
+    h.io.update=async(...args)=>{await update(...args);
+      if(kind==='network')h.service.networkConfiguration.awsvpcConfiguration.subnets=['other-subnet'];
+      if(kind==='desired')h.service.desiredCount=2;
+      if(kind==='unknown')h.service.futureConfiguration.retain=false;
+      if(kind==='circuit-breaker')h.service.deploymentConfiguration.deploymentCircuitBreaker.rollback=true;
+      if(kind==='failed-deployment')h.service.deployments[0].rolloutState='FAILED';
+    };
+    await expect(h.apply()).rejects.toThrow();expect(h.calls).not.toContain('release');
+  });
   it('pins a tagged baseline in the same nonroot update and keeps the raw definition in the plan',async()=>{
     const h=harness({tagged:true});expect(h.plan.baseline.definition.taskDefinition.containerDefinitions.every(c=>c.image.includes(':mem9-'))).toBe(true);
     expect(h.plan.target.containerDefinitions.every(c=>c.image.includes('@sha256:')&&c.user==='1000:1000')).toBe(true);

@@ -110,6 +110,8 @@ function harness() {
       expect(h.synced.has(output + (input.taskDefinition === oldArn ? '/restore-intent.json' : '/update-intent.json'))).toBe(true);
       h.mutations.push(input.taskDefinition === oldArn ? 'restore' : 'update');
       service.taskDefinition = input.taskDefinition; service.deploymentConfiguration = copy(input.deploymentConfiguration); service.deployments = [deployment(input.taskDefinition)];
+      if(h.deploymentObservations){service.currentServiceDeployment=`${prefix}service-deployment/${cluster}/Mem9Server/deployment-${h.mutations.length}`;service.currentServiceRevisions=[{arn:`${prefix}service-revision/${cluster}/Mem9Server/revision-${h.mutations.length}`,requestedTaskCount:1,runningTaskCount:1,pendingTaskCount:0}];}
+      h.afterServiceUpdate?.(service,input);
       if (h.restoreUnknown && input.taskDefinition === oldArn) throw fail('RequestTimeout');
       if (h.wrongRestore && input.taskDefinition === oldArn) h.restoredBadImage = true;
       service.pendingCount = h.neverStable && input.taskDefinition === newArn ? 1 : 0;
@@ -137,6 +139,23 @@ function harness() {
 }
 
 describe('actual frozen image preview rehearsal', () => {
+  it('verifies and restores a deployment whose ECS revision observations change on each update',async()=>{
+    const h=harness();h.deploymentObservations=true;
+    h.service.currentServiceRevisions=[{arn:`${prefix}service-revision/${cluster}/Mem9Server/original`,requestedTaskCount:1,runningTaskCount:1,pendingTaskCount:0}];
+    const result=await h.run();expect(result.outcome).toBe('PASS');expect(result.cleanup.complete).toBe(true);
+    expect(h.mutations).toEqual(['register','update','restore','deregister']);expect(mock.runtime).toHaveBeenCalled();
+  });
+  it.each(['network','desired','unknown','circuit-breaker'])('holds real %s changes even when deployment observations are expected to change',async kind=>{
+    const h=harness();h.deploymentObservations=true;
+    h.afterServiceUpdate=(service,input)=>{if(input.taskDefinition!==newArn)return;
+      if(kind==='network')service.networkConfiguration.awsvpcConfiguration.subnets=['other-subnet'];
+      if(kind==='desired')service.desiredCount=2;
+      if(kind==='unknown')service.futureConfiguration={changed:true};
+      if(kind==='circuit-breaker')service.deploymentConfiguration.deploymentCircuitBreaker.rollback=true;
+    };
+    const result=await h.run();expect(result.outcome).toBe('HELD');expect(result.failures).toContain('PreviewNonrootServiceChanged');
+    expect(result.cleanup.complete).toBe(false);expect(h.mutations).toEqual(['register','update']);expect(mock.runtime).not.toHaveBeenCalled();
+  });
   it('uses preview credentials, verifies real-helper scope, restores and deregisters exactly its revision', async () => {
     const h = harness(), result = await h.run();
     expect(result.outcome).toBe('PASS'); expect(result.cleanup.complete).toBe(true);

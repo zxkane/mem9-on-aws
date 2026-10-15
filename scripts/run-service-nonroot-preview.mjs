@@ -36,7 +36,9 @@ const json = value => JSON.parse(JSON.stringify(value));
 const environment = c => Object.fromEntries((c.environment ?? []).map(e => [e.name, e.value]));
 const taskEvidence = tasks => tasks.map(t => ({taskArn: t.taskArn, clusterArn: t.clusterArn, group: t.group, taskDefinitionArn: t.taskDefinitionArn, lastStatus: t.lastStatus, healthStatus: t.healthStatus,
   containers: t.containers.map(c => ({name: c.name, image: c.image, imageDigest: c.imageDigest, runtimeId: c.runtimeId, lastStatus: c.lastStatus, healthStatus: c.healthStatus}))}));
-const config = s => Object.fromEntries(Object.entries(s).filter(([k]) => !['events', 'deployments', 'runningCount', 'pendingCount', 'createdAt', 'updatedAt'].includes(k)));
+// Deployment/revision observations change during rollout and restore. The guards
+// below still bind every configuration field and verify deployments and actual tasks.
+const config = s => Object.fromEntries(Object.entries(s).filter(([k]) => !['events', 'deployments', 'runningCount', 'pendingCount', 'createdAt', 'updatedAt', 'currentServiceDeployment', 'currentServiceRevisions'].includes(k)));
 const runtimeFields = ['MNEMO_SCHEMA_MODE', 'MNEMO_NAMESPACE_REQUIRED', 'MNEMO_EMBED_MODEL', 'MNEMO_EMBED_DIMS', 'MNEMO_LLM_MODEL', 'MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS', 'MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT'];
 async function boundedRead(action, deadline) {
   need(Date.now() < deadline, 'Deadline'); let timer;

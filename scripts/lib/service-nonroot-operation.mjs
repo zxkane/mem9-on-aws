@@ -7,7 +7,9 @@ const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const digest = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 const copy = v => JSON.parse(JSON.stringify(v)); // Normalize SDK Date values to immutable JSON evidence.
 const freeze = v => {if (object(v) || Array.isArray(v)) {Object.values(v).forEach(freeze); Object.freeze(v);} return v;};
-const observations = new Set(['events', 'deployments', 'runningCount', 'pendingCount', 'createdAt', 'updatedAt']);
+// ECS changes these deployment observations when the requested revision rolls out.
+// Keep all other (including unknown) service fields bound; settled() checks rollout state.
+const observations = new Set(['events', 'deployments', 'runningCount', 'pendingCount', 'createdAt', 'updatedAt', 'currentServiceDeployment', 'currentServiceRevisions']);
 const config = service => Object.fromEntries(Object.entries(service).filter(([key]) => !observations.has(key)));
 const records = ['register-intent', 'register-result', 'update-intent', 'update-result', 'complete'];
 const recordName = (plan, name) => `service-nonroot-${plan.hash}-${name}.json`;
