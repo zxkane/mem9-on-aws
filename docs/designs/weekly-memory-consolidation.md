@@ -1374,8 +1374,12 @@ The operator requires a promoted setup, because canary receipts verify the
 survivor's tags as unchanged or as the exact member union. It serializes with
 execution, compares the live routine body rather than its history, verifies
 the function's owner and grants are unchanged, checks runtime ACLs, and records
-the version and SQL hash in the immutable `merge_policy_history`. Existing `context_conflict` reviews
-are re-queued when the planner reconsiders still-valid verdicts. A filter on
+the version and SQL hash in the immutable `merge_policy_history`. A planner re-queues a held-back
+verdict only when its anchor becomes dirty again, so the owner-only
+`requeue-merges` operation marks exactly the anchors of blocked MERGE verdicts
+(active, with no action yet) dirty once policy 2 is live. The planner then
+re-plans them through the normal path, reusing cached verdicts that are still
+valid and otherwise spending the ordinary model budget. A filter on
 one agent no longer finds a merged-in record from another agent; its content
 lives in the survivor.
 
@@ -1833,7 +1837,7 @@ file, its runner and test dependencies. Packaged SQL is mapped into the test's
 expected paths; another application source tree must not replace the inherited
 modules. A digest-pinned PostgreSQL sidecar listens only on loopback and receives
 no Aurora, tenant or production credentials. Both containers run as non-root.
-The runner requires all 23 named cases, zero skipped/failed cases and a successful
+The runner requires all 24 named cases, zero skipped/failed cases and a successful
 test process, then removes the four shared fixture roles and proves zero fixture
 database/role residue before PostgreSQL exits. The host may emit the final
 marked preview evidence only after verifying the actual images, task completion

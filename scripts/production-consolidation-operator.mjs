@@ -43,7 +43,7 @@ export function validatePlannerModel(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit','install-merge-policy'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit','install-merge-policy','requeue-merges'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -228,7 +228,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -245,7 +245,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit','install-merge-policy'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit','install-merge-policy','requeue-merges'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -361,6 +361,41 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           if((await db.query('SELECT mem9_runtime.acl_valid($1::oid) AS valid',[state.identity.runtimeRoleOid])).rows[0]?.valid!==true)throw Error('MergePolicyRuntimeAclInvalid');
           responseEvidence={mergePolicyVersion:MERGE_POLICY_VERSION,sqlHash,changed};
         }
+      }else if(request.operation==='requeue-merges'){
+        // MERGE verdicts held back by the sealed identical-context rule are
+        // re-planned only when their anchor becomes dirty again. Under policy
+        // 2, mark exactly those anchors dirty; the planner then re-queues them
+        // through the normal path, reusing cached verdicts where still valid.
+        const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('MergeRequeueRequiresPromotion');
+        const signature="'mem9_maintenance.queue_classification(text,text)'::regprocedure";
+        if(await scalar(db,`SELECT prosrc AS result FROM pg_proc WHERE oid=${signature}`)!==mergePolicyBody())throw Error('MergeRequeueRequiresPolicy');
+        let anchors=0;
+        for(const namespace of config.targets){
+          // The planner's lock order: execution and model control, the
+          // namespace queue lock, then work rows, which are dirtied in one
+          // sorted statement per chunk.
+          await db.query('SELECT mem9_maintenance.lock_model()');
+          await db.query('SELECT mem9_maintenance.lock_queue($1)',[namespace]);
+          const rows=(await db.query(`SELECT DISTINCT p.memory_id FROM mem9_maintenance.execution_reviews r
+            JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id
+            JOIN mem9_maintenance.publications p ON p.namespace_id=r.namespace_id AND p.classification_id=r.classification_id
+            JOIN public.memories m ON m.namespace_id=p.namespace_id AND m.id=p.memory_id AND m.state='active'
+            WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'
+              AND NOT EXISTS(SELECT FROM mem9_maintenance.actions a WHERE a.namespace_id=r.namespace_id AND a.classification_id=r.classification_id)
+              AND p.lease_generation=(SELECT max(latest.lease_generation) FROM mem9_maintenance.publications latest
+                WHERE latest.namespace_id=p.namespace_id AND latest.memory_id=p.memory_id)
+            ORDER BY p.memory_id LIMIT 20001`,[namespace])).rows.map(row=>row.memory_id);
+          if(rows.length>20000)throw Error('MergeRequeueTooLarge');
+          for(let i=0;i<rows.length;i+=5000){
+            const chunk=rows.slice(i,i+5000);
+            await db.query("SELECT count(mem9_maintenance.dirty_planner_input($1,t.id,clock_timestamp(),'audit')) FROM unnest($2::text[]) AS t(id)",[namespace,chunk]);
+            // An exhausted anchor would otherwise stay unclaimable after dirtying.
+            await db.query("UPDATE mem9_maintenance.work SET attempts=0,reason='audit' WHERE namespace_id=$1 AND memory_id=ANY($2) AND attempts=3",[namespace,chunk]);
+          }
+          anchors+=rows.length;
+        }
+        responseEvidence={anchors};
       }else if(request.operation==='readmit'){
         // A new release derives a new worker admission from the promoted
         // activation seed, so deployed schedules stop matching the dispatcher.

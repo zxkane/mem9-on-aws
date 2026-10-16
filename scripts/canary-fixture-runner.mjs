@@ -34,6 +34,7 @@ export const fixtureCaseNames=Object.freeze([
   'reports content-free census counts and the fields behind blocked merges',
   're-admits a promoted dispatcher only for the deployed release artifacts',
   'installs the cross-context merge policy once without changing its grants',
+  'marks only blocked cross-context merge anchors for re-planning once policy 2 is live',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;

@@ -1733,7 +1733,8 @@ needs no release evidence.
 `STAGE=prod node scripts/run-production-consolidation.mjs install-merge-policy`
 installs merge policy version 2, which lets one MERGE combine records from
 different agents, sources and tag sets in the same namespace (see the
-consolidation design). It is idempotent.
+consolidation design). It is idempotent. `requeue-merges` then marks the
+anchors of MERGE verdicts held back by the earlier rule for re-planning.
 
 After every production release, re-admit the promoted dispatcher to the new
 worker artifacts; until then scheduled workers stop with
