@@ -575,6 +575,27 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await expect(f.admin.query('DELETE FROM mem9_maintenance.merge_policy_history')).rejects.toThrow();
   }),60000);
 
+  it('marks only blocked cross-context merge anchors for re-planning once policy 2 is live',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const ids=[randomUUID(),randomUUID()].sort(),classId='8'.repeat(64);
+    for(const [i,id] of ids.entries())await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,agent_id,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic requeue fact','requeue-fixture',$4,'[]','{}','insight')`,[id,f.namespace,f.principal,'agent-'+i]);
+    const context=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    await f.admin.query("INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until) VALUES($1,$2,$2,$3,'MERGE','{}',clock_timestamp()+interval '1 hour')",[f.namespace,classId,context]);
+    for(const id of ids)await f.admin.query("INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint) VALUES($1,$2,$3,1,$4)",[f.namespace,classId,id,'0'.repeat(64)]);
+    await f.admin.query("INSERT INTO mem9_maintenance.publications(namespace_id,memory_id,lease_generation,classification_id) VALUES($1,$2,1,$3)",[f.namespace,ids[0],classId]);
+    await f.admin.query("INSERT INTO mem9_maintenance.execution_reviews(namespace_id,classification_id,reason) VALUES($1,$2,'context_conflict')",[f.namespace,classId]);
+    await f.admin.query("UPDATE mem9_maintenance.work SET reason='settled' WHERE namespace_id=$1",[f.namespace]);
+    const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request('requeue-merges'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    await expect(requeue()).rejects.toThrow('MergeRequeueRequiresPromotion');
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    await expect(requeue()).rejects.toThrow('MergeRequeueRequiresPolicy');
+    await runProductionConsolidation(f.admin,f.config,{...f.request('install-merge-policy'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    expect(await requeue()).toMatchObject({phase:'requeue-merges',anchors:1});
+    expect(await scalar(f.admin,'SELECT reason AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,ids[0]])).toBe('audit');
+    expect(await scalar(f.admin,"SELECT count(*)::int AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND reason='audit'",[f.namespace])).toBe(1);
+  }),60000);
+
   it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
     const {child}=await admittedContinuation(f,{admit:false});
     await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});

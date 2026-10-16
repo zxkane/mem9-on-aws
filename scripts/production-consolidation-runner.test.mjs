@@ -108,4 +108,28 @@ describe('production worker administrative task invocation',()=>{
     expect(f.journals.size).toBe(0);
     expect(f.calls.some(c=>c.type==='ListTasksCommand')).toBe(true);
   });
+  it('clears a journal whose own task ECS has forgotten long after its deadline, and nothing else',async()=>{
+    const invocation='e'.repeat(32),deadline=1800000000000,taskArn=`arn:aws:ecs:${region}:${account}:task/${cluster}/forgotten`;
+    const meta={region,account,cluster,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/${cluster}`};
+    const journal={version:1,stage:'prod',cluster:meta.clusterArn,taskDefinition,container:name,invocation,taskArn,
+      request:{operation:'census',invocation,deadline},requestHash:'a'.repeat(64)};
+    const run=async(time,failure={arn:taskArn,reason:'MISSING'})=>{
+      const journals=new Map([['/mem9-on-aws/prod/consolidation-runtime/invocations/'+invocation,JSON.stringify(journal)]]);
+      const send=async command=>{
+        const type=command.constructor.name;
+        if(type==='GetParametersByPathCommand')return {Parameters:[...journals].map(([Name,Value])=>({Name,Value}))};
+        if(type==='ListTasksCommand')return {taskArns:[]};
+        if(type==='DescribeTasksCommand')return {tasks:[],failures:[failure]};
+        if(type==='DeleteParameterCommand'){journals.delete(command.input.Name);return {};}
+        throw Error('UnexpectedCommand');
+      };
+      let clock=time;
+      await stopPreviousProductionAdministration({ssm:{send},ecs:{send}},meta,{now:()=>clock,sleep:async ms=>{clock+=ms;}});
+      return journals.size;
+    };
+    await expect(run(deadline+60000)).rejects.toThrow('ProductionWorkerTaskObservationFailed');
+    expect(await run(deadline+3600000)).toBe(0);
+    await expect(run(deadline+3600000,{arn:taskArn+'-other',reason:'MISSING'})).rejects.toThrow('ProductionWorkerTaskObservationFailed');
+    await expect(run(deadline+3600000,{arn:taskArn,reason:'ACCESS_DENIED'})).rejects.toThrow('ProductionWorkerTaskObservationFailed');
+  });
 });

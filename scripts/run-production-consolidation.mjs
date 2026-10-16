@@ -36,6 +36,7 @@ export function productionConsolidationOverrides(name,request){
   return overrides;
 }
 
+const ECS_STOPPED_TASK_RETENTION_MS=3600000;
 export async function stopPreviousProductionAdministration(clients,meta,{now=Date.now,sleep=delay}={}){
   const path='/mem9-on-aws/prod/consolidation-runtime/invocations/',journals=[];let NextToken;
   for(let page=0;page<100;page++){
@@ -67,7 +68,10 @@ export async function stopPreviousProductionAdministration(clients,meta,{now=Dat
       const matches=[];const all=[...ids];
       for(let i=0;i<all.length;i+=100){
         const result=await send(clients.ecs,new DescribeTasksCommand({cluster:meta.clusterArn,tasks:all.slice(i,i+100)}));
-        if(result.failures?.length)fail('ProductionWorkerTaskObservationFailed');
+        // ECS forgets a stopped task about an hour after it stops. Only the
+        // journal's own task may be missing, and only well after its deadline.
+        const forgotten=failure=>failure.arn===journal.taskArn&&failure.reason==='MISSING'&&now()>=journal.request.deadline+ECS_STOPPED_TASK_RETENTION_MS;
+        if(result.failures?.some(failure=>!forgotten(failure)))fail('ProductionWorkerTaskObservationFailed');
         for(const task of result.tasks??[]){
           const overrides=task.overrides?.containerOverrides,container=overrides?.[0];
           if(task.clusterArn===meta.clusterArn&&task.taskDefinitionArn===journal.taskDefinition&&overrides?.length===1&&container.name===journal.container&&
@@ -172,7 +176,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
-    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy'].includes(operation)?'admission':'inspection';
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges'].includes(operation)?'admission':'inspection';
     const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');

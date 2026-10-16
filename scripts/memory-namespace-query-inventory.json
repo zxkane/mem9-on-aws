@@ -3024,9 +3024,27 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "a20f1747d3d1a35bd892",
+      "id": "d066c5278466385e66d3",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 416,
+      "line": 375,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "fd02f3171ada0be9db5d4fbf52495a64e21a4a8e3d517fcce7a0b7dcd2936122",
+      "statement": "SELECT DISTINCT p.memory_id FROM mem9_maintenance.execution_reviews r JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id JOIN mem9_maintenance.publications p ON p.namespace_id=r.namespace_id AND p.classification_id=r.classification_id JOIN public.memories m ON m.namespace_id=p.namespace_id AND m.id=p.memory_id AND m.state='active' WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE' AND NOT EXISTS(SELECT FROM mem9_maintenance.actions a WHERE a.namespace_id=r.namespace_id AND a.classification_id=r.classification_id) ORDER BY p.memory_id LIMIT 20001",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "68a24c57ad30a7b7574e",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 439,
       "tables": [
         "memories"
       ],
@@ -3042,9 +3060,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "e0cf215f79bd39fe3c9f",
+      "id": "af3d8171372f9822c072",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 428,
+      "line": 451,
       "tables": [
         "memories"
       ],
@@ -3060,9 +3078,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "4b36090d7920fa0ea92b",
+      "id": "9ec0edb8c16b9412094c",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 432,
+      "line": 455,
       "tables": [
         "memories"
       ],
