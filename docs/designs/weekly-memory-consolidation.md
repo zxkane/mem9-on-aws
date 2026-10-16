@@ -1348,6 +1348,34 @@ Bedrock Mantle inference on the configured regional projects and the deployed
 model route settings. The executor has no inference grant. The canary and
 promotion gates then apply to model-classified actions unchanged.
 
+### Cross-context merges
+
+The sealed migration admits a MERGE only when every member has the same app,
+source, agent, tags and non-provenance metadata. Records about one fact
+written by different agents, ingest paths or tag extractions therefore stayed
+in review as `context_conflict`, and that rule, not the model, bounded
+consolidation. The owner-only `install-merge-policy` operation installs merge
+policy version 2 as an in-place replacement of
+`mem9_maintenance.queue_classification`. The runtime schema digest seals the
+bootstrap migrations after the credential cutover, so the policy cannot ship
+as a migration. A unit test proves the installed body differs from migration
+005 only in these hunks:
+
+- Members may differ in agent, source and tags. App and non-provenance
+  metadata must still match, and protected, pinned and non-insight members
+  remain review-only.
+- The survivor keeps the oldest member's agent and source and takes the
+  sorted union of tags, at most 50. Every member's complete row stays in
+  `metadata.consolidation.sources`, and undo restores the originals.
+- A tag-only change counts as a rewrite in the budget.
+
+The operator serializes with execution, verifies the function's owner and
+grants are unchanged, checks runtime ACLs, and records the version and SQL hash
+in the immutable `merge_policy_history`. Existing `context_conflict` reviews
+are re-queued when the planner reconsiders still-valid verdicts. A filter on
+one agent no longer finds a merged-in record from another agent; its content
+lives in the survivor.
+
 ### Required evidence
 
 Add regression cases to the existing consolidation test document for: ownership
@@ -1802,7 +1830,7 @@ file, its runner and test dependencies. Packaged SQL is mapped into the test's
 expected paths; another application source tree must not replace the inherited
 modules. A digest-pinned PostgreSQL sidecar listens only on loopback and receives
 no Aurora, tenant or production credentials. Both containers run as non-root.
-The runner requires all 22 named cases, zero skipped/failed cases and a successful
+The runner requires all 23 named cases, zero skipped/failed cases and a successful
 test process, then removes the four shared fixture roles and proves zero fixture
 database/role residue before PostgreSQL exits. The host may emit the final
 marked preview evidence only after verifying the actual images, task completion

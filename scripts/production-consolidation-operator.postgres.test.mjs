@@ -554,6 +554,19 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(paused.readmissions.at(-1)).toMatchObject({sourceTag:'mem9-ccccccc',paused:true});
   }),60000);
 
+  it('installs the cross-context merge policy once without changing its grants',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const acl=()=>scalar(f.admin,"SELECT proowner::text||'/'||coalesce(proacl::text,'') AS result FROM pg_proc WHERE oid='mem9_maintenance.queue_classification(text,text)'::regprocedure");
+    const before=await acl();
+    const install=()=>runProductionConsolidation(f.admin,f.config,{...f.request('install-merge-policy'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    expect(await install()).toMatchObject({mergePolicyVersion:2,changed:true});
+    expect(await install()).toMatchObject({mergePolicyVersion:2,changed:false});
+    expect(await acl()).toBe(before);
+    expect(await scalar(f.admin,"SELECT prosrc LIKE '%merged_tags%' AS result FROM pg_proc WHERE oid='mem9_maintenance.queue_classification(text,text)'::regprocedure")).toBe(true);
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.merge_policy_history')).toBe(1);
+    await expect(f.admin.query('DELETE FROM mem9_maintenance.merge_policy_history')).rejects.toThrow();
+  }),60000);
+
   it('closes an open continuation attempt without rewriting its ledger',()=>fixture(async f=>{
     const {child}=await admittedContinuation(f,{admit:false});
     await runProductionConsolidation(f.admin,f.config,f.request('pause'),{connect:f.connect});

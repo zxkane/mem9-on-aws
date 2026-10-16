@@ -16,6 +16,7 @@ import {assertCanaryAttemptCommitWindow} from './lib/production-canary-continuat
 import {decodeCanaryReport,verifyCanaryReport,decodeBenchmarkRefs,readCanaryReportFragments,canaryReportDigest} from './lib/production-canary-report.mjs';
 import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
+import {MERGE_POLICY_VERSION,MERGE_POLICY_SQL} from './lib/consolidation-merge-policy.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
@@ -42,7 +43,7 @@ export function validatePlannerModel(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit','install-merge-policy'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -227,7 +228,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -244,7 +245,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit','install-merge-policy'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -328,6 +329,35 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
         responseEvidence=await closeCanaryValidation(db,config,state,setup,request.invocation);
+      }else if(request.operation==='install-merge-policy'){
+        // Serialize with apply_action and planner queueing, then replace the
+        // queueing function in place. Its owner and grants are unchanged.
+        await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
+        await db.query('SAVEPOINT merge_policy_install');
+        try{
+          await db.query(`CREATE TABLE IF NOT EXISTS mem9_maintenance.merge_policy_history(
+            version INTEGER NOT NULL CHECK(version>0),sql_hash TEXT NOT NULL CHECK(sql_hash~'^[a-f0-9]{64}$'),
+            invocation TEXT PRIMARY KEY CHECK(invocation~'^[a-f0-9]{32}$'),installed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());
+            REVOKE ALL ON mem9_maintenance.merge_policy_history
+              FROM PUBLIC,mem9_maintenance_backend,mem9_maintenance_planner,mem9_maintenance_executor,mem9_maintenance_operator;
+            DROP TRIGGER IF EXISTS merge_policy_history_immutable ON mem9_maintenance.merge_policy_history;
+            CREATE TRIGGER merge_policy_history_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.merge_policy_history
+              FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
+          const sqlHash=hash(MERGE_POLICY_SQL);
+          const current=(await db.query('SELECT version,sql_hash FROM mem9_maintenance.merge_policy_history ORDER BY installed_at DESC LIMIT 1')).rows[0];
+          const signature="'mem9_maintenance.queue_classification(text,text)'::regprocedure";
+          const before=await scalar(db,`SELECT jsonb_build_object('owner',proowner::text,'acl',coalesce(proacl::text,'')) AS result FROM pg_proc WHERE oid=${signature}`);
+          const changed=current?.version!==MERGE_POLICY_VERSION||current?.sql_hash!==sqlHash;
+          if(changed){
+            await db.query(MERGE_POLICY_SQL);
+            await db.query('INSERT INTO mem9_maintenance.merge_policy_history(version,sql_hash,invocation) VALUES($1,$2,$3)',[MERGE_POLICY_VERSION,sqlHash,request.invocation]);
+          }
+          const after=await scalar(db,`SELECT jsonb_build_object('owner',proowner::text,'acl',coalesce(proacl::text,'')) AS result FROM pg_proc WHERE oid=${signature}`);
+          if(JSON.stringify(before)!==JSON.stringify(after))throw Error('MergePolicyGrantChanged');
+          if((await db.query('SELECT mem9_runtime.acl_valid($1::oid) AS valid',[state.identity.runtimeRoleOid])).rows[0]?.valid!==true)throw Error('MergePolicyRuntimeAclInvalid');
+          await db.query('RELEASE SAVEPOINT merge_policy_install');
+          responseEvidence={mergePolicyVersion:MERGE_POLICY_VERSION,sqlHash,changed};
+        }catch(error){await db.query('ROLLBACK TO SAVEPOINT merge_policy_install');throw error;}
       }else if(request.operation==='readmit'){
         // A new release derives a new worker admission from the promoted
         // activation seed, so deployed schedules stop matching the dispatcher.
