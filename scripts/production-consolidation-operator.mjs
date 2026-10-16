@@ -206,7 +206,7 @@ export async function consolidationCensus(db,targets){
         CASE WHEN lease_until>clock_timestamp() THEN 'leased' WHEN due_at>clock_timestamp() THEN 'delayed' ELSE 'due' END||'/'||
         reason||'/'||attempts AS key,count(*) AS count FROM mem9_maintenance.work WHERE namespace_id=$1 GROUP BY 1`));
       add('deferrals',await rows(`SELECT CASE WHEN reason IN ('budget_wait','capacity_wait','uncertainty_wait','model_disabled','policy_wait','deadline',
-        'model_failed','invalid_result','inputs_changed','existing','generation_reset') THEN reason ELSE 'other' END AS key,count(*) AS count
+        'model_failed','invalid_result','inputs_changed','existing','generation_reset','input_bound') THEN reason ELSE 'other' END AS key,count(*) AS count
         FROM mem9_maintenance.planner_deferrals WHERE namespace_id=$1 GROUP BY 1`));
       // Per blocked MERGE verdict, mark each context field whose values differ
       // across members. Only booleans leave the database.
@@ -250,7 +250,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -386,7 +386,9 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       }else if(request.operation==='set-model-budget'){
         // Usage, reservations and breaker state are never reset; only the
         // daily ceilings change. Each admission reserves the contract maxima.
-        // An open validation keeps the budget it was admitted with.
+        // An open validation keeps the budget it was admitted with. Execution
+        // and model control lock before setup, as the executor's receipt guard does.
+        await db.query('SELECT mem9_maintenance.lock_model()');
         const setup=(await db.query('SELECT phase,validation_id,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(!(setup?.phase==='promote'||setup?.phase==='prepared'&&!setup.validation_id)||setup.generation!==config.generation)throw Error('PlannerModelBudgetRequiresSetup');
         const contracts=(await db.query(`SELECT DISTINCT p.policy->'model' AS contract FROM mem9_maintenance.planner_policies p
@@ -399,8 +401,13 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         responseEvidence={dailyModelRequests:requests};
       }else if(request.operation==='resolve-model-uncertainty'){
         // An unknown outcome stays charged at its full reservation. Resolving
-        // it after its expiry only lifts the uncertainty limit that blocks new
-        // model calls, and resumes a breaker-paused model when nothing is open.
+        // one after its expiry only lifts the uncertainty limit that blocks new
+        // model calls. A pause is lifted only when this call resolved the
+        // uncertainty behind it; a contract-violation pause with nothing
+        // unknown needs a reviewed configure-model instead.
+        await db.query('SELECT mem9_maintenance.lock_model()');
+        const setup=(await db.query('SELECT phase,validation_id,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(!(setup?.phase==='promote'||setup?.phase==='prepared'&&!setup.validation_id)||setup.generation!==config.generation)throw Error('ModelUncertaintyRequiresSetup');
         const expired=(await db.query(`SELECT attempt_id FROM mem9_maintenance.model_attempts
           WHERE status='unknown' AND expires_at<clock_timestamp()-interval '10 minutes' ORDER BY attempt_id LIMIT 101`)).rows.map(row=>row.attempt_id);
         if(expired.length>100)throw Error('ModelUncertaintyTooLarge');
@@ -408,13 +415,16 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         const control=(await db.query('SELECT paused FROM mem9_maintenance.model_control WHERE singleton')).rows[0];
         const open=Number(await scalar(db,"SELECT count(*)::int AS result FROM mem9_maintenance.model_attempts WHERE status IN ('reserved','dispatched','unknown')"));
         let resumed=false;
-        if(control.paused&&open===0){await db.query("SELECT mem9_maintenance.resolve_model_uncertainty(NULL,'operator_resume')");resumed=true;}
-        responseEvidence={resolved:expired.length,resumed,open};
+        if(control.paused&&expired.length&&open===0){await db.query("SELECT mem9_maintenance.resolve_model_uncertainty(NULL,'operator_resume')");resumed=true;}
+        responseEvidence={resolved:expired.length,resumed,paused:control.paused&&!resumed,open};
       }else if(request.operation==='requeue-merges'){
         // MERGE verdicts held back by the sealed identical-context rule are
         // re-planned only when their anchor becomes dirty again. Under policy
         // 2, mark exactly those anchors dirty; the planner then re-queues them
         // through the normal path, reusing cached verdicts where still valid.
+        // Execution and model control lock before setup, as the executor's
+        // receipt guard does.
+        await db.query('SELECT mem9_maintenance.lock_model()');
         const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('MergeRequeueRequiresPromotion');
         const signature="'mem9_maintenance.queue_classification(text,text)'::regprocedure";

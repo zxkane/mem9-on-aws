@@ -1390,9 +1390,11 @@ limit and the breaker are kept. A dispatched call whose outcome is never
 observed becomes `unknown`, stays charged at its full reservation and counts
 against the unknown limit until resolved; nothing expires it. The owner-only
 `resolve-model-uncertainty` resolves unknown attempts more than ten minutes
-past their expiry, so no call can still be in flight, and lifts a breaker pause
-only through the existing `resolve_model_uncertainty` check that no attempt is
-outstanding. A filter on
+past their expiry, so no call can still be in flight. It lifts a pause only
+when it resolved such an attempt, through the existing
+`resolve_model_uncertainty` check that no attempt is outstanding; a contract
+violation that left nothing unknown keeps the model paused. Both operations
+lock execution and model control before the setup row, the executor's order. A filter on
 one agent no longer finds a merged-in record from another agent; its content
 lives in the survivor.
 

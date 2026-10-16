@@ -523,16 +523,29 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
       VALUES($3,$1,$2,1,0,current_date,'{}',1,1,1,'unknown',$4,$4,clock_timestamp()-interval '11 minutes')`,[f.namespace,anchor,attempt,{requests:1,input:32768,output:2048}]);
     await f.admin.query('UPDATE mem9_maintenance.model_control SET paused=TRUE WHERE singleton');
     const resolve=()=>runProductionConsolidation(f.admin,f.config,{...f.request('resolve-model-uncertainty'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    // A recent unknown outcome may still be in flight, so it stays unknown.
+    await f.admin.query("UPDATE mem9_maintenance.model_attempts SET expires_at=clock_timestamp()-interval '9 minutes' WHERE attempt_id=$1",[attempt]);
+    expect(await resolve()).toMatchObject({resolved:0,resumed:false,paused:true,open:1});
+    await f.admin.query("UPDATE mem9_maintenance.model_attempts SET expires_at=clock_timestamp()-interval '11 minutes' WHERE attempt_id=$1",[attempt]);
     expect((await runProductionConsolidation(f.admin,f.config,f.request('census'),{connect:f.connect})).model).toMatchObject({paused:true,attempts:{unknown:1}});
     expect(await resolve()).toMatchObject({resolved:1,resumed:true,open:0});
     expect(await scalar(f.admin,'SELECT status AS result FROM mem9_maintenance.model_attempts WHERE attempt_id=$1',[attempt])).toBe('resolved');
     expect(await scalar(f.admin,'SELECT charged AS result FROM mem9_maintenance.model_attempts WHERE attempt_id=$1',[attempt])).toEqual({requests:1,input:32768,output:2048});
     expect(await scalar(f.admin,'SELECT paused AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(false);
     expect(await resolve()).toMatchObject({resolved:0,resumed:false});
+    // A contract-violation pause with nothing unknown is not this operation's to lift.
+    await f.admin.query('UPDATE mem9_maintenance.model_control SET paused=TRUE WHERE singleton');
+    expect(await resolve()).toMatchObject({resolved:0,resumed:false,paused:true});
+    expect(await scalar(f.admin,'SELECT paused AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(true);
+    await f.admin.query('UPDATE mem9_maintenance.model_control SET paused=FALSE WHERE singleton');
     await runProductionConsolidation(f.admin,f.config,f.request('baseline'),{connect:f.connect});
     await expect(budget(25)).rejects.toThrow('PlannerModelBudgetRequiresSetup');
+    await expect(resolve()).rejects.toThrow('ModelUncertaintyRequiresSetup');
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
     expect(await budget(40)).toMatchObject({dailyModelRequests:40});
+    // Without one installed contract there is no token bound to derive.
+    await f.admin.query("UPDATE mem9_maintenance.planner_policies SET policy=policy-'model' WHERE namespace_id=$1",[f.namespace]);
+    await expect(budget(40)).rejects.toThrow('PlannerModelContractRequired');
     await expect(configure()).rejects.toThrow('PlannerModelRequiresPreparedSetup');
     await expect(runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel:{...plannerModel,contract:{...contract,adapter:'other'}}},{connect:f.connect})).rejects.toThrow();
   }),60000);

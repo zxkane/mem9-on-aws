@@ -1739,8 +1739,9 @@ namespace; the token limits follow from the installed contract's maxima. It
 keeps today's usage, slots and the breaker state, and is refused while a canary
 validation is open. `resolve-model-uncertainty` marks each `unknown` model
 attempt that expired more than ten minutes ago as resolved (its full
-reservation stays charged), then resumes a breaker-paused model if no attempt
-remains outstanding.
+reservation stays charged). If it resolved one and no attempt remains
+outstanding, it also lifts a model pause; a contract-violation pause with
+nothing unknown stays in place.
 
 `STAGE=prod node scripts/run-production-consolidation.mjs install-merge-policy`
 installs merge policy version 2, which lets one MERGE combine records from
