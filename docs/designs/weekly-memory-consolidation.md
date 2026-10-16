@@ -1379,7 +1379,20 @@ verdict only when its anchor becomes dirty again, so the owner-only
 `requeue-merges` operation marks exactly the anchors of blocked MERGE verdicts
 (active, with no action yet) dirty once policy 2 is live. The planner then
 re-plans them through the normal path, reusing cached verdicts that are still
-valid and otherwise spending the ordinary model budget. A filter on
+valid and otherwise spending the ordinary model budget.
+
+The daily model budget set by `configure-model` can be changed after promotion
+with the owner-only `set-model-budget`. It only replaces the stage and
+namespace ceilings: the requests limit is the operator's number and the token
+limits are that number times the installed contract's input and output maxima,
+since each admission reserves the maxima. Usage windows, slots, the unknown
+limit and the breaker are kept. A dispatched call whose outcome is never
+observed becomes `unknown`, stays charged at its full reservation and counts
+against the unknown limit until resolved; nothing expires it. The owner-only
+`resolve-model-uncertainty` resolves unknown attempts more than ten minutes
+past their expiry, so no call can still be in flight, and lifts a breaker pause
+only through the existing `resolve_model_uncertainty` check that no attempt is
+outstanding. A filter on
 one agent no longer finds a merged-in record from another agent; its content
 lives in the survivor.
 
