@@ -1726,9 +1726,22 @@ STAGE=prod node scripts/run-production-canary.mjs
 content-free counts: memory states, current classification results, review
 reasons, action outcomes, receipts, and which member fields (app, source,
 agent, tags, metadata, consolidation) currently differ in MERGE verdicts held
-back as `context_conflict`. Classifications count the current planner context;
-review counts include earlier contexts. It runs in a read-only transaction and
-needs no release evidence.
+back as `context_conflict`. It also reports the planner backlog (by
+readiness, work reason and attempts) with the last deferral reason, and the
+stage model state: daily limits, the last three days' used and reserved units,
+attempts by status, and whether the model is paused. Classifications count the
+current planner context; review counts include earlier contexts. It runs in a
+read-only transaction and needs no release evidence.
+
+`STAGE=prod node scripts/run-production-consolidation.mjs set-model-budget 20000`
+sets the daily planner model request limit (1-100000) for the stage and each
+namespace; the token limits follow from the installed contract's maxima. It
+keeps today's usage, slots and the breaker state, and is refused while a canary
+validation is open. `resolve-model-uncertainty` marks each `unknown` model
+attempt that expired more than ten minutes ago as resolved (its full
+reservation stays charged). If it resolved one and no attempt remains
+outstanding, it also lifts a model pause; a contract-violation pause with
+nothing unknown stays in place.
 
 `STAGE=prod node scripts/run-production-consolidation.mjs install-merge-policy`
 installs merge policy version 2, which lets one MERGE combine records from

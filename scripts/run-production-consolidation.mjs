@@ -137,7 +137,7 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   return meta;
 }
 
-export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel,expectedAdmission},{now=Date.now,sleep=delay}={}){
+export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility,plannerModel,expectedAdmission,dailyModelRequests},{now=Date.now,sleep=delay}={}){
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix='/mem9-on-aws/prod/',manifestName=prefix+'consolidation-runtime/operator-manifest';
   const response=await send(clients.ssm,new GetParametersCommand({Names:[manifestName],WithDecryption:true}));
@@ -176,7 +176,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
-    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges'].includes(operation)?'admission':'inspection';
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(operation)?'admission':'inspection';
     const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
@@ -185,7 +185,8 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
     ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
     ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{}),
-    ...(plannerModel!==undefined?{plannerModel}:{}),...(expectedAdmission!==undefined?{expectedAdmission}:{})};
+    ...(plannerModel!==undefined?{plannerModel}:{}),...(expectedAdmission!==undefined?{expectedAdmission}:{}),
+    ...(dailyModelRequests!==undefined?{dailyModelRequests}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
     await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));
@@ -260,7 +261,8 @@ async function main(){
     return;
   }
   const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),logs:new CloudWatchLogsClient({region}),sts:new STSClient({region}),iam:new IAMClient({region})};
-  try{const result=await runProductionConsolidationTask(clients,{region,operation:process.argv[2],dailyRows:Number(process.argv[3]),basisPoints:Number(process.argv[4])});process.stdout.write(JSON.stringify(result)+'\n');}
+  const extra=process.argv[2]==='set-model-budget'?{dailyModelRequests:Number(process.argv[3])}:{dailyRows:Number(process.argv[3]),basisPoints:Number(process.argv[4])};
+  try{const result=await runProductionConsolidationTask(clients,{region,operation:process.argv[2],...extra});process.stdout.write(JSON.stringify(result)+'\n');}
   finally{Object.values(clients).forEach(client=>client.destroy());}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(()=>{

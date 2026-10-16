@@ -500,7 +500,52 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(await scalar(f.admin,'SELECT policy AS result FROM mem9_maintenance.planner_policies WHERE namespace_id=$1',[f.namespace])).toEqual({enabled:true,similarity:0.82,model:contract});
     expect(await scalar(f.admin,"SELECT jsonb_agg(jsonb_build_array(scope,limits) ORDER BY scope) AS result FROM mem9_maintenance.model_policies")).toEqual([[f.namespace,limits],['stage',limits]].sort((a,b)=>a[0].localeCompare(b[0])));
     expect(await scalar(f.admin,'SELECT slots AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(2);
+    // A budget change keeps today's usage, the contract and the breaker state.
+    const used={requests:7,input:1000,output:100};
+    await f.admin.query("INSERT INTO mem9_maintenance.model_windows(scope,day,used) VALUES('stage',(clock_timestamp() AT TIME ZONE 'UTC')::date,$1)",[used]);
+    const budget=dailyModelRequests=>runProductionConsolidation(f.admin,f.config,{...f.request('set-model-budget'),invocation:randomUUID().replaceAll('-',''),dailyModelRequests},{connect:f.connect});
+    await expect(budget(0)).rejects.toThrow('InvalidPlannerModelBudget');
+    expect(await budget(25)).toMatchObject({phase:'set-model-budget',dailyModelRequests:25});
+    const raised={requests:25,input:25*32768,output:25*2048};
+    expect(await scalar(f.admin,"SELECT jsonb_agg(limits ORDER BY scope) AS result FROM mem9_maintenance.model_policies")).toEqual([raised,raised]);
+    expect(await scalar(f.admin,"SELECT used AS result FROM mem9_maintenance.model_windows WHERE scope='stage'")).toEqual(used);
+    expect(await scalar(f.admin,'SELECT jsonb_build_array(slots,unknown_limit) AS result FROM mem9_maintenance.model_control WHERE singleton')).toEqual([2,1]);
+    const census=await runProductionConsolidation(f.admin,f.config,f.request('census'),{connect:f.connect});
+    expect(census.model).toMatchObject({paused:false,slots:2,unknownLimit:1,limits:raised,windows:[{used}]});
+    // An expired unknown outcome stays charged; resolving it lifts the
+    // uncertainty limit and resumes a breaker-paused model.
+    const anchor=randomUUID(),attempt=randomUUID();
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,lease_generation,first_seen_at,due_at,reason)
+      VALUES($1,$2,1,1,1,clock_timestamp(),clock_timestamp(),'changed')`,[f.namespace,anchor]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.neighborhoods(namespace_id,memory_id,lease_generation,claimed_generation,context_hash,phase,members)
+      VALUES($1,$2,1,1,'c','exact','[]')`,[f.namespace,anchor]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.model_attempts(attempt_id,namespace_id,memory_id,lease_generation,caller,day,contract,stage_revision,namespace_revision,control_revision,status,reserved,charged,expires_at)
+      VALUES($3,$1,$2,1,0,current_date,'{}',1,1,1,'unknown',$4,$4,clock_timestamp()-interval '11 minutes')`,[f.namespace,anchor,attempt,{requests:1,input:32768,output:2048}]);
+    await f.admin.query('UPDATE mem9_maintenance.model_control SET paused=TRUE WHERE singleton');
+    const resolve=()=>runProductionConsolidation(f.admin,f.config,{...f.request('resolve-model-uncertainty'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    // A recent unknown outcome may still be in flight, so it stays unknown.
+    await f.admin.query("UPDATE mem9_maintenance.model_attempts SET expires_at=clock_timestamp()-interval '9 minutes' WHERE attempt_id=$1",[attempt]);
+    expect(await resolve()).toMatchObject({resolved:0,resumed:false,paused:true,open:1});
+    await f.admin.query("UPDATE mem9_maintenance.model_attempts SET expires_at=clock_timestamp()-interval '11 minutes' WHERE attempt_id=$1",[attempt]);
+    expect((await runProductionConsolidation(f.admin,f.config,f.request('census'),{connect:f.connect})).model).toMatchObject({paused:true,attempts:{unknown:1}});
+    expect(await resolve()).toMatchObject({resolved:1,resumed:true,open:0});
+    expect(await scalar(f.admin,'SELECT status AS result FROM mem9_maintenance.model_attempts WHERE attempt_id=$1',[attempt])).toBe('resolved');
+    expect(await scalar(f.admin,'SELECT charged AS result FROM mem9_maintenance.model_attempts WHERE attempt_id=$1',[attempt])).toEqual({requests:1,input:32768,output:2048});
+    expect(await scalar(f.admin,'SELECT paused AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(false);
+    expect(await resolve()).toMatchObject({resolved:0,resumed:false});
+    // A contract-violation pause with nothing unknown is not this operation's to lift.
+    await f.admin.query('UPDATE mem9_maintenance.model_control SET paused=TRUE WHERE singleton');
+    expect(await resolve()).toMatchObject({resolved:0,resumed:false,paused:true});
+    expect(await scalar(f.admin,'SELECT paused AS result FROM mem9_maintenance.model_control WHERE singleton')).toBe(true);
+    await f.admin.query('UPDATE mem9_maintenance.model_control SET paused=FALSE WHERE singleton');
     await runProductionConsolidation(f.admin,f.config,f.request('baseline'),{connect:f.connect});
+    await expect(budget(25)).rejects.toThrow('PlannerModelBudgetRequiresSetup');
+    await expect(resolve()).rejects.toThrow('ModelUncertaintyRequiresSetup');
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    expect(await budget(40)).toMatchObject({dailyModelRequests:40});
+    // Without one installed contract there is no token bound to derive.
+    await f.admin.query("UPDATE mem9_maintenance.planner_policies SET policy=policy-'model' WHERE namespace_id=$1",[f.namespace]);
+    await expect(budget(40)).rejects.toThrow('PlannerModelContractRequired');
     await expect(configure()).rejects.toThrow('PlannerModelRequiresPreparedSetup');
     await expect(runProductionConsolidation(f.admin,f.config,{...f.request('configure-model'),plannerModel:{...plannerModel,contract:{...contract,adapter:'other'}}},{connect:f.connect})).rejects.toThrow();
   }),60000);
@@ -521,6 +566,8 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(census.reviews['MERGE/context_conflict']).toBe(1);
     expect(census.contextConflicts.combinations).toEqual({'agent+tags':1});
     expect(census.contextConflicts.differing).toMatchObject({agent:1,tags:1,source:0,metadata:0});
+    expect(census.planner).toEqual({work:expect.any(Object),deferrals:expect.any(Object)});
+    expect(census.model).toMatchObject({paused:false,attempts:{},windows:[]});
     expect(JSON.stringify(census)).not.toContain('Synthetic census fact');
     expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.execution_reviews')).toBe(1);
   }),60000);

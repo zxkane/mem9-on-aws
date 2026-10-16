@@ -40,15 +40,22 @@ export function validatePlannerModel(value){
   return value;
 }
 
+function validModelRequests(value){
+  if(!Number.isSafeInteger(value)||value<1||value>100000)throw Error('InvalidPlannerModelBudget');
+  return value;
+}
+
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit','install-merge-policy','requeue-merges'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
-    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission','dailyModelRequests'].includes(k)))throw Error('InvalidProductionWorkerRequest');
   if(request.operation==='readmit'){if(!/^[a-f0-9]{64}$/.test(request.expectedAdmission??''))throw Error('ReadmissionScheduleRequired');}
   else if(request.expectedAdmission!==undefined)throw Error('UnexpectedReadmission');
+  if(request.operation==='set-model-budget')validModelRequests(request.dailyModelRequests);
+  else if(request.dailyModelRequests!==undefined)throw Error('UnexpectedPlannerModelBudget');
   if(request.operation==='configure-model')validatePlannerModel(request.plannerModel);
   else if(request.plannerModel!==undefined)throw Error('UnexpectedPlannerModel');
   if(['begin-continuation','inspect-canary','resume-plan'].includes(request.operation)&&!/^[a-f0-9]{32}$/.test(request.attemptId??''))throw Error('CanaryAttemptRequired');
@@ -176,7 +183,7 @@ const CONTEXT_FIELDS=['app','source','agent','tags','metadata','consolidation'];
  */
 export async function consolidationCensus(db,targets){
   const total={},add=(bucket,list)=>{for(const r of list)total[bucket][r.key]=(total[bucket][r.key]??0)+Number(r.count);};
-  for(const bucket of ['memories','classifications','reviews','actions','conflicts','receipts'])total[bucket]={};
+  for(const bucket of ['memories','classifications','reviews','actions','conflicts','receipts','work','deferrals'])total[bucket]={};
   await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   try{
     for(const namespace of targets){
@@ -194,6 +201,13 @@ export async function consolidationCensus(db,targets){
         JOIN mem9_maintenance.actions a ON a.namespace_id=s.namespace_id AND a.action_id=s.action_id WHERE s.namespace_id=$1 GROUP BY 1`));
       add('receipts',await rows(`SELECT k AS key,v AS count FROM (SELECT count(*) AS receipts,coalesce(sum((result->>'changed_rows')::bigint),0) AS changed_rows
         FROM mem9_maintenance.receipts WHERE namespace_id=$1) t,LATERAL (VALUES ('count',t.receipts),('changedRows',t.changed_rows)) v(k,v)`));
+      // Planner backlog by readiness, retry budget and last deferral reason.
+      add('work',await rows(`SELECT CASE WHEN desired_generation>completed_generation THEN 'pending' ELSE 'done' END||'/'||
+        CASE WHEN lease_until>clock_timestamp() THEN 'leased' WHEN due_at>clock_timestamp() THEN 'delayed' ELSE 'due' END||'/'||
+        reason||'/'||attempts AS key,count(*) AS count FROM mem9_maintenance.work WHERE namespace_id=$1 GROUP BY 1`));
+      add('deferrals',await rows(`SELECT CASE WHEN reason IN ('budget_wait','capacity_wait','uncertainty_wait','model_disabled','policy_wait','deadline',
+        'model_failed','invalid_result','inputs_changed','existing','generation_reset','input_bound') THEN reason ELSE 'other' END AS key,count(*) AS count
+        FROM mem9_maintenance.planner_deferrals WHERE namespace_id=$1 GROUP BY 1`));
       // Per blocked MERGE verdict, mark each context field whose values differ
       // across members. Only booleans leave the database.
       add('conflicts',await rows(`WITH blocked AS (
@@ -214,11 +228,19 @@ export async function consolidationCensus(db,targets){
           CASE WHEN tags THEN 'tags' END,CASE WHEN metadata THEN 'metadata' END,CASE WHEN consolidation THEN 'consolidation' END) AS key,
           count(*) AS count FROM fields GROUP BY 1`));
     }
+    // Model admission state is stage-wide and content-free.
+    const control=(await db.query('SELECT slots,unknown_limit,paused FROM mem9_maintenance.model_control WHERE singleton')).rows[0];
+    const attempts=Object.fromEntries((await db.query('SELECT status,count(*)::int AS count FROM mem9_maintenance.model_attempts GROUP BY status')).rows.map(r=>[r.status,r.count]));
+    const limits=(await db.query("SELECT limits FROM mem9_maintenance.model_policies WHERE scope='stage'")).rows[0]?.limits??null;
+    const windows=(await db.query(`SELECT day::text AS day,used,reserved FROM mem9_maintenance.model_windows WHERE scope='stage'
+      AND day>=(clock_timestamp() AT TIME ZONE 'UTC')::date-2 ORDER BY day`)).rows;
+    total.model={paused:control?.paused??null,slots:control?.slots??null,unknownLimit:control?.unknown_limit??null,attempts,limits,windows};
   }finally{await db.query('ROLLBACK');}
   const differing=Object.fromEntries(CONTEXT_FIELDS.map(field=>[field,Object.entries(total.conflicts)
     .filter(([key])=>key.split('+').includes(field)).reduce((sum,[,count])=>sum+count,0)]));
   return {memories:total.memories,classifications:total.classifications,reviews:total.reviews,actions:total.actions,
-    receipts:{count:total.receipts.count??0,changedRows:total.receipts.changedRows??0},contextConflicts:{combinations:total.conflicts,differing}};
+    receipts:{count:total.receipts.count??0,changedRows:total.receipts.changedRows??0},contextConflicts:{combinations:total.conflicts,differing},
+    planner:{work:total.work,deferrals:total.deferrals},model:total.model};
 }
 
 export async function runProductionConsolidation(db,config,request,{connect}={}){
@@ -228,7 +250,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -245,7 +267,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit','install-merge-policy','requeue-merges'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -361,11 +383,48 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           if((await db.query('SELECT mem9_runtime.acl_valid($1::oid) AS valid',[state.identity.runtimeRoleOid])).rows[0]?.valid!==true)throw Error('MergePolicyRuntimeAclInvalid');
           responseEvidence={mergePolicyVersion:MERGE_POLICY_VERSION,sqlHash,changed};
         }
+      }else if(request.operation==='set-model-budget'){
+        // Usage, reservations and breaker state are never reset; only the
+        // daily ceilings change. Each admission reserves the contract maxima.
+        // An open validation keeps the budget it was admitted with. Execution
+        // and model control lock before setup, as the executor's receipt guard does.
+        await db.query('SELECT mem9_maintenance.lock_model()');
+        const setup=(await db.query('SELECT phase,validation_id,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(!(setup?.phase==='promote'||setup?.phase==='prepared'&&!setup.validation_id)||setup.generation!==config.generation)throw Error('PlannerModelBudgetRequiresSetup');
+        const contracts=(await db.query(`SELECT DISTINCT p.policy->'model' AS contract FROM mem9_maintenance.planner_policies p
+          WHERE p.namespace_id=ANY($1) AND p.policy->'model'<>'null'`,[config.targets])).rows.map(row=>row.contract);
+        if(contracts.length!==1)throw Error('PlannerModelContractRequired');
+        const requests=validModelRequests(request.dailyModelRequests),limits={requests,input:requests*contracts[0].max_input_tokens,output:requests*contracts[0].max_output_tokens};
+        const control=(await db.query('SELECT slots,unknown_limit FROM mem9_maintenance.model_control WHERE singleton')).rows[0];
+        await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2,$3,$4)',['stage',limits,control.slots,control.unknown_limit]);
+        for(const namespace of config.targets)await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2)',[namespace,limits]);
+        responseEvidence={dailyModelRequests:requests};
+      }else if(request.operation==='resolve-model-uncertainty'){
+        // An unknown outcome stays charged at its full reservation. Resolving
+        // one after its expiry only lifts the uncertainty limit that blocks new
+        // model calls. A pause is lifted only when this call resolved the
+        // uncertainty behind it; a contract-violation pause with nothing
+        // unknown needs a reviewed configure-model instead.
+        await db.query('SELECT mem9_maintenance.lock_model()');
+        const setup=(await db.query('SELECT phase,validation_id,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(!(setup?.phase==='promote'||setup?.phase==='prepared'&&!setup.validation_id)||setup.generation!==config.generation)throw Error('ModelUncertaintyRequiresSetup');
+        const expired=(await db.query(`SELECT attempt_id FROM mem9_maintenance.model_attempts
+          WHERE status='unknown' AND expires_at<clock_timestamp()-interval '10 minutes' ORDER BY attempt_id LIMIT 101`)).rows.map(row=>row.attempt_id);
+        if(expired.length>100)throw Error('ModelUncertaintyTooLarge');
+        for(const id of expired)await db.query("SELECT mem9_maintenance.resolve_model_uncertainty($1,'operator_expired_unknown')",[id]);
+        const control=(await db.query('SELECT paused FROM mem9_maintenance.model_control WHERE singleton')).rows[0];
+        const open=Number(await scalar(db,"SELECT count(*)::int AS result FROM mem9_maintenance.model_attempts WHERE status IN ('reserved','dispatched','unknown')"));
+        let resumed=false;
+        if(control.paused&&expired.length&&open===0){await db.query("SELECT mem9_maintenance.resolve_model_uncertainty(NULL,'operator_resume')");resumed=true;}
+        responseEvidence={resolved:expired.length,resumed,paused:control.paused&&!resumed,open};
       }else if(request.operation==='requeue-merges'){
         // MERGE verdicts held back by the sealed identical-context rule are
         // re-planned only when their anchor becomes dirty again. Under policy
         // 2, mark exactly those anchors dirty; the planner then re-queues them
         // through the normal path, reusing cached verdicts where still valid.
+        // Execution and model control lock before setup, as the executor's
+        // receipt guard does.
+        await db.query('SELECT mem9_maintenance.lock_model()');
         const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('MergeRequeueRequiresPromotion');
         const signature="'mem9_maintenance.queue_classification(text,text)'::regprocedure";
