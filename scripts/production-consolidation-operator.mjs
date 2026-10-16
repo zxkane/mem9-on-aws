@@ -16,7 +16,7 @@ import {assertCanaryAttemptCommitWindow} from './lib/production-canary-continuat
 import {decodeCanaryReport,verifyCanaryReport,decodeBenchmarkRefs,readCanaryReportFragments,canaryReportDigest} from './lib/production-canary-report.mjs';
 import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
-import {MERGE_POLICY_VERSION,MERGE_POLICY_SQL} from './lib/consolidation-merge-policy.mjs';
+import {MERGE_POLICY_VERSION,MERGE_POLICY_SQL,mergePolicyBody} from './lib/consolidation-merge-policy.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
@@ -333,8 +333,11 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         // Serialize with apply_action and planner queueing, then replace the
         // queueing function in place. Its owner and grants are unchanged.
         await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
-        await db.query('SAVEPOINT merge_policy_install');
-        try{
+        // Canary receipts are verified against the sealed policy, so the new
+        // policy is installed only after promotion.
+        const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('MergePolicyRequiresPromotion');
+        {
           await db.query(`CREATE TABLE IF NOT EXISTS mem9_maintenance.merge_policy_history(
             version INTEGER NOT NULL CHECK(version>0),sql_hash TEXT NOT NULL CHECK(sql_hash~'^[a-f0-9]{64}$'),
             invocation TEXT PRIMARY KEY CHECK(invocation~'^[a-f0-9]{32}$'),installed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());
@@ -344,10 +347,11 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
             CREATE TRIGGER merge_policy_history_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.merge_policy_history
               FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
           const sqlHash=hash(MERGE_POLICY_SQL);
-          const current=(await db.query('SELECT version,sql_hash FROM mem9_maintenance.merge_policy_history ORDER BY installed_at DESC LIMIT 1')).rows[0];
           const signature="'mem9_maintenance.queue_classification(text,text)'::regprocedure";
           const before=await scalar(db,`SELECT jsonb_build_object('owner',proowner::text,'acl',coalesce(proacl::text,'')) AS result FROM pg_proc WHERE oid=${signature}`);
-          const changed=current?.version!==MERGE_POLICY_VERSION||current?.sql_hash!==sqlHash;
+          // Decide on the live routine: a bootstrap repair can restore the
+          // sealed body while the history still records version 2.
+          const changed=await scalar(db,`SELECT prosrc AS result FROM pg_proc WHERE oid=${signature}`)!==mergePolicyBody();
           if(changed){
             await db.query(MERGE_POLICY_SQL);
             await db.query('INSERT INTO mem9_maintenance.merge_policy_history(version,sql_hash,invocation) VALUES($1,$2,$3)',[MERGE_POLICY_VERSION,sqlHash,request.invocation]);
@@ -355,9 +359,8 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           const after=await scalar(db,`SELECT jsonb_build_object('owner',proowner::text,'acl',coalesce(proacl::text,'')) AS result FROM pg_proc WHERE oid=${signature}`);
           if(JSON.stringify(before)!==JSON.stringify(after))throw Error('MergePolicyGrantChanged');
           if((await db.query('SELECT mem9_runtime.acl_valid($1::oid) AS valid',[state.identity.runtimeRoleOid])).rows[0]?.valid!==true)throw Error('MergePolicyRuntimeAclInvalid');
-          await db.query('RELEASE SAVEPOINT merge_policy_install');
           responseEvidence={mergePolicyVersion:MERGE_POLICY_VERSION,sqlHash,changed};
-        }catch(error){await db.query('ROLLBACK TO SAVEPOINT merge_policy_install');throw error;}
+        }
       }else if(request.operation==='readmit'){
         // A new release derives a new worker admission from the promoted
         // activation seed, so deployed schedules stop matching the dispatcher.

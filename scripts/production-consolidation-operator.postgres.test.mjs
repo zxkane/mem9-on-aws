@@ -559,11 +559,19 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     const acl=()=>scalar(f.admin,"SELECT proowner::text||'/'||coalesce(proacl::text,'') AS result FROM pg_proc WHERE oid='mem9_maintenance.queue_classification(text,text)'::regprocedure");
     const before=await acl();
     const install=()=>runProductionConsolidation(f.admin,f.config,{...f.request('install-merge-policy'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    await expect(install()).rejects.toThrow('MergePolicyRequiresPromotion');
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
     expect(await install()).toMatchObject({mergePolicyVersion:2,changed:true});
     expect(await install()).toMatchObject({mergePolicyVersion:2,changed:false});
+    // A bootstrap repair that replays migration 005 restores the sealed body;
+    // the next installation detects that from the live routine.
+    const sealed=await readFile(new URL('../docker/bootstrap/migrations/005_consolidation_execution.sql',import.meta.url),'utf8');
+    const startAt=sealed.indexOf('CREATE OR REPLACE FUNCTION mem9_maintenance.queue_classification(');
+    await f.admin.query(sealed.slice(startAt,sealed.indexOf('END $$;',startAt)+'END $$;'.length));
+    expect(await install()).toMatchObject({changed:true});
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.merge_policy_history')).toBe(2);
     expect(await acl()).toBe(before);
     expect(await scalar(f.admin,"SELECT prosrc LIKE '%merged_tags%' AS result FROM pg_proc WHERE oid='mem9_maintenance.queue_classification(text,text)'::regprocedure")).toBe(true);
-    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.merge_policy_history')).toBe(1);
     await expect(f.admin.query('DELETE FROM mem9_maintenance.merge_policy_history')).rejects.toThrow();
   }),60000);
 

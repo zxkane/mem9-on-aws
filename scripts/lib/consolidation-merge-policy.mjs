@@ -4,6 +4,8 @@
 // consolidation operator. scripts/consolidation-merge-policy.test.mjs proves
 // that this body differs from migration 005 only in the documented hunks.
 export const MERGE_POLICY_VERSION=2;
+// The installed routine body, as PostgreSQL stores it in pg_proc.prosrc.
+export const mergePolicyBody=()=>MERGE_POLICY_SQL.slice(MERGE_POLICY_SQL.indexOf('AS $$')+5,MERGE_POLICY_SQL.lastIndexOf('$$'));
 export const MERGE_POLICY_SQL=String.raw`CREATE OR REPLACE FUNCTION mem9_maintenance.queue_classification(p_namespace TEXT,p_class TEXT) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$
 DECLARE c mem9_maintenance.classifications; snapshots JSONB:='[]'; semantic JSONB:='[]'; member RECORD; row_value JSONB;
@@ -65,8 +67,7 @@ BEGIN
     output:=jsonb_build_object('target',target,'content',content,'tags',merged_tags,
       'metadata',jsonb_set(coalesce(nullif(first_row->'metadata','null'),'{}'),'{consolidation}',coalesce(nullif(first_row->'metadata'->'consolidation','null'),'{}')||jsonb_build_object('sources',
         (SELECT jsonb_agg(value-ARRAY['embedding']) FROM jsonb_array_elements(snapshots))),TRUE));
-    costs:=jsonb_build_object('total',count_members,'rewrite',CASE WHEN content IS DISTINCT FROM first_row->>'content' OR
-        merged_tags IS DISTINCT FROM coalesce(nullif(first_row->'tags','null'),'[]') THEN 1 ELSE 0 END,
+    costs:=jsonb_build_object('total',count_members,'rewrite',CASE WHEN content IS DISTINCT FROM first_row->>'content' THEN 1 ELSE 0 END,
       'delete',count_members-1,'archive',0,'mark',0);
   ELSIF c.result='ARCHIVE' THEN
     IF count_members<>2 THEN RETURN mem9_maintenance.review_execution(p_namespace,p_class,'input_bound'); END IF;

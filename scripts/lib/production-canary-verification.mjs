@@ -5,6 +5,14 @@ const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof v
 export const canaryEvidenceHash=value=>createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 
 const fail=()=>{throw Error('ProductionCanaryReceiptMismatch');};
+// Merge policy 1 keeps the survivor's tags; policy 2 takes the exact union of
+// member tags. Either way no tag is invented or lost.
+function mergedTagsValid(after,survivor,members){
+  if(isDeepStrictEqual(after,survivor??[]))return true;
+  if(!Array.isArray(after)||new Set(after.map(tag=>JSON.stringify(tag))).size!==after.length)return false;
+  const union=new Set(members.flatMap(row=>Array.isArray(row.tags)?row.tags:[]).map(tag=>JSON.stringify(tag)));
+  return union.size===after.length&&after.every(tag=>union.has(JSON.stringify(tag)));
+}
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
 const without=(value,keys)=>Object.fromEntries(Object.entries(value).filter(([key])=>!keys.includes(key)));
 function byId(rows){
@@ -62,7 +70,7 @@ export function verifyCanaryReceipt(receipt,action,currentRows){
       typeof row.content!=='string'||!action.output.content.includes(row.content)))fail();
   if(!object(targetAfter.metadata)||!object(targetAfter.metadata.consolidation)||targetAfter.state!=='active'||targetAfter.content!==action.output.content||
     !isDeepStrictEqual(targetAfter.tags,action.output.tags)||!isDeepStrictEqual(targetAfter.metadata,action.output.metadata)||
-    !isDeepStrictEqual(targetAfter.tags,targetBefore.tags??[])||
+    !mergedTagsValid(targetAfter.tags,targetBefore.tags,before)||
     !isDeepStrictEqual(without(targetAfter.metadata,['consolidation']),without(targetBefore.metadata??{},['consolidation']))||
     !isDeepStrictEqual(without(targetAfter.metadata?.consolidation??{},['sources']),without(targetBefore.metadata?.consolidation??{},['sources']))||
     !object(targetAfter.metadata?.consolidation)||

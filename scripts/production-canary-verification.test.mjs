@@ -23,6 +23,21 @@ describe('real-data canary receipt verification',()=>{
     if(kind==='count')f.receipt.result.changed_rows=1;
     expect(()=>verifyCanaryReceipt(f.receipt,f.action,f.current)).toThrow('ProductionCanaryReceiptMismatch');
   });
+  it('accepts the exact tag union of merge policy 2 and rejects invented or lost tags',()=>{
+    const build=tags=>{
+      const f=fixture();
+      f.receipt.before_images[0].tags=['alpha'];f.receipt.before_images[1].tags=['beta','alpha'];
+      const sources=f.receipt.before_images.map(({embedding,...row})=>row);
+      f.action.members=f.receipt.before_images;f.action.output={...f.action.output,tags,metadata:{consolidation:{sources}}};
+      f.receipt.post_images[0]={...f.receipt.post_images[0],tags,metadata:f.action.output.metadata};
+      f.receipt.post_images[1]={...f.receipt.post_images[1],tags:['beta','alpha']};
+      return {...f,current:structuredClone(f.receipt.post_images)};
+    };
+    const union=build(['alpha','beta']);expect(verifyCanaryReceipt(union.receipt,union.action,union.current)).toEqual({changedRows:2,sourceRows:1});
+    for(const tags of [['alpha','beta','gamma'],['beta'],['alpha','alpha','beta']]){
+      const f=build(tags);expect(()=>verifyCanaryReceipt(f.receipt,f.action,f.current)).toThrow('ProductionCanaryReceiptMismatch');
+    }
+  });
   it('checks each survivor version chain and compares only its final post-image to current data',()=>{
     const first=fixture(),second=fixture();
     const survivor=structuredClone(first.receipt.post_images[0]);

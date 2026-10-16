@@ -1367,11 +1367,14 @@ as a migration. A unit test proves the installed body differs from migration
 - The survivor keeps the oldest member's agent and source and takes the
   sorted union of tags, at most 50. Every member's complete row stays in
   `metadata.consolidation.sources`, and undo restores the originals.
-- A tag-only change counts as a rewrite in the budget.
+- A tag-only change updates the survivor's tags without re-embedding; only a
+  content change counts as a rewrite.
 
-The operator serializes with execution, verifies the function's owner and
-grants are unchanged, checks runtime ACLs, and records the version and SQL hash
-in the immutable `merge_policy_history`. Existing `context_conflict` reviews
+The operator requires a promoted setup, because canary receipts verify the
+survivor's tags as unchanged or as the exact member union. It serializes with
+execution, compares the live routine body rather than its history, verifies
+the function's owner and grants are unchanged, checks runtime ACLs, and records
+the version and SQL hash in the immutable `merge_policy_history`. Existing `context_conflict` reviews
 are re-queued when the planner reconsiders still-valid verdicts. A filter on
 one agent no longer finds a merged-in record from another agent; its content
 lives in the survivor.

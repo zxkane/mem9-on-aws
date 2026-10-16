@@ -18,9 +18,7 @@ it('changes migration 005 queueing only in the reviewed cross-context hunks',()=
         coalesce(nullif(row_value->'tags','null'),'[]') IS DISTINCT FROM coalesce(nullif(first_row->'tags','null'),'[]') OR
         (coalesce(`)
     .replace(/    -- Members may come from different agents[\s\S]*?'output_bound'\); END IF;\n/,'')
-    .replace(`'tags',merged_tags,`,`'tags',coalesce(nullif(first_row->'tags','null'),'[]'),`)
-    .replace(` OR
-        merged_tags IS DISTINCT FROM coalesce(nullif(first_row->'tags','null'),'[]') THEN 1`,` THEN 1`);
+    .replace(`'tags',merged_tags,`,`'tags',coalesce(nullif(first_row->'tags','null'),'[]'),`);
   expect(reverted).toBe(sealed);
   for(const kept of ["'protected_member'","'invalid_context'","'operator_suppressed'","(row_value->'app_id') IS DISTINCT FROM",
     "-ARRAY['source_turns','source_seqs','consolidation']) IS DISTINCT FROM"])expect(MERGE_POLICY_SQL).toContain(kept);
