@@ -33,6 +33,7 @@ export const fixtureCaseNames=Object.freeze([
   'closes an open continuation attempt without rewriting its ledger',
   'reports content-free census counts and the fields behind blocked merges',
   're-admits a promoted dispatcher only for the deployed release artifacts',
+  'installs the cross-context merge policy once without changing its grants',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;

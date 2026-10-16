@@ -1730,6 +1730,11 @@ back as `context_conflict`. Classifications count the current planner context;
 review counts include earlier contexts. It runs in a read-only transaction and
 needs no release evidence.
 
+`STAGE=prod node scripts/run-production-consolidation.mjs install-merge-policy`
+installs merge policy version 2, which lets one MERGE combine records from
+different agents, sources and tag sets in the same namespace (see the
+consolidation design). It is idempotent.
+
 After every production release, re-admit the promoted dispatcher to the new
 worker artifacts; until then scheduled workers stop with
 `dispatcher configuration changed`:

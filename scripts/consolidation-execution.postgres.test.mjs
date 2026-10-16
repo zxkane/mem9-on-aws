@@ -4,6 +4,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import pg from 'pg';
 import {beforeAll,afterAll,describe,it,expect} from 'vitest';
 import {ensureNamespaceIndexes} from './migrate-memory-namespaces.mjs';
+import {MERGE_POLICY_SQL} from './lib/consolidation-merge-policy.mjs';
 
 const DSN=process.env.MEM9_EXECUTION_TEST_DSN;
 const CONTEXT='a'.repeat(64);
@@ -291,6 +292,28 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
    const result=await f.queue(await f.classify(ids));expect(result.status).toBe('review');
   }
   expect(await f.scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.execution_reviews')).toBe(3);
+ }));
+ it('EXEC-017 the cross-context policy merges different agents, sources and tags losslessly',()=>fixture(async f=>{
+  const ids=[await f.seed('Shared fact from one agent.',f.ns,'2024-01-01T00:00:00Z'),await f.seed('Shared fact from another agent.',f.ns,'2024-02-01T00:00:00Z')];
+  await f.db.query(`UPDATE memories SET agent_id='other-agent',source='other-source',tags='["beta","alpha"]' WHERE id=$1`,[ids[1]]);
+  await f.db.query(`UPDATE memories SET tags='["alpha","gamma"]' WHERE id=$1`,[ids[0]]);
+  await f.enable();
+  const blocked=await f.classify(ids);
+  expect(await f.queue(blocked)).toEqual({status:'review',reason:'context_conflict'});
+  await f.db.query(MERGE_POLICY_SQL);
+  // Metadata and protection rules still hold under the new policy.
+  const pinned=[await f.seed('P1'),await f.seed('P2')];await f.db.query("UPDATE memories SET memory_type='pinned' WHERE id=$1",[pinned[0]]);
+  expect(await f.queue(await f.classify(pinned))).toMatchObject({status:'review',reason:'protected_member'});
+  const meta=[await f.seed('M1'),await f.seed('M2')];await f.db.query(`UPDATE memories SET metadata='{"environment":"other"}' WHERE id=$1`,[meta[0]]);
+  expect(await f.queue(await f.classify(meta))).toMatchObject({status:'review',reason:'context_conflict'});
+  // Re-queueing the still-valid verdict, as a later planner pass does, now succeeds.
+  expect(await f.queue(blocked)).toMatchObject({status:'queued'});
+  const a=await f.claim();await f.ready(a);expect(await f.apply(a)).toMatchObject({status:'applied',changed_rows:2});
+  const [keeper,donor]=await Promise.all(ids.map(f.row));
+  expect(keeper).toMatchObject({state:'active',agent_id:'fixture',source:'fixture',tags:['alpha','beta','gamma']});
+  expect(keeper.content).toContain('Shared fact from one agent.');expect(keeper.content).toContain('Shared fact from another agent.');
+  expect(keeper.metadata.consolidation.sources.map(r=>r.agent_id).sort()).toEqual(['fixture','other-agent']);
+  expect(donor).toMatchObject({state:'deleted',superseded_by:ids[0]});
  }));
  it('EXEC-015 missing chronology cannot authorize an archive',()=>fixture(async f=>{
   const a=await f.seed('A'),b=await f.seed('B');
