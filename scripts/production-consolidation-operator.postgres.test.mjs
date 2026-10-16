@@ -585,14 +585,17 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     for(const id of ids)await f.admin.query("INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint) VALUES($1,$2,$3,1,$4)",[f.namespace,classId,id,'0'.repeat(64)]);
     await f.admin.query("INSERT INTO mem9_maintenance.publications(namespace_id,memory_id,lease_generation,classification_id) VALUES($1,$2,1,$3)",[f.namespace,ids[0],classId]);
     await f.admin.query("INSERT INTO mem9_maintenance.execution_reviews(namespace_id,classification_id,reason) VALUES($1,$2,'context_conflict')",[f.namespace,classId]);
-    await f.admin.query("UPDATE mem9_maintenance.work SET reason='settled' WHERE namespace_id=$1",[f.namespace]);
+    // Settle the anchor's work first, so dirtying must reopen it.
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,attempts,first_seen_at,due_at,reason)
+      VALUES($1,$2,2,2,2,0,clock_timestamp(),clock_timestamp(),'changed') ON CONFLICT(namespace_id,memory_id) DO UPDATE SET desired_generation=2,claimed_generation=2,completed_generation=2,attempts=0,reason='changed'`,[f.namespace,ids[0]]);
     const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request('requeue-merges'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
     await expect(requeue()).rejects.toThrow('MergeRequeueRequiresPromotion');
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
     await expect(requeue()).rejects.toThrow('MergeRequeueRequiresPolicy');
     await runProductionConsolidation(f.admin,f.config,{...f.request('install-merge-policy'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
     expect(await requeue()).toMatchObject({phase:'requeue-merges',anchors:1});
-    expect(await scalar(f.admin,'SELECT reason AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,ids[0]])).toBe('audit');
+    const work=(await f.admin.query('SELECT reason,desired_generation,completed_generation,attempts FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,ids[0]])).rows[0];
+    expect(work).toMatchObject({reason:'audit',attempts:0});expect(Number(work.desired_generation)).toBeGreaterThan(Number(work.completed_generation));
     expect(await scalar(f.admin,"SELECT count(*)::int AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND reason='audit'",[f.namespace])).toBe(1);
   }),60000);
 

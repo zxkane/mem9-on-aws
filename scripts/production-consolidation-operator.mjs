@@ -372,15 +372,27 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         if(await scalar(db,`SELECT prosrc AS result FROM pg_proc WHERE oid=${signature}`)!==mergePolicyBody())throw Error('MergeRequeueRequiresPolicy');
         let anchors=0;
         for(const namespace of config.targets){
+          // The planner's lock order: execution and model control, the
+          // namespace queue lock, then work rows, which are dirtied in one
+          // sorted statement per chunk.
+          await db.query('SELECT mem9_maintenance.lock_model()');
+          await db.query('SELECT mem9_maintenance.lock_queue($1)',[namespace]);
           const rows=(await db.query(`SELECT DISTINCT p.memory_id FROM mem9_maintenance.execution_reviews r
             JOIN mem9_maintenance.classifications c ON c.namespace_id=r.namespace_id AND c.classification_id=r.classification_id
             JOIN mem9_maintenance.publications p ON p.namespace_id=r.namespace_id AND p.classification_id=r.classification_id
             JOIN public.memories m ON m.namespace_id=p.namespace_id AND m.id=p.memory_id AND m.state='active'
             WHERE r.namespace_id=$1 AND r.reason='context_conflict' AND c.result='MERGE'
               AND NOT EXISTS(SELECT FROM mem9_maintenance.actions a WHERE a.namespace_id=r.namespace_id AND a.classification_id=r.classification_id)
-            ORDER BY p.memory_id LIMIT 20001`,[namespace])).rows;
+              AND p.lease_generation=(SELECT max(latest.lease_generation) FROM mem9_maintenance.publications latest
+                WHERE latest.namespace_id=p.namespace_id AND latest.memory_id=p.memory_id)
+            ORDER BY p.memory_id LIMIT 20001`,[namespace])).rows.map(row=>row.memory_id);
           if(rows.length>20000)throw Error('MergeRequeueTooLarge');
-          for(const row of rows)await db.query("SELECT mem9_maintenance.dirty_planner_input($1,$2,clock_timestamp(),'audit')",[namespace,row.memory_id]);
+          for(let i=0;i<rows.length;i+=5000){
+            const chunk=rows.slice(i,i+5000);
+            await db.query("SELECT count(mem9_maintenance.dirty_planner_input($1,t.id,clock_timestamp(),'audit')) FROM unnest($2::text[]) AS t(id)",[namespace,chunk]);
+            // An exhausted anchor would otherwise stay unclaimable after dirtying.
+            await db.query("UPDATE mem9_maintenance.work SET attempts=0,reason='audit' WHERE namespace_id=$1 AND memory_id=ANY($2) AND attempts=3",[namespace,chunk]);
+          }
           anchors+=rows.length;
         }
         responseEvidence={anchors};
