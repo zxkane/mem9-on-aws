@@ -3042,9 +3042,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "22abbcc0490270d892c0",
+      "id": "6eebd90fa530bc35c35f",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 510,
+      "line": 532,
       "tables": [
         "memories"
       ],
@@ -3060,9 +3060,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "120d93569d9896acb8b1",
+      "id": "3de1684745461963695f",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 522,
+      "line": 544,
       "tables": [
         "memories"
       ],
@@ -3078,9 +3078,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "8be624e6b139fd7cf97d",
+      "id": "973068d832943840d402",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 526,
+      "line": 548,
       "tables": [
         "memories"
       ],

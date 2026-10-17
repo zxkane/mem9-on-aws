@@ -1749,6 +1749,23 @@ different agents, sources and tag sets in the same namespace (see the
 consolidation design). It is idempotent. `requeue-merges` then marks the
 anchors of MERGE verdicts held back by the earlier rule for re-planning.
 
+To move a promoted planner to another certified model, deploy the planner
+route settings for it (`MEM9_LLM_MODEL`, region and project), re-admit, certify
+the model against that route, then switch:
+
+```bash
+node scripts/evaluate-planner-model.mjs mantle-responses-total-v1 "$certificate"
+MEM9_PLANNER_CERTIFICATE="$certificate" STAGE=prod node scripts/run-production-canary.mjs switch-model
+```
+
+The switch checks that the contract names exactly the deployed planner's
+model, region and project after verifying its task role. It keeps the daily
+request limit and usage, and recomputes the token limits from the new
+contract's maxima. Because the contract is part of the planner context, every memory is
+re-planned and decisions from the old model, including queued actions, are
+discarded. Between the deploy and the switch the planner rejects its old
+contract, so run the switch right after `readmit`.
+
 After every production release, re-admit the promoted dispatcher to the new
 worker artifacts; until then scheduled workers stop with
 `dispatcher configuration changed`:

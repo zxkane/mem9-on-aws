@@ -111,7 +111,9 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
     canaryEvidenceHash(actual)!==canaryEvidenceHash(secrets)||container.secrets.length!==Object.keys(secrets).length)fail();
   const meta={...manifest,region,account,cluster,kind,revision,controlSourceTag:approved.controlSourceTag??approved.sourceTag,dataRelease,
     image:worker.image,sourceTag:worker.sourceTag,containerName,taskDefinitionArn:worker.taskDefinitionArn,subnets:approved.subnets,securityGroup:approved.securityGroup,
-    taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn};
+    taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn,
+    ...(kind==='planner'?{plannerRoute:{model:values.MEM9_LLM_MODEL,region:values.AWS_REGION,project:values.MEM9_BEDROCK_PROJECT,
+      responsesRegion:values.MEM9_LLM_RESPONSES_REGION,openaiProject:values.MEM9_BEDROCK_PROJECT_OPENAI}}:{})};
   await verifyProductionTaskRoles(clients,meta,definition,containerName,secrets,'WorkerParameters',plannerModelStatements({kind,region,account,values}));
   const template=await send(clients.scheduler,new GetScheduleCommand({Name:worker.scheduleName,GroupName:manifest.groupName}));
   return {...meta,template,logOptions:container.logConfiguration?.options};
