@@ -1759,8 +1759,9 @@ MEM9_PLANNER_CERTIFICATE="$certificate" STAGE=prod node scripts/run-production-c
 ```
 
 The switch checks that the contract names exactly the deployed planner's
-model, region and project after verifying its task role. It keeps budgets and
-usage. Because the contract is part of the planner context, every memory is
+model, region and project after verifying its task role. It keeps the daily
+request limit and usage, and recomputes the token limits from the new
+contract's maxima. Because the contract is part of the planner context, every memory is
 re-planned and decisions from the old model, including queued actions, are
 discarded. Between the deploy and the switch the planner rejects its old
 contract, so run the switch right after `readmit`.

@@ -542,7 +542,7 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     // every target, while budgets and usage stay.
     const switchModel=next=>runProductionConsolidation(f.admin,f.config,{...f.request('switch-model'),invocation:randomUUID().replaceAll('-',''),
       plannerModel:{...plannerModel,contract:next}},{connect:f.connect});
-    const next={...contract,model:'openai.gpt-next',region:'us-east-1',proof:'8'.repeat(64)};
+    const next={...contract,model:'openai.gpt-next',region:'us-east-1',max_input_tokens:65536,proof:'8'.repeat(64)};
     await expect(switchModel(next)).rejects.toThrow('PlannerModelSwitchRequiresPromotion');
     await runProductionConsolidation(f.admin,f.config,f.request('baseline'),{connect:f.connect});
     await expect(budget(25)).rejects.toThrow('PlannerModelBudgetRequiresSetup');
@@ -550,10 +550,13 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
     expect(await budget(40)).toMatchObject({dailyModelRequests:40});
     const before=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
-    expect(await switchModel(next)).toMatchObject({phase:'switch-model',modelContractHash:canaryEvidenceHash(next)});
+    expect(await switchModel(next)).toMatchObject({phase:'switch-model',modelEnabled:true,modelContractHash:canaryEvidenceHash(next)});
     expect(await scalar(f.admin,'SELECT policy AS result FROM mem9_maintenance.planner_policies WHERE namespace_id=$1',[f.namespace])).toEqual({enabled:true,similarity:0.82,model:next});
     expect(await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace])).not.toBe(before);
-    expect(await scalar(f.admin,"SELECT limits AS result FROM mem9_maintenance.model_policies WHERE scope='stage'")).toEqual({requests:40,input:40*32768,output:40*2048});
+    // Token limits follow the new maxima, so 40 daily requests stay admissible.
+    const switched={requests:40,input:40*65536,output:40*2048};
+    expect(await scalar(f.admin,"SELECT jsonb_agg(limits ORDER BY scope) AS result FROM mem9_maintenance.model_policies")).toEqual([switched,switched]);
+    expect(await scalar(f.admin,'SELECT jsonb_build_array(slots,unknown_limit) AS result FROM mem9_maintenance.model_control WHERE singleton')).toEqual([2,1]);
     expect(await scalar(f.admin,"SELECT used AS result FROM mem9_maintenance.model_windows WHERE scope='stage'")).toEqual(used);
     // Without one installed contract there is no token bound to derive.
     await f.admin.query("UPDATE mem9_maintenance.planner_policies SET policy=policy-'model' WHERE namespace_id=$1",[f.namespace]);

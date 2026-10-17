@@ -1390,7 +1390,9 @@ its role holds. The operator then installs the contract with `configure_planner`
 after taking execution and model control and the setup row. A new contract is a
 new planner context: every active memory is marked for audit, and the
 executor's existing context checks invalidate classifications and queued
-actions from the old context. No pause is needed, and budgets and usage stay.
+actions from the old context. No pause is needed. The daily request limit,
+usage, slots and unknown limit stay; the token limits are recomputed from the
+new contract's maxima, since each admission reserves them.
 
 The daily model budget set by `configure-model` can be changed after promotion
 with the owner-only `set-model-budget`. It only replaces the stage and

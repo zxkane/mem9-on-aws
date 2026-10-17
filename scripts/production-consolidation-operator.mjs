@@ -502,14 +502,21 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         // A promoted planner moves to another certified contract in place.
         // The contract is part of the planner context, so every target is
         // re-planned and queued actions from the old context are invalidated
-        // by the executor's context check; budgets and usage are kept.
+        // by the executor's context check. The daily request limit and usage
+        // stay; token limits follow the new contract's maxima, which each
+        // admission reserves.
         await db.query('SELECT mem9_maintenance.lock_model()');
         const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('PlannerModelSwitchRequiresPromotion');
         const model=request.plannerModel;
+        const requests=validModelRequests(Number((await scalar(db,"SELECT limits AS result FROM mem9_maintenance.model_policies WHERE scope='stage'"))?.requests));
+        const limits={requests,input:requests*model.contract.max_input_tokens,output:requests*model.contract.max_output_tokens};
+        const control=(await db.query('SELECT slots,unknown_limit FROM mem9_maintenance.model_control WHERE singleton')).rows[0];
+        await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2,$3,$4)',['stage',limits,control.slots,control.unknown_limit]);
         for(const namespace of config.targets){
           const current=await scalar(db,'SELECT policy AS result FROM mem9_maintenance.planner_policies WHERE namespace_id=$1',[namespace]);
           if(!current?.model)throw Error('PlannerModelContractRequired');
+          await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2)',[namespace,limits]);
           await db.query('SELECT mem9_maintenance.configure_planner($1,$2)',[namespace,{enabled:true,similarity:model.similarity,model:model.contract}]);
         }
         responseEvidence={modelContractHash:canaryEvidenceHash(model.contract)};
@@ -649,7 +656,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     if(request.operation==='prepare'){
       await checkpoint();await db.query("UPDATE mem9_maintenance.production_worker_setup SET phase='prepared' WHERE singleton AND generation=$1",[config.generation]);
     }
-    return {phase:request.operation,namespaces:config.targets.length,modelEnabled:request.operation==='configure-model',...responseEvidence,
+    return {phase:request.operation,namespaces:config.targets.length,modelEnabled:['configure-model','switch-model'].includes(request.operation),...responseEvidence,
       ...(['plan','resume-plan','canary'].includes(request.operation)?{admission:request.invocation}:{}),...(request.operation==='baseline'?{
       validationId:await scalar(db,'SELECT validation_id AS result FROM mem9_maintenance.production_worker_setup WHERE singleton')}:{} )};
   });
