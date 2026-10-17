@@ -1088,8 +1088,9 @@ project that does not exist.
 PROJECT_REGION=us-east-1 scripts/deploy-bedrock-mantle-project.sh
 
 # 2. Admit and grant the new project beside the old one. Deployments paused.
-#    .env keeps MEM9_LLM_RESPONSES_REGION=us-west-2 and adds
-#    WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=us-east-1.
+#    .env keeps MEM9_LLM_RESPONSES_REGION=us-west-2 and adds both
+#    WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=us-east-1 and
+#    MEM9_BEDROCK_PROJECT_OPENAI_NEXT=<us-east-1-project-id>; they are set together.
 gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-east-1
 gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body <us-east-1-project-id>
 WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
