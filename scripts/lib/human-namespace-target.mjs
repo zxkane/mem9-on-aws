@@ -42,8 +42,15 @@ export async function verifyHumanPreviewTarget(
     }),
     connectFactory,
     cleanupOnly = false,
+    // The preview deploy runs this commit's images when it built them, and
+    // the default `latest` workload images when the change rebuilt none.
+    serverImageTag = `pr-${manifest.commit.slice(0, 7)}`,
   } = {},
 ) {
+  check(
+    serverImageTag === `pr-${manifest.commit.slice(0, 7)}` || serverImageTag === "latest",
+    "deployed_commit_mismatch",
+  );
   validateDeploymentManifest(manifest);
   const prefix = `/mem9-on-aws/${manifest.stage}`;
   let auditLogGroup, readerClientId;
@@ -142,7 +149,7 @@ export async function verifyHumanPreviewTarget(
     check(
       definition?.containerDefinitions?.length === 3 &&
         definition.containerDefinitions.every((c) =>
-          c.image.endsWith(`:pr-${manifest.commit.slice(0, 7)}`),
+          c.image.endsWith(`:${serverImageTag}`),
         ),
       "deployed_commit_mismatch",
     );

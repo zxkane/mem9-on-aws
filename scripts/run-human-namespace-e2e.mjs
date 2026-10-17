@@ -84,6 +84,9 @@ export async function main(args = process.argv.slice(2)) {
   }
   const target = await verifyHumanPreviewTarget(manifest, {
     cleanupOnly: options.cleanup,
+    ...(process.env.MEM9_HUMAN_E2E_TASK === "1" && process.env.MEM9_DEPLOY_IMAGE_TAG
+      ? { serverImageTag: process.env.MEM9_DEPLOY_IMAGE_TAG }
+      : {}),
   });
   let plan;
   if (options.cleanup) {

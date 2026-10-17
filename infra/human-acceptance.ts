@@ -33,6 +33,7 @@ export function humanAcceptance(
       AWS_REGION: region,
       MEM9_STAGE: $app.stage,
       MEM9_DEPLOY_COMMIT: process.env.MEM9_DEPLOY_COMMIT || "",
+      MEM9_DEPLOY_IMAGE_TAG: process.env.MEM9_IMAGE_TAG || "latest",
       MEM9_DB_HOST: dbOut.host,
       MEM9_DB_PORT: dbOut.port.apply(String),
       MEM9_DB_NAME: dbOut.database,

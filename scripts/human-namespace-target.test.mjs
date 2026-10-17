@@ -269,6 +269,20 @@ describe("trusted preview target pinning", () => {
       ).toBe(true);
     },
   );
+  it("accepts the default workload images a change without rebuilt images deploys", async () => {
+    const f = fixture();
+    for (const definition of f.responses["ecs/describe-task-definition"].taskDefinition.containerDefinitions)
+      definition.image = definition.image.replace(/:pr-aaaaaaa$/u, ":latest");
+    await expect(verifyHumanPreviewTarget(f.manifest, f)).rejects.toThrow("deployed_commit_mismatch");
+    const result = await verifyHumanPreviewTarget(f.manifest, { ...f, serverImageTag: "latest" });
+    expect(result.providerOrigin).toContain("fixture-login");
+  });
+  it("rejects a server image tag that is neither this commit nor latest", async () => {
+    const f = fixture();
+    await expect(verifyHumanPreviewTarget(f.manifest, { ...f, serverImageTag: "pr-bbbbbbb" }))
+      .rejects.toThrow("deployed_commit_mismatch");
+    expect(f.aws).not.toHaveBeenCalled();
+  });
   it("closes its connection when the enforced database phase is absent", async () => {
     const f = fixture();
     f.db.query.mockResolvedValue({ rows: [{ phase: "additive_ready" }] });
