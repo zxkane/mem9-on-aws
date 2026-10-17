@@ -9,8 +9,8 @@ I/O is faked via injected deps.
 
 - **TC-MMROUTE-001** — `zai.glm-5` (and any unmatched model) resolves to the
   `chat` route with the configured application-region base;
-  `openai.gpt-5.6-terra` and
-  `openai.gpt-5.6-luna` resolve to the `responses` route with the
+  `openai.gpt-5.6-terra`, `openai.gpt-5.6-luna` and
+  `openai.gpt-6-luna` resolve to the `responses` route with the
   `openai/v1` base in the responses region.
 - **TC-MMROUTE-002** — `LLM_PROXY_RESPONSES_MODEL_PREFIXES` accepts a comma
   list; a custom prefix routes accordingly; empty entries are ignored.
@@ -28,6 +28,9 @@ I/O is faked via injected deps.
   default; invalid values → 400; result lands as `reasoning.effort`.
 - **TC-MMROUTE-013** — unknown chat-completions fields are NOT forwarded;
   the translated body stays within `maxBodyBytes` (413 otherwise).
+- **TC-MMROUTE-014** — every translated Responses body sets `store: false`,
+  even when the chat request asks for `store: true`, so Bedrock does not keep
+  memory content for later retrieval.
 
 ## Response translation (Responses → chat)
 

@@ -20,7 +20,7 @@ The `model` field of each incoming chat-completions request selects a route:
 | Route | Match | Upstream | API |
 |---|---|---|---|
 | `chat` (default) | everything else (e.g. `zai.glm-5`) | `https://bedrock-mantle.<region>.api.aws/v1` (application region) | chat-completions passthrough (current behavior, byte-identical) |
-| `responses` | model starts with a configured prefix (default `openai.gpt-5.6-`) | `https://bedrock-mantle.<responsesRegion>.api.aws/openai/v1` (default us-west-2) | chat-completions ⇄ Responses translation |
+| `responses` | model starts with a configured prefix (default `openai.gpt-5.6-`, `openai.gpt-6-`) | `https://bedrock-mantle.<responsesRegion>.api.aws/openai/v1` (default us-west-2) | chat-completions ⇄ Responses translation |
 
 Switching models = change `MNEMO_LLM_MODEL` (env, task-def) or send a
 different `model` per request. No proxy restart semantics change.
@@ -29,7 +29,7 @@ different `model` per request. No proxy restart semantics change.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `LLM_PROXY_RESPONSES_MODEL_PREFIXES` | `openai.gpt-5.6-` | Comma list of model-id prefixes routed via Responses |
+| `LLM_PROXY_RESPONSES_MODEL_PREFIXES` | `openai.gpt-5.6-,openai.gpt-6-` | Comma list of model-id prefixes routed via Responses |
 | `LLM_PROXY_RESPONSES_REGION` | `us-west-2` | Region for the responses route (bearer + endpoint) |
 | `LLM_PROXY_RESPONSES_BASE` | derived from region | Override for tests |
 | `LLM_PROXY_REASONING_EFFORT` | `high` | `reasoning.effort` when the request doesn't carry `reasoning_effort` (mem9 can't) |
