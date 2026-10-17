@@ -37,6 +37,18 @@ Parameters:
       Optional second Bedrock Mantle project ARN for the llm-proxy Responses
       route (OpenAI reasoning models; regional project in the responses
       region, e.g. us-west-2). Empty keeps the boundary unchanged.
+  NextOpenAiBedrockProjectArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^(arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/(default|proj_[a-z0-9]{1,20}))?$"
+    ConstraintDescription: >
+      Leave empty or use a same-account Bedrock Mantle project ARN whose
+      service-generated project id is `default` or `proj_` plus at most 20
+      lowercase letters or digits.
+    Description: >
+      Optional, temporary Bedrock Mantle project ARN admitted beside
+      OpenAiBedrockProjectArn while the Responses route migrates to another
+      region. Empty outside a migration keeps the boundary unchanged.
   PolicyRevision:
     Type: String
     Default: r1
@@ -47,6 +59,7 @@ Parameters:
 
 Conditions:
   HasOpenAiBedrockProject: !Not [!Equals [!Ref OpenAiBedrockProjectArn, ""]]
+  HasNextOpenAiBedrockProject: !Not [!Equals [!Ref NextOpenAiBedrockProjectArn, ""]]
   InitialObserverRevision: !Equals [!Ref PolicyRevision, "r1"]
 
 Resources:
@@ -138,6 +151,9 @@ Resources:
               # AWS::NoValue removes this entry entirely when unconfigured, so
               # the default boundary keeps its historic shape.
               - !If [HasOpenAiBedrockProject, !Ref OpenAiBedrockProjectArn, !Ref "AWS::NoValue"]
+              # Temporary second Responses-route slot, set only during a
+              # cross-region route migration so both projects stay admitted.
+              - !If [HasNextOpenAiBedrockProject, !Ref NextOpenAiBedrockProjectArn, !Ref "AWS::NoValue"]
               - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/mem9-on-aws/*
               - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
               - !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/sst/*

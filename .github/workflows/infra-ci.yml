@@ -31,6 +31,13 @@
 #                  the value is explicitly true or false.
 #   MEM9_LLM_RESPONSES_REGION — independent fallback region for selected OpenAI
 #                  GPT models. Unset keeps the runtime/boundary default us-west-2.
+#   WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION — set only while the Responses
+#                  route migrates regions: the other region whose Mantle project
+#                  the boundary admits beside MEM9_LLM_RESPONSES_REGION's. The
+#                  boundary preflight then expects the two-slot document.
+#   MEM9_BEDROCK_PROJECT_OPENAI_NEXT — that region's Mantle project id, set
+#                  with the variable above: the mem9 server task role grants it
+#                  beside MEM9_BEDROCK_PROJECT_OPENAI during the migration.
 #   MEM9_COGNITO_DOMAIN_PREFIX — existing production Cognito domain prefix.
 #                  Set this before adopting derived defaults so prod keeps its
 #                  current OAuth hostname. Previews intentionally do not use it.
@@ -437,6 +444,7 @@ jobs:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-preview
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
+      WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: ${{ vars.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: Deployment maintenance gate
@@ -555,6 +563,7 @@ jobs:
           # region's Mantle project id + model selector. The region itself is a
           # job-level variable and defaults to us-west-2 when unset.
           MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+          MEM9_BEDROCK_PROJECT_OPENAI_NEXT: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI_NEXT }}
           MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
@@ -644,6 +653,7 @@ jobs:
           MEM9_ECR_NAMESPACE: ${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
           MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+          MEM9_BEDROCK_PROJECT_OPENAI_NEXT: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI_NEXT }}
           MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
           MEM9_DURABLE_INGEST_ENABLED: "1"
           MEM9_DEPLOY_COMMIT: ${{ github.sha }}
@@ -1492,6 +1502,7 @@ jobs:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-prod
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
+      WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: ${{ vars.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION }}
       # Authentication is an operator choice. Preview jobs receive none of these
       # settings and continue to create isolated Cognito pools and test clients.
       MEM9_AUTH_MODE: ${{ secrets.MEM9_AUTH_MODE || 'managed' }}
@@ -1728,6 +1739,7 @@ jobs:
           # region's Mantle project id + model selector. The region itself is a
           # job-level variable and defaults to us-west-2 when unset.
           MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+          MEM9_BEDROCK_PROJECT_OPENAI_NEXT: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI_NEXT }}
           MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
           # Explicitly false before migration. The guarded migration changes it
           # to true only after every passable role has the exact boundary and
@@ -1881,6 +1893,8 @@ jobs:
       MEM9_COGNITO_DOMAIN_PREFIX: ${{ vars.MEM9_COGNITO_DOMAIN_PREFIX }}
       MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
       MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+      MEM9_BEDROCK_PROJECT_OPENAI_NEXT: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI_NEXT }}
+      WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: ${{ vars.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION }}
       MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
       WORKLOAD_BOUNDARY_PROD_ENABLED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
       MEM9_DURABLE_INGEST_ENABLED: "1"
@@ -1976,6 +1990,8 @@ jobs:
       MEM9_CONSOLIDATION_SCHEDULE_ENABLED: "0"
       MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
       MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+      MEM9_BEDROCK_PROJECT_OPENAI_NEXT: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI_NEXT }}
+      WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: ${{ vars.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
       MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
       STAGE: ${{ inputs.runtime_stage }}

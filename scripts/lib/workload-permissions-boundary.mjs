@@ -224,6 +224,10 @@ const NETWORK_INTERFACE_DENY_ACTIONS = [
 ];
 const MAX_IAM_PAGES = 100;
 const MAX_IAM_ITEMS = 10_000;
+// IAM's managed-policy document limit, in characters. Not adjustable.
+export const IAM_MANAGED_POLICY_SIZE_QUOTA = 6144;
+// The longest value the template's PolicyRevision AllowedPattern admits.
+export const WORST_CASE_BOUNDARY_POLICY_REVISION = `r${"9".repeat(20)}`;
 // An AWS region, as a bare regex source (embeddable in a larger ARN pattern)
 // and as an anchored matcher for validating a region on its own.
 const ANY_REGION_SOURCE = "[a-z]{2}(?:-gov)?-[a-z]+-[0-9]";
@@ -357,6 +361,7 @@ function boundaryContract({
   bedrockProjectArn,
   decisionArtifactBucketName = `mem9-audit-${accountId}`,
   openAiBedrockProjectArn = "",
+  nextOpenAiBedrockProjectArn = "",
   policyRevision = "r1",
 }) {
   assertIdentity({ partition, accountId });
@@ -382,6 +387,28 @@ function boundaryContract({
     }).test(openAiBedrockProjectArn)
   ) {
     throw new Error("invalid OpenAI Bedrock Mantle project ARN");
+  }
+  // Optional, temporary third project: the Responses route's NEXT regional
+  // project, admitted beside the current one only while the route migrates
+  // between regions, so neither deploy order leaves the running proxy without
+  // a permitted project. Empty outside a migration; the document then matches
+  // the one-slot shape byte for byte.
+  if (nextOpenAiBedrockProjectArn) {
+    if (
+      !mantleProjectArnPattern({
+        partition,
+        accountId,
+        regionSource: ANY_REGION_SOURCE,
+      }).test(nextOpenAiBedrockProjectArn)
+    ) {
+      throw new Error("invalid next OpenAI Bedrock Mantle project ARN");
+    }
+    if (
+      nextOpenAiBedrockProjectArn === bedrockProjectArn ||
+      nextOpenAiBedrockProjectArn === openAiBedrockProjectArn
+    ) {
+      throw new Error("next OpenAI Bedrock Mantle project ARN is not distinct");
+    }
   }
   if (!/^r[0-9]{1,20}$/u.test(policyRevision)) {
     throw new Error("invalid boundary policy revision");
@@ -479,6 +506,7 @@ function boundaryContract({
     projectResources: [
       bedrockProjectArn,
       ...(openAiBedrockProjectArn ? [openAiBedrockProjectArn] : []),
+      ...(nextOpenAiBedrockProjectArn ? [nextOpenAiBedrockProjectArn] : []),
       `arn:${partition}:ecr:${applicationRegion}:${accountId}:repository/mem9-on-aws/*`,
       `arn:${partition}:lambda:${applicationRegion}:${accountId}:function:mem9-on-aws-*`,
       `arn:${partition}:logs:${applicationRegion}:${accountId}:log-group:/sst/*`,
@@ -509,7 +537,7 @@ export function expectedBoundaryPolicyDocument(contract) {
     ssmApprovalParameterArn,
     ssmParameterArn,
   } = boundaryContract(contract);
-  return {
+  const document = {
     Version: "2012-10-17",
     Statement: [
       {
@@ -717,6 +745,27 @@ export function expectedBoundaryPolicyDocument(contract) {
       },
     ],
   };
+  // The quota is hard (not adjustable), and one-slot shapes always fit. Both
+  // Responses-route slots plus a long custom bucket can exceed it, so refuse
+  // to describe a document IAM would reject rather than let a guarded update
+  // fail inside the quarantine window.
+  if (JSON.stringify(document).length > IAM_MANAGED_POLICY_SIZE_QUOTA) {
+    throw new Error("workload boundary exceeds the IAM managed-policy size quota");
+  }
+  return document;
+}
+
+// Size of the expected document at the longest revision PolicyRevision admits.
+// The guarded updater mints `r$(Date.now())$(pid)`, so this is the size bound a
+// rollout can actually reach, whatever revision is deployed today. Throws when
+// that bound exceeds the quota.
+export function worstCaseBoundaryPolicySize(contract) {
+  return JSON.stringify(
+    expectedBoundaryPolicyDocument({
+      ...contract,
+      policyRevision: WORST_CASE_BOUNDARY_POLICY_REVISION,
+    }),
+  ).length;
 }
 
 function sortedStrings(value, label) {

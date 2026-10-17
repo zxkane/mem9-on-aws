@@ -106,6 +106,39 @@ resource, and Mantle projects are regional (different ids per region):
 - `bedrock-mantle:CallWithBearerToken` is already `Resource: "*"` in both the
   task role and the boundary ceiling — no change.
 
+### Moving the Responses route to another region
+
+Two single-project controls apply to the Responses route: the boundary's
+`OpenAiBedrockProjectArn` slot and the mem9 server task role's Responses grant.
+If either changes before every running task has moved, those tasks call a
+project they are denied. Upstream durable ingest treats that 403 as permanent
+and drops the job. The temporary second boundary slot
+(`NextOpenAiBedrockProjectArn`) and a second task-role grant close the window.
+`WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION` selects the region for both, and
+`MEM9_BEDROCK_PROJECT_OPENAI_NEXT` gives the project id. Only the always-on mem9
+server needs the overlap. The batch planner and cleanup tasks keep one grant,
+and a run denied by the swap defers.
+
+1. Create the new region's project:
+   `PROJECT_REGION=us-east-1 scripts/deploy-bedrock-mantle-project.sh`.
+2. With deployments paused and `MEM9_LLM_RESPONSES_REGION` still on the old
+   region, set both next variables to the new region and project. Run the
+   guarded boundary rollout, so the boundary admits old and new. Then deploy,
+   so the role grants old and new while the route still uses the old project.
+3. With deployments paused, set `MEM9_LLM_RESPONSES_REGION` and
+   `MEM9_BEDROCK_PROJECT_OPENAI` to the new region and project. Set the next
+   variables to the old region and project, unpause, and deploy. The role's
+   project set is unchanged. New tasks use the new project, and old tasks keep
+   the old one until they stop.
+4. When no server task from the pre-swap task definition is running: with
+   deployments paused, delete both next variables and set `.env` to the new
+   region. Run the guarded rollout first, so the boundary admits only the new
+   project. Then deploy, so the role grants only the new project. The reverse
+   order fails the deploy preflight, which by then expects the one-slot
+   boundary.
+
+The README runbook gives the exact commands.
+
 The checked-in default posture remains GLM-5 in the `sst.config.ts` application
 region. No fallback-region grant is exercised until an operator both configures
 the OpenAI project and selects the GPT model.

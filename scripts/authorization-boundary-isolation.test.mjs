@@ -74,6 +74,7 @@ function renderTemplate(contract) {
     'AWS::URLSuffix':contract.partition==='aws-cn'?'amazonaws.com.cn':'amazonaws.com',
     ApplicationRegion:contract.applicationRegion,DecisionArtifactBucketName:bucket(contract),
     BedrockProjectArn:contract.bedrockProjectArn,OpenAiBedrockProjectArn:contract.openAiBedrockProjectArn??'',
+    NextOpenAiBedrockProjectArn:contract.nextOpenAiBedrockProjectArn??'',
     PolicyRevision:contract.policyRevision??'r1','AWS::NoValue':noValue};
   const resolve=value=>{
     if(Array.isArray(value))return value.map(resolve).filter(v=>v!==noValue);
@@ -83,8 +84,9 @@ function renderTemplate(contract) {
         expect(Object.hasOwn(values,key)).toBe(true);return values[key];
       });
       if(Object.hasOwn(value,'Fn::If')){
-        const [condition,yes,no]=value['Fn::If'];expect(condition).toBe('HasOpenAiBedrockProject');
-        return resolve(contract.openAiBedrockProjectArn?yes:no);
+        const [condition,yes,no]=value['Fn::If'],slots={HasOpenAiBedrockProject:'openAiBedrockProjectArn',HasNextOpenAiBedrockProject:'nextOpenAiBedrockProjectArn'};
+        expect(Object.hasOwn(slots,condition)).toBe(true);
+        return resolve(contract[slots[condition]]?yes:no);
       }
       return Object.fromEntries(Object.entries(value).map(([key,child])=>[key,resolve(child)]));
     }
@@ -115,6 +117,20 @@ describe('authorization archive workload boundary',()=>{
   it('TC096/110: the complete maximum fixture is 6069 characters; longer bucket names reject',()=>{
     expect(JSON.stringify(renderTemplate(maximum).document).length).toBe(6069);
     for(const length of [34,63])expect(()=>build({...base,decisionArtifactBucketName:'a'.repeat(length)})).toThrow(/invalid decision-artifact bucket name/u);
+  });
+
+  it('TC-IAM-BOUNDARY-108: the two-slot migration shape keeps rendered parity and refuses a 33-character bucket',()=>{
+    const next=`arn:aws:bedrock-mantle:us-east-1:${accountId}:project/proj_${'z'.repeat(20)}`;
+    for(const bucketName of [undefined,'abc','example-decisions']){
+      const contract={...maximum,decisionArtifactBucketName:bucketName,nextOpenAiBedrockProjectArn:next};
+      const {document}=renderTemplate(contract);
+      expect(document.Statement).toHaveLength(16);
+      expect(verify(document,contract)).toBe(true);
+      expect(compare(document,build(contract))).toBe(true);
+      expect(JSON.stringify(document).length).toBeLessThanOrEqual(6144);
+    }
+    expect(JSON.stringify(renderTemplate({...maximum,nextOpenAiBedrockProjectArn:next}).document).length).toBe(6151);
+    expect(()=>build({...maximum,nextOpenAiBedrockProjectArn:next})).toThrow(/size quota/u);
   });
 
   it.each([

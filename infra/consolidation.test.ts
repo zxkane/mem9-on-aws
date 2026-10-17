@@ -506,6 +506,22 @@ describe("consolidation task and schedule", () => {
     expect(resources.filter(({ kind }) => kind === "Role")).toHaveLength(0);
   });
 
+  it("TC-IAM-BOUNDARY-113: keeps the batch planner on one Responses project during a region migration", async () => {
+    vi.stubEnv("WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION", "us-east-1");
+    vi.stubEnv("MEM9_BEDROCK_PROJECT_OPENAI_NEXT", "proj_next");
+    installGlobals("prod");
+    await loadAndRun();
+    const args = materialize(one("Task", "Mem9Consolidation").args) as Record<string, any>;
+    const inference = (args.permissions as Array<Record<string, any>>).find(
+      (permission) => permission.actions?.includes("bedrock-mantle:CreateInference"),
+    );
+    expect(materialize(inference!.resources)).toEqual([
+      "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test",
+      "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
+    ]);
+    expect(JSON.stringify(args.environment)).not.toContain("proj_next");
+  });
+
   it("TC-CONSOL-020/023/028/079: always defines a report task but omits the ungated schedule", async () => {
     installGlobals("prod");
     await loadAndRun();

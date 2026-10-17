@@ -38,6 +38,9 @@ import {
   verifyLambdaExecutionRoleTrustPolicy,
   verifyPermanentEnforcementDocuments,
   verifyQuarantinePolicy,
+  IAM_MANAGED_POLICY_SIZE_QUOTA,
+  WORST_CASE_BOUNDARY_POLICY_REVISION,
+  worstCaseBoundaryPolicySize,
 } from "./lib/workload-permissions-boundary.mjs";
 import {gatewayBoundaryProbeCases} from './lib/gateway-workload-boundary.mjs';
 import {OBSERVER_BOUNDARY_POLICY_NAME, expectedObserverBoundaryPolicyDocument, observerBoundaryProbeCases} from './lib/observer-workload-boundary.mjs';
@@ -615,6 +618,7 @@ function resolveTemplateValue(
   policyRevision = FIXTURE_POLICY_REVISION,
   bedrockProjectArn = boundaryContract.bedrockProjectArn,
   decisionArtifactBucketName = `mem9-audit-${accountId}`,
+  nextOpenAiBedrockProjectArn = undefined,
 ) {
   const recur = (child) =>
     resolveTemplateValue(
@@ -623,6 +627,7 @@ function resolveTemplateValue(
       policyRevision,
       bedrockProjectArn,
       decisionArtifactBucketName,
+      nextOpenAiBedrockProjectArn,
     );
   if (Array.isArray(value)) {
     // A parsed `!If [HasOpenAiBedrockProject, ...]` node. Unconfigured, the
@@ -630,6 +635,10 @@ function resolveTemplateValue(
     // AWS::NoValue → the entry vanishes from the parent list.
     if (value.length === 3 && value[0] === "HasOpenAiBedrockProject") {
       return openAiBedrockProjectArn ? recur(value[1]) : NO_VALUE;
+    }
+    // The temporary migration slot collapses the same way when unset.
+    if (value.length === 3 && value[0] === "HasNextOpenAiBedrockProject") {
+      return nextOpenAiBedrockProjectArn ? recur(value[1]) : NO_VALUE;
     }
     return value.map(recur).filter((item) => item !== NO_VALUE);
   }
@@ -646,6 +655,9 @@ function resolveTemplateValue(
   // Only reachable from the !If true branch above; unconfigured, the whole node
   // collapses to NO_VALUE before this can be consulted.
   if (value === "OpenAiBedrockProjectArn") return openAiBedrockProjectArn;
+  if (value === "NextOpenAiBedrockProjectArn") {
+    return nextOpenAiBedrockProjectArn;
+  }
   return value
     .replaceAll("${AWS::Partition}", partition)
     .replaceAll("${AWS::AccountId}", accountId)
@@ -780,6 +792,11 @@ async function runBoundaryDeployMock({
   deployedPolicy,
   guarded = false,
   gatewayMissing = false,
+  // Mantle project stacks by region; any other region reads as absent.
+  mantleProjects = {
+    [boundaryContract.applicationRegion]: boundaryContract.bedrockProjectArn,
+  },
+  nextOpenAiRegion,
   gatewayRuntimeRejected = false,
   observerSimulationMutation = "",
   emptyObserverProbes = false,
@@ -817,13 +834,28 @@ async function runBoundaryDeployMock({
   const quarantinePath = join(directory, "quarantine.json");
   const simulationPath = join(directory, "simulation.json");
   const simulationCompletePath = join(directory, "simulation-complete");
-  const expectedBoundaryPolicy = expectedBoundaryPolicyDocument({
+  const expectedContract = {
     ...boundaryContract,
+    bedrockProjectArn: mantleProjects[boundaryContract.applicationRegion],
+    openAiBedrockProjectArn: mantleProjects[responsesRegion ?? "us-west-2"],
+    nextOpenAiBedrockProjectArn:
+      nextOpenAiRegion === undefined ? undefined : mantleProjects[nextOpenAiRegion],
     policyRevision,
     ...(decisionArtifactBucketName
       ? { decisionArtifactBucketName }
       : {}),
-  });
+  };
+  let expectedBoundaryPolicy;
+  try {
+    expectedBoundaryPolicy = expectedBoundaryPolicyDocument(expectedContract);
+  } catch {
+    // A shape the library refuses (an invalid or oversize next slot). The deploy
+    // script must stop before reading any document, so any fixture will do.
+    expectedBoundaryPolicy = expectedBoundaryPolicyDocument({
+      ...expectedContract,
+      nextOpenAiBedrockProjectArn: undefined,
+    });
+  }
   const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
   await writeFile(gatewayExpectedPath, JSON.stringify(expectedGatewayBoundaryPolicyDocument({...boundaryContract,policyRevision})));
   await writeFile(gatewayProbesPath, JSON.stringify(gatewayBoundaryProbeCases(boundaryContract)));
@@ -1158,14 +1190,15 @@ case "$command" in
     stack="$(arg --stack-name "$@")"
     query="$(arg --query "$@")"
     if [[ "$stack" == "bedrock-mantle-project-mem9-on-aws" ]]; then
-      # Regional: the primary project exists in the application region; the
-      # optional Responses-route project stack is absent (feature off).
+      # Regional: by default only the primary project exists, in the
+      # application region; the Responses-route stacks are absent (feature off).
       project_region="$(arg --region "$@")"
-      if [[ "$project_region" != "ap-northeast-1" ]]; then
+      project_arn="$(jq -r --arg region "$project_region" '.[$region] // empty' <<<"$MOCK_MANTLE_PROJECTS")"
+      if [[ -z "$project_arn" ]]; then
         printf '%s\\n' 'ValidationError: Stack with id bedrock-mantle-project-mem9-on-aws does not exist' >&2
         exit 255
       fi
-      printf '%s\\n' 'arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test'
+      printf '%s\\n' "$project_arn"
     elif [[ "$MOCK_STACK_EXISTS" != "true" && ! -f "$MOCK_CREATED" ]]; then
       printf '%s\\n' 'ValidationError: Stack does not exist' >&2
       exit 255
@@ -1492,6 +1525,7 @@ esac
           ),
           MOCK_EXPECTED: expectedPath,
           MOCK_MATCHING: String(matching),
+          MOCK_MANTLE_PROJECTS: JSON.stringify(mantleProjects),
           MOCK_BASE_POLICY_MATCHES: String(basePolicyMatches),
           MOCK_BASE_REF_AVAILABLE: String(baseRefAvailable),
           MOCK_POLICY_IDENTITY_READBACK_FAILS: String(
@@ -1524,6 +1558,11 @@ esac
           ...(responsesRegion === undefined
             ? {}
             : { MEM9_LLM_RESPONSES_REGION: responsesRegion }),
+          ...(nextOpenAiRegion === undefined
+            ? {}
+            : {
+                WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: nextOpenAiRegion,
+              }),
           ...(realBasePolicy
             ? { WORKLOAD_BOUNDARY_BASE_REF: baseRef }
             : basePolicyMatches === undefined
@@ -1559,6 +1598,7 @@ async function runRolloutGateMock({
   dotenvApplicationRegion,
   dotenvDecisionArtifactBucket,
   dotenvOpenAiProjectRegion,
+  dotenvNextOpenAiProjectRegion,
   dotenvResponsesRegion,
   dotenvProfile,
   dotenvProjectRegion,
@@ -1598,6 +1638,7 @@ async function runRolloutGateMock({
     dotenvApplicationRegion !== undefined ||
     dotenvDecisionArtifactBucket !== undefined ||
     dotenvOpenAiProjectRegion !== undefined ||
+    dotenvNextOpenAiProjectRegion !== undefined ||
     dotenvResponsesRegion !== undefined ||
     dotenvProfile !== undefined ||
     dotenvProjectRegion !== undefined ||
@@ -1629,6 +1670,11 @@ async function runRolloutGateMock({
           ? []
           : [
               `WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION=${dotenvOpenAiProjectRegion}`,
+            ]),
+        ...(dotenvNextOpenAiProjectRegion === undefined
+          ? []
+          : [
+              `WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=${dotenvNextOpenAiProjectRegion}`,
             ]),
         ...(dotenvResponsesRegion === undefined
           ? []
@@ -1928,6 +1974,7 @@ printf '%s\\n' "$((now + MOCK_CLOCK_STEP_MS * 1000000))" > "$MOCK_CLOCK"
     "PROJECT_REGION",
     "WORKLOAD_BOUNDARY_APPLICATION_REGION",
     "WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION",
+    "WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION",
   ]) {
     delete childEnv[name];
   }
@@ -7714,6 +7761,7 @@ describe("operator entry point", { timeout: 10000 }, () => {
       dotenvApplicationRegion: "eu-west-1",
       dotenvDecisionArtifactBucket: "example-mem9-decision-artifacts",
       dotenvOpenAiProjectRegion: "us-east-1",
+      dotenvNextOpenAiProjectRegion: "us-west-2",
       dotenvResponsesRegion: "us-east-1",
       dotenvProfile: "custom-operator",
       dotenvProjectRegion: "eu-west-1",
@@ -7737,6 +7785,9 @@ describe("operator entry point", { timeout: 10000 }, () => {
     );
     expect(resumeState).toContain(
       "MEM9_LLM_RESPONSES_REGION=us-east-1",
+    );
+    expect(resumeState).toContain(
+      "WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=us-west-2",
     );
     expect(resumeState).toContain(
       "MEM9_TEMPLATE_BUCKET=reviewed-template-bucket",
@@ -7841,6 +7892,107 @@ describe("operator entry point", { timeout: 10000 }, () => {
     ).toBe(false);
     expect(calls.some((call) => call.startsWith("iam "))).toBe(false);
   });
+
+  // Migration fixtures: the current Responses project in us-west-2 and the next
+  // one in us-east-1, both with maximum-length service-generated ids.
+  const migrationProjects = Object.fromEntries(
+    [boundaryContract.applicationRegion, "us-west-2", "us-east-1"].map((region) => [
+      region,
+      `arn:aws:bedrock-mantle:${region}:123456789012:project/${MAX_MANTLE_PROJECT_ID}`,
+    ]),
+  );
+  const expectNoBoundaryMutation = (calls) => {
+    expect(
+      calls.some((call) =>
+        /cloudformation (validate-template|create-stack|update-stack)/u.test(call),
+      ),
+    ).toBe(false);
+    expect(calls.some((call) => call.startsWith("iam "))).toBe(false);
+  };
+
+  it.each([
+    ["the application region", "ap-northeast-1", 2, "must differ from the application and current Responses regions"],
+    ["the current Responses region", "us-west-2", 2, "must differ from the application and current Responses regions"],
+    ["a malformed region", "us-east-1;", 2, "Next Responses-route region is malformed"],
+    ["a region with no project stack", "eu-west-1", 1, "Next Responses-route Mantle project is not deployed in eu-west-1"],
+  ])("TC-IAM-BOUNDARY-109 fails closed when the next Responses region is %s", async (_name, nextOpenAiRegion, status, message) => {
+    const { calls, result } = await runBoundaryDeployMock({
+      guarded: true,
+      mantleProjects: migrationProjects,
+      nextOpenAiRegion,
+    });
+    expect(result.status).toBe(status);
+    expect(result.stderr).toContain(message);
+    expectNoBoundaryMutation(calls);
+  });
+
+  it("TC-IAM-BOUNDARY-110 refuses a two-slot boundary over the IAM quota before any stack call", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      decisionArtifactBucketName: "a".repeat(33),
+      guarded: true,
+      mantleProjects: migrationProjects,
+      nextOpenAiRegion: "us-east-1",
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "Boundary document does not fit the IAM managed-policy quota",
+    );
+    expectNoBoundaryMutation(calls);
+  });
+
+  it("TC-IAM-BOUNDARY-111 verifies and updates the two-slot migration boundary", async () => {
+    const verified = await runBoundaryDeployMock({
+      matching: true,
+      mantleProjects: migrationProjects,
+      nextOpenAiRegion: "us-east-1",
+      verifyOnly: true,
+    });
+    expect(verified.result.status).toBe(0);
+    expect(verified.result.stdout).toContain(
+      "Next Responses-route Mantle project admitted (us-east-1).",
+    );
+    expectVerifyOnlyAwsCallsReadOnly(verified.calls);
+    // After the application switch CI names the slots the other way round.
+    const switched = await runBoundaryDeployMock({
+      matching: true,
+      mantleProjects: migrationProjects,
+      nextOpenAiRegion: "us-west-2",
+      responsesRegion: "us-east-1",
+      verifyOnly: true,
+    });
+    expect(switched.result.status).toBe(0);
+    const updated = await runBoundaryDeployMock({
+      guarded: true,
+      mantleProjects: migrationProjects,
+      nextOpenAiRegion: "us-east-1",
+    });
+    expect(updated.result.status).toBe(0);
+    const update = updated.calls.find((call) =>
+      call.startsWith("cloudformation update-stack"),
+    );
+    expect(update).toContain(
+      `ParameterKey=OpenAiBedrockProjectArn,ParameterValue=${migrationProjects["us-west-2"]}`,
+    );
+    expect(update).toContain(
+      `ParameterKey=NextOpenAiBedrockProjectArn,ParameterValue=${migrationProjects["us-east-1"]}`,
+    );
+  }, 60_000);
+
+  it("TC-IAM-BOUNDARY-105 passes an empty next slot on every stack write when unset", async () => {
+    const created = await runBoundaryDeployMock({
+      quarantine: false,
+      stackExists: false,
+    });
+    const updated = await runBoundaryDeployMock({ guarded: true });
+    for (const [verb, { calls, result }] of [
+      ["create-stack", created],
+      ["update-stack", updated],
+    ]) {
+      expect(result.status).toBe(0);
+      const write = calls.find((call) => call.startsWith(`cloudformation ${verb}`));
+      expect(write).toContain("ParameterKey=NextOpenAiBedrockProjectArn,ParameterValue= ");
+    }
+  }, 40_000);
 
   it("refuses any existing policy update outside the guarded rollout", async () => {
     const { calls, result } = await runBoundaryDeployMock();
@@ -8610,6 +8762,7 @@ describe("boundary and deploy-role templates", () => {
     openAiBedrockProjectArn,
     policyRevision,
     bedrockProjectArn,
+    nextOpenAiBedrockProjectArn,
   ) =>
     resolveTemplateValue(
       parseCloudFormation(boundaryTemplatePath).Resources
@@ -8617,6 +8770,8 @@ describe("boundary and deploy-role templates", () => {
       openAiBedrockProjectArn,
       policyRevision,
       bedrockProjectArn,
+      undefined,
+      nextOpenAiBedrockProjectArn,
     );
 
   it("TC-IAM-BOUNDARY-102 declares a retained action and project-resource permissions ceiling", () => {
@@ -9259,6 +9414,162 @@ describe("boundary and deploy-role templates", () => {
         }),
       ).toThrow(/invalid decision-artifact bucket name/iu);
     }
+  });
+
+  // The temporary migration slot. Region pairs are the two shapes that matter:
+  // the real us-west-2 -> us-east-1 move, and the longest region names AWS uses.
+  const NEXT_OPENAI_PROJECT_ARN =
+    "arn:aws:bedrock-mantle:us-east-1:123456789012:project/proj_next";
+  const maxProjectArn = (region) =>
+    `arn:aws:bedrock-mantle:${region}:123456789012:project/${MAX_MANTLE_PROJECT_ID}`;
+  const resourceList = (document) =>
+    asList(boundaryStatement(document.Statement, "resources").NotResource);
+
+  it("TC-IAM-BOUNDARY-105 renders the unset next slot byte-identically to today's shapes", () => {
+    for (const openAiBedrockProjectArn of [undefined, OPENAI_PROJECT_ARN]) {
+      const contract = { ...boundaryContract, openAiBedrockProjectArn };
+      const expected = JSON.stringify(expectedBoundaryPolicyDocument(contract));
+      for (const nextOpenAiBedrockProjectArn of [undefined, ""]) {
+        expect(
+          JSON.stringify(
+            boundaryPolicyDocument(
+              openAiBedrockProjectArn,
+              undefined,
+              undefined,
+              nextOpenAiBedrockProjectArn,
+            ),
+          ),
+        ).toBe(JSON.stringify(boundaryPolicyDocument(openAiBedrockProjectArn)));
+        expect(
+          JSON.stringify(
+            expectedBoundaryPolicyDocument({
+              ...contract,
+              nextOpenAiBedrockProjectArn,
+            }),
+          ),
+        ).toBe(expected);
+      }
+    }
+  });
+
+  it("TC-IAM-BOUNDARY-106 admits a configured next project exactly once, in either Responses order", () => {
+    const document = boundaryPolicyDocument(
+      OPENAI_PROJECT_ARN,
+      undefined,
+      undefined,
+      NEXT_OPENAI_PROJECT_ARN,
+    );
+    const resources = resourceList(document);
+    expect(resources.filter((arn) => arn === NEXT_OPENAI_PROJECT_ARN)).toHaveLength(1);
+    expect(resources.indexOf(NEXT_OPENAI_PROJECT_ARN)).toBe(
+      resources.indexOf(OPENAI_PROJECT_ARN) + 1,
+    );
+    // Only the resource list changes; every other statement is untouched.
+    const oneSlot = boundaryPolicyDocument(OPENAI_PROJECT_ARN);
+    expect(
+      document.Statement.filter((statement) => !asList(statement.NotResource).includes(NEXT_OPENAI_PROJECT_ARN)),
+    ).toEqual(
+      oneSlot.Statement.filter((statement) => !asList(statement.NotResource).includes(OPENAI_PROJECT_ARN)),
+    );
+    const contract = {
+      ...boundaryContract,
+      openAiBedrockProjectArn: OPENAI_PROJECT_ARN,
+      nextOpenAiBedrockProjectArn: NEXT_OPENAI_PROJECT_ARN,
+    };
+    expect(verifyBoundaryPolicyDocument(document, contract)).toBe(true);
+    // After the application switches regions, CI names the slots the other way
+    // round; the boundary rolled out before the switch must still verify.
+    expect(
+      verifyBoundaryPolicyDocument(document, {
+        ...contract,
+        openAiBedrockProjectArn: NEXT_OPENAI_PROJECT_ARN,
+        nextOpenAiBedrockProjectArn: OPENAI_PROJECT_ARN,
+      }),
+    ).toBe(true);
+    // ...but neither one-slot expectation accepts the two-slot document.
+    expect(verifyBoundaryPolicyDocument(document, { ...contract, nextOpenAiBedrockProjectArn: "" })).toBe(false);
+    expect(verifyBoundaryPolicyDocument(oneSlot, contract)).toBe(false);
+    expect(
+      parseCloudFormation(boundaryTemplatePath).Parameters
+        .NextOpenAiBedrockProjectArn,
+    ).toMatchObject({
+      Default: "",
+      AllowedPattern: parseCloudFormation(boundaryTemplatePath).Parameters
+        .OpenAiBedrockProjectArn.AllowedPattern,
+    });
+  });
+
+  it("TC-IAM-BOUNDARY-107 rejects a next project that duplicates an admitted one or is malformed", () => {
+    const contract = {
+      ...boundaryContract,
+      openAiBedrockProjectArn: OPENAI_PROJECT_ARN,
+    };
+    for (const duplicate of [boundaryContract.bedrockProjectArn, OPENAI_PROJECT_ARN]) {
+      expect(() =>
+        expectedBoundaryPolicyDocument({
+          ...contract,
+          nextOpenAiBedrockProjectArn: duplicate,
+        }),
+      ).toThrow(/next OpenAI Bedrock Mantle project ARN is not distinct/u);
+    }
+    for (const bad of [
+      `arn:aws:bedrock-mantle:us-east-1:${["000000", "000000"].join("")}:project/proj_next`,
+      "arn:aws:bedrock-mantle:us-east-1:123456789012:project/proj_UPPER",
+      "arn:aws:bedrock-mantle:us-east-1:123456789012:project/*",
+      "arn:aws:bedrock:us-east-1:123456789012:project/proj_next",
+    ]) {
+      expect(() =>
+        expectedBoundaryPolicyDocument({
+          ...contract,
+          nextOpenAiBedrockProjectArn: bad,
+        }),
+      ).toThrow(/invalid next OpenAI Bedrock Mantle project ARN/u);
+    }
+  });
+
+  it("TC-IAM-BOUNDARY-108 keeps both worst-case Responses slots inside the quota and refuses an oversize bucket", () => {
+    expect(WORST_CASE_BOUNDARY_POLICY_REVISION).toBe(worstCasePolicyRevision());
+    expect(IAM_MANAGED_POLICY_SIZE_QUOTA).toBe(6_144);
+    const policyRevision = worstCasePolicyRevision();
+    const measured = {};
+    for (const [label, openAiRegion, nextRegion] of [
+      ["migration", "us-west-2", "us-east-1"],
+      ["longest", "ap-southeast-2", "ap-southeast-5"],
+    ]) {
+      const contract = {
+        ...boundaryContract,
+        bedrockProjectArn: MAX_PRIMARY_PROJECT_ARN,
+        openAiBedrockProjectArn: maxProjectArn(openAiRegion),
+        nextOpenAiBedrockProjectArn: maxProjectArn(nextRegion),
+        policyRevision,
+      };
+      const document = boundaryPolicyDocument(
+        contract.openAiBedrockProjectArn,
+        policyRevision,
+        MAX_PRIMARY_PROJECT_ARN,
+        contract.nextOpenAiBedrockProjectArn,
+      );
+      expect(verifyBoundaryPolicyDocument(document, contract)).toBe(true);
+      measured[label] = JSON.stringify(document).length;
+      expect(worstCaseBoundaryPolicySize(contract)).toBe(measured[label]);
+      // A 33-character custom bucket renders four times and no longer fits.
+      expect(() =>
+        expectedBoundaryPolicyDocument({
+          ...contract,
+          decisionArtifactBucketName: "a".repeat(33),
+        }),
+      ).toThrow(/exceeds the IAM managed-policy size quota/u);
+    }
+    expect(measured).toEqual({ migration: 6_111, longest: 6_121 });
+    // One slot still fits the longest bucket at the worst revision.
+    expect(
+      worstCaseBoundaryPolicySize({
+        ...boundaryContract,
+        bedrockProjectArn: MAX_PRIMARY_PROJECT_ARN,
+        openAiBedrockProjectArn: MAX_OPENAI_PROJECT_ARN,
+        decisionArtifactBucketName: "a".repeat(33),
+      }),
+    ).toBe(6_069);
   });
 
   // The gate above is only as honest as the revision it renders, and the fixture

@@ -1057,6 +1057,97 @@ migration is idempotent and treats quarantine as installed until proven
 otherwise. Never manually remove
 `mem9-on-aws-workload-boundary-quarantine` during recovery.
 
+### Moving the Responses route to another region
+
+Two policies limit the Responses-route project: the workload boundary admits it
+and the always-on mem9 server's task role grants it. Each holds one project.
+Whichever changes first, running llm-proxy tasks are denied for a while.
+Upstream durable ingest treats that 403 as permanent and drops the job. For a
+move with no lost jobs, admit and grant both projects while ECS replaces tasks.
+Two optional variables do this:
+
+- `WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION`: the boundary's second slot,
+  and the region of the second task-role grant.
+- `MEM9_BEDROCK_PROJECT_OPENAI_NEXT`: that region's project id, for the
+  second task-role grant.
+
+Synthesis fails if only one is set, if the id is malformed, or if the region
+equals `MEM9_LLM_RESPONSES_REGION`. Only the mem9 server gets the extra grant.
+The consolidation planner and cleanup tasks are batch work. A run that starts on
+the old project and is denied after the swap only defers to the next run.
+
+The example below moves `us-west-2` to `us-east-1`. Each rollout follows the
+maintenance procedure above: `DEPLOYMENT_MAINTENANCE_PAUSED=true` and a clean
+default-branch checkout. The rollout resumes deployments when it finishes. Set
+repository variables only while deployments are paused. A deploy that ran on a
+partly updated set would fail its preflight, or synthesize a grant for a
+project that does not exist.
+
+```bash
+# 1. Create the new region's Mantle Project. NEW_PROJECT_ID is its ProjectId
+#    output; OLD_PROJECT_ID is the current MEM9_BEDROCK_PROJECT_OPENAI.
+PROJECT_REGION=us-east-1 scripts/deploy-bedrock-mantle-project.sh
+
+# 2. Admit and grant the new project beside the old one. Deployments paused.
+#    .env keeps MEM9_LLM_RESPONSES_REGION=us-west-2 and adds both
+#    WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=us-east-1 and
+#    MEM9_BEDROCK_PROJECT_OPENAI_NEXT=$NEW_PROJECT_ID; they are set together.
+gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-east-1
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body "$NEW_PROJECT_ID"
+WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
+  scripts/rollout-workload-permissions-boundary.sh   # boundary: old + new
+gh workflow run "Infra CI" --ref main                # role: old + new; route: old
+
+# 3. Swap the route. The old project becomes the second grant. Pause first.
+gh variable set DEPLOYMENT_MAINTENANCE_PAUSED --body true
+gh variable set MEM9_LLM_RESPONSES_REGION --body us-east-1
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI --body "$NEW_PROJECT_ID"
+gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-west-2
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body "$OLD_PROJECT_ID"
+gh variable set DEPLOYMENT_MAINTENANCE_PAUSED --body false
+gh workflow run "Infra CI" --ref main                # role: old + new; route: new
+
+# 4. Once no Mem9Server task from the pre-swap task definition is still
+#    running, drop the old project. The boundary goes first. Deployments paused.
+#    .env sets MEM9_LLM_RESPONSES_REGION=us-east-1 and no
+#    WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION.
+gh variable delete WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION
+gh variable delete MEM9_BEDROCK_PROJECT_OPENAI_NEXT
+WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
+  scripts/rollout-workload-permissions-boundary.sh   # boundary: new
+gh workflow run "Infra CI" --ref main                # role: new
+```
+
+Every running task stays inside both the boundary and its role throughout:
+
+- **Step 2:** the boundary admits the new project before any role grants it.
+  The deploy adds the new grant while tasks still call the old project.
+- **Step 3:** the role's set of projects does not change. Tasks from the
+  replaced definition keep calling the old project, and new tasks call the new
+  one.
+- **Step 4:** the boundary drops the old project only after nothing calls it.
+  The later deploy removes a grant the boundary already denies.
+
+Step 4 must run the rollout before the deploy. With the variables deleted, the
+deploy's preflight expects the one-slot boundary, so it fails against the
+two-slot boundary.
+
+Each preflight reads the same repository variables. The verifier compares
+resource lists as sets, so step 3's swapped names verify against step 2's
+boundary. The live task-role verifiers derive their expected policy from the
+server task definition. `LLM_PROXY_RESPONSES_NEXT_REGION` and
+`LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT` record the extra grant there; the
+proxy does not read them. A role with the extra grant but no record fails
+verification, and so does a record without the grant.
+
+The boundary deploy script exits 2 before any stack call when the next region is
+malformed or equals the application or current Responses region. It exits 1
+when that region has no Mantle Project stack. Two slots fit the 6144-character
+managed-policy quota with the default decision-artifact bucket. A custom
+`MEM9_DECISION_ARTIFACT_BUCKET` longer than 28 characters can exceed the quota,
+depending on region and project-id lengths. The script checks the worst-case
+size and exits 2 before any stack call.
+
 The operator-only Gateway source-condition canary uses
 `scripts/lib/gateway-runtime-canary-resources.mjs` to render the fixture in
 `scripts/test-fixtures/gateway-runtime-canary/`. The raw template is a compiler
