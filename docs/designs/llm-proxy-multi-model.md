@@ -106,6 +106,30 @@ resource, and Mantle projects are regional (different ids per region):
 - `bedrock-mantle:CallWithBearerToken` is already `Resource: "*"` in both the
   task role and the boundary ceiling — no change.
 
+### Moving the Responses route to another region
+
+The boundary has one Responses-route slot, so updating it before or after the
+application deploy leaves a window in which running tasks call a project the
+boundary denies. Upstream durable ingest treats that 403 as permanent and drops
+the job. The temporary `NextOpenAiBedrockProjectArn` slot closes the window by
+admitting both projects while ECS replaces tasks:
+
+1. Create the new region's project:
+   `PROJECT_REGION=us-east-1 scripts/deploy-bedrock-mantle-project.sh`.
+2. Admit both projects. With `MEM9_LLM_RESPONSES_REGION` still on the old region,
+   set `WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION` to the new region in
+   `.env` and as a repository variable, then run the guarded boundary rollout.
+3. Switch the application: set the repository variables
+   `MEM9_LLM_RESPONSES_REGION` and `MEM9_BEDROCK_PROJECT_OPENAI` to the new
+   region and project id, set `WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION` to
+   the old region, and deploy. The boundary still admits both projects.
+4. After every old task has drained and in-flight ingest jobs have finished,
+   set `MEM9_LLM_RESPONSES_REGION` to the new region in `.env`, clear
+   `WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION` in `.env` and the repository
+   variables, and run the guarded rollout again. This drops the old project.
+
+The README runbook gives the exact commands.
+
 The checked-in default posture remains GLM-5 in the `sst.config.ts` application
 region. No fallback-region grant is exercised until an operator both configures
 the OpenAI project and selects the GPT model.

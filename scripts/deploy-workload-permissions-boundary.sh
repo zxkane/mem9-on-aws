@@ -210,6 +210,48 @@ else
   echo "Responses-route Mantle project not deployed in ${openai_project_region}; boundary unchanged."
 fi
 
+# Optional, temporary second Responses-route project, set only while the route
+# migrates between regions so the boundary admits the old and new projects
+# together and neither deploy order leaves a running proxy denied. Unlike the
+# slot above, an explicit request is never silently "off": a region that would
+# duplicate an admitted ARN, or one with no project stack, fails closed.
+next_openai_project_region="${WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION:-}"
+next_openai_bedrock_project_arn=""
+if [[ -n "$next_openai_project_region" ]]; then
+  if [[ ! "$next_openai_project_region" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]]; then
+    echo "Next Responses-route region is malformed; no mutation was attempted." >&2
+    exit 2
+  fi
+  if [[ "$next_openai_project_region" == "$application_region" ||
+        "$next_openai_project_region" == "$openai_project_region" ]]; then
+    echo "Next Responses-route region must differ from the application and current Responses regions; no mutation was attempted." >&2
+    exit 2
+  fi
+  next_openai_bedrock_project_arn="$(read_bedrock_project_arn "$next_openai_project_region")" || exit 1
+  if [[ -z "$next_openai_bedrock_project_arn" ]]; then
+    echo "Next Responses-route Mantle project is not deployed in ${next_openai_project_region}; no mutation was attempted." >&2
+    exit 1
+  fi
+  echo "Next Responses-route Mantle project admitted (${next_openai_project_region})."
+fi
+
+# The 6144-character managed-policy quota is not adjustable. Size the document
+# at the longest revision the guarded updater can mint before any stack call:
+# two Responses-route slots plus a long custom bucket can exceed it, and
+# CloudFormation would only discover that mid-update inside the quarantine.
+if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" \
+    WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+    WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
+    WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET="$decision_artifact_bucket_name" \
+    WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN="$openai_bedrock_project_arn" \
+    WORKLOAD_BOUNDARY_NEXT_OPENAI_BEDROCK_PROJECT_ARN="$next_openai_bedrock_project_arn" \
+    WORKLOAD_BOUNDARY_PARTITION="$partition" \
+      node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --quota \
+      </dev/null >/dev/null; then
+  echo "Boundary document does not fit the IAM managed-policy quota; no mutation was attempted." >&2
+  exit 2
+fi
+
 if ! aws cloudformation validate-template \
   --template-body "file://$template_file" \
   --region "$region" >/dev/null 2>&1; then
@@ -294,6 +336,7 @@ verify_boundary_policy_at_base() {
       WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
       WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET="$decision_artifact_bucket_name" \
       WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN="$openai_bedrock_project_arn" \
+      WORKLOAD_BOUNDARY_NEXT_OPENAI_BEDROCK_PROJECT_ARN="$next_openai_bedrock_project_arn" \
       WORKLOAD_BOUNDARY_PARTITION="$partition" \
       WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
         node "$temp_dir/scripts/verify-workload-permissions-boundary.mjs" \
@@ -351,6 +394,7 @@ verify_boundary_policy() {
     WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
     WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET="$decision_artifact_bucket_name" \
     WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN="$openai_bedrock_project_arn" \
+    WORKLOAD_BOUNDARY_NEXT_OPENAI_BEDROCK_PROJECT_ARN="$next_openai_bedrock_project_arn" \
     WORKLOAD_BOUNDARY_PARTITION="$partition" \
     WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
       node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" \
@@ -728,6 +772,7 @@ if [[ $describe_exit -eq 0 ]]; then
       "ParameterKey=BedrockProjectArn,ParameterValue=$bedrock_project_arn" \
       "ParameterKey=DecisionArtifactBucketName,ParameterValue=$decision_artifact_bucket_name" \
       "ParameterKey=OpenAiBedrockProjectArn,ParameterValue=$openai_bedrock_project_arn" \
+      "ParameterKey=NextOpenAiBedrockProjectArn,ParameterValue=$next_openai_bedrock_project_arn" \
       "ParameterKey=PolicyRevision,ParameterValue=$policy_revision" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$region" >/dev/null 2>&1
@@ -757,6 +802,7 @@ elif grep -qi "does not exist" <<<"$describe_output"; then
       "ParameterKey=BedrockProjectArn,ParameterValue=$bedrock_project_arn" \
       "ParameterKey=DecisionArtifactBucketName,ParameterValue=$decision_artifact_bucket_name" \
       "ParameterKey=OpenAiBedrockProjectArn,ParameterValue=$openai_bedrock_project_arn" \
+      "ParameterKey=NextOpenAiBedrockProjectArn,ParameterValue=$next_openai_bedrock_project_arn" \
       "ParameterKey=PolicyRevision,ParameterValue=r1" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$region" \

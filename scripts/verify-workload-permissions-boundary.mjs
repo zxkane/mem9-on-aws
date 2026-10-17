@@ -6,6 +6,7 @@ import {
   verifyGatewayBoundaryPolicyDocument,
   verifyObserverBoundaryPolicyDocument,
   verifyQuarantinePolicy,
+  worstCaseBoundaryPolicySize,
 } from "./lib/workload-permissions-boundary.mjs";
 import {gatewayBoundaryProbeCases,gatewayBoundaryVerificationPlan} from './lib/gateway-workload-boundary.mjs';
 import {observerBoundaryProbeCases} from './lib/observer-workload-boundary.mjs';
@@ -26,9 +27,24 @@ try {
       process.env.WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET,
     openAiBedrockProjectArn:
       process.env.WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN || "",
+    nextOpenAiBedrockProjectArn:
+      process.env.WORKLOAD_BOUNDARY_NEXT_OPENAI_BEDROCK_PROJECT_ARN || "",
     partition: process.env.WORKLOAD_BOUNDARY_PARTITION,
     policyRevision: process.env.WORKLOAD_BOUNDARY_POLICY_REVISION,
   };
+  if (process.argv[2] === '--quota') {
+    try {
+      process.stdout.write(`${worstCaseBoundaryPolicySize(contract)}\n`);
+    } catch (error) {
+      process.stderr.write(
+        /size quota/u.test(error?.message ?? "")
+          ? "Workload permissions-boundary would exceed the IAM managed-policy size quota.\n"
+          : "Workload permissions-boundary contract is invalid.\n",
+      );
+      process.exit(2);
+    }
+    process.exit(0);
+  }
   if (process.argv[2] === '--gateway-probes') {
     process.stdout.write(JSON.stringify(gatewayBoundaryProbeCases(contract))+'\n');
     process.exit(0);

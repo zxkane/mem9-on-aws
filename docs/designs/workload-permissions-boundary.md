@@ -202,6 +202,26 @@ last possible point, then rechecks quarantine before deleting it. This narrows
 the cross-system observation-to-mutation window but does not make it atomic; the
 trusted-writer and no-concurrent-settings-change assumptions are required.
 
+Mantle inference is pinned to exact project ARNs: the application-region
+project, the optional Responses-route project (`OpenAiBedrockProjectArn`), and a
+second, temporary Responses-route slot (`NextOpenAiBedrockProjectArn`). The
+temporary slot exists only for moving the Responses route to another region.
+With a single slot, any order of boundary update and application deploy leaves
+a window where running llm-proxy tasks call a project the boundary denies. That
+403 is a permanent failure to upstream durable ingest, so the job is lost. With
+both slots set, the boundary admits the old and new projects while tasks are
+replaced. An empty slot is removed with `AWS::NoValue`, so the document is
+byte-identical to the one-slot shape. The deploy script fails closed when the
+next region equals the application or current Responses region, or has no
+project stack. The verifier compares resource lists as sets, so the two slots
+verify in either order. That lets CI swap the names when the application
+switches regions. Two maximum-length slots fit the 6144-character managed-policy
+quota at the worst-case revision with the default decision-artifact bucket
+(6121 characters with 14-character regions). A custom bucket longer than 28
+characters can exceed the quota; the bucket name renders four times. The
+contract library therefore refuses any document over the quota. The deploy script checks the worst-case size before any stack call and
+exits 2.
+
 The managed policy has `DeletionPolicy: Retain` and
 `UpdateReplacePolicy: Retain`. Its fixed name is functional: the deploy-role
 conditions, rollout verifier, and SST transform must all reference one stable

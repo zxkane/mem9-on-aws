@@ -1057,6 +1057,52 @@ migration is idempotent and treats quarantine as installed until proven
 otherwise. Never manually remove
 `mem9-on-aws-workload-boundary-quarantine` during recovery.
 
+### Moving the Responses route to another region
+
+The boundary admits exactly one Responses-route Mantle project. Whichever runs
+first, the boundary update or the application deploy, running llm-proxy tasks
+are denied for a while. Upstream durable ingest treats that 403 as permanent and
+drops the job. For a move with no lost jobs, admit both projects through the
+temporary `WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION` slot. The example below
+moves `us-west-2` to `us-east-1`. Each rollout follows the maintenance procedure
+above (`DEPLOYMENT_MAINTENANCE_PAUSED=true`, a clean default-branch checkout).
+While deployments are paused, change each repository variable before its
+rollout so no CI preflight sees the boundary half-updated.
+
+```bash
+# 1. Create the new region's Mantle Project.
+PROJECT_REGION=us-east-1 scripts/deploy-bedrock-mantle-project.sh
+
+# 2. Admit both projects. .env keeps MEM9_LLM_RESPONSES_REGION=us-west-2 and adds
+#    WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=us-east-1.
+gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-east-1
+WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
+  scripts/rollout-workload-permissions-boundary.sh
+
+# 3. Switch the application. The old region stays admitted as the next slot.
+gh variable set MEM9_LLM_RESPONSES_REGION --body us-east-1
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI --body <us-east-1-project-id>
+gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-west-2
+gh workflow run "Infra CI" --ref main
+
+# 4. After every old task has drained and in-flight ingest jobs have finished,
+#    drop the old project. .env now sets MEM9_LLM_RESPONSES_REGION=us-east-1 and
+#    no WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION.
+gh variable delete WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION
+WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
+  scripts/rollout-workload-permissions-boundary.sh
+```
+
+The deploy script refuses the next slot before any stack call, exiting 2, when
+the region is malformed or equals the application or current Responses region.
+It exits 1 when that region has no Mantle Project stack. The production and
+preview preflights read the same repository variable, and the verifier compares
+resource lists as sets, so step 3's swapped names verify against step 2's
+boundary. Two slots fit the 6144-character managed-policy quota with the default
+decision-artifact bucket. A custom `MEM9_DECISION_ARTIFACT_BUCKET` longer than
+28 characters can exceed the quota, depending on region and project-id lengths.
+The script checks the worst-case size and exits 2 before any stack call.
+
 The operator-only Gateway source-condition canary uses
 `scripts/lib/gateway-runtime-canary-resources.mjs` to render the fixture in
 `scripts/test-fixtures/gateway-runtime-canary/`. The raw template is a compiler
