@@ -1084,15 +1084,16 @@ partly updated set would fail its preflight, or synthesize a grant for a
 project that does not exist.
 
 ```bash
-# 1. Create the new region's Mantle Project.
+# 1. Create the new region's Mantle Project. NEW_PROJECT_ID is its ProjectId
+#    output; OLD_PROJECT_ID is the current MEM9_BEDROCK_PROJECT_OPENAI.
 PROJECT_REGION=us-east-1 scripts/deploy-bedrock-mantle-project.sh
 
 # 2. Admit and grant the new project beside the old one. Deployments paused.
 #    .env keeps MEM9_LLM_RESPONSES_REGION=us-west-2 and adds both
 #    WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION=us-east-1 and
-#    MEM9_BEDROCK_PROJECT_OPENAI_NEXT=<us-east-1-project-id>; they are set together.
+#    MEM9_BEDROCK_PROJECT_OPENAI_NEXT=$NEW_PROJECT_ID; they are set together.
 gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-east-1
-gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body <us-east-1-project-id>
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body "$NEW_PROJECT_ID"
 WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
   scripts/rollout-workload-permissions-boundary.sh   # boundary: old + new
 gh workflow run "Infra CI" --ref main                # role: old + new; route: old
@@ -1100,9 +1101,9 @@ gh workflow run "Infra CI" --ref main                # role: old + new; route: o
 # 3. Swap the route. The old project becomes the second grant. Pause first.
 gh variable set DEPLOYMENT_MAINTENANCE_PAUSED --body true
 gh variable set MEM9_LLM_RESPONSES_REGION --body us-east-1
-gh variable set MEM9_BEDROCK_PROJECT_OPENAI --body <us-east-1-project-id>
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI --body "$NEW_PROJECT_ID"
 gh variable set WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION --body us-west-2
-gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body <us-west-2-project-id>
+gh variable set MEM9_BEDROCK_PROJECT_OPENAI_NEXT --body "$OLD_PROJECT_ID"
 gh variable set DEPLOYMENT_MAINTENANCE_PAUSED --body false
 gh workflow run "Infra CI" --ref main                # role: old + new; route: new
 
