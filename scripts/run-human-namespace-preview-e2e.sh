@@ -88,6 +88,10 @@ for _ in $(seq 1 12); do
 done
 [[ "$EXIT" == "0" ]] || {
   grep -E '^human namespace preview acceptance failed \([A-Za-z][A-Za-z0-9_]{0,63}\)$' "$OUTPUT" >&2 || true
+  # ECS-reported stop codes only; no task output or memory content.
+  aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" --region "$REGION" \
+    --query 'tasks[0].{stopCode:stopCode,stoppedReason:stoppedReason,exitCode:containers[0].exitCode,containerReason:containers[0].reason}' \
+    --output json >&2 || true
   echo "::error::Human namespace acceptance task failed"
   exit 1
 }
