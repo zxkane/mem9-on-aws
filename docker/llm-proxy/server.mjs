@@ -46,7 +46,7 @@ const DEFAULT_MAX_TOKENS = 4096;
 // Keep chat and Responses request translation and token budgets separately
 // configurable. Validate complete and truncated replies with synthetic
 // fixtures for the selected model, endpoint, and region.
-const DEFAULT_RESPONSES_MODEL_PREFIXES = ["openai.gpt-5.6-"];
+const DEFAULT_RESPONSES_MODEL_PREFIXES = ["openai.gpt-5.6-", "openai.gpt-6-"];
 const DEFAULT_RESPONSES_REGION = "us-west-2";
 export const DEFAULT_REASONING_EFFORT = "high";
 const DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS = 16384;
@@ -270,6 +270,9 @@ export function translateChatToResponses(payload, cfg) {
     input,
     reasoning: { effort },
     max_output_tokens: maxOutputTokens,
+    // The Responses API stores input and output for 30 days by default;
+    // memory content must never be kept for later retrieval.
+    store: false,
   };
 }
 

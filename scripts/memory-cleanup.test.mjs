@@ -1650,7 +1650,7 @@ describe("LLM route", () => {
     // These near-miss IDs do not match the configured Responses prefix.
     // Pin their chat-route budget explicitly so route changes require
     // a deliberate update to this test.
-    for (const model of ["openai.gpt-5.6terra", "openai.gpt-6-terra", "OPENAI.GPT-5.6-TERRA"]) {
+    for (const model of ["openai.gpt-5.6terra", "openai.gpt-6luna", "OPENAI.GPT-5.6-TERRA"]) {
       const { calls, fetchImpl } = recorder([chatReply('{"verdicts":[]}')]);
       await build({ model }, { fetchImpl })("sys", []);
       // Documents the CURRENT behavior so a future prefix change is a visible

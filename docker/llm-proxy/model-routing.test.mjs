@@ -45,7 +45,7 @@ const cfg = {
   maxTokens: 4096,
   tokenTtlSeconds: 43200,
   refreshIntervalMs: 60 * 60 * 1000,
-  responsesModelPrefixes: ["openai.gpt-5.6-"],
+  responsesModelPrefixes: ["openai.gpt-5.6-", "openai.gpt-6-"],
   responsesRegion: "us-west-2",
   responsesBase: "https://mantle-west.test/openai/v1",
   reasoningEffort: "high",
@@ -75,9 +75,9 @@ function responsesReply(overrides = {}) {
 }
 
 describe("readConfig responses-route fields", () => {
-  it("defaults: gpt-5.6 prefix, us-west-2, derived base, high effort, 16384 cap", () => {
+  it("defaults: gpt-5.6 and gpt-6 prefixes, us-west-2, derived base, high effort, 16384 cap", () => {
     const c = readConfig({ AWS_REGION: "ap-southeast-1" });
-    expect(c.responsesModelPrefixes).toEqual(["openai.gpt-5.6-"]);
+    expect(c.responsesModelPrefixes).toEqual(["openai.gpt-5.6-", "openai.gpt-6-"]);
     expect(c.responsesRegion).toBe("us-west-2");
     expect(c.responsesBase).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1");
     expect(c.reasoningEffort).toBe("high");
@@ -123,7 +123,7 @@ describe("resolveRoute (TC-MMROUTE-001)", () => {
     expect(r.url).toBe("https://mantle-tokyo.test/v1/chat/completions");
   });
 
-  it.each(["openai.gpt-5.6-terra", "openai.gpt-5.6-luna"])(
+  it.each(["openai.gpt-5.6-terra", "openai.gpt-5.6-luna", "openai.gpt-6-luna"])(
     "routes %s to the responses route in the responses region",
     (model) => {
       const r = resolveRoute(model, cfg);
@@ -145,6 +145,11 @@ describe("translateChatToResponses", () => {
     expect(out.input).toEqual([{ role: "user", content: "classify this" }]);
     expect(out.reasoning).toEqual({ effort: "high" });
     expect(out.max_output_tokens).toBe(16384);
+  });
+
+  it("TC-MMROUTE-014: every Responses request disables storage", () => {
+    expect(translateChatToResponses(terraChat, cfg).store).toBe(false);
+    expect(translateChatToResponses({ ...terraChat, store: true }, cfg).store).toBe(false);
   });
 
   it("joins multiple system messages with newlines", () => {
