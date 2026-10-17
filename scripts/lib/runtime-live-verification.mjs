@@ -34,9 +34,15 @@ export function runtimeServerContract(definition,meta,tenantSecret){
   ]};
   const proxy=environment(definition.containerDefinitions.find(c=>c.name==='llm-proxy'));
   const project=(region,id)=>`arn:aws:bedrock-mantle:${region}:${meta.account}:project/${id}`;
+  // A temporary second Responses-route grant exists only while the route moves
+  // regions, and only when the task definition records it; both markers or none.
+  const nextRegion=proxy.LLM_PROXY_RESPONSES_NEXT_REGION,nextProject=proxy.LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT;
+  if((nextRegion!==undefined||nextProject!==undefined)&&(!/^[a-z]{2}(-gov)?-[a-z]+-[0-9]$/.test(nextRegion??'')||
+    !/^(default|proj_[a-z0-9]{1,20})$/.test(nextProject??'')||[meta.region,proxy.LLM_PROXY_RESPONSES_REGION].includes(nextRegion)))fail('RuntimeResponsesMigrationMismatch');
   const task={Version:'2012-10-17',Statement:[
     {Effect:'Allow',Action:['bedrock-mantle:CreateInference'],Resource:[proxy.LLM_PROXY_OPENAI_PROJECT?project(meta.region,proxy.LLM_PROXY_OPENAI_PROJECT):'*',
-      ...(proxy.LLM_PROXY_RESPONSES_OPENAI_PROJECT?[project(proxy.LLM_PROXY_RESPONSES_REGION,proxy.LLM_PROXY_RESPONSES_OPENAI_PROJECT)]:[])]},
+      ...(proxy.LLM_PROXY_RESPONSES_OPENAI_PROJECT?[project(proxy.LLM_PROXY_RESPONSES_REGION,proxy.LLM_PROXY_RESPONSES_OPENAI_PROJECT)]:[]),
+      ...(nextProject?[project(nextRegion,nextProject)]:[])]},
     {Effect:'Allow',Action:['bedrock-mantle:CallWithBearerToken','bedrock-mantle:GetProject','bedrock-mantle:ListProjects','bedrock-mantle:ListTagsForResource'],Resource:['*']},
     {Effect:'Allow',Action:['ssmmessages:CreateControlChannel','ssmmessages:CreateDataChannel','ssmmessages:OpenControlChannel','ssmmessages:OpenDataChannel'],Resource:['*']},
   ]};

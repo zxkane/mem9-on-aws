@@ -122,6 +122,19 @@ const BEDROCK_PROJECT_OPENAI = process.env.MEM9_BEDROCK_PROJECT_OPENAI || "";
 // agrees, so the task grant and boundary Project cannot silently diverge.
 const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 
+// Temporary second Responses-route project, set only while the route moves to
+// another region (README: "Moving the Responses route to another region"). The
+// mem9 server is always on: when a deploy swaps the route, the task role is
+// rewritten while the previous tasks still serve on the old project, so the
+// role grants both until those tasks drain. The same region variable selects
+// the boundary's second slot. Both unset → no grant and no env, byte-identical
+// to the one-project shape. Batch tasks (planner, cleanup) deliberately keep a
+// single grant: a stale run only defers.
+const NEXT_RESPONSES_REGION =
+  process.env.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION || "";
+const BEDROCK_PROJECT_OPENAI_NEXT =
+  process.env.MEM9_BEDROCK_PROJECT_OPENAI_NEXT || "";
+
 export interface RuntimeTaskDefinitionView {
   arn:Output<string>;
   containerDefinitions:Output<string>;
@@ -166,6 +179,23 @@ export function ecs(
   if(productionExecution!==undefined&&($app.stage!=='prod'||!runtime?.executionRoleArn))throw Error('ProductionExecutionRequiresRuntimeIdentity');
   if ($app.stage === "prod" && !BEDROCK_PROJECT) {
     throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
+  }
+  if (Boolean(NEXT_RESPONSES_REGION) !== Boolean(BEDROCK_PROJECT_OPENAI_NEXT)) {
+    throw new Error(
+      "WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION and MEM9_BEDROCK_PROJECT_OPENAI_NEXT must be set together",
+    );
+  }
+  if (
+    BEDROCK_PROJECT_OPENAI_NEXT &&
+    (!/^(default|proj_[a-z0-9]{1,20})$/.test(BEDROCK_PROJECT_OPENAI_NEXT) ||
+      !/^[a-z]{2}(-gov)?-[a-z]+-[0-9]$/.test(NEXT_RESPONSES_REGION) ||
+      NEXT_RESPONSES_REGION === RESPONSES_REGION)
+  ) {
+    // The application region is a deploy-time Output here; the boundary deploy
+    // script refuses that region for the same slot before any mutation.
+    throw new Error(
+      "The next Responses-route project must be a valid project id in a region other than the Responses region",
+    );
   }
   // GitHub exposes an unset repository secret as an empty string. Reject that
   // before registering any resources; sst.Secret accepts empty string values.
@@ -327,6 +357,11 @@ export function ecs(
                 $interpolate`arn:aws:bedrock-mantle:${RESPONSES_REGION}:${accountId()}:project/${BEDROCK_PROJECT_OPENAI}`,
               ]
             : []),
+          ...(BEDROCK_PROJECT_OPENAI_NEXT
+            ? [
+                $interpolate`arn:aws:bedrock-mantle:${NEXT_RESPONSES_REGION}:${accountId()}:project/${BEDROCK_PROJECT_OPENAI_NEXT}`,
+              ]
+            : []),
         ],
       },
       {
@@ -486,6 +521,15 @@ export function ecs(
           // Empty project → header omitted on that route only.
           LLM_PROXY_RESPONSES_REGION: RESPONSES_REGION,
           LLM_PROXY_RESPONSES_OPENAI_PROJECT: BEDROCK_PROJECT_OPENAI,
+          // Not read by the proxy: records the temporary migration grant above
+          // in the task definition, the only input the live task-role
+          // verifiers derive their expected policy from.
+          ...(BEDROCK_PROJECT_OPENAI_NEXT
+            ? {
+                LLM_PROXY_RESPONSES_NEXT_REGION: NEXT_RESPONSES_REGION,
+                LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT: BEDROCK_PROJECT_OPENAI_NEXT,
+              }
+            : {}),
         },
         logging: { retention: "1 month" },
         // /health flips to 200 only once the first Bedrock bearer is minted (a

@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {verifyRuntimeRoles} from './lib/runtime-live-verification.mjs';
+import {runtimeServerContract,verifyRuntimeRoles} from './lib/runtime-live-verification.mjs';
 
 function fixture(){
   const meta={stage:'prod',region:'ap-northeast-1',account:'123456789012',productionRuntime:true};
@@ -43,5 +43,50 @@ describe('production runtime role trust',()=>{
     f.iam.send=async command=>command.constructor.name==='GetRolePolicyCommand'&&command.input.PolicyName==='ProductionCredentialFence'
       ?{PolicyDocument:{Version:'2012-10-17',Statement:[]}}:send(command);
     await expect(verifyRuntimeRoles(f)).rejects.toThrow('RuntimeRolePolicyMismatch');
+  });
+});
+
+// The Responses route's temporary second project (region migration). The live
+// verifiers derive the expected task-role policy from the task definition, so
+// the extra grant is accepted only when the definition records both markers.
+describe('Responses-route migration grant',()=>{
+  const stage='pr-7',region='ap-northeast-1',account='123456789012';
+  const cluster='mem9-on-aws-pr-7-Mem9Cluster-abc',serverTaskDefinition=`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-Mem9Server:9`;
+  const tenantSecret=`arn:aws:secretsmanager:${region}:${account}:secret:mem9-on-aws-pr-7-tenant-api-key-abc`;
+  const base=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/${stage}`;
+  const meta={stage,region,account,cluster,serverTaskDefinition};
+  const definition=proxyEnvironment=>({taskDefinitionArn:serverTaskDefinition,family:cluster+'-Mem9Server',
+    containerDefinitions:[{name:'mnemo-server',environment:[{name:'MEM9_STAGE',value:stage},{name:'MNEMO_SCHEMA_MODE',value:'verify'},{name:'MNEMO_NAMESPACE_REQUIRED',value:'1'}],
+      secrets:Object.entries({MEM9_DB_SECRET:base+'/runtime/database-credential',MEM9_TENANT_ID:tenantSecret,
+        MNEMO_TRANSPORT_SIGNING_KEYS:base+'/namespace/transport-signing-keys',MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS:base+'/namespace/service-transport-signing-keys'}).map(([name,valueFrom])=>({name,valueFrom}))},
+      {name:'llm-proxy',environment:Object.entries(proxyEnvironment).map(([name,value])=>({name,value}))}]});
+  const project=(projectRegion,id)=>`arn:aws:bedrock-mantle:${projectRegion}:${account}:project/${id}`;
+  const current={LLM_PROXY_OPENAI_PROJECT:'proj_app',LLM_PROXY_RESPONSES_REGION:'us-east-1',LLM_PROXY_RESPONSES_OPENAI_PROJECT:'proj_new'};
+  const migrating={...current,LLM_PROXY_RESPONSES_NEXT_REGION:'us-west-2',LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT:'proj_old'};
+  const inference=contract=>contract.task.Statement.find(s=>s.Action.includes('bedrock-mantle:CreateInference')).Resource;
+
+  it('TC-IAM-BOUNDARY-112 expects exactly the recorded projects in each shape',()=>{
+    expect(inference(runtimeServerContract(definition(current),meta,tenantSecret)))
+      .toEqual([project(region,'proj_app'),project('us-east-1','proj_new')]);
+    expect(inference(runtimeServerContract(definition(migrating),meta,tenantSecret)))
+      .toEqual([project(region,'proj_app'),project('us-east-1','proj_new'),project('us-west-2','proj_old')]);
+  });
+
+  it.each([
+    ['a region without a project',{...current,LLM_PROXY_RESPONSES_NEXT_REGION:'us-west-2'}],
+    ['a project without a region',{...current,LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT:'proj_old'}],
+    ['a malformed project id',{...migrating,LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT:'proj_*'}],
+    ['the current Responses region',{...migrating,LLM_PROXY_RESPONSES_NEXT_REGION:'us-east-1'}],
+    ['the application region',{...migrating,LLM_PROXY_RESPONSES_NEXT_REGION:region}],
+  ])('TC-IAM-BOUNDARY-112 rejects a migration marker with %s',(_name,proxyEnvironment)=>{
+    expect(()=>runtimeServerContract(definition(proxyEnvironment),meta,tenantSecret)).toThrow('RuntimeResponsesMigrationMismatch');
+  });
+
+  it('TC-IAM-BOUNDARY-112 rejects a live extra grant the task definition does not record',async()=>{
+    const f=fixture(),recorded=runtimeServerContract(definition(current),meta,tenantSecret);
+    const live=runtimeServerContract(definition(migrating),meta,tenantSecret);
+    f.contract.task=live.task;
+    await expect(verifyRuntimeRoles(f)).resolves.toBeUndefined();
+    await expect(verifyRuntimeRoles({...f,contract:{...f.contract,task:recorded.task}})).rejects.toThrow('RuntimeRolePolicyMismatch');
   });
 });

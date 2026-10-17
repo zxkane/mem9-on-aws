@@ -322,6 +322,9 @@ afterEach(() => {
   delete process.env.MEM9_ECR_NAMESPACE;
   delete process.env.MEM9_BEDROCK_PROJECT;
   delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
+  delete process.env.MEM9_BEDROCK_PROJECT_OPENAI_NEXT;
+  delete process.env.MEM9_LLM_RESPONSES_REGION;
+  delete process.env.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION;
   delete process.env.MEM9_DURABLE_INGEST_ENABLED;
   delete process.env.MEM9_NAMESPACE_REQUIRED;
   delete process.env.SST_SECRET_SlackWebhookUrl;
@@ -523,6 +526,68 @@ describe("ecs stack", () => {
     const proxy = containers.find((c) => c.name === "llm-proxy");
     expect(proxy?.environment.LLM_PROXY_RESPONSES_OPENAI_PROJECT).toBe("proj_openai_west");
     expect(proxy?.environment.LLM_PROXY_RESPONSES_REGION).toBe("us-west-2");
+  });
+
+  // The temporary second Responses-route grant for a region migration.
+  const responsesGrants = () => {
+    const perms = services[0].args.permissions as { actions: string[]; resources: unknown[] }[];
+    return (perms.find((p) => p.actions.includes("bedrock-mantle:CreateInference"))?.resources ?? [])
+      .map((r) => String(materialize(r)));
+  };
+  const proxyEnvironment = () =>
+    (materialize(services[0].args.containers) as { name: string; environment: Record<string, string> }[])
+      .find((c) => c.name === "llm-proxy")?.environment ?? {};
+
+  it("TC-IAM-BOUNDARY-113: no next Responses vars leaves the role grant and proxy env unchanged", async () => {
+    installGlobals("prod");
+    process.env.MEM9_BEDROCK_PROJECT = "proj_app";
+    process.env.MEM9_BEDROCK_PROJECT_OPENAI = "proj_old";
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    expect(responsesGrants()).toHaveLength(2);
+    expect(responsesGrants().some((r) => r.includes("us-west-2") && r.endsWith("project/proj_old"))).toBe(true);
+    expect(Object.keys(proxyEnvironment()).filter((name) => name.includes("_NEXT_"))).toEqual([]);
+  });
+
+  it.each([
+    ["before the swap", "us-west-2", "proj_old", "us-east-1", "proj_new"],
+    ["after the swap", "us-east-1", "proj_new", "us-west-2", "proj_old"],
+  ])("TC-IAM-BOUNDARY-113: the next Responses vars grant the mem9 server both projects %s", async (_name, responsesRegion, project, nextRegion, nextProject) => {
+    installGlobals("prod");
+    process.env.MEM9_BEDROCK_PROJECT = "proj_app";
+    process.env.MEM9_LLM_RESPONSES_REGION = responsesRegion;
+    process.env.MEM9_BEDROCK_PROJECT_OPENAI = project;
+    process.env.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION = nextRegion;
+    process.env.MEM9_BEDROCK_PROJECT_OPENAI_NEXT = nextProject;
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const grants = responsesGrants();
+    expect(grants).toHaveLength(3);
+    expect(grants[0]).toMatch(/^arn:aws:bedrock-mantle:ap-northeast-1:[^:]+:project\/proj_app$/);
+    expect(grants[1]).toMatch(new RegExp(`^arn:aws:bedrock-mantle:${responsesRegion}:[^:]+:project/${project}$`));
+    expect(grants[2]).toMatch(new RegExp(`^arn:aws:bedrock-mantle:${nextRegion}:[^:]+:project/${nextProject}$`));
+    // The proxy keeps routing to the current project; the markers only record
+    // the extra grant for the live task-role verifiers.
+    expect(proxyEnvironment()).toMatchObject({
+      LLM_PROXY_RESPONSES_REGION: responsesRegion,
+      LLM_PROXY_RESPONSES_OPENAI_PROJECT: project,
+      LLM_PROXY_RESPONSES_NEXT_REGION: nextRegion,
+      LLM_PROXY_RESPONSES_NEXT_OPENAI_PROJECT: nextProject,
+    });
+  });
+
+  it.each([
+    ["only the region", { WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: "us-east-1" }, "must be set together"],
+    ["only the project", { MEM9_BEDROCK_PROJECT_OPENAI_NEXT: "proj_new" }, "must be set together"],
+    ["a malformed project", { WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: "us-east-1", MEM9_BEDROCK_PROJECT_OPENAI_NEXT: "proj_New" }, "valid project id"],
+    ["a malformed region", { WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: "us-east-1;", MEM9_BEDROCK_PROJECT_OPENAI_NEXT: "proj_new" }, "valid project id"],
+    ["the Responses region", { WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: "us-west-2", MEM9_BEDROCK_PROJECT_OPENAI_NEXT: "proj_new" }, "valid project id"],
+  ])("TC-IAM-BOUNDARY-113: refuses synthesis with %s", async (_name, env, message) => {
+    installGlobals("prod");
+    process.env.MEM9_BEDROCK_PROJECT = "proj_app";
+    Object.assign(process.env, env);
+    const ecs = await loadEcs();
+    expect(() => ecs(fakeDbOut())).toThrow(message);
   });
 
   it("TC-MMROUTE-060: without the OpenAI project no extra grant or project env appears", async () => {

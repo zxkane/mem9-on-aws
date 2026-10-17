@@ -219,8 +219,15 @@ switches regions. Two maximum-length slots fit the 6144-character managed-policy
 quota at the worst-case revision with the default decision-artifact bucket
 (6121 characters with 14-character regions). A custom bucket longer than 28
 characters can exceed the quota; the bucket name renders four times. The
-contract library therefore refuses any document over the quota. The deploy script checks the worst-case size before any stack call and
-exits 2.
+contract library therefore refuses any document over the quota. The deploy
+script checks the worst-case size before any stack call and exits 2.
+
+The boundary slot alone does not prevent the 403. The always-on mem9 server's
+task role is an identity policy with its own single Responses grant, and a
+deploy rewrites it while tasks from the previous definition are still serving.
+During the move the same region variable plus `MEM9_BEDROCK_PROJECT_OPENAI_NEXT`
+add a second, temporary task-role grant. The README runbook orders boundary,
+role, and route changes so every running task stays inside both policies.
 
 The managed policy has `DeletionPolicy: Retain` and
 `UpdateReplacePolicy: Retain`. Its fixed name is functional: the deploy-role

@@ -235,6 +235,18 @@ describe("standalone namespace cleanup task", () => {
     ]);
   });
 
+  it("TC-IAM-BOUNDARY-113: keeps the batch cleanup task on one Responses project during a region migration", async () => {
+    vi.stubEnv("WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION", "us-east-1");
+    vi.stubEnv("MEM9_BEDROCK_PROJECT_OPENAI_NEXT", "proj_next");
+    const { task } = await render();
+    const args = materialize(task.args);
+    expect(args.permissions[0].resources).toEqual([
+      "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_primary",
+      "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_responses",
+    ]);
+    expect(JSON.stringify(args.environment)).not.toContain("proj_next");
+  });
+
   it("omits an unconfigured Responses project without widening the primary grant", async () => {
     vi.stubEnv("MEM9_BEDROCK_PROJECT_OPENAI", "");
     const { task } = await render();
