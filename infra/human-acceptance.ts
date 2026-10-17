@@ -1,7 +1,15 @@
 import type { CognitoOutputs } from "./cognito";
 import type { DbOutputs } from "./db";
-import { workloadImage } from "./ecr";
+import { ecrImage } from "./ecr";
 import { resolveVpc } from "./vpc";
+
+// CI's build-human-acceptance-image job always publishes here, whether or not
+// the pull request rebuilt its workload images (which moves MEM9_ECR_NAMESPACE).
+export const HUMAN_ACCEPTANCE_REPOSITORY = "mem9-on-aws/preview/bootstrap";
+
+export function humanAcceptanceImage(tag: string) {
+  return ecrImage(HUMAN_ACCEPTANCE_REPOSITORY, tag);
+}
 
 export function humanAcceptance(
   cluster: sst.aws.Cluster,
@@ -20,10 +28,7 @@ export function humanAcceptance(
     architecture: "arm64",
     cpu: "1 vCPU",
     memory: "2 GB",
-    image: workloadImage(
-      "bootstrap",
-      process.env.MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG || "human-latest",
-    ),
+    image: humanAcceptanceImage(process.env.MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG || "human-latest"),
     environment: {
       AWS_REGION: region,
       MEM9_STAGE: $app.stage,
