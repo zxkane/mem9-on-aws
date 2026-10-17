@@ -1381,6 +1381,17 @@ verdict only when its anchor becomes dirty again, so the owner-only
 re-plans them through the normal path, reusing cached verdicts that are still
 valid and otherwise spending the ordinary model budget.
 
+A promoted planner moves to another certified contract with the owner-only
+`switch-model`, reached only through `run-production-canary.mjs`. That entry
+requires the checkout to be the current main, loads and verifies the deployed
+planner task and its role, and refuses a contract whose model, region or project
+differs from the planner's route settings, which are the only Mantle grants
+its role holds. The operator then installs the contract with `configure_planner`
+after taking execution and model control and the setup row. A new contract is a
+new planner context: every active memory is marked for audit, and the
+executor's existing context checks invalidate classifications and queued
+actions from the old context. No pause is needed, and budgets and usage stay.
+
 The daily model budget set by `configure-model` can be changed after promotion
 with the owner-only `set-model-budget`. It only replaces the stage and
 namespace ceilings: the requests limit is the operator's number and the token

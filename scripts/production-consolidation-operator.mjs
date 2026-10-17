@@ -48,7 +48,7 @@ function validModelRequests(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','census','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission','dailyModelRequests'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -56,7 +56,7 @@ export function parseProductionConsolidationRequest(raw){
   else if(request.expectedAdmission!==undefined)throw Error('UnexpectedReadmission');
   if(request.operation==='set-model-budget')validModelRequests(request.dailyModelRequests);
   else if(request.dailyModelRequests!==undefined)throw Error('UnexpectedPlannerModelBudget');
-  if(request.operation==='configure-model')validatePlannerModel(request.plannerModel);
+  if(['configure-model','switch-model'].includes(request.operation))validatePlannerModel(request.plannerModel);
   else if(request.plannerModel!==undefined)throw Error('UnexpectedPlannerModel');
   if(['begin-continuation','inspect-canary','resume-plan'].includes(request.operation)&&!/^[a-f0-9]{32}$/.test(request.attemptId??''))throw Error('CanaryAttemptRequired');
   if(request.attemptId!==undefined&&(!['begin-continuation','inspect-canary','resume-plan','canary','verify-canary','promote'].includes(request.operation)||!/^[a-f0-9]{32}$/.test(request.attemptId)))throw Error('UnexpectedCanaryAttempt');
@@ -250,7 +250,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -267,7 +267,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -495,6 +495,21 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2,$3,$4)',['stage',model.stage.limits,model.stage.slots,model.stage.unknown]);
         for(const namespace of config.targets){
           await db.query('SELECT mem9_maintenance.set_planner_model_budget($1,$2)',[namespace,model.namespace.limits]);
+          await db.query('SELECT mem9_maintenance.configure_planner($1,$2)',[namespace,{enabled:true,similarity:model.similarity,model:model.contract}]);
+        }
+        responseEvidence={modelContractHash:canaryEvidenceHash(model.contract)};
+      }else if(request.operation==='switch-model'){
+        // A promoted planner moves to another certified contract in place.
+        // The contract is part of the planner context, so every target is
+        // re-planned and queued actions from the old context are invalidated
+        // by the executor's context check; budgets and usage are kept.
+        await db.query('SELECT mem9_maintenance.lock_model()');
+        const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('PlannerModelSwitchRequiresPromotion');
+        const model=request.plannerModel;
+        for(const namespace of config.targets){
+          const current=await scalar(db,'SELECT policy AS result FROM mem9_maintenance.planner_policies WHERE namespace_id=$1',[namespace]);
+          if(!current?.model)throw Error('PlannerModelContractRequired');
           await db.query('SELECT mem9_maintenance.configure_planner($1,$2)',[namespace,{enabled:true,similarity:model.similarity,model:model.contract}]);
         }
         responseEvidence={modelContractHash:canaryEvidenceHash(model.contract)};

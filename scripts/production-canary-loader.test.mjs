@@ -1,5 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {loadProductionCanaryWorker,plannerModelStatements} from './lib/production-canary-delivery.mjs';
+import {plannerContractMatchesRoute} from './run-production-canary.mjs';
 
 function fixture(drift){
   const account='123456789012',region='ap-northeast-1',revision='a'.repeat(40),generation='b'.repeat(64),cluster='mem9-on-aws-prod-Fixture';
@@ -49,6 +50,7 @@ describe('production canary worker target loading',()=>{
     const f=fixture(),target=await loadProductionCanaryWorker(f.clients,f.options);
     expect(target.subnets).toEqual(['subnet-abcd']);expect(target.securityGroup).toBe('sg-abcd');
     expect(f.calls.filter(name=>name==='GetRoleCommand')).toHaveLength(2);
+    expect(target.plannerRoute).toBeUndefined();
   });
   it.each(['host','database','port'])('rejects %s drift before schedule creation',async drift=>{
     const f=fixture(drift);await expect(loadProductionCanaryWorker(f.clients,f.options)).rejects.toThrow('ProductionCanaryDeliveryFailed');
@@ -71,5 +73,16 @@ describe('planner model grant verification',()=>{
     expect(()=>plannerModelStatements({...context,kind:'executor',values})).toThrow();
     for(const drift of [{MEM9_BEDROCK_PROJECT:'proj_*'},{MEM9_LLM_RESPONSES_REGION:'*'},{AWS_REGION:'us-east-1'}])
       expect(()=>plannerModelStatements({...context,kind:'planner',values:{...values,...drift}})).toThrow();
+  });
+});
+describe('planner model switch route',()=>{
+  const route={model:'openai.gpt-example',region:'ap-northeast-1',project:'proj_app',responsesRegion:'us-east-1',openaiProject:'proj_responses'};
+  const contract={adapter:'mantle-responses-total-v1',model:'openai.gpt-example',region:'us-east-1',project:'proj_responses'};
+  it('accepts only the deployed planner model, region and project',()=>{
+    expect(plannerContractMatchesRoute(contract,route)).toBe(true);
+    expect(plannerContractMatchesRoute({...contract,adapter:'mantle-chat-total-v1',region:'ap-northeast-1',project:'proj_app'},route)).toBe(true);
+    for(const drift of [{model:'openai.other'},{region:'us-west-2'},{project:'proj_app'},{adapter:'mantle-chat-total-v1'}])
+      expect(plannerContractMatchesRoute({...contract,...drift},route)).toBe(false);
+    expect(plannerContractMatchesRoute(contract,undefined)).toBe(false);
   });
 });

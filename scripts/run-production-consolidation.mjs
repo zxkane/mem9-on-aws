@@ -176,7 +176,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
-    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(operation)?'admission':'inspection';
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(operation)?'admission':'inspection';
     const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
@@ -256,7 +256,7 @@ async function main(){
   if(process.argv[2]==='configure-model'){
     const plannerModel=await plannerModelRequest();
     const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),logs:new CloudWatchLogsClient({region}),sts:new STSClient({region}),iam:new IAMClient({region})};
-    try{process.stdout.write(JSON.stringify(await runProductionConsolidationTask(clients,{region,operation:'configure-model',plannerModel}))+'\n');}
+    try{process.stdout.write(JSON.stringify(await runProductionConsolidationTask(clients,{region,operation:process.argv[2],plannerModel}))+'\n');}
     finally{Object.values(clients).forEach(client=>client.destroy());}
     return;
   }

@@ -11,7 +11,7 @@ import {STSClient} from '@aws-sdk/client-sts';
 import {SchedulerClient} from '@aws-sdk/client-scheduler';
 import {CloudWatchLogsClient} from '@aws-sdk/client-cloudwatch-logs';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
-import {runProductionConsolidationTask} from './run-production-consolidation.mjs';
+import {runProductionConsolidationTask,plannerModelRequest} from './run-production-consolidation.mjs';
 import {loadProductionCanaryWorker,runProductionCanaryWake,recoverProductionCanaryDeliveries,quiesceProductionWorkers} from './lib/production-canary-delivery.mjs';
 import {loadMcpCanaryConfiguration,createMcpCanaryClient,sampleMcpCanaryCohort} from './lib/mcp-canary-sampler.mjs';
 import {runProductionCanaryFlow} from './lib/production-canary-flow.mjs';
@@ -128,8 +128,37 @@ export async function readmitProductionRelease(clients,{region}){
   return {phase:'readmitted',changed:result.changed,enabled:result.enabled,taskDefinitions:verified.taskDefinitions};
 }
 
+/** A contract is usable only on the exact model, region and project the deployed planner serves. */
+export function plannerContractMatchesRoute(contract,route){
+  const responses=contract?.adapter==='mantle-responses-total-v1';
+  return !!route&&typeof route.model==='string'&&contract.model===route.model&&
+    contract.region===(responses?route.responsesRegion:route.region)&&contract.project===(responses?route.openaiProject:route.project);
+}
+
+/**
+ * Switches a promoted planner to a newly certified contract on the deployed
+ * planner route, whose role grants the loader has just verified.
+ */
+export async function switchProductionPlannerModel(clients,{region,plannerModel}){
+  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
+  if(await gh(['api',`repos/${repository}/commits/main`,'--jq','.sha'])!==revision)throw Error('ProductionModelSwitchRequiresMain');
+  const planner=await loadProductionCanaryWorker(clients,{region,kind:'planner',revision});
+  if(!plannerContractMatchesRoute(plannerModel.contract,planner.plannerRoute))throw Error('PlannerModelRouteMismatch');
+  const result=await runProductionConsolidationTask(clients,{region,operation:'switch-model',plannerModel});
+  return {phase:'model-switched',modelContractHash:result.modelContractHash};
+}
+
 async function main(){
   if(process.env.STAGE!=='prod')throw Error('ProductionCanaryStageRequired');
+  if(process.argv[2]==='switch-model'){
+    const region=process.env.AWS_REGION||await resolveApplicationRegion();
+    const plannerModel=await plannerModelRequest();
+    const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region:'us-east-1'}),sts:new STSClient({region}),
+      scheduler:new SchedulerClient({region}),logs:new CloudWatchLogsClient({region})};
+    try{process.stdout.write(JSON.stringify({event:'production_canary',...await switchProductionPlannerModel(clients,{region,plannerModel})})+'\n');}
+    finally{Object.values(clients).forEach(client=>client.destroy());}
+    return;
+  }
   if(process.argv[2]==='readmit'){
     const region=process.env.AWS_REGION||await resolveApplicationRegion();
     const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region:'us-east-1'}),sts:new STSClient({region}),
