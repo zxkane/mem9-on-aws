@@ -38,7 +38,11 @@ it('JSON cannot supply native provenance to the actual owner getter',()=>{
  for(const value of [{},{cleanupVerified:true,rounds:[1,2,3]},{status:'OBSERVATIONS_COMPLETE',cleanupComplete:true},{kind:'boundary-read-only',verified:true}])expect(()=>inspectGatewayCanaryAwsEvidence(value)).toThrow(/NativeCompletion/);
 });
 it('runtime request without an owner channel fails before any network or cloud operation',async()=>{
- await expect(requestGatewayRuntimeSourceGate({boundary:expectedGatewayBoundaryPolicyDocument(contract),contract,policyVersion:'v1',socketPath:null})).rejects.toThrow(/NativeOwnerRequired/);
+ const expectedSource={commit:'a'.repeat(40),tree:'b'.repeat(40)};
+ await expect(requestGatewayRuntimeSourceGate({boundary:expectedGatewayBoundaryPolicyDocument(contract),contract,policyVersion:'v1',expectedSource,socketPath:null})).rejects.toThrow(/NativeOwnerRequired/);
+ // Without the caller's own source nothing is sent at all.
+ for(const source of [undefined,{commit:'a'.repeat(40)},{commit:'a'.repeat(40),tree:'B'.repeat(40)}])
+  await expect(requestGatewayRuntimeSourceGate({boundary:expectedGatewayBoundaryPolicyDocument(contract),contract,policyVersion:'v1',expectedSource:source,socketPath:'/nonexistent/gate.sock'})).rejects.toThrow(/ExpectedSource/);
 });
 it('real verifier CLI fails closed without a native broker; matrix output stays explicitly separate',async()=>{
  const env={PATH:process.env.PATH,WORKLOAD_BOUNDARY_ACCOUNT_ID:contract.accountId,WORKLOAD_BOUNDARY_APPLICATION_REGION:contract.applicationRegion,WORKLOAD_BOUNDARY_PARTITION:'aws',WORKLOAD_BOUNDARY_POLICY_REVISION:'r1',WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION:'v1'};
@@ -60,7 +64,7 @@ it('both real CI preflights retain their read-only invocation',async()=>{
  const workflow=await readFile(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8');
  expect([...workflow.matchAll(/deploy-workload-permissions-boundary\.sh --verify-only/g)]).toHaveLength(2);
 });
-it.each(['valid','denied','wrong-policy','old-request','partial'])('local broker framing: %s (synthetic transport, no native-origin claim)',async kind=>{
+it.each(['valid','denied','wrong-policy','old-request','partial','other-commit','other-tree'])('local broker framing: %s (synthetic transport, no native-origin claim)',async kind=>{
  const f=await fixture(),directory=await mkdtemp(join(tmpdir(),'gateway-gate-')),path=join(directory,'gate.sock');
  const server=net.createServer(socket=>{let chunks=[];socket.on('data',chunk=>{chunks.push(chunk);const bytes=Buffer.concat(chunks);if(bytes.length<4||bytes.length<bytes.readUInt32BE(0)+4)return;
   const request=JSON.parse(bytes.subarray(4));expect(request.argv.slice(0,2)).toEqual(['gateway-runtime','verify-source']);expect(request.argv).not.toContain('simulate-custom-policy');
@@ -68,6 +72,7 @@ it.each(['valid','denied','wrong-policy','old-request','partial'])('local broker
   const frame=Buffer.alloc(body.length+4);frame.writeUInt32BE(body.length);body.copy(frame,4);socket.end(kind==='partial'?frame.subarray(0,7):frame);
  });});
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(path,resolve);});await chmod(path,0o600);
- try{const promise=requestGatewayRuntimeSourceGate({...f.options,socketPath:path});if(kind==='valid')expect((await promise).kind).toBe('gateway-source-condition-verified');else await expect(promise).rejects.toThrow(/GatewayRuntimeSource/);}
+ const expectedSource=kind==='other-commit'?{...f.options.source,commit:'c'.repeat(40)}:kind==='other-tree'?{...f.options.source,tree:'c'.repeat(40)}:f.options.source;
+ try{const promise=requestGatewayRuntimeSourceGate({...f.options,expectedSource,socketPath:path});if(kind==='valid')expect((await promise).kind).toBe('gateway-source-condition-verified');else await expect(promise).rejects.toThrow(/GatewayRuntimeSource/);}
  finally{await new Promise(resolve=>server.close(resolve));await rm(directory,{recursive:true,force:true});}
 });

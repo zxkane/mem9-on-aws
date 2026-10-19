@@ -31,10 +31,13 @@ export function verifyGatewayRuntimeSourceMaterial(material,{boundary,contract,p
 
 /** Fixed request on the existing authenticated local runner channel. This
  * operation returns a native verification receipt, never an IAM simulation.
- * An ordinary shell with no owner broker cannot enable the source gate. */
-export async function requestGatewayRuntimeSourceGate({boundary,contract,policyVersion,socketPath=process.env.MEM9_BOOTSTRAP_REQUEST_SOCKET,signal}){
+ * An ordinary shell with no owner broker cannot enable the source gate.
+ * expectedSource is the caller's own checkout {commit,tree}: a receipt from a
+ * broker running any other source is rejected. */
+export async function requestGatewayRuntimeSourceGate({boundary,contract,policyVersion,expectedSource,socketPath=process.env.MEM9_BOOTSTRAP_REQUEST_SOCKET,signal}){
  const document=typeof boundary==='string'?JSON.parse(boundary):boundary;
  need(hash(document)===hash(expectedGatewayBoundaryPolicyDocument(contract))&&/^v[1-9][0-9]*$/.test(policyVersion),'Boundary');
+ need(exact(expectedSource,['commit','tree'])&&Object.values(expectedSource).every(h=>typeof h==='string'&&/^[a-f0-9]{40}$/.test(h)),'ExpectedSource');
  need(typeof socketPath==='string'&&isAbsolute(socketPath)&&Buffer.byteLength(socketPath)<104,'NativeOwnerRequired');
  const s=await lstat(socketPath),parent=await lstat(dirname(socketPath));
  need(s.isSocket()&&s.uid===process.getuid()&&(s.mode&511)===0o600&&parent.isDirectory()&&parent.uid===process.getuid()&&(parent.mode&511)===0o700&&await realpath(socketPath)===socketPath,'NativeOwnerRequired');
@@ -50,7 +53,7 @@ export async function requestGatewayRuntimeSourceGate({boundary,contract,policyV
   socket.on('end',()=>{try{
    need(size>=4&&size===buffer.readUInt32BE(0)+4,'Incomplete');const body=buffer.subarray(4,size),value=JSON.parse(body.toString('utf8'));need(Buffer.from(JSON.stringify(value)).equals(body)&&exact(value,['version','id','status','stdout','stderr'])&&value.version===1&&value.id===id&&value.status===0&&value.stderr==='','Rejected');
    const text=Buffer.from(value.stdout,'base64');need(text.toString('base64')===value.stdout,'Response');const receipt=JSON.parse(text.toString('utf8'));
-   need(Buffer.from(JSON.stringify(receipt)).equals(text)&&exact(receipt,['version','kind','policyHash','policyVersion','evidenceHash','handlerHash','source','coverage'])&&receipt.version===1&&receipt.kind==='gateway-source-condition-verified'&&receipt.policyHash===hash(document)&&receipt.policyVersion===policyVersion&&hash(receipt.coverage)===hash(['kms-source-condition','ec2-source-condition'])&&[receipt.evidenceHash,receipt.handlerHash].every(h=>/^[a-f0-9]{64}$/.test(h??''))&&exact(receipt.source,['commit','tree'])&&Object.values(receipt.source).every(h=>/^[a-f0-9]{40}$/.test(h)),'Receipt');finish(null,receipt);
+   need(Buffer.from(JSON.stringify(receipt)).equals(text)&&exact(receipt,['version','kind','policyHash','policyVersion','evidenceHash','handlerHash','source','coverage'])&&receipt.version===1&&receipt.kind==='gateway-source-condition-verified'&&receipt.policyHash===hash(document)&&receipt.policyVersion===policyVersion&&hash(receipt.coverage)===hash(['kms-source-condition','ec2-source-condition'])&&[receipt.evidenceHash,receipt.handlerHash].every(h=>/^[a-f0-9]{64}$/.test(h??''))&&exact(receipt.source,['commit','tree'])&&receipt.source.commit===expectedSource.commit&&receipt.source.tree===expectedSource.tree,'Receipt');finish(null,receipt);
   }catch(e){finish(e);}});
   socket.on('error',()=>finish(Error('GatewayRuntimeSourceTransport')));socket.on('close',()=>{if(!settled)finish(Error('GatewayRuntimeSourceIncomplete'));});
  });
