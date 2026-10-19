@@ -798,8 +798,12 @@ async function runBoundaryDeployMock({
   },
   nextOpenAiRegion,
   gatewayRuntimeRejected = false,
+  // The live Gateway boundary carries an extra statement until the update.
+  gatewayDriftBeforeUpdate = false,
   observerSimulationMutation = "",
   emptyObserverProbes = false,
+  // The reviewed Gateway statements no longer match the pinned accepted digest.
+  gatewayStatementsChanged = false,
   policyRevision = 'r1',
   matching = false,
   policyIdentityReadbackFails = false,
@@ -858,14 +862,21 @@ async function runBoundaryDeployMock({
   }
   const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
   await writeFile(gatewayExpectedPath, JSON.stringify(expectedGatewayBoundaryPolicyDocument({...boundaryContract,policyRevision})));
+  const gatewayDriftPath = join(directory, 'gateway-drift.json');
+  if (gatewayDriftBeforeUpdate) {
+    const drifted = expectedGatewayBoundaryPolicyDocument({...boundaryContract,policyRevision});
+    drifted.Statement.push({Effect:'Deny',Action:'sns:Publish',Resource:'*'});
+    await writeFile(gatewayDriftPath, JSON.stringify(drifted));
+  }
   await writeFile(gatewayProbesPath, JSON.stringify(gatewayBoundaryProbeCases(boundaryContract)));
   await writeFile(observerExpectedPath, JSON.stringify(expectedObserverBoundaryPolicyDocument({...boundaryContract,policyRevision})));
   await writeFile(observerProbesPath, JSON.stringify(observerBoundaryProbeCases(boundaryContract)));
-  if (emptyObserverProbes) {
+  if (emptyObserverProbes || gatewayStatementsChanged) {
     const nodePath = join(directory, 'node');
     await writeFile(nodePath, `#!/usr/bin/env bash
 for value in "$@"; do
-  if [[ "$value" == --observer-probes ]]; then printf '[]\\n'; exit 0; fi
+  if [[ "$value" == --observer-probes && "${emptyObserverProbes}" == true ]]; then printf '[]\\n'; exit 0; fi
+  if [[ "$value" == --gateway-accepted && "${gatewayStatementsChanged}" == true ]]; then exit 1; fi
 done
 exec "${process.execPath}" "$@"
 `);
@@ -1267,7 +1278,11 @@ case "$command" in
     ;;
   "iam get-policy-version")
     if [[ "$(arg --policy-arn "$@")" == *"mem9-on-aws-gateway-boundary" ]]; then
-      cat "$MOCK_GATEWAY_EXPECTED"
+      if [[ -n "$MOCK_GATEWAY_DRIFT" && ! -f "$MOCK_UPDATED" ]]; then
+        cat "$MOCK_GATEWAY_DRIFT"
+      else
+        cat "$MOCK_GATEWAY_EXPECTED"
+      fi
     elif [[ "$(arg --policy-arn "$@")" == *"mem9-on-aws-observer-boundary" ]]; then
       cat "$MOCK_OBSERVER_EXPECTED"
     elif [[ "$MOCK_POST_MUTATION_DRIFT" != "true" &&
@@ -1510,6 +1525,7 @@ esac
             boundarySimulationMalformedProbe,
           MOCK_BOUNDARY_SIMULATIONS: boundarySimulationsPath,
           MOCK_GATEWAY_EXPECTED: gatewayExpectedPath,
+          MOCK_GATEWAY_DRIFT: gatewayDriftBeforeUpdate ? gatewayDriftPath : '',
           MOCK_GATEWAY_PROBES: gatewayProbesPath,
           MOCK_OBSERVER_EXPECTED: observerExpectedPath,
           MOCK_OBSERVER_PROBES: observerProbesPath,
@@ -8445,10 +8461,37 @@ describe("operator entry point", { timeout: 10000 }, () => {
     expect(simulations).toHaveLength(46);
     expect(simulations.some(c=>c.includes('Function-fixture')&&c.includes('ContextKeyName=lambda:SourceFunctionArn'))).toBe(false);
   });
-  it('R2 missing native evidence holds without manufacturing a new policy revision',async()=>{
+  it('R2 an unchanged Gateway boundary needs no native evidence and is not rewritten',async()=>{
     const f=await runBoundaryDeployMock({matching:true,guarded:true,policyRevision:'r'+'7'.repeat(20),gatewayRuntimeRejected:true});
-    expect(f.result.status).toBe(1);expect(f.result.stderr).toContain('does not authorize a boundary rewrite');
+    expect(f.result.status,f.result.stderr).toBe(0);
     expect(f.calls.some(c=>/^cloudformation (?:update|create)-stack/.test(c))).toBe(false);
+  });
+  it('TC-IAM-BOUNDARY-114 rewrites a workload boundary without native evidence while the Gateway boundary is unchanged',async()=>{
+    const f=await runBoundaryDeployMock({guarded:true,gatewayRuntimeRejected:true});
+    expect(f.result.status,f.result.stderr).toBe(0);
+    expect(f.calls.some(c=>/^cloudformation update-stack/.test(c))).toBe(true);
+    expect(f.result.stderr).not.toContain('runtime verification is required');
+  });
+  it('TC-IAM-BOUNDARY-116 keeps native evidence mandatory for changed Gateway statements already written by an earlier run',async()=>{
+    // An aborted earlier rollout leaves the new statements live, so live state
+    // matches the reviewed document; only the pinned digest withholds the waiver.
+    const f=await runBoundaryDeployMock({guarded:true,gatewayRuntimeRejected:true,gatewayStatementsChanged:true});
+    expect(f.result.status).toBe(1);
+    expect(f.result.stderr).toContain('does not authorize a boundary rewrite');
+    expect(f.calls.some(c=>/^cloudformation update-stack/.test(c))).toBe(false);
+    const matching=await runBoundaryDeployMock({matching:true,guarded:true,gatewayRuntimeRejected:true,gatewayStatementsChanged:true});
+    expect(matching.result.status).toBe(1);
+    const accepted=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true});
+    expect(accepted.result.status,accepted.result.stderr).toBe(0);
+  });
+  it('TC-IAM-BOUNDARY-115 keeps native evidence mandatory when the update changes the Gateway boundary',async()=>{
+    const f=await runBoundaryDeployMock({guarded:true,gatewayRuntimeRejected:true,gatewayDriftBeforeUpdate:true});
+    expect(f.result.status).toBe(1);
+    expect(f.result.stderr).toContain('Gateway source-condition runtime verification is required');
+    // Repairing drift restores the accepted statements; quarantine holds for this run.
+    expect(f.calls.some(c=>/^cloudformation update-stack/.test(c))).toBe(true);
+    const accepted=await runBoundaryDeployMock({guarded:true,gatewayDriftBeforeUpdate:true});
+    expect(accepted.result.status,accepted.result.stderr).toBe(0);
   });
 
   it("checks the active boundary read-only with KMS simulation semantics and no native broker", async () => {
@@ -8457,7 +8500,7 @@ describe("operator entry point", { timeout: 10000 }, () => {
       verifyOnly: true,
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('runtime source conditions require guarded owner verification');
+    expect(result.stdout).toContain('runtime source conditions are verified only when a guarded update changes the reviewed Gateway statements');
     const simulations = calls.filter(
       (call) =>
         call.startsWith("iam simulate-custom-policy") &&
