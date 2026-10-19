@@ -8,7 +8,7 @@ import {
   verifyQuarantinePolicy,
   worstCaseBoundaryPolicySize,
 } from "./lib/workload-permissions-boundary.mjs";
-import {gatewayBoundaryProbeCases,gatewayBoundaryVerificationPlan} from './lib/gateway-workload-boundary.mjs';
+import {gatewayBoundaryProbeCases,gatewayBoundaryVerificationPlan,gatewayBoundaryStatementsDigest,GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE} from './lib/gateway-workload-boundary.mjs';
 import {observerBoundaryProbeCases} from './lib/observer-workload-boundary.mjs';
 
 try {
@@ -55,6 +55,9 @@ try {
   }
   if(process.argv[2]==='--gateway-simulation-probes'){
     process.stdout.write(JSON.stringify(gatewayBoundaryVerificationPlan(contract).simulation)+'\n');process.exit(0);
+  }
+  if(process.argv[2]==='--gateway-accepted'){
+    process.exit(gatewayBoundaryStatementsDigest()===GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE?0:1);
   }
   if(process.argv[2]==='--gateway-runtime'){
     const {requestGatewayRuntimeSourceGate}=await import('./lib/gateway-runtime-source-gate.mjs');

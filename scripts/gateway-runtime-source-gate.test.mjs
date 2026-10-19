@@ -47,8 +47,11 @@ it('real verifier CLI fails closed without a native broker; matrix output stays 
  await expect(run('--gateway-runtime',JSON.stringify(expectedGatewayBoundaryPolicyDocument(contract)))).rejects.toMatchObject({code:1});
  const body=await readFile(new URL('./deploy-workload-permissions-boundary.sh',import.meta.url),'utf8');
   expect(body).toContain('--gateway-runtime');expect(body).toContain('--gateway-simulation-probes');expect(body.indexOf('Missing or invalid runtime evidence')).toBeLessThan(body.indexOf('aws cloudformation update-stack'));
-  expect(body).toContain('[[ "$verify_only" != "true" ]] && ! WORKLOAD_BOUNDARY_ACCOUNT_ID=');
-  expect(body).toContain('Read-only boundary documents and IAM simulations verified; runtime source conditions require guarded owner verification.');
+  expect(body).toContain('[[ "$verify_only" != "true" && "$gateway_runtime_required" == "true" ]] && ! WORKLOAD_BOUNDARY_ACCOUNT_ID=');
+  // Only an exact reviewed Gateway document waives native evidence.
+  expect(body).toContain('if [[ "$verify_only" != "true" ]] && gateway_boundary_matches_reviewed &&');
+  expect(body).toContain('verify-workload-permissions-boundary.mjs" --gateway-accepted </dev/null; then');
+  expect(body).toContain('Read-only boundary documents and IAM simulations verified; runtime source conditions are verified only when a guarded update changes the reviewed Gateway statements.');
 });
 it('gate-only source changes use the existing code-only preparation classification',()=>{
  expect(classifyChangedPaths(['scripts/lib/gateway-runtime-source-gate.mjs','scripts/lib/gateway-workload-boundary.mjs','scripts/verify-workload-permissions-boundary.mjs','scripts/deploy-workload-permissions-boundary.sh'])).toEqual({workloadChanged:false,applicationInfrastructureChanged:false,awsMutationRequired:false});

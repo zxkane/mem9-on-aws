@@ -1175,6 +1175,18 @@ policy after resource/transport cleanup. Unknown outcomes retain evidence and
 hold recovery. Runtime observations do not themselves authorize a workload
 rollout or replace the existing guarded resume procedure.
 
+The native broker at `MEM9_BOOTSTRAP_REQUEST_SOCKET` that runs this canary is
+not yet implemented. The Gateway statements live when the gate was introduced
+are therefore accepted without its receipt: their digest is pinned as
+`GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE` in
+`scripts/lib/gateway-workload-boundary.mjs`. A guarded update rewrites every
+boundary at a new policy revision. It skips the receipt only while the reviewed
+Gateway statements still hash to that pin and the live Gateway boundary equals
+them. If the statements change, every run needs the receipt, including a retry
+after an aborted run has already written them. If they are live, the receipt is
+requested before any rewrite. A drifted Gateway boundary is rewritten back to
+the accepted statements. Do not change the pin without the evidence.
+
 An ownership stack in `UPDATE_ROLLBACK_COMPLETE` is repaired only by the guarded
 rollout; read-only verification rejects it even if the current policy happens to
 match. For `UPDATE_ROLLBACK_FAILED`, first use CloudFormation's reviewed

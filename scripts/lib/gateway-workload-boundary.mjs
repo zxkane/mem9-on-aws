@@ -1,3 +1,5 @@
+import {createHash} from 'node:crypto';
+
 /** Closed Gateway role family and its operator-owned boundary. This is policy
  * construction, not a caller-selected boundary or runtime authority. */
 export const GATEWAY_BOUNDARY_POLICY_NAME = 'mem9-on-aws-gateway-boundary';
@@ -95,6 +97,22 @@ export function gatewayBoundaryProbeCases(contract) {
     }
   }
   return cases;
+}
+
+// The Gateway boundary statements accepted without native source-condition
+// evidence: those already live when the runtime gate was introduced, whose
+// broker is not yet implemented. A guarded update waives the receipt only while
+// the reviewed document still hashes to this value, so any change to the
+// Gateway statements needs the receipt again. Do not update this pin without
+// that evidence.
+export const GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE =
+  'b6e6f8dc430791fa3b9ac42e6bf5b4f8652c549f8fff6a9a4abcc06ce05063db';
+const canonicalJson = v => Array.isArray(v) ? v.map(canonicalJson) :
+  v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonicalJson(v[k])])) : v;
+/** Digest of the Gateway statements, independent of account, region and revision. */
+export function gatewayBoundaryStatementsDigest() {
+  const document = expectedGatewayBoundaryPolicyDocument({partition:'aws',accountId:'123456789012',applicationRegion:'us-east-1',policyRevision:'r1'});
+  return createHash('sha256').update(JSON.stringify(canonicalJson(document))).digest('hex');
 }
 
 /** Source predicates require actual Lambda credentials. Preserve every

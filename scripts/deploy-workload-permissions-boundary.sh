@@ -262,6 +262,9 @@ fi
 policy_arn=""
 policy_revision="r1"
 force_guarded_recovery=false
+# Native Gateway source-condition evidence is required unless this run proves
+# the live Gateway boundary already matches its reviewed document. See below.
+gateway_runtime_required=true
 read_policy_arn() {
   local logical_resource="${1:-WorkloadPermissionsBoundary}"
   aws cloudformation describe-stack-resources \
@@ -552,7 +555,7 @@ verify_gateway_boundary_policy() {
   if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
       WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
       node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway <<<"$boundary_policy"; then return 1; fi
-  if [[ "$verify_only" != "true" ]] && ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+  if [[ "$verify_only" != "true" && "$gateway_runtime_required" == "true" ]] && ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
       WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
       WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION="$default_version" \
       node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-runtime <<<"$boundary_policy"; then
@@ -619,6 +622,36 @@ verify_observer_boundary_policy() {
   done <<<"$rows"
   version_after="$(aws iam get-policy --policy-arn "$observer_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
   [[ "$version_after" == "$default_version" ]] || { echo "Observer boundary changed during verification." >&2; return 1; }
+}
+
+# Exact comparison of the live Gateway boundary with its reviewed document at
+# the live policy revision. Simulations are not needed: equal documents have
+# equal semantics.
+gateway_boundary_matches_reviewed() {
+  local gateway_arn default_version boundary_policy
+  gateway_arn="$(read_policy_arn GatewayPermissionsBoundary)"
+  [[ "$gateway_arn" == "arn:${partition}:iam::${account_id}:policy/${gateway_policy_name}" ]] || return 1
+  default_version="$(aws iam get-policy --policy-arn "$gateway_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  [[ "$default_version" =~ ^v[1-9][0-9]*$ ]] || return 1
+  boundary_policy="$(aws iam get-policy-version --policy-arn "$gateway_arn" --version-id "$default_version" --query PolicyVersion.Document --output json 2>/dev/null)" || return 1
+  WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+    WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+    node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway <<<"$boundary_policy" >/dev/null 2>&1
+}
+
+# Ask the native broker for source-condition evidence for the live Gateway
+# boundary, which must already equal its reviewed document.
+request_gateway_runtime_receipt() {
+  local gateway_arn default_version boundary_policy
+  gateway_arn="$(read_policy_arn GatewayPermissionsBoundary)"
+  [[ "$gateway_arn" == "arn:${partition}:iam::${account_id}:policy/${gateway_policy_name}" ]] || return 1
+  default_version="$(aws iam get-policy --policy-arn "$gateway_arn" --query Policy.DefaultVersionId --output text 2>/dev/null)" || return 1
+  [[ "$default_version" =~ ^v[1-9][0-9]*$ ]] || return 1
+  boundary_policy="$(aws iam get-policy-version --policy-arn "$gateway_arn" --version-id "$default_version" --query PolicyVersion.Document --output json 2>/dev/null)" || return 1
+  WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+    WORKLOAD_BOUNDARY_PARTITION="$partition" WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+    WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION="$default_version" \
+    node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-runtime <<<"$boundary_policy" >/dev/null 2>&1
 }
 
 verify_all_boundaries() {
@@ -735,10 +768,19 @@ if [[ $describe_exit -eq 0 ]]; then
     echo "Boundary policy revision read-back failed." >&2
     exit 1
   }
+  # A guarded update rewrites every boundary at a new semantics-neutral policy
+  # revision. Native source-condition evidence is waived only for the Gateway
+  # statements reviewed as accepted without it (a digest pinned in code, not
+  # live state, so a failed earlier run cannot launder a change), and only
+  # while the live Gateway boundary equals that reviewed document.
+  if [[ "$verify_only" != "true" ]] && gateway_boundary_matches_reviewed &&
+     node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" --gateway-accepted </dev/null; then
+    gateway_runtime_required=false
+  fi
   if [[ "$force_guarded_recovery" != "true" ]]; then
     if [[ "$verify_only" == "true" ]]; then
       if verify_all_boundaries; then
-        echo "Read-only boundary documents and IAM simulations verified; runtime source conditions require guarded owner verification."
+        echo "Read-only boundary documents and IAM simulations verified; runtime source conditions are verified only when a guarded update changes the reviewed Gateway statements."
         exit 0
       fi
       exit 1
@@ -751,6 +793,14 @@ if [[ $describe_exit -eq 0 ]]; then
     exit 1
   fi
   if [[ "${gateway_runtime_gate_failed:-false}" == "true" ]]; then
+    echo "Missing or invalid runtime evidence does not authorize a boundary rewrite." >&2
+    exit 1
+  fi
+  # Unaccepted Gateway statements that are already live (for example written
+  # by an aborted earlier run) need their evidence before any rewrite, even
+  # when another boundary is what differs.
+  if [[ "$gateway_runtime_required" == "true" ]] && gateway_boundary_matches_reviewed &&
+     ! request_gateway_runtime_receipt; then
     echo "Missing or invalid runtime evidence does not authorize a boundary rewrite." >&2
     exit 1
   fi

@@ -1,7 +1,9 @@
 import {describe,it,expect} from 'vitest';
 import {readFileSync} from 'node:fs';
 import {parse} from 'yaml';
-import {expectedGatewayBoundaryPolicyDocument as render,gatewayBoundaryProbeCases,gatewayRoleStage,gatewayBoundaryArn} from './lib/gateway-workload-boundary.mjs';
+import {expectedGatewayBoundaryPolicyDocument as render,gatewayBoundaryProbeCases,gatewayRoleStage,gatewayBoundaryArn,gatewayBoundaryStatementsDigest,GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE} from './lib/gateway-workload-boundary.mjs';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {verifyGatewayBoundaryPolicyDocument,expectedRoleBoundaryArn,expectedBoundaryPolicyDocument} from './lib/workload-permissions-boundary.mjs';
 const contract={partition:'aws',accountId:'123456789012',applicationRegion:'ap-northeast-1',policyRevision:'r1'};
 const policy=render(contract),list=v=>v===undefined?[]:Array.isArray(v)?v:[v];
@@ -91,6 +93,12 @@ describe('closed Gateway permissions boundary',()=>{
     }
    }
   }
+ });
+ it('TC-IAM-BOUNDARY-117 pins the Gateway statements accepted without native runtime evidence',()=>{
+  // Changing any Gateway statement changes this digest, which restores the
+  // native evidence requirement until the pin is reviewed with that evidence.
+  expect(gatewayBoundaryStatementsDigest()).toBe(GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE);
+  expect(()=>execFileSync(process.execPath,[fileURLToPath(new URL('./verify-workload-permissions-boundary.mjs',import.meta.url)),'--gateway-accepted'],{input:''})).not.toThrow();
  });
  it('keeps both template and native renderer identical, without changing the original boundary',()=>{
   const customTags=[...['!Sub','!Ref','!GetAtt'].map(tag=>({tag,resolve:value=>value})),...['!If','!Not','!Equals'].map(tag=>({tag,collection:'seq',resolve:value=>value}))];
