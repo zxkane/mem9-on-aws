@@ -283,7 +283,7 @@ function schedulerRoleArnPatterns({ partition, accountId }) {
   );
 }
 
-function globMatches(pattern, value) {
+export function globMatches(pattern, value) {
   const source = String(pattern)
     .split(/([*?])/u)
     .map((part) => {

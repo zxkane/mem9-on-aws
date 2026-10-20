@@ -14,8 +14,8 @@ export function codeZip(source=handlerSource,name='index.js'){
  end.writeUInt32LE(0x06054b50);end.writeUInt16LE(1,8);end.writeUInt16LE(1,10);end.writeUInt32LE(central.length+n.length,12);end.writeUInt32LE(local.length+n.length+compressed.length,16);
  return Buffer.concat([local,n,compressed,central,n,end]);
 }
-export function harness({phase='A1',defect,number=1,clock=Date.now(),event:providedEvent,environment={}}={}){
- const scope=compileGatewayRuntimeCanaryScope({accountId:'0'.repeat(12),applicationRegion:'ap-northeast-1',verificationId:'abcdef012345',vpcId:'vpc-12345678',ownerRoleArn:'arn:aws:iam::'+'0'.repeat(12)+':role/synthetic-scoped-owner'}),keyArn=scope.keyArnPattern.replace('*','a'.repeat(8)+'-'+['a'.repeat(4),'a'.repeat(4),'a'.repeat(4),'a'.repeat(12)].join('-'));
+export function harness({phase='A1',defect,number=1,clock=Date.now(),event:providedEvent,environment={},scope:providedScope}={}){
+ const scope=providedScope??compileGatewayRuntimeCanaryScope({accountId:'0'.repeat(12),applicationRegion:'ap-northeast-1',verificationId:'abcdef012345',vpcId:'vpc-12345678',ownerRoleArn:'arn:aws:iam::'+'0'.repeat(12)+':role/synthetic-scoped-owner'}),keyArn=scope.keyArnPattern.replace('*','a'.repeat(8)+'-'+['a'.repeat(4),'a'.repeat(4),'a'.repeat(4),'a'.repeat(12)].join('-'));
  const event=providedEvent??gatewayCanaryInvocation({nonce:'b'.repeat(64),ciphertextBase64:Buffer.from('synthetic encrypted test bytes').toString('base64')});
  const calls=[],closed=[],plaintext=Buffer.from(GATEWAY_CANARY_PLAINTEXT);let at=clock;
  const metadata=(service,status)=>({requestId:`service-${service}-${number}-request`,httpStatusCode:status,attempts:1});

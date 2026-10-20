@@ -1175,9 +1175,10 @@ policy after resource/transport cleanup. Unknown outcomes retain evidence and
 hold recovery. Runtime observations do not themselves authorize a workload
 rollout or replace the existing guarded resume procedure.
 
-The native broker at `MEM9_BOOTSTRAP_REQUEST_SOCKET` that runs this canary is
-not yet implemented. The Gateway statements live when the gate was introduced
-are therefore accepted without its receipt: their digest is pinned as
+The owner-run broker `scripts/run-gateway-runtime-source-broker.mjs` runs this
+canary and answers the guarded update at `MEM9_BOOTSTRAP_REQUEST_SOCKET`. The
+Gateway statements live when the gate was introduced, before the broker
+existed, are accepted without its receipt: their digest is pinned as
 `GATEWAY_BOUNDARY_ACCEPTED_WITHOUT_RUNTIME_EVIDENCE` in
 `scripts/lib/gateway-workload-boundary.mjs`. A guarded update rewrites every
 boundary at a new policy revision. It skips the receipt only while the reviewed
@@ -1186,6 +1187,242 @@ them. If the statements change, every run needs the receipt, including a retry
 after an aborted run has already written them. If they are live, the receipt is
 requested before any rewrite. A drifted Gateway boundary is rewritten back to
 the accepted statements. Do not change the pin without the evidence.
+
+The canary attaches the live Gateway boundary itself in its original phase, so
+it can only exercise statements that are already live. A rollout that changes
+the Gateway statements therefore takes two guarded runs:
+
+1. Run the guarded rollout without a broker. It writes the new statements, then
+   fails at their source-condition verification with the quarantine held.
+2. Start the broker, wait for its export line, then rerun the rollout with the
+   socket exported. Use the printed resume command if the first run printed
+   one.
+
+```bash
+# Terminal 1: the broker. It reads AWS_PROFILE and the optional MEM9_VPC_ID
+# from the same gitignored .env as the rollout. It runs the canary once (several
+# minutes), prints one export line, then serves. See below for the
+# Organizations acknowledgement.
+GATEWAY_CANARY_ORG_POLICIES_PRINCIPAL_NEUTRAL=true \
+  node --env-file-if-exists=.env scripts/run-gateway-runtime-source-broker.mjs
+# export MEM9_BOOTSTRAP_REQUEST_SOCKET=/tmp/mem9-gw-AbC123/broker.sock
+
+# Terminal 2: the rollout, with that line pasted first.
+export MEM9_BOOTSTRAP_REQUEST_SOCKET=/tmp/mem9-gw-AbC123/broker.sock
+WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
+  scripts/rollout-workload-permissions-boundary.sh
+```
+
+Run both from the same clean checkout at the same commit, with the owner's AWS
+credentials for the application account. Those credentials must be an
+assumed-role session. The broker binds every receipt to that commit and tree,
+and checks before each request that the checkout is still clean and unchanged.
+The rollout's verifier reads its own checkout's HEAD commit and tree with git
+and rejects a receipt that names any other source.
+
+The broker runs the canary before it publishes its socket. It first reads the
+live `mem9-on-aws-gateway-boundary` default version with the owner's
+credentials. That version must equal the reviewed document for the owner's
+account, the checkout's application region and the document's own revision.
+The canary then runs against that live boundary. Its plan is rendered from the
+reviewed document, which the live one was just verified to equal, because IAM
+returns the same statements in its own key order. The lifecycle requires a
+byte-identical rendering, and the broker checks this before any session. A
+failure names the differing fields. The handler and template come
+from the checkout. The VPC is `MEM9_VPC_ID`, or the region's default VPC when it
+is unset, as for the application. After cleanup the broker re-reads the live
+version and publishes nothing unless it is unchanged.
+
+Requests are then answered from that one canary, with no AWS mutation, well
+within the client's 15-second limit. Each request is only a claim. The broker
+re-reads the live default version, which must equal the requested document and
+version. The document must equal the reviewed document at its own revision. Its
+statements must also be the ones the canary exercised. Only the `Gr<rev>`
+revision Sid may differ; it names a revision and takes no part in evaluation. A
+rollout rewrites every boundary at a fresh revision, so the request after the
+rewrite still matches. The receipt names the requested document and version; its
+evidence and handler hashes are those of the startup canary.
+
+The broker serves at most three requests, one at a time, for up to 75 minutes
+(`--max-requests`, `--deadline-minutes`), then removes its socket. Three is the
+most one guarded update asks for: an initial verification, a check before the
+rewrite when changed statements are already live, and a verification after the
+rewrite. It refuses a second connection while one request runs. Its socket is
+`0600` in a private `0700` directory, so only the owner's uid can reach it. Any
+process running as that uid can still request a receipt for the verified
+statements, so do not leave a broker running.
+
+The canary's three lanes are STS sessions of a dedicated, ephemeral operator
+role, `gateway-canary-operator-mem9-on-aws`, each restricted by its own session
+policy. The observe lane carries the inline observation policy and makes every
+read, the KMS encrypt and the Lambda invoke. The bootstrap lane may only create,
+read and delete the temporary provisioning policy. The provision lane is
+restricted by that managed policy and makes only the CloudFormation create,
+update and delete calls.
+
+The operator role's only permission is the union of those three lane policies,
+generalized only in the twelve-character verification id. It can assume no
+role, so a lane cannot renew itself. Its trust admits exactly one same-account
+owner role. Its name is outside the `mem9-on-aws-*` namespace that the deploy
+role administers. The template is generated from the canary's own policy
+compiler, so the two cannot drift.
+
+The operator trust is equivalent to an unrestricted session of the owner role.
+It names the role, so it admits every session of that role, including a
+narrowed one. The owner check sees only the role's identity policies and its
+boundary, not session policies. Never issue a scoped or narrowed owner session
+that allows `sts:AssumeRole` or `sts:TagSession` on
+`gateway-canary-operator-mem9-on-aws`. That covers an `AssumeRole` session
+policy and an IAM Identity Center permission set narrowed below the role, among
+others. Such a session would gain the whole operator. Trust conditions on
+`RoleSessionName` or `SourceIdentity` are not a reliable control here, so none
+are used. At start the broker logs this as a warning. It adds further warnings
+when the owner is an Identity Center role or the session name looks federated
+(an e-mail address).
+
+The operator role is administrator-equivalent. `CreateStack` on the canary
+stack takes an arbitrary template, so its CloudFormation, IAM and Lambda grants
+can create any policy and any role, with any trust. It must therefore grant its
+owner nothing new. The owner must already hold every operator permission. The
+deploy script and the broker both check this before doing anything:
+- They read the owner role's own identity policies: every inline policy,
+  every attached managed policy at its default version (explicit denies
+  included), and its permissions boundary if one is set. A truncated list, more
+  than ten policies, an oversize document or any read error stops them.
+- They run `iam simulate-custom-policy` twice for each operator statement, on
+  the same actions, concrete sample resources and context. The context is the
+  statement's condition values plus the owner's `aws:PrincipalArn`. A condition
+  with several values gets one case per value, so both permissions boundaries
+  are covered.
+  - The first run uses only the operator's own deployed policy, rendered for
+    this account and region.
+  - The second run uses the owner's documents.
+- Every pair the operator is allowed must be allowed to the owner. Pairs the
+  operator itself is denied are ignored. The simulator applies every listed
+  action to every listed resource, so it denies resource-type mismatches, and
+  it denies `logs:GetLogEvents` on a log stream even under
+  `AdministratorAccess`.
+- The operator's own decisions are pinned. Those exceptions are derived from
+  the statements alone: a role action on a policy ARN, a policy action on a
+  role ARN, and `GetLogEvents` on a log stream. That is 13 of the 102 pairs, so
+  the operator must be allowed exactly the other 89. A simulator or compiler
+  drift that newly denies a core grant (for example `CreateStack`, `CreateRole`
+  or `PassRole`), or newly allows an exception, refuses rather than silently
+  skipping that grant for the owner.
+- The simulation also supplies the owner role's tags as `aws:PrincipalTag/<key>`
+  context, so an owner Deny keyed on its own tags applies.
+- They leave service control policies and resource control policies out of
+  the simulation. `SimulatePrincipalPolicy` cannot be used, because in an
+  Organizations account its SCP evaluation denies even actions that the same
+  owner performs successfully. Leaving them out is sound only if no SCP or RCP
+  treats the owner differently from the operator.
+  - No SCP or RCP may condition on any `aws:Principal*` key (such as
+    `aws:PrincipalArn` or `aws:PrincipalTag/*`), `aws:userid` or
+    `aws:SourceIdentity`, or use them as policy variables. A
+    typical SSO-narrowing SCP does exactly that, and would let a narrowed owner
+    escalate through the operator.
+  - The operator must state that this holds by setting
+    `GATEWAY_CANARY_ORG_POLICIES_PRINCIPAL_NEUTRAL=true`. The deploy script and
+    the broker refuse without it, before any AWS call.
+  - Where `organizations:ListParents`, `ListPoliciesForTarget` and
+    `DescribePolicy` are readable, both also scan every SCP and RCP on the
+    account, its OU chain and the root for those keys. Each document is
+    parsed, and every Condition key and every `${...}` variable is checked, so
+    JSON escapes cannot hide one; a raw substring check stays as a backstop. Any
+    match, or content that does not parse, refuses even with the
+    acknowledgement.
+  - If the policies cannot be read completely, both say so ("not fully
+    readable; relying on ...") and rely on the acknowledgement alone.
+- The deploy script also checks, before `validate-template`, that the committed
+  template is exactly what the compiler renders.
+- They refuse unless every pair is allowed. The deploy script checks before any
+  stack call, the broker before any session.
+- They refuse some roles as owner:
+  - the operator role itself;
+  - any role whose path or name starts with `mem9-on-a` or
+    `github-actions-mem9-on-aws`, or whose ARN matches any role glob granted in
+    `infra/cloudformation/github-actions-role.yaml`.
+
+  The whole path counts, because IAM's `*` crosses `/`, and the comparison
+  ignores case.
+
+The operator role exists only for a canary window. The procedure is: deploy
+it, run the broker (and the guarded rollout), then delete it:
+
+```bash
+# 1. Deploy the operator role for this window.
+GATEWAY_CANARY_ORG_POLICIES_PRINCIPAL_NEUTRAL=true \
+GATEWAY_CANARY_OWNER_ROLE_ARN=arn:aws:iam::<aws-account-id>:role/<owner-role> \
+  CC_PROJECT=<project> CC_USAGE=cc-<project> \
+  scripts/deploy-gateway-canary-operator-role.sh
+# 2. Run the broker and the guarded rollout, as above.
+# 3. Delete it again.
+scripts/deploy-gateway-canary-operator-role.sh --delete
+```
+
+The check that the owner already holds every operator permission runs only at
+deploy and at broker start. A role left in place keeps trusting the owner after
+the owner has been narrowed, for example after it loses `AdministratorAccess`,
+so it would let the owner regain those permissions. The stack's
+`DeletionPolicy` is `Delete`, so deleting the stack removes the role.
+`--delete` also handles a stack created with an older Retain template: it first
+updates the stack to the current template, or, if that fails, deletes the
+inline policy and then the role directly. It refuses a role that has attached
+managed policies. It ends by verifying that `iam get-role` reports
+`NoSuchEntity`, and fails otherwise.
+
+At start the broker verifies the role at its fixed name before issuing any
+session:
+- the role's trust must name exactly the caller's role, with the same session
+  tags;
+- it must have that one inline policy for this account and region;
+- it must have no attached policies.
+
+The owner may be an IAM Identity Center role. Besides every operator
+permission, it needs `sts:AssumeRole` on the operator role, plus `sts:TagSession`
+when tags are set. It also needs `iam:SimulateCustomPolicy` and read access to its
+own policies: `iam:GetRole`, `iam:ListRolePolicies`, `iam:GetRolePolicy`,
+`iam:ListAttachedRolePolicies`, `iam:GetPolicy` and `iam:GetPolicyVersion`, and,
+for the Organizations scan, the three `organizations` reads above.
+
+When `CC_PROJECT` and `CC_USAGE` are both set, every lane session must carry the
+tags `Project=$CC_PROJECT` and `usage=$CC_USAGE`. The deploy script then makes
+the trust allow `sts:TagSession` and require exactly those two values.
+`GATEWAY_CANARY_SESSION_TAGS` selects how the tags reach STS:
+- `transitive` (the default): the caller is itself a tagged, chained session,
+  such as one from the local credential helper, which marks `usage`, `User`,
+  `Host` and `Project` as transitive. Role chaining forwards those tags to the
+  lanes automatically, and setting one again is an STS conflict, so the broker
+  passes no explicit tags. The trust's `aws:TagKeys` therefore also admits the
+  forwarded `User` and `Host`, with their values unconstrained. Nothing else is
+  loosened.
+- `explicit`: for a caller without transitive tags, the broker passes both
+  tags on each `AssumeRole`.
+
+`CC_PROJECT` must match `^[a-z0-9-]{1,64}$`, and `CC_USAGE` must be
+`cc-<project>` or `codex-<project>`. The broker and the deploy script refuse to
+run when only one of them is set, when either is malformed, or when a mode is
+set without them. Each lane has private credential files, which are deleted when
+the canary ends. A failed AWS call is reported in the broker's output and
+journal by service, operation and error code only, for example
+`sts AssumeRole: InvalidParameterValue`. Message bodies and ARNs are left out.
+
+Evidence goes to `${XDG_STATE_HOME:-~/.local/state}/mem9-on-aws/gateway-source-broker`
+(`--evidence-dir`), one private directory per broker run. It holds the canary
+journal (lifecycle, session-policy and phase-diagnostic records), the outcome,
+the inspected evidence, the startup receipt and a journal of every request.
+Every file is `0600`. Any failure, timeout or doubt publishes no socket or
+returns no receipt. An interrupt during the canary stops it, but its cleanup
+still runs. If cleanup cannot be confirmed, the canary is `HELD` and the broker
+exits with status 3. It prints the canary stack and session policy names, and
+the evidence directory records what was retained. Review and clean those up
+before any retry. Otherwise the broker exits 1 when it did not start or a
+request got no receipt, and 0 when every request got one. Ctrl-C, `SIGTERM`,
+and the `SIGHUP` a closing terminal sends all stop it the same way. No new
+request is accepted, and a running canary first finishes its cleanup.
+
+Because the canary runs before the rollout starts, it does not count against
+the rollout's 60-minute limit or the guarded update's 20-minute command limit.
 
 An ownership stack in `UPDATE_ROLLBACK_COMPLETE` is repaired only by the guarded
 rollout; read-only verification rejects it even if the current policy happens to

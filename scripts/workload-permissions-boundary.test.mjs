@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { createRetainedOperatorFixture } from "./test-fixtures/retained-operator.mjs";
 import {mockGatewaySourceGate} from './test-fixtures/gateway-runtime-canary/mock-source-gate.mjs';
+import {spawnSimulatedBroker} from './test-fixtures/gateway-runtime-canary/simulated-broker.mjs';
 import { expectedRetainedOperatorProtectionPolicy, retainedOperatorProtectionPolicyName } from "./lib/retained-operator-protection.mjs";
 import {
   DENY_DANGEROUS_POLICY_NAME,
@@ -798,6 +799,11 @@ async function runBoundaryDeployMock({
   },
   nextOpenAiRegion,
   gatewayRuntimeRejected = false,
+  // 'mock' answers from a synthetic IPC fixture; 'broker' runs the real broker
+  // library over synthetic AWS services; 'none' exports no socket at all.
+  runtimeGate: runtimeGateKind = 'mock',
+  // The mock gate's receipt names a commit other than the checkout's HEAD.
+  gatewaySourceMismatch = false,
   // The live Gateway boundary carries an extra statement until the update.
   gatewayDriftBeforeUpdate = false,
   observerSimulationMutation = "",
@@ -1466,6 +1472,13 @@ esac
       gitPath,
       `#!/usr/bin/env bash
 set -euo pipefail
+if [[ "\${1:-}" == "-C" ]]; then shift 2; fi
+if [[ "\${1:-}" == "rev-parse" && "\${2:-}" == "--verify" ]]; then
+  case "\${3:-}" in
+    'HEAD^{commit}') printf '%s\\n' "$MOCK_SOURCE_COMMIT"; exit 0 ;;
+    'HEAD^{tree}') printf '%s\\n' "$MOCK_SOURCE_TREE"; exit 0 ;;
+  esac
+fi
 if [[ "\${1:-}" == "cat-file" ]]; then
   [[ "$MOCK_BASE_REF_AVAILABLE" == "true" ]] || exit 1
   case "\${3:-}" in
@@ -1501,8 +1514,14 @@ esac
   }
 
   let runtimeGate;
+  const broker = {};
   try {
-    if(!verifyOnly||guarded)runtimeGate=await mockGatewaySourceGate({path:join(directory,'gateway.sock'),policyPath:gatewayExpectedPath,reject:gatewayRuntimeRejected});
+    // The verifier binds the receipt to the checkout HEAD it reads through git:
+    // the fake git reports MOCK_SOURCE_*, a real fixture repository its own HEAD.
+    const head=rev=>spawnSync('git',['-C',root,'rev-parse','--verify',rev],{encoding:'utf8'}).stdout.trim();
+    let source=realBasePolicy?{commit:head('HEAD^{commit}'),tree:head('HEAD^{tree}')}:{commit:'a'.repeat(40),tree:'b'.repeat(40)};
+    if((!verifyOnly||guarded)&&runtimeGateKind==='mock')runtimeGate=await mockGatewaySourceGate({path:join(directory,'gateway.sock'),policyPath:gatewayExpectedPath,reject:gatewayRuntimeRejected,source:gatewaySourceMismatch?{...source,commit:'c'.repeat(40)}:source});
+    if(runtimeGateKind==='broker'){runtimeGate=await spawnSimulatedBroker({directory,liveBoundaryPath:gatewayExpectedPath});source=runtimeGate.source;}
     const result = spawnSync(
       "bash",
       [
@@ -1533,6 +1552,8 @@ esac
           MOCK_GATEWAY_MISSING: String(gatewayMissing),
           MOCK_CURRENT_POLICY_REVISION: policyRevision,
           MEM9_BOOTSTRAP_REQUEST_SOCKET: runtimeGate?.path??'',
+          MOCK_SOURCE_COMMIT: source.commit,
+          MOCK_SOURCE_TREE: source.tree,
           MOCK_CALLS: callsPath,
           MOCK_CREATED: createdPath,
           MOCK_DEPLOYED: deployedPath,
@@ -1595,9 +1616,11 @@ esac
         .split("\n")
         .filter(Boolean),
       result,
+      broker,
     };
   } finally {
-    await runtimeGate?.close();
+    const summary = await runtimeGate?.close();
+    if (runtimeGateKind === 'broker') broker.summary = summary;
     await rm(directory, { force: true, recursive: true });
   }
 }
@@ -8483,6 +8506,24 @@ describe("operator entry point", { timeout: 10000 }, () => {
     expect(matching.result.status).toBe(1);
     const accepted=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true});
     expect(accepted.result.status,accepted.result.stderr).toBe(0);
+  });
+  it('TC-GW-BROKER-012 completes a guarded update with changed Gateway statements through the real broker, and fails without one',async()=>{
+    const f=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true,runtimeGate:'broker'});
+    expect(f.result.status,f.result.stderr).toBe(0);
+    expect(f.calls.some(c=>/^cloudformation update-stack/.test(c))).toBe(true);
+    // Before the rewrite (statements already live) and after it, both answered
+    // from the one startup canary; neither runs another.
+    expect(f.broker.summary.requests.map(r=>r.status)).toEqual(['RECEIPT_ISSUED','RECEIPT_ISSUED']);
+    const absent=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true,runtimeGate:'none'});
+    expect(absent.result.status).toBe(1);
+    expect(absent.result.stderr).toContain('does not authorize a boundary rewrite');
+    expect(absent.calls.some(c=>/^cloudformation update-stack/.test(c))).toBe(false);
+  },180_000);
+  it('TC-GW-BROKER-021 rejects a receipt bound to a commit other than the rollout checkout',async()=>{
+    const f=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true,gatewaySourceMismatch:true});
+    expect(f.result.status).toBe(1);
+    expect(f.result.stderr).toContain('does not authorize a boundary rewrite');
+    expect(f.calls.some(c=>/^cloudformation update-stack/.test(c))).toBe(false);
   });
   it('TC-IAM-BOUNDARY-115 keeps native evidence mandatory when the update changes the Gateway boundary',async()=>{
     const f=await runBoundaryDeployMock({guarded:true,gatewayRuntimeRejected:true,gatewayDriftBeforeUpdate:true});

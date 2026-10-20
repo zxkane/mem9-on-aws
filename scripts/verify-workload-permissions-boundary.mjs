@@ -61,7 +61,12 @@ try {
   }
   if(process.argv[2]==='--gateway-runtime'){
     const {requestGatewayRuntimeSourceGate}=await import('./lib/gateway-runtime-source-gate.mjs');
-    await requestGatewayRuntimeSourceGate({boundary:input,contract,policyVersion:process.env.WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION});process.exit(0);
+    const {execFileSync}=await import('node:child_process');
+    // The receipt must come from a broker running this exact checkout.
+    const repoRoot=(await import('node:url')).fileURLToPath(new URL('..',import.meta.url));
+    const head=rev=>execFileSync('git',['-C',repoRoot,'rev-parse','--verify',rev],{encoding:'utf8',stdio:['ignore','pipe','ignore'],timeout:10_000}).trim();
+    const expectedSource={commit:head('HEAD^{commit}'),tree:head('HEAD^{tree}')};
+    await requestGatewayRuntimeSourceGate({boundary:input,contract,policyVersion:process.env.WORKLOAD_BOUNDARY_GATEWAY_POLICY_VERSION,expectedSource});process.exit(0);
   }
   const gateway = process.argv[2] === '--gateway';
   const observer = process.argv[2] === '--observer';

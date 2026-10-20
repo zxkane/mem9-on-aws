@@ -100,8 +100,8 @@ export function gatewayBoundaryProbeCases(contract) {
 }
 
 // The Gateway boundary statements accepted without native source-condition
-// evidence: those already live when the runtime gate was introduced, whose
-// broker is not yet implemented. A guarded update waives the receipt only while
+// evidence: those already live when the runtime gate was introduced, before
+// its broker existed. A guarded update waives the receipt only while
 // the reviewed document still hashes to this value, so any change to the
 // Gateway statements needs the receipt again. Do not update this pin without
 // that evidence.
