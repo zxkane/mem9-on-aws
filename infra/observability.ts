@@ -464,7 +464,7 @@ export function observability(
         {
           type: "metric",
           x: 0,
-          y: 33,
+          y: 27,
           width: 24,
           height: 6,
           properties: {
@@ -482,7 +482,7 @@ export function observability(
         {
           type: "metric",
           x: 0,
-          y: 27,
+          y: 33,
           width: 24,
           height: 6,
           properties: {

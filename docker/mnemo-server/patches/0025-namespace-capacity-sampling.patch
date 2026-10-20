@@ -1,9 +1,9 @@
 diff --git a/server/internal/ingestqueue/namespace_capacity.go b/server/internal/ingestqueue/namespace_capacity.go
 new file mode 100644
-index 0000000..4d9d664
+index 0000000..de79bcc
 --- /dev/null
 +++ b/server/internal/ingestqueue/namespace_capacity.go
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,101 @@
 +package ingestqueue
 +
 +import (
@@ -95,23 +95,22 @@ index 0000000..4d9d664
 +	if err == nil || ctx.Err() != nil {
 +		return
 +	}
-+	if errors.Is(err, ErrSamplerScopeDenied) {
++	switch {
++	case errors.Is(err, ErrSamplerScopeDenied):
 +		errorClass = "scope_denied"
-+	}
-+	if errors.Is(err, ErrSamplerNotEnforced) {
++	case errors.Is(err, ErrSamplerNotEnforced):
 +		errorClass = "namespace_not_enforced"
-+	}
-+	if errors.Is(err, context.DeadlineExceeded) {
++	case errors.Is(err, context.DeadlineExceeded):
 +		errorClass = "deadline"
 +	}
 +	w.logger.Error("namespace vector capacity sample failed", "error_class", errorClass)
 +}
 diff --git a/server/internal/ingestqueue/namespace_capacity_test.go b/server/internal/ingestqueue/namespace_capacity_test.go
 new file mode 100644
-index 0000000..1a4be38
+index 0000000..30980f5
 --- /dev/null
 +++ b/server/internal/ingestqueue/namespace_capacity_test.go
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,142 @@
 +package ingestqueue
 +
 +import (
@@ -238,6 +237,20 @@ index 0000000..1a4be38
 +	case <-done:
 +	case <-time.After(time.Second):
 +		t.Fatal("sampler not canceled")
++	}
++}
++
++func TestNamespaceCapacityAuthorizationErrorPrecedence(t *testing.T) {
++	var output, logs bytes.Buffer
++	repo := &capacityTestRepo{fakeRepo: &fakeRepo{}, capacity: func(context.Context) (int, int, error) {
++		return 0, 0, errors.Join(ErrSamplerScopeDenied, context.DeadlineExceeded)
++	}}
++	cfg := DefaultWorkerConfig()
++	cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
++	w := NewWorker(repo, fakeProcessor{}, "tenant", "worker", cfg, slog.New(slog.NewTextHandler(&logs, nil)))
++	w.sampleNamespaceCapacity(context.Background())
++	if output.Len() != 0 || !strings.Contains(logs.String(), "scope_denied") || strings.Contains(logs.String(), "error_class=deadline") {
++		t.Fatal("authorization signal lost")
 +	}
 +}
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
@@ -449,10 +462,10 @@ index 0000000..bbc5f42
 +}
 diff --git a/server/internal/repository/postgres/namespace_capacity_test.go b/server/internal/repository/postgres/namespace_capacity_test.go
 new file mode 100644
-index 0000000..95b062c
+index 0000000..850e286
 --- /dev/null
 +++ b/server/internal/repository/postgres/namespace_capacity_test.go
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,189 @@
 +package postgres
 +
 +import (
@@ -623,6 +636,24 @@ index 0000000..95b062c
 +		t.Fatalf("pool wait not bounded: %v", err)
 +	}
 +	conn.Close()
++}
++
++func TestNamespaceCapacityConfigMatchesRequests(t *testing.T) {
++	db := ingestTestDB(t)
++	seedSamplerAccess(t, db)
++	for _, value := range []string{"", "invalid", "0", "-1", "30000"} {
++		t.Run(value, func(t *testing.T) {
++			t.Setenv("MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS", value)
++			_, ceiling, err := NewIngestJobRepo(db).NamespaceVectorCapacity(context.Background())
++			if err != nil {
++				t.Fatal(err)
++			}
++			request := NewMemoryRepo(db, false, "", testutil.TestNamespaceScope())
++			if ceiling <= 0 || ceiling != request.exactVectorMaxRows {
++				t.Fatalf("sampler ceiling %d differs from request %d", ceiling, request.exactVectorMaxRows)
++			}
++		})
++	}
 +}
 diff --git a/server/internal/repository/postgres/namespace_vector_dense_test.go b/server/internal/repository/postgres/namespace_vector_dense_test.go
 new file mode 100644
