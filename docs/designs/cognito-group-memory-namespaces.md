@@ -895,7 +895,9 @@ the runtime emits a content-free warning. Production metric filters publish
 `NamespaceVectorRows`, `NamespaceVectorCapacityWarning`,
 `NamespaceVectorCapacityExceeded`, and `NamespaceVectorTimeout` in
 `mem9-on-aws/NamespaceVector`; none has an identifier dimension. The warning,
-capacity, and timeout counters have separate alarms. The migration drops the tenant-wide HNSW index if
+capacity, and timeout signals have separate alarms. The warning alarm uses a
+periodic utilization sample, described below, rather than query warning events.
+The migration drops the tenant-wide HNSW index if
 no supported path still uses it; otherwise a plan-regression test proves that
 namespace search cannot select it. A future per-namespace ANN strategy requires
 a separate reviewed design.
@@ -1230,6 +1232,46 @@ valid rollback target. Recovery options are:
 Control tables and namespace columns remain after application rollback.
 
 ## Observability And Privacy
+
+### Periodic namespace capacity
+
+Patch `0025-namespace-capacity-sampling` adds an independent capacity loop to the
+existing ingest worker. Each database sample has a ten-second budget, no overlapping or
+catch-up work, and no retries. It validates enforcement and all active namespace
+memberships with the existing sampler identity. A repeatable-read transaction
+holds authorization rows in namespace/principal/membership order through the
+counts; lifecycle changes may wait up to the bounded sample deadline. Existing
+runtime SELECT and column-UPDATE grants suffice for these row locks. Sampling
+performs no DML, changes no grants, and reads no content or embedding values.
+
+Only a complete authorized sample emits one EMF record with stage-only
+`NamespaceVectorUtilizationPercent` and `NamespaceVectorCapacitySampleCompleted`
+in `mem9-on-aws/NamespaceVector`. Utilization is the highest per-namespace row
+count divided by the same configured request ceiling; values above 100% remain
+visible. A verified empty set emits zero. Authorization, database, or emission
+failure does not publish an early completion heartbeat or a partial maximum.
+Emission uses the existing shared stdout transport; its backpressure can stall
+logging, including existing ingest telemetry. The database cancellation budget
+does not make an arbitrary blocking log writer cancellable. Missing completion
+metrics remain observable through the independent CloudWatch liveness alarm.
+
+The capacity warning evaluates Maximum utilization at 80%, two of two five-minute
+periods. Missing data preserves its previous alarm state; it does not create a
+healthy metric or prove recovery. One genuinely non-breaching evaluated period
+can recover the warning. Inspect the separate completion-liveness signal before
+treating a frozen OK as current health. Five missing minute heartbeats and a
+five-minute notification wait trigger that notification. The wait applies to
+every state transition, including steady-state outages; outages shorter than
+roughly ten minutes can recover without paging. Query warning
+counters remain diagnostic; hard-cap and SQL-timeout alarms remain independent.
+
+Vector search logs retain their existing message/result contract and add bounded
+phase timing: `transaction_setup`, `count`, `rank_hydrate`, or `commit`. A timeout
+is logged once; success records `count_ms`, `rank_hydrate_ms`, and elapsed time.
+No query parameters, vectors, SQL, DSNs, or identity fields are added. Dense
+synthetic first-call and prepared-query regressions supplement the warm benchmark.
+These diagnostics do not establish a production timeout root cause or claim to
+repair it; query changes require supporting execution evidence.
 
 Content-free metrics:
 

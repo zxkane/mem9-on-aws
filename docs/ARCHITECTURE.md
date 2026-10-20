@@ -551,11 +551,20 @@ pre-ceiling warning, hard capacity refusals, and SQL timeouts. Production log
 metric filters publish these in `mem9-on-aws/NamespaceVector` without
 namespace, principal, memory, or request dimensions; the dashboard and alerts
 use only the resulting bounded metric names.
+The capacity warning is driven by an independent minute sampler's maximum
+namespace utilization, not query traffic. Only a complete authorized count
+publishes utilization and completion heartbeat together. The warning retains
+its previous state when samples are missing; a separate completion-liveness
+alarm exposes that blind interval after a bounded recurring notification wait. Existing
+hard-cap and query-timeout alarms remain active. Timeout logs add bounded phase
+and duration fields to distinguish count from ranking/hydration failures.
 The regression verifies exact results and query-plan structure using synthetic
 fixtures. Public performance evidence must describe a reproducible fixture and
 its resource settings, without exposing an operator's corpus or measurements.
 Measure complete-result fetching after scale-down as well as warm plans, and
 include concurrent requests when validating the two-second guard.
+The local gate includes dense deterministic vectors and first/repeated prepared
+queries; its timings do not certify performance after Aurora scale-down.
 
 The IaC default is a 1 ACU minimum for the production stage, 0.5 ACU for
 development and previews, and a 4 ACU maximum for every stage. These are product

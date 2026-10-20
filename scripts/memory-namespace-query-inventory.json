@@ -4390,9 +4390,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "2a1c33bf5eebb86375c7",
+      "id": "665939b3547c75b72362",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 598,
+      "line": 602,
       "tables": [
         "memories"
       ],
@@ -4406,9 +4406,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "e7e3302e6e9aef232cc9",
+      "id": "e0678d97c46f0cd52f6a",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 677,
+      "line": 688,
       "tables": [
         "memories"
       ],
@@ -4424,9 +4424,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "4eb56c3717ca7bd16c2d",
+      "id": "81e6bcb28a291da3bda1",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 743,
+      "line": 759,
       "tables": [
         "memories"
       ],
@@ -4441,9 +4441,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "abbcad28c0e4119d791e",
+      "id": "fa766d69bb77803af1a7",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 771,
+      "line": 787,
       "tables": [
         "memories"
       ],
@@ -4458,9 +4458,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "57091f528bf4a4a2ddcf",
+      "id": "656fc2f92032c00fde7e",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 1097,
+      "line": 1113,
       "tables": [
         "memories"
       ],
@@ -4473,6 +4473,22 @@
         "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
       ],
       "namespace_evidence": null
+    },
+    {
+      "id": "caf04dbc136414a18e6b",
+      "owner": "upstream/server/internal/repository/postgres/namespace_capacity.go",
+      "line": 65,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "e53d1a9d672f8014ba94916d62536e113c28ca19d9adc2afd8ba0ce8a55859f5",
+      "statement": "SELECT COUNT(*) FROM memories WHERE namespace_id=$1 AND state='active' AND embedding IS NOT NULL",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
     },
     {
       "id": "e2e5d1ce285c5d27b9a3",

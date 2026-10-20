@@ -150,6 +150,37 @@ function one(kind: string): ResourceRecord {
   return matches[0];
 }
 
+describe("sampled namespace capacity", () => {
+  beforeEach(() => { resources = []; installGlobals(); });
+
+  it("requires measured recovery and independently reports missing samples", () => {
+    observability({ stage: "prod", logGroupName: out("synthetic-log") as never,
+      slackWebhookUrl: "https://example.com/webhook", mantleProject: "synthetic" });
+    const alarm = resources.find((r) => r.logicalName === "NamespaceVectorCapacityWarningAlarm")!;
+    expect(alarm.args).toMatchObject({ namespace: "mem9-on-aws/NamespaceVector",
+      metricName: "NamespaceVectorUtilizationPercent", dimensions: { stage: "prod" },
+      statistic: "Maximum", period: 300, evaluationPeriods: 2, datapointsToAlarm: 2,
+      threshold: 80, treatMissingData: "ignore" });
+    expect(alarm.args.alarmActions).toBeDefined();
+    expect(alarm.args.okActions).toBeDefined();
+    const live = resources.find((r) => r.logicalName === "NamespaceVectorCapacityLivenessAlarm")!;
+    expect(live.args).toMatchObject({ evaluationPeriods: 5, datapointsToAlarm: 5,
+      threshold: 1, comparisonOperator: "LessThanThreshold", treatMissingData: "breaching" });
+    expect(JSON.stringify(live.args.metricQueries)).toContain("FILL(heartbeat, 0)");
+    expect(JSON.stringify(live.args.metricQueries)).toContain("NamespaceVectorCapacitySampleCompleted");
+    const notification = resources.find((r) => r.logicalName === "NamespaceVectorCapacityLivenessNotification")!;
+    expect(notification.args).toMatchObject({ actionsSuppressor: { waitPeriod: 300, extensionPeriod: 0 } });
+    expect(notification.args.okActions).toBeUndefined();
+    for (const name of ["NamespaceVectorCapacityExceededAlarm", "NamespaceVectorTimeoutAlarm"]) {
+      expect(resources.find((r) => r.logicalName === name)?.args.alarmActions).toBeDefined();
+    }
+    const dashboard = JSON.stringify(materialize(one("Dashboard").args));
+    expect(dashboard).toContain("NamespaceVectorUtilizationPercent");
+    expect(dashboard).toContain("NamespaceVectorCapacitySampleCompleted");
+    expect(dashboard).toContain("frozen");
+  });
+});
+
 function queue(logicalName: string): ResourceRecord {
   const match = resources.find(
     (resource) => resource.kind === "Queue" && resource.logicalName === logicalName,
@@ -235,7 +266,7 @@ describe("observability alert delivery", () => {
     const topic = one("Topic");
     expect(topic.args).toEqual({ name: "mem9-on-aws-prod-alerts" });
     const alarms = resources.filter((resource) => resource.kind === "MetricAlarm");
-    expect(alarms).toHaveLength(14);
+    expect(alarms).toHaveLength(16);
     const actionBearingMetricAlarms = alarms.filter(
       (alarm) => alarm.args.alarmActions !== undefined,
     );
@@ -247,13 +278,18 @@ describe("observability alert delivery", () => {
       expect(materialize(alarm.args.okActions)).toEqual(
         materialize(alarm.args.alarmActions),
       );
-      expect(alarm.args.treatMissingData).toBe("notBreaching");
+      expect(alarm.args.treatMissingData).toBe(
+        alarm.logicalName === "NamespaceVectorCapacityWarningAlarm" ? "ignore" : "notBreaching",
+      );
     }
-    const composite = one("CompositeAlarm");
-    expect(materialize(composite.args.alarmActions)).toEqual([
-      "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
-    ]);
-    expect(composite.args.okActions).toBeUndefined();
+    const composites = resources.filter((resource) => resource.kind === "CompositeAlarm");
+    expect(composites).toHaveLength(2);
+    for (const composite of composites) {
+      expect(materialize(composite.args.alarmActions)).toEqual([
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ]);
+      expect(composite.args.okActions).toBeUndefined();
+    }
 
     const queueAlarms = alarms.filter(
       (alarm) => alarm.args.metricName === "ApproximateNumberOfMessagesVisible",
@@ -687,7 +723,7 @@ describe("observability alert delivery", () => {
           resource.kind === "MetricAlarm" ||
           resource.kind === "CompositeAlarm",
       ),
-    ).toHaveLength(15);
+    ).toHaveLength(18);
   });
 
   it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019/024..027: pins alarm semantics", () => {
@@ -1173,11 +1209,6 @@ describe("observability alert delivery", () => {
     );
 
     for (const [logicalName, metricName, threshold] of [
-      [
-        "NamespaceVectorCapacityWarningAlarm",
-        "NamespaceVectorCapacityWarning",
-        1,
-      ],
       [
         "NamespaceVectorCapacityExceededAlarm",
         "NamespaceVectorCapacityExceeded",

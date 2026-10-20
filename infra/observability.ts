@@ -459,7 +459,25 @@ export function observability(
           y: 26,
           width: 24,
           height: 1,
-          properties: { markdown: "# Namespace vector search" },
+          properties: { markdown: "# Namespace vector search\nCapacity state is frozen when samples are missing; inspect sampler completion/liveness before treating a frozen OK as healthy. Query warning counts are diagnostic." },
+        },
+        {
+          type: "metric",
+          x: 0,
+          y: 33,
+          width: 24,
+          height: 6,
+          properties: {
+            title: "Sampled namespace utilization and sampler completion",
+            region,
+            period: 300,
+            metrics: [
+              [namespaceVectorNamespace, "NamespaceVectorUtilizationPercent", "stage", stage,
+                { stat: "Maximum", label: "Highest namespace utilization (%)" }],
+              [namespaceVectorNamespace, "NamespaceVectorCapacitySampleCompleted", "stage", stage,
+                { stat: "Sum", label: "Complete authorized samples", yAxis: "right" }],
+            ],
+          },
         },
         {
           type: "metric",
@@ -480,7 +498,7 @@ export function observability(
               [
                 namespaceVectorNamespace,
                 "NamespaceVectorCapacityWarning",
-                { stat: "Sum" },
+                { stat: "Sum", label: "Query capacity warnings (diagnostic)" },
               ],
               [
                 namespaceVectorNamespace,
@@ -560,17 +578,53 @@ export function observability(
 
   new aws.cloudwatch.MetricAlarm("NamespaceVectorCapacityWarningAlarm", {
     alarmDescription:
-      "Namespace exact-vector rows reached at least 80% of the configured ceiling.",
+      "Sampled maximum namespace utilization reached 80%. Missing samples freeze " +
+      "the previous alarm state; inspect capacity-sampler liveness. A genuine " +
+      "non-breaching evaluated period is required for recovery.",
     namespace: namespaceVectorNamespace,
-    metricName: "NamespaceVectorCapacityWarning",
-    statistic: "Sum",
-    period: 900,
-    evaluationPeriods: 1,
-    threshold: 1,
+    metricName: "NamespaceVectorUtilizationPercent",
+    dimensions: { stage },
+    statistic: "Maximum",
+    period: 300,
+    evaluationPeriods: 2,
+    datapointsToAlarm: 2,
+    threshold: 80,
     comparisonOperator: "GreaterThanOrEqualToThreshold",
-    treatMissingData: "notBreaching",
+    // Missing data preserves state, not a last-value metric. The independent
+    // completion alarm covers blind sampling, including a frozen OK state.
+    treatMissingData: "ignore",
     alarmActions,
     okActions,
+  });
+
+  const capacityLiveness = new aws.cloudwatch.MetricAlarm("NamespaceVectorCapacityLivenessAlarm", {
+    alarmDescription: "No complete authorized namespace-capacity sample for five minutes.",
+    metricQueries: [
+      { id: "heartbeat", metric: { namespace: namespaceVectorNamespace,
+        metricName: "NamespaceVectorCapacitySampleCompleted", dimensions: { stage },
+        stat: "Maximum", period: 60 }, returnData: false },
+      { id: "present", expression: "FILL(heartbeat, 0)", returnData: true },
+    ],
+    evaluationPeriods: 5,
+    datapointsToAlarm: 5,
+    threshold: 1,
+    comparisonOperator: "LessThanThreshold",
+    treatMissingData: "breaching",
+  });
+  const capacityGrace = new aws.cloudwatch.MetricAlarm("NamespaceVectorCapacityActionDelayGuard", {
+    alarmDescription: "Always-OK guard for a five-minute wait on each capacity-liveness state change.",
+    namespace: namespaceVectorNamespace,
+    metricName: "NamespaceVectorCapacitySampleCompleted",
+    dimensions: { stage },
+    statistic: "Minimum", period: 60, evaluationPeriods: 1, threshold: 0,
+    comparisonOperator: "LessThanThreshold", treatMissingData: "notBreaching",
+  });
+  new aws.cloudwatch.CompositeAlarm("NamespaceVectorCapacityLivenessNotification", {
+    alarmName: `mem9-on-aws-${stage}-namespace-capacity-liveness`,
+    alarmDescription: "Capacity sampling is unavailable beyond the notification wait; utilization state may be frozen.",
+    alarmRule: capacityLiveness.arn.apply((arn) => `ALARM("${arn}")`),
+    actionsSuppressor: { alarm: capacityGrace.arn, waitPeriod: 300, extensionPeriod: 0 },
+    alarmActions,
   });
 
   new aws.cloudwatch.MetricAlarm("NamespaceVectorCapacityExceededAlarm", {

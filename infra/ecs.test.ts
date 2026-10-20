@@ -913,13 +913,14 @@ describe("ecs stack", () => {
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     const compositeAlarms = created.filter((c) => c.kind === "CompositeAlarm");
     expect(filters.length).toBe(7); // recall, ingest auth, and namespace-vector metrics
-    expect(alarms.length).toBe(14);
-    expect(compositeAlarms).toHaveLength(1);
+    expect(alarms.length).toBe(16);
+    expect(compositeAlarms).toHaveLength(2);
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
     // Queue health remains evidence-based; only sampler liveness treats loss
     // of its continuously expected signal as breaching.
     const missingPolicies = alarms.map((alarm) => alarm.args.treatMissingData);
-    expect(missingPolicies.filter((policy) => policy === "breaching")).toHaveLength(1);
+    expect(missingPolicies.filter((policy) => policy === "breaching")).toHaveLength(2);
+    expect(missingPolicies.filter((policy) => policy === "ignore")).toHaveLength(1);
     expect(
       missingPolicies.filter((policy) => policy === "notBreaching"),
     ).toHaveLength(13);
