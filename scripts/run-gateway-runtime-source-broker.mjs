@@ -78,6 +78,11 @@ log(`source ${broker.source.commit} (tree ${broker.source.tree})`);
 log(`owner role ${broker.owner.roleArn}; operator role ${broker.operator.roleArn}; application region ${broker.region}; VPC ${broker.vpcId}`);
 log(`canary verified; evidence ${broker.evidenceDirectory}`);
 log(`serving up to ${broker.maxRequests} request(s) until ${new Date(broker.deadlineAt).toISOString()}. In the rollout terminal run:`);
+// The line is pasted into a shell; publish only a path with no shell syntax.
+if(!/^\/[A-Za-z0-9._/-]+$/.test(broker.socketPath)){
+  log('not serving: the socket path has characters unsafe to paste into a shell; set TMPDIR to a plain path');
+  await broker.close({abort:true});process.exit(1);
+}
 process.stdout.write(`export MEM9_BOOTSTRAP_REQUEST_SOCKET=${broker.socketPath}\n`);
 
 const {requests}=await broker.closed;
