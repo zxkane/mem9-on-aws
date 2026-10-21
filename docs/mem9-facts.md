@@ -583,6 +583,16 @@ still keep writers stopped through namespace cutover.
   `namespace_not_enforced` output rather than publishing a false healthy zero
   over a legacy NULL-namespace queue. Heartbeat continues independently; no
   tenant-wide age query or compatibility authorization bypass is introduced.
+- Patch `0025-namespace-capacity-sampling` runs capacity observation independently
+  from queue age, with one bounded operation at a time. It preserves sampler
+  authorization row locks through an all-namespace maximum count and publishes
+  utilization plus completion in one stage-only EMF record. Empty or partial
+  authorization never becomes a healthy zero. The capacity warning uses sampled
+  utilization and retains state on missing data; completion liveness covers
+  missing samples. Existing query warnings are diagnostic counters, and hard-cap
+  and timeout failures retain their independent alarms. Query logs include
+  bounded phase and timing fields without parameters or identity. Dense-vector
+  first-call/prepared-query tests supplement the warm synthetic benchmark.
 - Prescreen analysis uses the fixed analysis service key and checks its active
   namespace membership before any payload query. Authorization and evaluation
   share a repeatable-read, read-only snapshot. A supplied principal ID cannot

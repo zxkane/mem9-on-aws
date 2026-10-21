@@ -422,3 +422,20 @@ The existing migration rehearsal remains the execution gate for additive DDL
 idempotence, legacy-shaped row preservation, phase guards, and enforcement.
 The coverage ownership map names verification surfaces; it does not replace
 execution evidence or enable the deferred cleanup-scan and Slack capabilities.
+
+## Sampled capacity and vector diagnostics
+
+| ID | Scenario | Required result |
+|---|---|---|
+| TC-VECTOR-RELIABILITY-001 | Complete, empty, 80%, and over-capacity samples | Maximum authorized namespace utilization; zero only after complete validation; values above 100% remain visible |
+| TC-VECTOR-RELIABILITY-002 | Missing, revoked, disabled or wrong-source sampler identity/membership; partial DB failure | No utilization or completion heartbeat; bounded failure log |
+| TC-VECTOR-RELIABILITY-003 | Concurrent lifecycle mutation or exhausted connection pool | Existing authorization lock order retained; revoke waits or sample fails; context cancellation releases resources |
+| TC-VECTOR-RELIABILITY-004 | Capacity sample stalls, fails, or worker stops | Ingest heartbeat and queue-age loop remain independent; one capacity operation at a time; shutdown cancels and joins it |
+| TC-VECTOR-RELIABILITY-005 | Invalid metric values or writer failure | No early completion signal; one validated EMF record; no identifiers, content or raw errors |
+| TC-VECTOR-RELIABILITY-006 | Query traffic stops/resumes while sampled capacity stays high | Capacity alarm remains based on utilization; missing samples freeze state and independently trigger liveness |
+| TC-VECTOR-RELIABILITY-007 | Genuine healthy capacity sample | One non-breaching evaluated period can recover the 2-of-2 warning; timeout and hard-cap alarms remain enabled |
+| TC-VECTOR-RELIABILITY-008 | Vector SQL timeout during count, ranking/hydration, setup or commit | Exactly one compatible timeout log with bounded phase and elapsed time; no SQL, vector, DSN or identity |
+| TC-VECTOR-RELIABILITY-009 | Dense synthetic 1024-dimensional vectors at configured ceiling | First and repeated filtered/unfiltered top-K 10/50 preserve exact results under the existing SQL deadline; report count, query and full request timings |
+
+These tests certify the sampled alarm and diagnostic behavior. Local synthetic
+timings do not establish the cause of a production timeout or certify its repair.

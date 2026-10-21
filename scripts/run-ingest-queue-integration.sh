@@ -414,6 +414,6 @@ export MEM9_NAMESPACE_OPERATOR_ROOT="$ROOT"
 MEM9_NAMESPACE_PERFORMANCE_TEST=1 \
 MNEMO_TEST_POSTGRES_DSN="$BENCHMARK_DSN" \
   go test -count=1 -v \
-  -run '^TestNamespaceVectorConfiguredCeilingBenchmark$' \
+  -run '^TestNamespaceVector(ConfiguredCeilingBenchmark|DenseFirstAndPreparedQueries)$' \
   ./internal/repository/postgres
 go test -count=1 ./...

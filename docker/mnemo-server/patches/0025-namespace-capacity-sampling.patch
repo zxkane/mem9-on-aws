@@ -1,0 +1,843 @@
+diff --git a/server/internal/ingestqueue/namespace_capacity.go b/server/internal/ingestqueue/namespace_capacity.go
+new file mode 100644
+index 0000000..de79bcc
+--- /dev/null
++++ b/server/internal/ingestqueue/namespace_capacity.go
+@@ -0,0 +1,101 @@
++package ingestqueue
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"time"
++)
++
++const namespaceCapacitySampleTimeout = 10 * time.Second
++
++// Optional capabilities keep backends without namespaces and existing telemetry
++// implementations on their original worker path.
++type namespaceCapacityRepository interface {
++	NamespaceVectorCapacity(context.Context) (rows, ceiling int, err error)
++}
++type namespaceCapacityTelemetry interface {
++	NamespaceVectorCapacity(rows, ceiling int) error
++}
++
++func (t *emfTelemetry) NamespaceVectorCapacity(rows, ceiling int) error {
++	if rows < 0 || ceiling <= 0 {
++		return errors.New("invalid namespace capacity sample")
++	}
++	record := struct {
++		Metadata    emfMetadata `json:"_aws"`
++		Stage       string      `json:"stage"`
++		Utilization float64     `json:"NamespaceVectorUtilizationPercent"`
++		Completed   int         `json:"NamespaceVectorCapacitySampleCompleted"`
++	}{
++		Metadata: emfMetadata{Timestamp: t.now().UnixMilli(), CloudWatchMetrics: []emfDirective{{
++			Namespace: "mem9-on-aws/NamespaceVector", Dimensions: [][]string{{"stage"}},
++			Metrics: []emfMetric{{Name: "NamespaceVectorUtilizationPercent", Unit: "Percent"}, {Name: "NamespaceVectorCapacitySampleCompleted", Unit: "Count"}},
++		}}}, Stage: t.stage, Utilization: float64(rows) / float64(ceiling) * 100, Completed: 1,
++	}
++	payload, err := json.Marshal(record)
++	if err != nil {
++		return err
++	}
++	payload = append(payload, '\n')
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	n, err := t.output.Write(payload)
++	if err != nil {
++		return err
++	}
++	if n != len(payload) {
++		return io.ErrShortWrite
++	}
++	return nil
++}
++
++func (w *Worker) runNamespaceCapacitySampler(ctx context.Context) {
++	// A fresh timer after each completed sample skips catch-up work. No capacity
++	// transaction can overlap the previous one, even after a stalled database.
++	for {
++		if ctx.Err() != nil {
++			return
++		}
++		w.sampleNamespaceCapacity(ctx)
++		timer := time.NewTimer(time.Minute)
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			return
++		case <-timer.C:
++		}
++	}
++}
++
++func (w *Worker) sampleNamespaceCapacity(ctx context.Context) {
++	repo, ok := w.repo.(namespaceCapacityRepository)
++	if !ok {
++		return
++	}
++	telemetry, ok := w.config.Telemetry.(namespaceCapacityTelemetry)
++	if !ok {
++		return
++	}
++	sampleCtx, cancel := context.WithTimeout(ctx, namespaceCapacitySampleTimeout)
++	defer cancel()
++	rows, ceiling, err := repo.NamespaceVectorCapacity(sampleCtx)
++	errorClass := "database_error"
++	if err == nil {
++		err = telemetry.NamespaceVectorCapacity(rows, ceiling)
++		errorClass = "telemetry_write_failed"
++	}
++	if err == nil || ctx.Err() != nil {
++		return
++	}
++	switch {
++	case errors.Is(err, ErrSamplerScopeDenied):
++		errorClass = "scope_denied"
++	case errors.Is(err, ErrSamplerNotEnforced):
++		errorClass = "namespace_not_enforced"
++	case errors.Is(err, context.DeadlineExceeded):
++		errorClass = "deadline"
++	}
++	w.logger.Error("namespace vector capacity sample failed", "error_class", errorClass)
++}
+diff --git a/server/internal/ingestqueue/namespace_capacity_test.go b/server/internal/ingestqueue/namespace_capacity_test.go
+new file mode 100644
+index 0000000..30980f5
+--- /dev/null
++++ b/server/internal/ingestqueue/namespace_capacity_test.go
+@@ -0,0 +1,142 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"log/slog"
++	"strings"
++	"testing"
++	"time"
++)
++
++type capacityTestRepo struct {
++	*fakeRepo
++	capacity func(context.Context) (int, int, error)
++}
++
++func (r *capacityTestRepo) NamespaceVectorCapacity(ctx context.Context) (int, int, error) {
++	return r.capacity(ctx)
++}
++
++type capacityFailWriter struct {
++	calls int
++	short bool
++}
++
++func (w *capacityFailWriter) Write(p []byte) (int, error) {
++	w.calls++
++	if w.short {
++		return len(p) - 1, nil
++	}
++	return 0, errors.New("private-writer-error")
++}
++
++func TestNamespaceCapacityTelemetryCompleteRecord(t *testing.T) {
++	for _, rows := range []int{0, 80, 120} {
++		var b bytes.Buffer
++		tm := NewEMFTelemetry("prod", &b, func() time.Time { return time.Unix(10, 0) }).(*emfTelemetry)
++		if err := tm.NamespaceVectorCapacity(rows, 100); err != nil {
++			t.Fatal(err)
++		}
++		var record map[string]any
++		if err := json.Unmarshal(b.Bytes(), &record); err != nil {
++			t.Fatal(err)
++		}
++		if record["NamespaceVectorUtilizationPercent"] != float64(rows) || record["NamespaceVectorCapacitySampleCompleted"] != float64(1) {
++			t.Fatalf("bad metrics: %s", b.String())
++		}
++		if len(record) != 4 || !strings.Contains(b.String(), `"Namespace":"mem9-on-aws/NamespaceVector"`) || !strings.Contains(b.String(), `"Dimensions":[["stage"]]`) {
++			t.Fatalf("unbounded record: %s", b.String())
++		}
++	}
++	for _, values := range [][2]int{{-1, 100}, {1, 0}, {1, -1}} {
++		var b bytes.Buffer
++		tm := NewEMFTelemetry("prod", &b, nil).(*emfTelemetry)
++		if tm.NamespaceVectorCapacity(values[0], values[1]) == nil || b.Len() != 0 {
++			t.Fatal("invalid metric emitted")
++		}
++	}
++	for _, short := range []bool{false, true} {
++		w := &capacityFailWriter{short: short}
++		tm := NewEMFTelemetry("prod", w, nil).(*emfTelemetry)
++		if err := tm.NamespaceVectorCapacity(80, 100); err == nil || w.calls != 1 {
++			t.Fatal("writer failure not returned in one call")
++		}
++	}
++}
++
++func TestNamespaceCapacitySampleFailureOmitsHeartbeat(t *testing.T) {
++	for _, fail := range []bool{false, true} {
++		var output, logs bytes.Buffer
++		repo := &capacityTestRepo{fakeRepo: &fakeRepo{}, capacity: func(ctx context.Context) (int, int, error) {
++			deadline, ok := ctx.Deadline()
++			if !ok || time.Until(deadline) > 10*time.Second {
++				t.Fatal("unbounded sample")
++			}
++			if fail {
++				return 90, 100, errors.New("private-namespace-and-error")
++			}
++			return 90, 100, nil
++		}}
++		cfg := DefaultWorkerConfig()
++		cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
++		w := NewWorker(repo, fakeProcessor{}, "private-tenant", "worker", cfg, slog.New(slog.NewTextHandler(&logs, nil)))
++		w.sampleNamespaceCapacity(context.Background())
++		if fail && output.Len() != 0 {
++			t.Fatal("partial sample emitted telemetry")
++		}
++		if !fail && output.Len() == 0 {
++			t.Fatal("successful sample missing")
++		}
++		if strings.Contains(output.String()+logs.String(), "private-") {
++			t.Fatal("private error or identity logged")
++		}
++	}
++}
++
++func TestNamespaceCapacityLoopCancellationAndQueueIndependence(t *testing.T) {
++	entered := make(chan struct{})
++	done := make(chan struct{})
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	repo := &capacityTestRepo{fakeRepo: &fakeRepo{}, capacity: func(ctx context.Context) (int, int, error) { close(entered); <-ctx.Done(); return 0, 0, ctx.Err() }}
++	cfg := DefaultWorkerConfig()
++	cfg.Telemetry = NewEMFTelemetry("prod", io.Discard, nil)
++	w := NewWorker(repo, fakeProcessor{}, "tenant", "worker", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	go func() { w.runNamespaceCapacitySampler(ctx); close(done) }()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("sampler not started")
++	}
++	queueDone := make(chan struct{})
++	go func() { w.sampleOldestQueuedAge(ctx); close(queueDone) }()
++	select {
++	case <-queueDone:
++	case <-time.After(time.Second):
++		t.Fatal("capacity blocked queue sampling")
++	}
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("sampler not canceled")
++	}
++}
++
++func TestNamespaceCapacityAuthorizationErrorPrecedence(t *testing.T) {
++	var output, logs bytes.Buffer
++	repo := &capacityTestRepo{fakeRepo: &fakeRepo{}, capacity: func(context.Context) (int, int, error) {
++		return 0, 0, errors.Join(ErrSamplerScopeDenied, context.DeadlineExceeded)
++	}}
++	cfg := DefaultWorkerConfig()
++	cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
++	w := NewWorker(repo, fakeProcessor{}, "tenant", "worker", cfg, slog.New(slog.NewTextHandler(&logs, nil)))
++	w.sampleNamespaceCapacity(context.Background())
++	if output.Len() != 0 || !strings.Contains(logs.String(), "scope_denied") || strings.Contains(logs.String(), "error_class=deadline") {
++		t.Fatal("authorization signal lost")
++	}
++}
+diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
+index a2a8687..a9984f5 100644
+--- a/server/internal/ingestqueue/worker.go
++++ b/server/internal/ingestqueue/worker.go
+@@ -119,6 +119,15 @@ func (w *Worker) Run(ctx context.Context) error {
+ 			defer active.Done()
+ 			w.runQueueAgeSampler(workerCtx)
+ 		}()
++		if _, ok := w.repo.(namespaceCapacityRepository); ok {
++			if _, ok := w.config.Telemetry.(namespaceCapacityTelemetry); ok {
++				active.Add(1)
++				go func() {
++					defer active.Done()
++					w.runNamespaceCapacitySampler(workerCtx)
++				}()
++			}
++		}
+ 	}
+ 
+ 	for {
+diff --git a/server/internal/repository/postgres/memory.go b/server/internal/repository/postgres/memory.go
+index dd12fb5..8973038 100644
+--- a/server/internal/repository/postgres/memory.go
++++ b/server/internal/repository/postgres/memory.go
+@@ -573,12 +573,15 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 	queryVec []float32,
+ 	limit int,
+ ) ([]domain.Memory, error) {
++	started := time.Now()
++	phase, phaseStarted := "transaction_setup", started
++	classify := func(err error) error { return classifyNamespaceVectorPhaseError(err, phase, phaseStarted) }
+ 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{
+ 		Isolation: sql.LevelRepeatableRead,
+ 		ReadOnly:  true,
+ 	})
+ 	if err != nil {
+-		return nil, fmt.Errorf("begin exact namespace vector search: %w", err)
++		return nil, fmt.Errorf("begin exact namespace vector search: %w", classify(err))
+ 	}
+ 	defer tx.Rollback()
+ 
+@@ -591,9 +594,10 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 		`SELECT set_config('statement_timeout', $1, true)`,
+ 		strconv.FormatInt(timeout.Milliseconds(), 10),
+ 	); err != nil {
+-		return nil, classifyNamespaceVectorError(err)
++		return nil, classify(err)
+ 	}
+ 
++	phase, phaseStarted = "count", time.Now()
+ 	var rowsInNamespace int
+ 	if err := tx.QueryRowContext(ctx, `
+ 		SELECT COUNT(*)
+@@ -603,8 +607,9 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 		  AND embedding IS NOT NULL`,
+ 		r.namespaceID,
+ 	).Scan(&rowsInNamespace); err != nil {
+-		return nil, classifyNamespaceVectorError(err)
++		return nil, classify(err)
+ 	}
++	countDuration := time.Since(phaseStarted)
+ 	maxRows := r.exactVectorMaxRows
+ 	if maxRows <= 0 {
+ 		maxRows = 10000
+@@ -631,6 +636,7 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 		)
+ 	}
+ 
++	phase, phaseStarted = "rank_hydrate", time.Now()
+ 	vecParamIdx := len(filterArgs) + 1
+ 	limitParamIdx := vecParamIdx + 1
+ 	query := namespaceVectorQuery(conds, vecParamIdx, limitParamIdx)
+@@ -639,7 +645,7 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 	args = append(args, pgvector.NewVector(queryVec), limit)
+ 	rows, err := tx.QueryContext(ctx, query, args...)
+ 	if err != nil {
+-		return nil, classifyNamespaceVectorError(err)
++		return nil, classify(err)
+ 	}
+ 	var memories []domain.Memory
+ 	for rows.Next() {
+@@ -652,17 +658,22 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 	}
+ 	if err := rows.Err(); err != nil {
+ 		rows.Close()
+-		return nil, classifyNamespaceVectorError(err)
++		return nil, classify(err)
+ 	}
+ 	if err := rows.Close(); err != nil {
+ 		return nil, err
+ 	}
++	rankDuration := time.Since(phaseStarted)
++	phase, phaseStarted = "commit", time.Now()
+ 	if err := tx.Commit(); err != nil {
+-		return nil, classifyNamespaceVectorError(err)
++		return nil, classify(err)
+ 	}
+ 	slog.Info(
+ 		"namespace vector search",
+ 		"result", "success",
++		"elapsed_ms", time.Since(started).Milliseconds(),
++		"count_ms", countDuration.Milliseconds(),
++		"rank_hydrate_ms", rankDuration.Milliseconds(),
+ 		"rows", rowsInNamespace,
+ 		"max_rows", maxRows,
+ 	)
+@@ -691,10 +702,15 @@ func namespaceVectorQuery(conds []string, vectorParameter, limitParameter int) s
+ 	)
+ }
+ 
+-func classifyNamespaceVectorError(err error) error {
++func classifyNamespaceVectorPhaseError(err error, phase string, started time.Time) error {
++	switch phase {
++	case "transaction_setup", "count", "rank_hydrate", "commit":
++	default:
++		phase = "transaction_setup"
++	}
+ 	var pgErr *pgconn.PgError
+ 	if errors.As(err, &pgErr) && pgErr.Code == "57014" {
+-		slog.Warn("namespace vector search", "result", "timeout")
++		slog.Warn("namespace vector search", "result", "timeout", "phase", phase, "elapsed_ms", time.Since(started).Milliseconds())
+ 		return fmt.Errorf("%w: exact vector statement timed out", domain.ErrNamespaceVectorTimeout)
+ 	}
+ 	return err
+diff --git a/server/internal/repository/postgres/namespace_capacity.go b/server/internal/repository/postgres/namespace_capacity.go
+new file mode 100644
+index 0000000..bbc5f42
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_capacity.go
+@@ -0,0 +1,77 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++)
++
++// NamespaceVectorCapacity reads metadata and counts only. Authorization locks
++// follow the existing namespace -> principal -> membership order and survive
++// through the count. Row locks require a transaction without ReadOnly=true;
++// this operation performs no DML and never provisions sampler access.
++func (r *IngestJobRepo) NamespaceVectorCapacity(ctx context.Context) (int, int, error) {
++	ceiling, _ := namespaceExactVectorConfig()
++	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
++	if err != nil {
++		return 0, 0, err
++	}
++	defer tx.Rollback()
++	var phase string
++	if err = tx.QueryRowContext(ctx, `SELECT phase FROM memory_namespace_migration_state WHERE singleton_id`).Scan(&phase); err != nil {
++		return 0, 0, err
++	}
++	if phase != "constraints_complete" {
++		return 0, 0, ingestqueue.ErrSamplerNotEnforced
++	}
++	rows, err := tx.QueryContext(ctx, `SELECT namespace_id FROM memory_namespaces WHERE status='active' ORDER BY namespace_id FOR SHARE`)
++	if err != nil {
++		return 0, 0, err
++	}
++	var namespaces []string
++	for rows.Next() {
++		var namespaceID string
++		if err = rows.Scan(&namespaceID); err != nil {
++			rows.Close()
++			return 0, 0, err
++		}
++		namespaces = append(namespaces, namespaceID)
++	}
++	err = rows.Err()
++	rows.Close()
++	if err != nil {
++		return 0, 0, err
++	}
++	var principalID string
++	if err = tx.QueryRowContext(ctx, `SELECT principal_id FROM memory_principals
++ WHERE principal_key=$1 AND principal_type='service' AND status='active' FOR SHARE`, samplerPrincipalKey()).Scan(&principalID); err != nil {
++		return 0, 0, samplerAuthorizationError(err)
++	}
++	// Validate every membership before reading any memory table. Empty namespace
++	// sets still require enforcement and the fixed active sampler principal.
++	for _, namespaceID := range namespaces {
++		var role string
++		if err = tx.QueryRowContext(ctx, `SELECT role FROM memory_namespace_memberships
++  WHERE namespace_id=$1 AND principal_id=$2 AND status='active' AND source_type='service'
++  AND role IN ('viewer','member','owner') FOR SHARE`, namespaceID, principalID).Scan(&role); err != nil {
++			return 0, 0, samplerAuthorizationError(err)
++		}
++	}
++	maximum := 0
++	for _, namespaceID := range namespaces {
++		var count int
++		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories
++  WHERE namespace_id=$1 AND state='active' AND embedding IS NOT NULL`, namespaceID).Scan(&count); err != nil {
++			return 0, 0, fmt.Errorf("count namespace vector rows: %w", err)
++		}
++		if count > maximum {
++			maximum = count
++		}
++	}
++	if err = tx.Commit(); err != nil {
++		return 0, 0, err
++	}
++	return maximum, ceiling, nil
++}
+diff --git a/server/internal/repository/postgres/namespace_capacity_test.go b/server/internal/repository/postgres/namespace_capacity_test.go
+new file mode 100644
+index 0000000..850e286
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_capacity_test.go
+@@ -0,0 +1,189 @@
++package postgres
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++	"testing"
++	"time"
++)
++
++func TestNamespaceCapacityCompleteAndAuthorization(t *testing.T) {
++	t.Setenv("MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS", "100")
++	db := ingestTestDB(t)
++	r := NewIngestJobRepo(db)
++	ctx := context.Background()
++	if _, _, err := r.NamespaceVectorCapacity(ctx); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++		t.Fatalf("missing identity accepted: %v", err)
++	}
++	seedSamplerAccess(t, db)
++	if _, err := db.Exec(`INSERT INTO memories(id,content,embedding,state,namespace_id,created_by_principal_id,updated_by_principal_id)
++ SELECT '97000000-0000-4000-8000-'||lpad(i::text,12,'0'),'synthetic',('[1,'||array_to_string(array_fill(0,ARRAY[1023]),',')||']')::vector,'active',$1,$2,$2 FROM generate_series(1,120)i`, testutil.TestNamespaceID, testutil.TestPrincipalID); err != nil {
++		t.Fatal(err)
++	}
++	n, max, err := r.NamespaceVectorCapacity(ctx)
++	if err != nil || n != 120 || max != 100 {
++		t.Fatalf("maximum=%d ceiling=%d err=%v", n, max, err)
++	}
++	if _, err = db.Exec(`UPDATE memories SET state='deleted' WHERE namespace_id=$1`, testutil.TestNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	n, _, err = r.NamespaceVectorCapacity(ctx)
++	if err != nil || n != 0 {
++		t.Fatalf("deleted rows counted: %d %v", n, err)
++	}
++	for _, change := range []struct{ sql, undo string }{
++		{`UPDATE memory_principals SET status='disabled' WHERE principal_id=$1`, `UPDATE memory_principals SET status='active' WHERE principal_id=$1`},
++		{`UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1`, `UPDATE memory_namespace_memberships SET status='active' WHERE principal_id=$1`},
++		{`UPDATE memory_namespace_memberships SET source_type='operator' WHERE principal_id=$1`, `UPDATE memory_namespace_memberships SET source_type='service' WHERE principal_id=$1`},
++	} {
++		if _, err = db.Exec(change.sql, samplerTestPrincipalID); err != nil {
++			t.Fatal(err)
++		}
++		if _, _, err = r.NamespaceVectorCapacity(ctx); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++			t.Fatalf("bad access accepted: %v", err)
++		}
++		if _, err = db.Exec(change.undo, samplerTestPrincipalID); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if _, err = db.Exec(`UPDATE memory_namespaces SET status='disabled'`); err != nil {
++		t.Fatal(err)
++	}
++	n, _, err = r.NamespaceVectorCapacity(ctx)
++	if err != nil || n != 0 {
++		t.Fatalf("empty sample rejected: %v", err)
++	}
++	if _, err = db.Exec(`UPDATE memory_principals SET status='disabled' WHERE principal_id=$1`, samplerTestPrincipalID); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err = r.NamespaceVectorCapacity(ctx); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++		t.Fatal("empty namespace set bypassed principal")
++	}
++}
++
++func TestNamespaceCapacityHoldsRevocationFence(t *testing.T) {
++	db := ingestTestDB(t)
++	seedSamplerAccess(t, db)
++	r := NewIngestJobRepo(db)
++	blocker, err := db.Begin()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blocker.Rollback()
++	if _, err = blocker.Exec(`LOCK TABLE memories IN ACCESS EXCLUSIVE MODE`); err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	done := make(chan error, 1)
++	go func() { _, _, err := r.NamespaceVectorCapacity(ctx); done <- err }()
++	deadline := time.Now().Add(time.Second)
++	waiting := false
++	for time.Now().Before(deadline) {
++		if err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
++   AND wait_event_type='Lock' AND query LIKE 'SELECT COUNT(*) FROM memories%')`).Scan(&waiting); err != nil {
++			t.Fatal(err)
++		}
++		if waiting {
++			break
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if !waiting {
++		t.Fatal("sampler did not reach its authorized count")
++	}
++	revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
++	_, err = db.ExecContext(revokeCtx, `UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1`, samplerTestPrincipalID)
++	revokeCancel()
++	if err == nil {
++		t.Fatal("revocation passed the active count fence")
++	}
++	if err = blocker.Rollback(); err != nil {
++		t.Fatal(err)
++	}
++	if err = <-done; err != nil {
++		t.Fatalf("authorized sample failed: %v", err)
++	}
++	if _, err = db.Exec(`UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1`, samplerTestPrincipalID); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err = r.NamespaceVectorCapacity(context.Background()); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++		t.Fatal("later sample bypassed revocation")
++	}
++}
++
++func TestNamespaceCapacityRuntimePrivileges(t *testing.T) {
++	db := ingestTestDB(t)
++	seedSamplerAccess(t, db)
++	db.SetMaxOpenConns(1)
++	role := fmt.Sprintf("capacity_fixture_%d", time.Now().UnixNano())
++	if _, err := db.Exec("CREATE ROLE " + role); err != nil {
++		t.Fatal(err)
++	}
++	defer func() { db.Exec("RESET ROLE"); db.Exec("DROP OWNED BY " + role); db.Exec("DROP ROLE " + role) }()
++	grants := []string{
++		"GRANT USAGE ON SCHEMA public TO " + role,
++		"GRANT SELECT ON memories,memory_namespace_migration_state,memory_namespaces,memory_principals,memory_namespace_memberships TO " + role,
++		"GRANT UPDATE(updated_at) ON memory_namespaces TO " + role,
++		"GRANT UPDATE(last_seen_at) ON memory_principals TO " + role,
++		"GRANT UPDATE(granted_at) ON memory_namespace_memberships TO " + role,
++		"SET ROLE " + role,
++	}
++	for _, q := range grants {
++		if _, err := db.Exec(q); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if n, _, err := NewIngestJobRepo(db).NamespaceVectorCapacity(context.Background()); err != nil || n != 0 {
++		t.Fatalf("runtime privileges insufficient: %d %v", n, err)
++	}
++	if _, err := db.Exec(`UPDATE memory_namespaces SET status='disabled'`); err == nil {
++		t.Fatal("fixture can disable namespaces")
++	}
++}
++
++func TestNamespaceCapacityEnforcementAndCancellation(t *testing.T) {
++	db := ingestTestDB(t)
++	seedSamplerAccess(t, db)
++	r := NewIngestJobRepo(db)
++	if _, err := db.Exec(`UPDATE memory_namespace_migration_state SET phase='additive_ready',
++ checkpoint=NULL,legacy_namespace_id=NULL,legacy_principal_id=NULL,legacy_namespace_slug=NULL,
++ legacy_namespace_display_name=NULL,legacy_principal_key=NULL WHERE singleton_id`); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := r.NamespaceVectorCapacity(context.Background()); !errors.Is(err, ingestqueue.ErrSamplerNotEnforced) {
++		t.Fatalf("unenforced sample accepted: %v", err)
++	}
++	db.SetMaxOpenConns(1)
++	conn, err := db.Conn(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
++	defer cancel()
++	if _, _, err = r.NamespaceVectorCapacity(ctx); !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("pool wait not bounded: %v", err)
++	}
++	conn.Close()
++}
++
++func TestNamespaceCapacityConfigMatchesRequests(t *testing.T) {
++	db := ingestTestDB(t)
++	seedSamplerAccess(t, db)
++	for _, value := range []string{"", "invalid", "0", "-1", "30000"} {
++		t.Run(value, func(t *testing.T) {
++			t.Setenv("MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS", value)
++			_, ceiling, err := NewIngestJobRepo(db).NamespaceVectorCapacity(context.Background())
++			if err != nil {
++				t.Fatal(err)
++			}
++			request := NewMemoryRepo(db, false, "", testutil.TestNamespaceScope())
++			if ceiling <= 0 || ceiling != request.exactVectorMaxRows {
++				t.Fatalf("sampler ceiling %d differs from request %d", ceiling, request.exactVectorMaxRows)
++			}
++		})
++	}
++}
+diff --git a/server/internal/repository/postgres/namespace_vector_dense_test.go b/server/internal/repository/postgres/namespace_vector_dense_test.go
+new file mode 100644
+index 0000000..75ce45c
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_vector_dense_test.go
+@@ -0,0 +1,105 @@
++package postgres
++
++import (
++	"context"
++	"encoding/json"
++	"math"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestNamespaceVectorDenseFirstAndPreparedQueries(t *testing.T) {
++	if os.Getenv("MEM9_NAMESPACE_PERFORMANCE_TEST") != "1" {
++		t.Skip("MEM9_NAMESPACE_PERFORMANCE_TEST is not enabled")
++	}
++	db := ingestTestDB(t)
++	db.SetMaxOpenConns(1)
++	seedNamespaceVectorBenchmark(t, db)
++	// Dense deterministic non-zero values exercise TOAST reads that the mostly
++	// zero warm fixture compresses away. No customer vectors or content are used.
++	if _, err := db.Exec(`UPDATE memories m SET embedding=(
++  ARRAY[1::real,substring(m.id,25)::real/30000] ||
++  ARRAY(SELECT (sin((substring(m.id,25)::integer*1024+j)::double precision)/1000)::real FROM generate_series(1,1022)j)
++ )::vector`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`VACUUM ANALYZE memories`); err != nil {
++		t.Fatal(err)
++	}
++	repo := NewMemoryRepo(db, false, "", testutil.TestNamespaceScope())
++	repo.exactVectorMaxRows = namespaceBenchmarkRows
++	repo.exactVectorTimeout = 2 * time.Second
++	vec := make([]float32, 1024)
++	vec[0] = 1
++	ctx := context.Background()
++	for _, filtered := range []bool{false, true} {
++		for _, limit := range []int{10, 50} {
++			// Close the previous case's idle connection. Each K/filter case starts
++			// with a fresh physical connection, then reuses it for all eight calls.
++			db.SetMaxIdleConns(0)
++			db.SetMaxIdleConns(1)
++			filter := domain.MemoryFilter{MinScore: -1}
++			app := "namespace-benchmark"
++			if filtered {
++				filter.AppID = &app
++			}
++			var reference []domain.Memory
++			for call := 0; call < 8; call++ {
++				started := time.Now()
++				actual, err := repo.VectorSearch(ctx, vec, filter, limit)
++				elapsed := time.Since(started)
++				if err != nil {
++					t.Fatalf("filtered=%v K=%d call=%d: %v", filtered, limit, call, err)
++				}
++				if elapsed >= 2*time.Second {
++					t.Fatalf("request exceeded synthetic budget: %s", elapsed)
++				}
++				if call == 0 {
++					reference, err = baselineNamespaceVectorSearch(ctx, db, testutil.TestNamespaceScope(), vec, filter, limit)
++					if err != nil {
++						t.Fatal(err)
++					}
++				}
++				assertSameBenchmarkRows(t, reference, actual, limit)
++				for i := range actual {
++					if actual[i].Score == nil || reference[i].Score == nil || math.Abs(*actual[i].Score-*reference[i].Score) > 1e-6 {
++						t.Fatal("exact score changed")
++					}
++				}
++				t.Logf("dense vector filtered=%v top_k=%d call=%d request_ms=%d", filtered, limit, call, elapsed.Milliseconds())
++			}
++		}
++	}
++	// Verify the real pgx driver exercised prepared queries beyond initial custom
++	// planning, instead of treating repeated EXPLAIN statements as that proof.
++	var executions int64
++	if err := db.QueryRow(`SELECT COALESCE(MAX(generic_plans+custom_plans),0) FROM pg_prepared_statements
++ WHERE statement LIKE '%WITH namespace_distances AS MATERIALIZED%'`).Scan(&executions); err != nil {
++		t.Fatal(err)
++	}
++	if executions < 8 {
++		t.Fatalf("only %d prepared query executions", executions)
++	}
++	var counts int
++	start := time.Now()
++	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE namespace_id=$1 AND state='active' AND embedding IS NOT NULL`, testutil.TestNamespaceID).Scan(&counts); err != nil {
++		t.Fatal(err)
++	}
++	t.Logf("dense count rows=%d count_ms=%d prepared_executions=%d", counts, time.Since(start).Milliseconds(), executions)
++	// Compact, content-free plan diagnostics; never print parameterized SQL or
++	// a full plan containing query vectors. Timing of the actual query is logged
++	// by the request path as count_ms and rank_hydrate_ms.
++	var raw []byte
++	if err := db.QueryRow(`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT COUNT(*) FROM memories WHERE namespace_id=$1 AND state='active' AND embedding IS NOT NULL`, testutil.TestNamespaceID).Scan(&raw); err != nil {
++		t.Fatal(err)
++	}
++	var plans []map[string]any
++	if err := json.Unmarshal(raw, &plans); err != nil {
++		t.Fatal(err)
++	}
++	t.Logf("dense count execution_ms=%v planning_ms=%v", plans[0]["Execution Time"], plans[0]["Planning Time"])
++}
+diff --git a/server/internal/repository/postgres/namespace_vector_diagnostics_test.go b/server/internal/repository/postgres/namespace_vector_diagnostics_test.go
+new file mode 100644
+index 0000000..de6922e
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_vector_diagnostics_test.go
+@@ -0,0 +1,69 @@
++package postgres
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"log/slog"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/jackc/pgx/v5/pgconn"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestNamespaceVectorDiagnosticTimeout(t *testing.T) {
++	for _, phase := range []string{"transaction_setup", "count", "rank_hydrate", "commit", "private-invalid-phase"} {
++		var b bytes.Buffer
++		original := slog.Default()
++		slog.SetDefault(slog.New(slog.NewJSONHandler(&b, nil)))
++		err := classifyNamespaceVectorPhaseError(&pgconn.PgError{Code: "57014", Message: "private-sql-content"}, phase, time.Now().Add(-2*time.Second))
++		slog.SetDefault(original)
++		if !errors.Is(err, domain.ErrNamespaceVectorTimeout) {
++			t.Fatal("lost typed timeout")
++		}
++		if strings.Count(b.String(), "\n") != 1 || strings.Contains(b.String(), "private-") {
++			t.Fatalf("bad timeout record: %s", b.String())
++		}
++		var record map[string]any
++		if err := json.Unmarshal(b.Bytes(), &record); err != nil {
++			t.Fatal(err)
++		}
++		wantPhase := phase
++		if strings.HasPrefix(phase, "private-") {
++			wantPhase = "transaction_setup"
++		}
++		if record["phase"] != wantPhase || record["msg"] != "namespace vector search" || record["result"] != "timeout" || record["elapsed_ms"].(float64) < 2000 {
++			t.Fatalf("bad phase timing: %s", b.String())
++		}
++	}
++}
++
++func TestNamespaceVectorPoolDeadlineIsNotSQLTimeout(t *testing.T) {
++	db := ingestTestDB(t)
++	db.SetMaxOpenConns(1)
++	conn, err := db.Conn(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	var output bytes.Buffer
++	original := slog.Default()
++	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
++	defer slog.SetDefault(original)
++	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
++	defer cancel()
++	repo := NewMemoryRepo(db, false, "", testutil.TestNamespaceScope())
++	vec := make([]float32, 1024)
++	vec[0] = 1
++	_, err = repo.VectorSearch(ctx, vec, domain.MemoryFilter{}, 10)
++	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, domain.ErrNamespaceVectorTimeout) {
++		t.Fatalf("incorrect setup error: %v", err)
++	}
++	if output.Len() != 0 {
++		t.Fatalf("pool deadline counted as SQL timeout: %s", output.String())
++	}
++}
