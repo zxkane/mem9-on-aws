@@ -2106,8 +2106,18 @@ re-planned and decisions from the old model, including queued actions, are
 discarded. Between the deploy and the switch the planner rejects its old
 contract, so run the switch right after `readmit`.
 
-After every production release, re-admit the promoted dispatcher to the new
-worker artifacts; until then scheduled workers stop with
+After a production release builds new workload images, Infra CI automatically
+re-admits a promoted dispatcher to those worker artifacts after bootstrap.
+Infrastructure-only releases reuse the previous images and admission.
+The hard gate verifies
+the database admission and exact schedule targets before foreground E2E can
+pass. Unpromoted installations are skipped only when execution, dispatch and
+schedules are disabled; an existing pause stays paused. Any readmission or
+verification error fails deployment. Logs expose only bounded status fields.
+
+For an operator-run deployment or recovery, run the same guarded readmission
+from the checkout matching the deployed main revision and application region.
+Until readmission completes, scheduled workers reject the changed release with
 `dispatcher configuration changed`:
 
 ```bash

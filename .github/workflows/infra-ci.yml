@@ -1493,8 +1493,9 @@ jobs:
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
     # infra/db.ts). The configured custom reconciliation budget
     # can wait just under 30m, and bootstrap/E2E follow it. The failure reporter
-    # is a separate always() job, so it still runs if this 75m budget is exhausted.
-    timeout-minutes: 75
+    # is a separate always() job. Reserve another 20m for guarded consolidation
+    # readmission and its database/schedule verification after bootstrap.
+    timeout-minutes: 95
     permissions:
       id-token: write
       contents: read
@@ -1787,6 +1788,16 @@ jobs:
         env:
           STAGE: prod
         run: bash scripts/run-bootstrap-task.sh
+
+      - name: Re-admit production consolidation
+        # Infra-only releases reuse the previous image and its admission. The
+        # guarded operator must match the source revision of newly built images.
+        if: env.MEM9_PRODUCTION_RUNTIME_MODE == 'active' && needs.changes.outputs.workload_changed == 'true'
+        timeout-minutes: 20
+        env:
+          STAGE: prod
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/run-production-canary.mjs readmit-if-promoted
 
       - name: MCP write-search E2E (prod, hard)
         # HARD gate on prod: the full section 6/6a chain must round-trip

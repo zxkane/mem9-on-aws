@@ -746,7 +746,7 @@ describe("workflow integration", () => {
 
   it("reports prod failures from an independent always job", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
-    expect(workflow.jobs["deploy-prod"]["timeout-minutes"]).toBe(75);
+    expect(workflow.jobs["deploy-prod"]["timeout-minutes"]).toBe(95);
     expect(workflow.jobs["deploy-prod"].permissions).not.toHaveProperty("issues");
 
     const reporter = workflow.jobs["report-prod-failure"];
