@@ -113,19 +113,43 @@ export async function runProductionCanary({clients,region,dailyRows=6000,basisPo
  * the database derives the admission from the promoted activation seed, and
  * the deployed schedules must then carry exactly that admission.
  */
-export async function readmitProductionRelease(clients,{region}){
-  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
-  if(await gh(['api',`repos/${repository}/commits/main`,'--jq','.sha'])!==revision)throw Error('ProductionReadmissionRequiresMain');
+export async function readmitProductionRelease(clients,{region,ifPromoted=false},{
+  readRevision=()=>execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim(),
+  currentMain=()=>gh(['api',`repos/${repository}/commits/main`,'--jq','.sha']),
+  loadWorker=loadProductionCanaryWorker,administer=runProductionConsolidationTask,verify=verifyProductionScheduling,
+}={}){
+  const revision=readRevision();
+  if(await currentMain()!==revision)throw Error('ProductionReadmissionRequiresMain');
   const targets=[];
-  for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
+  for(const kind of ['planner','executor'])targets.push(await loadWorker(clients,{region,kind,revision}));
+  if(ifPromoted){
+    const status=await administer(clients,{region,operation:'status'});
+    if(status.setupPhase!=='promote'){
+      if([status.enabled,status.dispatcherEnabled].some(value=>value!==false&&value!==undefined))throw Error('ProductionReadmissionStateMismatch');
+      await verify(clients,targets,{enabled:false});
+      return {phase:'not-promoted',changed:false,enabled:false};
+    }
+    if(typeof status.enabled!=='boolean'||status.dispatcherEnabled!==status.enabled)throw Error('ProductionReadmissionStateMismatch');
+  }
   const presented=targets.map(target=>JSON.parse(target.template.Target.Input).containerOverrides?.[0]?.environment
     ?.find(item=>item.name==='MEM9_WORKER_ADMISSION')?.value);
   if(!/^[a-f0-9]{64}$/.test(presented[0]??'')||presented[1]!==presented[0])throw Error('ProductionReadmissionScheduleMismatch');
-  const result=await runProductionConsolidationTask(clients,{region,operation:'readmit',expectedAdmission:presented[0]});
+  if(await currentMain()!==revision)throw Error('ProductionReadmissionRequiresMain');
+  const result=await administer(clients,{region,operation:'readmit',expectedAdmission:presented[0]});
   if(result.admission!==presented[0])throw Error('ProductionReadmissionScheduleMismatch');
   if(!/^[a-f0-9]{64}$/.test(result.admission??''))throw Error('ProductionReadmissionMissing');
-  const verified=await verifyProductionScheduling(clients,targets,{enabled:result.enabled,admission:result.admission});
+  const verified=await verify(clients,targets,{enabled:result.enabled,admission:result.admission});
+  if(ifPromoted){
+    const status=await administer(clients,{region,operation:'status'});
+    if(status.setupPhase!=='promote'||status.admission!==result.admission||status.dispatcherEnabled!==result.enabled||
+      status.enabled!==result.enabled)throw Error('ProductionReadmissionStateMismatch');
+  }
   return {phase:'readmitted',changed:result.changed,enabled:result.enabled,taskDefinitions:verified.taskDefinitions};
+}
+
+export function productionReadmissionRecord({phase,changed,enabled}){
+  if(!['readmitted','not-promoted'].includes(phase)||typeof changed!=='boolean'||typeof enabled!=='boolean')throw Error('InvalidProductionReadmissionResult');
+  return {event:'production_canary',phase,changed,enabled};
 }
 
 /** A contract is usable only on the exact model, region and project the deployed planner serves. */
@@ -159,11 +183,12 @@ async function main(){
     finally{Object.values(clients).forEach(client=>client.destroy());}
     return;
   }
-  if(process.argv[2]==='readmit'){
+  if(['readmit','readmit-if-promoted'].includes(process.argv[2])){
     const region=process.env.AWS_REGION||await resolveApplicationRegion();
     const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region:'us-east-1'}),sts:new STSClient({region}),
       scheduler:new SchedulerClient({region}),logs:new CloudWatchLogsClient({region})};
-    try{process.stdout.write(JSON.stringify({event:'production_canary',...await readmitProductionRelease(clients,{region})})+'\n');}
+    try{process.stdout.write(JSON.stringify(productionReadmissionRecord(await readmitProductionRelease(clients,
+      {region,ifPromoted:process.argv[2]==='readmit-if-promoted'})))+'\n');}
     finally{Object.values(clients).forEach(client=>client.destroy());}
     return;
   }
