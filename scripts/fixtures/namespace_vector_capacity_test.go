@@ -161,7 +161,7 @@ func runVectorCapacityCase(t *testing.T, admin *sql.DB, size int, mode string, c
 	// Warm each physical connection independently, including the five custom
 	// plans PostgreSQL considers before selecting a generic prepared plan.
 	type warmObservation struct {
-		err                       error
+		err, planErr              error
 		attempted, completed      int
 		genericPlans, customPlans int64
 	}
@@ -183,7 +183,7 @@ func runVectorCapacityCase(t *testing.T, admin *sql.DB, size int, mode string, c
 			}
 			if err := pool.QueryRow(`SELECT coalesce(sum(generic_plans),0),coalesce(sum(custom_plans),0)
  FROM pg_prepared_statements WHERE statement ~ '^[[:space:]]*WITH namespace_distances'`).Scan(&observed.genericPlans, &observed.customPlans); err != nil {
-				observed.err = err
+				observed.planErr = err
 			}
 			warmResults <- observed
 		}(repo, pools[i])
@@ -196,6 +196,9 @@ func runVectorCapacityCase(t *testing.T, admin *sql.DB, size int, mode string, c
 		warmCompleted += observed.completed
 		warmGeneric += observed.genericPlans
 		warmCustom += observed.customPlans
+		if observed.planErr != nil {
+			t.Fatalf("cannot inspect prepared plans: %v (preceding warmup error: %v)", observed.planErr, observed.err)
+		}
 		if errors.Is(observed.err, domain.ErrNamespaceVectorTimeout) {
 			warmTimeouts++
 		} else if observed.err != nil {
@@ -334,7 +337,9 @@ func runVectorCapacityCase(t *testing.T, admin *sql.DB, size int, mode string, c
 	if writes && overlapWrites < 1 {
 		t.Fatal("no background writes overlapped the measurement")
 	}
-	if warmTimeouts == 0 && warmGeneric+warmCustom < int64(concurrency*6) {
+	if warmCompleted != concurrency*6 {
+		t.Error("warmup incomplete; sampled timings do not establish steady-state capacity")
+	} else if warmGeneric+warmCustom < int64(concurrency*6) {
 		t.Fatal("prepared-plan warmup was not observed")
 	}
 }

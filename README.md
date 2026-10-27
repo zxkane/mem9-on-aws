@@ -637,7 +637,9 @@ automatic/custom/generic prepared plans; and concurrent vector updates.
 (2g/4g/8g/16g) control container resources.
 
 Reports separate successful-request percentiles, timeouts, other failures and
-background writes. First-connection timing does not imply an evicted cache.
+background writes. Incomplete warmup makes the experiment fail while retaining
+its observations; those timings cannot certify steady-state capacity.
+First-connection timing does not imply an evicted cache.
 The experiment retains the two-second SQL guard and verifies exact results and
 namespace isolation; its larger row ceiling applies only inside the test.
 Container resources are not ACUs, and these results do not establish an Aurora
