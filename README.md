@@ -622,6 +622,28 @@ capacity-refusal, and timeout counters from
 configured row ceiling; metric dimensions never contain namespace, principal,
 memory, or request identifiers.
 
+Run the optional local capacity experiment with:
+
+```bash
+MEM9_VECTOR_CAPACITY_MATRIX=1 bash scripts/run-ingest-queue-integration.sh
+```
+
+It runs the actual patched Go repository against a disposable PostgreSQL
+container with 2 CPUs and 4 GiB of memory. The dense synthetic fixture covers
+25,000, 30,000 and 50,000 vectors per namespace; concurrency 1, 5 and 10;
+automatic/custom/generic prepared plans; and concurrent vector updates.
+`MEM9_VECTOR_MATRIX_ROWS=25000` selects one fixture size. Optional
+`MEM9_VECTOR_MATRIX_CPUS` (1/2/4/8) and `MEM9_VECTOR_MATRIX_MEMORY`
+(2g/4g/8g/16g) control container resources.
+
+Reports separate successful-request percentiles, timeouts, other failures and
+background writes. First-connection timing does not imply an evicted cache.
+The experiment retains the two-second SQL guard and verifies exact results and
+namespace isolation; its larger row ceiling applies only inside the test.
+Container resources are not ACUs, and these results do not establish an Aurora
+capacity limit. Measure an isolated Aurora deployment after scale-down before
+changing production capacity or the production row ceiling.
+
 #### Operator-run human OAuth acceptance
 
 `scripts/run-human-namespace-e2e.mjs` exercises real human authorization-code +

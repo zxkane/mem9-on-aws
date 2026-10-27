@@ -9,13 +9,28 @@ TMP_DIR=$(mktemp -d)
 CONTAINER="mem9-ingest-queue-${RANDOM}-${BASHPID}"
 
 cleanup() {
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker rm -fv "$CONTAINER" >/dev/null 2>&1 || true
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
+CAPACITY_DOCKER_ARGS=()
+if [[ "${MEM9_VECTOR_CAPACITY_MATRIX:-0}" == "1" ]]; then
+  CAPACITY_CPUS="${MEM9_VECTOR_MATRIX_CPUS:-2}"
+  CAPACITY_MEMORY="${MEM9_VECTOR_MATRIX_MEMORY:-4g}"
+  [[ "$CAPACITY_CPUS" =~ ^(1|2|4|8)$ && "$CAPACITY_MEMORY" =~ ^(2|4|8|16)g$ ]] || {
+    echo "Invalid capacity experiment resource bounds" >&2
+    exit 2
+  }
+  CAPACITY_DOCKER_ARGS=(--cpus "$CAPACITY_CPUS" --memory "$CAPACITY_MEMORY" --shm-size 512m)
+  export MEM9_VECTOR_MATRIX_CPUS="$CAPACITY_CPUS"
+  export MEM9_VECTOR_MATRIX_MEMORY="$CAPACITY_MEMORY"
+  export MEM9_VECTOR_MATRIX_ENVIRONMENT=local-postgres-container
+fi
+
 docker run -d \
   --name "$CONTAINER" \
+  "${CAPACITY_DOCKER_ARGS[@]}" \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=mem9_queue \
   -p 127.0.0.1::5432 \
@@ -252,6 +267,16 @@ git -C "$TMP_DIR/upstream" remote add origin https://github.com/mem9-ai/mem9.git
 git -C "$TMP_DIR/upstream" fetch -q --depth 1 origin "$MEM9_REF"
 git -C "$TMP_DIR/upstream" checkout -q FETCH_HEAD
 git -C "$TMP_DIR/upstream" apply "$ROOT"/docker/mnemo-server/patches/*.patch
+if [[ "${MEM9_VECTOR_CAPACITY_MATRIX:-0}" == "1" ]]; then
+  cp "$ROOT/scripts/fixtures/namespace_vector_capacity_test.go" \
+    "$TMP_DIR/upstream/server/internal/repository/postgres/namespace_capacity_matrix_test.go"
+  (
+    cd "$TMP_DIR/upstream/server"
+    go test -count=1 -v -timeout 30m -run '^TestNamespaceVectorCapacityMatrix$' \
+      ./internal/repository/postgres
+  )
+  exit 0
+fi
 QUERY_INVENTORY_ARGS=(--upstream "$TMP_DIR/upstream")
 if [[ "${MEM9_WRITE_QUERY_INVENTORY:-0}" == "1" ]]; then
   QUERY_INVENTORY_ARGS+=(--write)
