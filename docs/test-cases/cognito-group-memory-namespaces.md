@@ -439,3 +439,12 @@ execution evidence or enable the deferred cleanup-scan and Slack capabilities.
 
 These tests certify the sampled alarm and diagnostic behavior. Local synthetic
 timings do not establish the cause of a production timeout or certify its repair.
+
+### Opt-in vector capacity experiment
+
+| ID | Scenario | Expected |
+| --- | --- | --- |
+| TC-VECTOR-CAPACITY-001 | Dense synthetic vectors at 25,000, 30,000 and 50,000 active rows per namespace | Actual repository queries retain the two-second SQL timeout; each successful response matches an independent exact query and contains only the requested namespace |
+| TC-VECTOR-CAPACITY-002 | Concurrency 1, 5 and 10 with automatic, custom and generic prepared plans | Report attempted, successful and timed-out requests separately; latency percentiles explicitly cover successful requests only |
+| TC-VECTOR-CAPACITY-003 | Repeat the workload with synthetic background writes | Writes and reads remain confined to the disposable test database; report write failures and completed writes |
+| TC-VECTOR-CAPACITY-004 | New connections followed by repeated requests | Record first-request and repeated-request timings without describing a fresh connection as an evicted database cache |
