@@ -84,6 +84,7 @@ function installGlobals(stage: string) {
 }
 
 beforeEach(() => {
+  vi.stubEnv("MEM9_AURORA_MAX_ACU", "");
   sgs = [];
   rules = [];
   params = [];
@@ -91,6 +92,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const g of ["$app", "aws", "sst"]) delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_VPC_ID;
   vi.resetModules();
@@ -164,6 +166,31 @@ describe("db stack", () => {
     installGlobals(stage);
     const db = await loadDb();
     db();
+    expect(auroras[0].args.scaling).toEqual({ min: "0.5 ACU", max: "4 ACU" });
+  });
+
+  it.each(["1", "6.5", "12", "256"])("accepts a production maximum of %s ACU", async (capacity) => {
+    installGlobals("prod");
+    vi.stubEnv("MEM9_AURORA_MAX_ACU", capacity);
+    (await loadDb())();
+    expect(auroras[0].args.scaling).toEqual({ min: "1 ACU", max: `${capacity} ACU` });
+  });
+
+  it.each(["0", "0.5", "-1", "1.25", "256.5", "Infinity", "NaN", "1e1", "6 ACU"])(
+    "rejects invalid production capacity %s before registering resources", async (capacity) => {
+      installGlobals("prod");
+      vi.stubEnv("MEM9_AURORA_MAX_ACU", capacity);
+      expect(await loadDb()).toThrow(/MEM9_AURORA_MAX_ACU/);
+      expect(sgs).toHaveLength(0);
+      expect(auroras).toHaveLength(0);
+      expect(params).toHaveLength(0);
+    },
+  );
+
+  it.each(["dev", "pr-42"])("ignores production capacity settings in %s", async (stage) => {
+    installGlobals(stage);
+    vi.stubEnv("MEM9_AURORA_MAX_ACU", "invalid-production-setting");
+    (await loadDb())();
     expect(auroras[0].args.scaling).toEqual({ min: "0.5 ACU", max: "4 ACU" });
   });
 

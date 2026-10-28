@@ -646,6 +646,23 @@ Container resources are not ACUs, and these results do not establish an Aurora
 capacity limit. Measure an isolated Aurora deployment after scale-down before
 changing production capacity or the production row ceiling.
 
+Production's Aurora maximum can be configured with the `MEM9_AURORA_MAX_ACU`
+secret in the GitHub `prod` environment. Use a number without the `ACU` suffix;
+the configuration accepts 1–256 in increments of 0.5 and defaults to 4 when
+unset or empty. For a local production deployment, provide the same environment
+variable. The production minimum remains 1 ACU, and development/preview stages
+retain their 0.5–4 ACU range even when the variable is present. Both regular
+production deployment and credential cutover read this setting. Setting the
+secret alone does not deploy it: run `Infra CI` on `main` afterward.
+
+Choose the ceiling from isolated measurements, verify that the deployed engine
+and platform support the selected range, and keep actual capacity decisions in
+private operator records. After deployment, check the cluster's scaling range,
+actual capacity, query timeouts, and instance parameter status. A maximum change
+can leave derived parameters pending a reboot; assess that separately before
+scheduling a restart. Raising the maximum does not change namespace row limits
+or SQL timeouts.
+
 #### Operator-run human OAuth acceptance
 
 `scripts/run-human-namespace-e2e.mjs` exercises real human authorization-code +
