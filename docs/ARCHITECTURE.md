@@ -568,7 +568,11 @@ queries; its timings do not certify performance after Aurora scale-down.
 
 The IaC default is a 1 ACU minimum for the production stage, 0.5 ACU for
 development and previews, and a 4 ACU maximum for every stage. These are product
-configuration defaults, not a report of any operator's deployment. Capacity
+configuration defaults, not a report of any operator's deployment. Production
+can override only the maximum through `MEM9_AURORA_MAX_ACU` (1–256 in 0.5 ACU
+increments); CI reads it from the protected `prod` environment secret. Both
+regular deployment and credential cutover preserve this setting. Development
+and preview stages ignore it. Capacity
 selection must account for the workload's cache needs and regional pricing;
 keep deployment-specific measurements and decisions in private records.
 

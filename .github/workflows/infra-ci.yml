@@ -1502,6 +1502,7 @@ jobs:
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-prod
+      MEM9_AURORA_MAX_ACU: ${{ secrets.MEM9_AURORA_MAX_ACU }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
       WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION: ${{ vars.WORKLOAD_BOUNDARY_NEXT_OPENAI_PROJECT_REGION }}
       # Authentication is an operator choice. Preview jobs receive none of these
@@ -1887,6 +1888,7 @@ jobs:
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-prod
+      MEM9_AURORA_MAX_ACU: ${{ secrets.MEM9_AURORA_MAX_ACU }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
       MEM9_AUTH_MODE: ${{ secrets.MEM9_AUTH_MODE || 'managed' }}
       MEM9_OIDC_ISSUER: ${{ secrets.MEM9_OIDC_ISSUER }}

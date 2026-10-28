@@ -42,6 +42,15 @@ export interface DbOutputs {
 }
 
 export function db(): DbOutputs {
+  // Operator capacity choices apply only to production. Validate before any
+  // resource registration; previews must not inherit a production cost ceiling.
+  const capacity = $app.stage === "prod"
+    ? process.env.MEM9_AURORA_MAX_ACU?.trim() || "4"
+    : "4";
+  const maxAcu = Number(capacity);
+  if (!/^[1-9]\d*(?:\.[05])?$/.test(capacity) || maxAcu > 256) {
+    throw new Error("MEM9_AURORA_MAX_ACU must be between 1 and 256 in increments of 0.5");
+  }
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const { vpcId, privateSubnetIds } = resolveVpc();
 
@@ -121,7 +130,7 @@ export function db(): DbOutputs {
     database: "mem9",
     scaling: {
       min: $app.stage === "prod" ? "1 ACU" : "0.5 ACU",
-      max: "4 ACU",
+      max: `${maxAcu} ACU`,
     },
     vpc: {
       subnets: privateSubnetIds,

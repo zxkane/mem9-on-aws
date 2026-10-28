@@ -214,6 +214,15 @@ defaults are 1 ACU minimum for production, 0.5 ACU for development/previews, and
 4 ACU maximum. Verify capacity together with cache size, query results, and the
 two-second SQL guard. Public evidence must not describe a personal deployment.
 
+Production capacity configuration must preserve the 1 ACU floor and default
+4 ACU maximum when unset. Synthetic settings (including half-ACU values) must
+reach Aurora; invalid values, values below the floor, and values above the
+configuration's 256 ACU bound must fail before database resources are registered.
+Development and preview stages must ignore the production setting. Both regular
+production deployment and credential-cutover deployment must read the same
+protected environment secret. Capacity changes must preserve namespace row and
+SQL-timeout guards, backup retention, and deletion protection.
+
 | ID             | Scenario                                                      | Expected                                                                                                                      | Surface                   |
 | -------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | TC-GROUPNS-084 | Eligible principal enqueues ingest                            | Job persists tenant, namespace, principal, payload, and state before accepted response                                        | PostgreSQL integration    |
