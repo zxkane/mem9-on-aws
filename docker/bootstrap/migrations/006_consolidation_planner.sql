@@ -235,7 +235,19 @@ LANGUAGE SQL IMMUTABLE SET search_path=pg_catalog,pg_temp AS $$
     (SELECT coalesce(jsonb_agg(value->'memory'),'[]') FROM jsonb_array_elements(p_members)))::text)::text)+2048
 $$;
 
-CREATE OR REPLACE FUNCTION mem9_maintenance.claim_neighborhood(p_namespace TEXT) RETURNS JSONB
+-- The runtime commits this bounded claim before starting the expensive scan.
+-- A cancelled query or disconnected worker therefore cannot refund its attempt.
+CREATE OR REPLACE FUNCTION mem9_maintenance.claim_planner_work(p_namespace TEXT) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DECLARE w RECORD;
+BEGIN
+  PERFORM mem9_maintenance.planner_guard(p_namespace);
+  SELECT * INTO w FROM mem9_maintenance.claim_work(p_namespace,1,300);
+  IF NOT FOUND THEN RETURN jsonb_build_object('status','idle'); END IF;
+  RETURN jsonb_build_object('status','claimed','anchor_id',w.memory_id,'lease_generation',w.lease_generation);
+END $$;
+
+CREATE OR REPLACE FUNCTION mem9_maintenance.read_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$
 DECLARE w RECORD; a public.memories; progress mem9_maintenance.planner_progress; policy mem9_maintenance.planner_policies;
   chosen TEXT[]; observed_ids TEXT[]; candidate RECORD; members JSONB; cached JSONB; phase TEXT:='exact'; next_phase TEXT;
@@ -244,8 +256,14 @@ DECLARE w RECORD; a public.memories; progress mem9_maintenance.planner_progress;
 BEGIN
   PERFORM mem9_maintenance.planner_guard(p_namespace);
   SELECT * INTO policy FROM mem9_maintenance.planner_policies WHERE namespace_id=p_namespace;
-  SELECT * INTO w FROM mem9_maintenance.claim_work(p_namespace,1,300);
-  IF NOT FOUND THEN RETURN jsonb_build_object('status','idle'); END IF;
+  SELECT * INTO w FROM mem9_maintenance.work WHERE namespace_id=p_namespace AND memory_id=p_anchor FOR UPDATE;
+  IF NOT FOUND OR p_lease IS NULL OR w.lease_generation<>p_lease OR w.lease_until IS NULL
+    OR w.lease_until<=clock_timestamp() OR w.claimed_generation<=w.completed_generation THEN
+    RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='invalid planner lease'; END IF;
+  IF w.desired_generation<>w.claimed_generation THEN
+    PERFORM mem9_maintenance.defer_neighborhood(p_namespace,p_anchor,p_lease,'inputs_changed');
+    RETURN jsonb_build_object('status','retry');
+  END IF;
   SELECT * INTO progress FROM mem9_maintenance.planner_progress WHERE namespace_id=p_namespace AND memory_id=w.memory_id;
   IF FOUND AND progress.expected_generation=w.claimed_generation THEN phase:=progress.phase;
   ELSE
@@ -370,6 +388,16 @@ BEGIN
   RETURN result;
 END $$;
 
+-- A function cannot commit acquisition independently of its scan. Reject the
+-- retired combined protocol instead of letting older workers silently revive
+-- unbounded retries. The current worker uses the two autocommit calls above.
+CREATE OR REPLACE FUNCTION mem9_maintenance.claim_neighborhood(p_namespace TEXT) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+BEGIN
+  PERFORM mem9_maintenance.planner_guard(p_namespace);
+  RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='split planner claim required';
+END $$;
+
 CREATE OR REPLACE FUNCTION mem9_maintenance.finish_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT,p_result TEXT) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$
 DECLARE n mem9_maintenance.neighborhoods; w mem9_maintenance.work; payload JSONB; members JSONB; id TEXT; result JSONB; pending_change TIMESTAMPTZ;
@@ -426,8 +454,9 @@ BEGIN
   PERFORM mem9_maintenance.dirty(p_namespace,p_anchor,p_seen,p_reason);
   -- Only an observed input change (or changed audit fingerprint), not expiry or
   -- retry, can reopen a page blocked by this planner. Keep its unresolved age.
-  UPDATE mem9_maintenance.work w SET attempts=0,reason=p_reason WHERE w.namespace_id=p_namespace AND w.memory_id=p_anchor AND w.attempts=3
-    AND EXISTS(SELECT FROM mem9_maintenance.planner_deferrals d WHERE d.namespace_id=p_namespace AND d.memory_id=p_anchor);
+  -- Crashed claimants may never have written a deferral. A real input change
+  -- must also reopen those exhausted generations, preserving unresolved age.
+  UPDATE mem9_maintenance.work w SET attempts=0,reason=p_reason WHERE w.namespace_id=p_namespace AND w.memory_id=p_anchor AND w.attempts=3;
 END $$;
 CREATE OR REPLACE FUNCTION mem9_maintenance.consume_planner_changes(p_namespace TEXT,p_limit INTEGER) RETURNS INTEGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
@@ -711,7 +740,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
 DECLARE w mem9_maintenance.work; a mem9_maintenance.model_attempts; free_attempt BOOLEAN; scope_name TEXT;
 BEGIN
   PERFORM mem9_maintenance.planner_guard(p_namespace);
-  IF p_reason IS NULL OR p_reason NOT IN ('budget_wait','capacity_wait','uncertainty_wait','model_disabled','policy_wait','deadline','model_failed','invalid_result','inputs_changed','existing') THEN
+  IF p_reason IS NULL OR p_reason NOT IN ('budget_wait','capacity_wait','uncertainty_wait','model_disabled','policy_wait','deadline','model_failed','invalid_result','inputs_changed','existing','scan_failed') THEN
     RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='invalid planner deferral'; END IF;
   SELECT * INTO w FROM mem9_maintenance.work WHERE namespace_id=p_namespace AND memory_id=p_anchor FOR UPDATE;
   IF NOT FOUND OR w.lease_generation<>p_lease OR w.lease_until IS NULL THEN RETURN; END IF;
@@ -756,6 +785,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA mem9_maintenance FROM PUBLIC,mem9_maintenance
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA mem9_maintenance FROM PUBLIC,mem9_maintenance_planner,mem9_maintenance_executor,mem9_maintenance_backend,mem9_maintenance_operator;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mem9_maintenance FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION mem9_maintenance.claim_neighborhood(TEXT),mem9_maintenance.finish_neighborhood(TEXT,TEXT,BIGINT,TEXT),
+  mem9_maintenance.claim_planner_work(TEXT),mem9_maintenance.read_neighborhood(TEXT,TEXT,BIGINT),
   mem9_maintenance.planner_receipt(TEXT,TEXT,BIGINT),mem9_maintenance.consume_planner_changes(TEXT,INTEGER),mem9_maintenance.audit_planner(TEXT,INTEGER),
   mem9_maintenance.reserve_planner_model(TEXT,TEXT,BIGINT,INTEGER),mem9_maintenance.dispatch_planner_model(TEXT,UUID),
   mem9_maintenance.cancel_planner_model(TEXT,UUID),

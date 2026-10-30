@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parsePlannerVerdict, runConsolidationPlanner } from './consolidation-planner.mjs';
+import { createPlannerDatabase, parsePlannerVerdict, runConsolidationPlanner } from './consolidation-planner.mjs';
 
 const lease = (contents = ['alpha', 'beta']) => ({
   status: 'leased', anchor_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', lease_generation: 1,
@@ -23,6 +23,40 @@ function fixture(work = lease()) {
 }
 
 describe('incremental planner protocol', () => {
+  it('records scan cancellation and still classifies subsequent eligible work', async () => {
+    const { deps, options } = fixture(lease(['single']));
+    const failure = { phase: 'neighborhood', errorClass: '57014' };
+    deps.claim.mockReset().mockResolvedValueOnce({ status: 'retry', failure })
+      .mockResolvedValueOnce(lease(['single'])).mockResolvedValue({ status: 'idle' });
+    deps.finish.mockResolvedValue({ status: 'keep' });
+    expect(await runConsolidationPlanner(deps, options)).toMatchObject({
+      deferred: 1, scanFailures: 1, lastFailure: failure, keep: 1, stopReason: 'idle',
+    });
+  });
+
+  it('commits a claim before scanning and durably defers a cancelled scan', async () => {
+    const work = { status: 'claimed', anchor_id: 'synthetic-anchor', lease_generation: 2 };
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ result: work }] })
+      .mockRejectedValueOnce(Object.assign(Error('private query and parameters'), { code: '57014' }))
+      .mockResolvedValueOnce({ rows: [{ result: null }] });
+    const db = createPlannerDatabase({ query }, 'synthetic-namespace');
+    expect(await db.claim()).toEqual({ status: 'retry', failure: { phase: 'neighborhood', errorClass: '57014' } });
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+      'SELECT mem9_maintenance.claim_planner_work($1) AS result',
+      'SELECT mem9_maintenance.read_neighborhood($1,$2,$3) AS result',
+      'SELECT mem9_maintenance.defer_neighborhood($1,$2,$3,$4) AS result',
+    ]);
+    expect(query.mock.calls[2][1]).toEqual(['synthetic-namespace', 'synthetic-anchor', 2, 'scan_failed']);
+  });
+
+  it('stops if failure recording cannot complete, leaving the committed lease for recovery', async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ result: { status: 'claimed', anchor_id: 'anchor', lease_generation: 1 } }] })
+      .mockRejectedValueOnce(Object.assign(Error('private scan'), { code: '57014' }))
+      .mockRejectedValueOnce(Object.assign(Error('private connection'), { code: '08006' }));
+    await expect(createPlannerDatabase({ query }, 'namespace').claim()).rejects.toMatchObject({ code: '08006', phase: 'defer' });
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+
   it('accepts only the complete bounded verdict object', () => {
     for (const result of ['MERGE', 'KEEP', 'REVIEW']) expect(parsePlannerVerdict(JSON.stringify({ result }))).toBe(result);
     for (const raw of ['null', '[]', '{}', '{"result":"DELETE"}', '{"result":"MERGE","ids":["x"]}',

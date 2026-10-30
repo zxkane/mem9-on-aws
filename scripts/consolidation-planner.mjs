@@ -2,6 +2,7 @@ import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { requireNamespaceId } from './lib/maintenance-scope.mjs';
 import { createPlannerModelClient, plannerNeedsReview } from './lib/consolidation-model.mjs';
+import { consolidationFailure, withDatabaseFailures } from './lib/consolidation-diagnostics.mjs';
 
 export const PLANNER_RUNTIME_MS = 50 * 60_000;
 export const MODEL_TIMEOUT_MS = 110_000;
@@ -27,14 +28,21 @@ export async function runConsolidationPlanner(deps, {
       !Number.isSafeInteger(dispatchMarginMs) || dispatchMarginMs < 1 || dispatchMarginMs > DISPATCH_MARGIN_MS) throw Error('invalid planner runtime');
   const deadline = now() + runtimeMs;
   const report = { claimed: 0, cacheHits: 0, modelCalls: 0, queued: 0, existing: 0, keep: 0, review: 0,
-    blocked: 0, deferred: 0, stopReason: 'deadline' };
+    blocked: 0, deferred: 0, scanFailures: 0, stopReason: 'deadline' };
   await deps.maintain();
   while (now() < deadline) {
     await deps.consume?.();
     if (now() >= deadline) break;
     if (report.claimed > 0 && report.claimed % 100 === 0) await deps.maintain();
     const work = await deps.claim();
-    if (work.status === 'retry') { report.deferred++; continue; }
+    if (work.status === 'retry') {
+      report.deferred++;
+      if (work.failure) {
+        report.scanFailures++;
+        report.lastFailure = consolidationFailure(work.failure);
+      }
+      continue;
+    }
     if (work.status === 'idle') { report.stopReason = 'idle'; break; }
     if (work.status === 'blocked') { report.blocked++; continue; }
     if (work.status !== 'leased' || !Array.isArray(work.members) || work.members.length > 10) throw Error('invalid planner lease');
@@ -95,7 +103,10 @@ export async function runConsolidationPlanner(deps, {
 }
 
 export function createPlannerDatabase(db, namespaceId) {
-  const scalar = async (sql, args = []) => (await db.query(sql, [namespaceId, ...args])).rows[0].result;
+  const scalar = async (sql, args = [], phase = 'database') => {
+    try { return (await db.query(sql, [namespaceId, ...args])).rows[0].result; }
+    catch (error) { throw Object.assign(Error('planner database operation failed'), { code: error?.code, phase }); }
+  };
   const lease = work => [work.anchor_id, work.lease_generation];
   return {
     consume: () => scalar('SELECT mem9_maintenance.consume_planner_changes($1,1000) AS result'),
@@ -105,7 +116,20 @@ export function createPlannerDatabase(db, namespaceId) {
       await scalar('SELECT mem9_maintenance.audit_planner($1,1000) AS result');
       await scalar('SELECT mem9_maintenance.planner_status($1) AS result');
     },
-    claim: () => scalar('SELECT mem9_maintenance.claim_neighborhood($1) AS result'),
+    claim: async () => {
+      // Each query commits independently. Do not wrap acquisition and scanning
+      // in a transaction: recovery depends on the claim surviving cancellation.
+      const work = await scalar('SELECT mem9_maintenance.claim_planner_work($1) AS result', [], 'claim');
+      if (work.status === 'idle') return work;
+      if (work.status !== 'claimed') throw Error('invalid planner claim');
+      try {
+        return await scalar('SELECT mem9_maintenance.read_neighborhood($1,$2,$3) AS result', lease(work), 'neighborhood');
+      } catch (error) {
+        if (!['57014', '40P01', '55P03'].includes(error.code)) throw error;
+        await scalar('SELECT mem9_maintenance.defer_neighborhood($1,$2,$3,$4) AS result', [...lease(work), 'scan_failed'], 'defer');
+        return { status: 'retry', failure: consolidationFailure(error) };
+      }
+    },
     reserve: (work, remaining) => scalar('SELECT mem9_maintenance.reserve_planner_model($1,$2,$3,$4) AS result', [...lease(work), remaining]),
     dispatch: admission => scalar('SELECT mem9_maintenance.dispatch_planner_model($1,$2) AS result', [admission.attempt_id]),
     cancel: admission => scalar('SELECT mem9_maintenance.cancel_planner_model($1,$2) AS result', [admission.attempt_id]),
@@ -122,7 +146,7 @@ async function main() {
   // Includes initialization/final status and catches a stalled credential
   // provider. Database receipts/leases, not this process, own crash recovery.
   const watchdog = setTimeout(() => {
-    process.stdout.write(JSON.stringify({ event: 'consolidation_planner_failed', errorClass: 'Deadline' }) + '\n');
+    process.stdout.write(JSON.stringify({ event: 'consolidation_planner_failed', phase: 'runtime', errorClass: 'Deadline' }) + '\n');
     process.exit(1);
   }, PLANNER_RUNTIME_MS);
   watchdog.unref();
@@ -136,30 +160,38 @@ async function main() {
   const db = new pg.Client({ host: process.env.MEM9_DB_HOST, port: Number(process.env.MEM9_DB_PORT || 5432),
     database: process.env.MEM9_DB_NAME, user: credentials.username, password: credentials.password, ssl: { rejectUnauthorized: true },
     connectionTimeoutMillis: 3000, statement_timeout: 10000, query_timeout: 11000, application_name: 'mem9-consolidation-planner' });
-  await db.connect();
   try {
-    const deps = createPlannerDatabase(db, namespace);
-    deps.needsReview = work => plannerNeedsReview(work, process.env);
-    const mintToken = async region => {
-      const [{ getToken }, { fromNodeProviderChain }] = await Promise.all([
-        import('@aws/bedrock-token-generator'), import('@aws-sdk/credential-providers'),
-      ]);
-      return getToken({ credentials: await fromNodeProviderChain()(), region, expiresInSeconds: 3600 });
-    };
-    deps.infer = createPlannerModelClient({ mintToken, dispatch: deps.dispatch, env: process.env });
-    const slice = process.env.MEM9_CONSOLIDATION_SLICE_SECONDS;
-    if (slice !== undefined && (!/^[1-9][0-9]*$/.test(slice) || Number(slice) > 3000)) throw Error('invalid planner slice');
-    const runtimeMs = Math.floor(Math.min(PLANNER_RUNTIME_MS - (performance.now() - started) - FINISH_MARGIN_MS,
-      slice === undefined ? PLANNER_RUNTIME_MS : Number(slice) * 1000));
-    const report = await runConsolidationPlanner(deps, { runtimeMs });
+    const report = await withDatabaseFailures(db, async () => {
+      await db.connect();
+      const deps = createPlannerDatabase(db, namespace);
+      deps.needsReview = work => plannerNeedsReview(work, process.env);
+      const mintToken = async region => {
+        const [{ getToken }, { fromNodeProviderChain }] = await Promise.all([
+          import('@aws/bedrock-token-generator'), import('@aws-sdk/credential-providers'),
+        ]);
+        return getToken({ credentials: await fromNodeProviderChain()(), region, expiresInSeconds: 3600 });
+      };
+      deps.infer = createPlannerModelClient({ mintToken, dispatch: deps.dispatch, env: process.env });
+      const slice = process.env.MEM9_CONSOLIDATION_SLICE_SECONDS;
+      if (slice !== undefined && (!/^[1-9][0-9]*$/.test(slice) || Number(slice) > 3000)) throw Error('invalid planner slice');
+      const runtimeMs = Math.floor(Math.min(PLANNER_RUNTIME_MS - (performance.now() - started) - FINISH_MARGIN_MS,
+        slice === undefined ? PLANNER_RUNTIME_MS : Number(slice) * 1000));
+      return runConsolidationPlanner(deps, { runtimeMs });
+    }, () => {
+      // A credential/model promise may retain handles after the DB operation
+      // loses the race. Retire this process even if that work cannot be aborted;
+      // its durable lease and any uncertain model reservation remain recoverable.
+      const shutdown = setTimeout(() => process.exit(1), 5000);
+      shutdown.unref();
+    });
     process.stdout.write(JSON.stringify({ event: 'consolidation_planner', stage, ...report }) + '\n');
     if (['contract_violation', 'pending_publication'].includes(report.stopReason)) process.exitCode = 1;
-  } finally { clearTimeout(watchdog); await db.end(); }
+  } finally { clearTimeout(watchdog); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => {
-    process.stdout.write(JSON.stringify({ event: 'consolidation_planner_failed', errorClass: /^[A-Z0-9]{5}$/.test(error.code || '') ? error.code : 'PlannerError' }) + '\n');
+    process.stdout.write(JSON.stringify({ event: 'consolidation_planner_failed', ...consolidationFailure(error, 'startup') }) + '\n');
     process.exitCode = 1;
   });
 }

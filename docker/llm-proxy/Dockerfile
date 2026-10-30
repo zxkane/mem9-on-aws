@@ -57,6 +57,7 @@ COPY scripts/consolidation-worker.mjs /app/scripts/consolidation-worker.mjs
 COPY scripts/consolidation-canary-replay.mjs /app/scripts/consolidation-canary-replay.mjs
 COPY scripts/lib/production-canary-verification.mjs /app/scripts/lib/production-canary-verification.mjs
 COPY scripts/lib/consolidation-model.mjs /app/scripts/lib/consolidation-model.mjs
+COPY scripts/lib/consolidation-diagnostics.mjs /app/scripts/lib/consolidation-diagnostics.mjs
 COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs
 COPY scripts/lib/memory-namespace.mjs /app/scripts/lib/memory-namespace.mjs
 COPY scripts/lib/maintenance-scope.mjs /app/scripts/lib/maintenance-scope.mjs

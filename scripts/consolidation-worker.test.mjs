@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseWorkerConfig, runWorker, safeWorkerRecord } from './consolidation-worker.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { parseWorkerConfig, runWorker, runWorkerSlice, safeWorkerRecord } from './consolidation-worker.mjs';
 
 const targets=['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
 const env={MEM9_STAGE:'pr-worker',MEM9_WORKER_KIND:'planner',MEM9_WORKER_GENERATION:'generation-a',MEM9_WORKER_TARGETS:JSON.stringify(targets),
@@ -15,6 +17,60 @@ function fixture(){
 }
 
 describe('continuous consolidation dispatcher',()=>{
+  function childFixture() {
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn() });
+    const result = runWorkerSlice(targets[0], { kind: 'planner', stage: 'pr-worker', budgetMs: 1000,
+      environment: {}, spawnChild: () => child });
+    return { child, result };
+  }
+  it('preserves bounded diagnostics from a failed child across split stream chunks',async()=>{
+    const {child,result}=childFixture();
+    const line=JSON.stringify({event:'consolidation_planner_failed',phase:'neighborhood',errorClass:'57014',
+      namespace_id:targets[0],parameters:['private-marker'],message:'private-marker'});
+    child.stdout.write(line.slice(0,30));
+    child.stdout.write(line.slice(30)+'\n');
+    child.emit('close',1,null);
+    expect(await result).toEqual({ok:false,progress:0,failure:{phase:'neighborhood',errorClass:'57014'}});
+  });
+  it.each([
+    ['not-json',undefined],
+    [JSON.stringify({event:'consolidation_executor_failed',phase:'neighborhood',errorClass:'57014'}),undefined],
+    [JSON.stringify({event:'consolidation_planner_failed',phase:'private-marker',errorClass:'private-marker'}),
+      {phase:'unknown',errorClass:'PlannerError'}],
+    [JSON.stringify({event:'consolidation_planner_failed',phase:'neighborhood',errorClass:'57014',padding:'x'.repeat(5000)}),undefined],
+  ])('rejects malformed, foreign, oversized or unbounded failure fields',async(line,failure)=>{
+    const {child,result}=childFixture();
+    child.stderr.write(line+'\n');child.emit('close',1,null);
+    expect((await result).failure).toEqual(failure);
+  });
+  it('retains recovered scan failures from a successful planner without exposing extra fields',()=>{
+    const record={event:'consolidation_planner',stage:'pr-worker',claimed:1,queued:0,keep:1,existing:0,review:0,modelCalls:0,
+      scanFailures:1,lastFailure:{phase:'neighborhood',errorClass:'57014',message:'private-marker'}};
+    expect(safeWorkerRecord(JSON.stringify(record),'planner','pr-worker')).toMatchObject({
+      progress:1,scanFailures:1,lastFailure:{phase:'neighborhood',errorClass:'57014'},
+    });
+    expect(JSON.stringify(safeWorkerRecord(JSON.stringify(record),'planner','pr-worker'))).not.toContain('private-marker');
+  });
+  it('reports recovered failures while allowing other targets to complete',async()=>{
+    const f=fixture();
+    f.deps.runSlice.mockResolvedValueOnce({ok:true,progress:1,classified:1,scanFailures:1,
+      lastFailure:{phase:'neighborhood',errorClass:'57014',namespace_id:targets[0]}})
+      .mockResolvedValueOnce({ok:false,progress:0,failure:{phase:'defer',errorClass:'08006',message:'private-marker'}});
+    const result=await runWorker(f.deps,f.config,{clock:f.clock});
+    expect(result).toMatchObject({outcome:'partial_failure',classified:1,failedSlices:1,scanFailures:1,
+      lastFailure:{phase:'defer',errorClass:'08006'}});
+    expect(JSON.stringify(result)).not.toMatch(/private-marker|namespace_id/);
+  });
+  it.each([9501,20000])('a deadline at %i does not hide recovered scan failures',async(elapsed)=>{
+    const f=fixture();let time=0;
+    f.deps.runSlice.mockImplementation(async()=>{
+      time=elapsed;
+      return {ok:true,progress:1,classified:1,scanFailures:1,lastFailure:{phase:'neighborhood',errorClass:'57014'}};
+    });
+    expect(await runWorker(f.deps,f.config,{clock:()=>time})).toMatchObject({
+      outcome:'partial_failure',stopReason:'deadline',scanFailures:1,
+    });
+  });
   it('requires explicit bounded targets and a kind-specific credential',()=>{
     expect(()=>parseWorkerConfig({...env,MEM9_STAGE:'prod'})).toThrow();
     expect(parseWorkerConfig({...env,MEM9_STAGE:'prod',MEM9_WORKER_ADMISSION:'a'.repeat(32)}).admission).toBe('a'.repeat(32));

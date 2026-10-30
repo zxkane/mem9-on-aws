@@ -544,3 +544,28 @@ they are pending until executable tests and same-account rehearsal pass.
 | TC-CONS-WORKER-137 | Print readmission results in public CI logs | Emit only event, phase, changed and enabled fields; omit admission, activation seed, resource identifiers and memory content |
 | TC-CONS-WORKER-138 | Execute a production deployment with new workload images | Run the hard readmission gate only for active production runtimes, after bootstrap and before foreground E2E; keep the configured runner and provide a bounded 20-minute step within the job budget |
 | TC-CONS-WORKER-139 | Deploy an infrastructure-only change using the previous images | Preserve the reused artifact revision and its admission; do not run the new-image readmission gate against an unrelated checkout revision |
+
+### Planner cancellation and retry recovery
+
+| ID | Scenario | Expected evidence |
+|---|---|---|
+| PLAN-017 | Time out and cancel neighborhood selection using a controlled fixture row lock; try the retired combined entry point | Three failures retain attempts 1/2/3 and lease generations, preserve oldest age, back off, and exhaust the failing anchor; a later eligible anchor finishes; the retired entry point rejects before claiming |
+| PLAN-018 | Disconnect after claiming, expire the lease, and resume with a new worker | The attempt remains committed; a new generation can finish; stale scanning and deferral cannot alter the replacement lease |
+| PLAN-019 | Call either split phase from a foreign or revoked identity | Both acquisition and scan retain namespace authorization; no neighborhood is published |
+| PLAN-020 | A transient scan fails, or its failure bookkeeping also fails | The planner continues later work only after durable deferral; unavailable bookkeeping fails closed and leaves the committed lease for recovery |
+| PLAN-021 | A planner child fails, reports recovered cancellations, reaches its deadline, or receives an asynchronous database error | The parent retains bounded phase/error-class diagnostics and counts and reports failure even at the deadline; actual CLI subprocesses emit no raw stderr, parameters, content, credentials, or namespace identifiers |
+| PLAN-022 | Profile candidate selection with deterministic synthetic dense vectors | Reproducible EXPLAIN evidence compares projection costs; exact membership, distance ties, thresholds, pagination, and exclusions remain covered |
+
+Run `bash scripts/run-consolidation-planner-integration.sh` for database recovery
+and isolation. Run `npm exec -- vitest run scripts/consolidation-planner.test.mjs
+scripts/consolidation-planner-cli.test.mjs scripts/consolidation-worker.test.mjs`
+for protocol and output privacy. Execution and scheduling integration rehearsals
+retain publication/receipt atomicity and worker admission coverage.
+
+PLAN-022 runs the source candidate query and an experimental distance-only
+materialization against 26,000 synthetic dense 1024-dimensional vectors. It emits
+`synthetic_planner_projection_comparison` with execution time and buffer counts,
+and checks tied-distance pagination plus the actual planner's selected members.
+The runtime query is unchanged by this fix. This is a reproducible local
+comparison, not an Aurora capacity estimate or a production latency guarantee;
+cache order and host load affect timing, so there is no timing-based pass/fail.

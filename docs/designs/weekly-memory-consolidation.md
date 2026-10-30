@@ -383,6 +383,33 @@ than requesting fresh model output for every unchanged record.
 
 ### Bounded candidate neighborhoods
 
+The runtime commits `claim_planner_work(namespace)` before calling
+`read_neighborhood(namespace, anchor, lease_generation)` in a separate
+autocommit statement. Both calls authorize the current planner identity; the
+scan also checks the live lease and generation after taking the normal locks.
+Cancellation, deadlock, or a lock timeout defers that same lease for 30 seconds
+without refunding the attempt. Three failures exhaust the anchor, while other
+eligible work continues. A crashed worker leaves a committed lease and attempt;
+expiry permits bounded recovery. Real input changes can reopen exhausted work
+even when the crashed worker never wrote a deferral.
+
+The retired single-call `claim_neighborhood` entrypoint fails closed with
+SQLSTATE `55000` before claiming work. It cannot provide this durability because
+its claim and scan share one transaction. Deploy the schema and current worker
+image together; an older worker is rejected instead of reviving unbounded
+retries. Current workers must use the split calls and must not wrap them in an
+outer transaction.
+
+Planner and worker summaries expose the scan-failure count and the last bounded
+phase/error class. A recovered scan failure still produces a worker
+`partial_failure` outcome, even when later work completes or reaches its
+deadline. Idle database connection errors also pass through the same bounded
+failure path, and the dispatcher aborts its child on connection loss. The planner
+retires within five seconds of an asynchronous database failure if outstanding
+credential/model work retains process handles; uncertain reservations retain
+their conservative accounting. Raw child output,
+exception text, parameters and namespace identifiers do not enter these records.
+
 Replace the full in-process all-pairs comparison with namespace-restricted
 candidate retrieval around dirty anchors. Reuse the exact-vector retrieval and
 late-hydration patterns already validated by this project. Fetch content only
