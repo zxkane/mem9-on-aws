@@ -52,7 +52,7 @@ diff --git a/server/internal/service/ingest_vector_retry_test.go b/server/intern
 new file mode 100644
 --- /dev/null
 +++ b/server/internal/service/ingest_vector_retry_test.go
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,160 @@
 +package service
 +
 +import (
@@ -148,38 +148,49 @@ new file mode 100644
 +	}
 +}
 +
-+func TestReconcileNamespaceVectorRetryHonorsContext(t *testing.T) {
-+	for _, deadline := range []bool{false, true} {
-+		t.Run(fmt.Sprintf("deadline_%t", deadline), func(t *testing.T) {
-+			ctx, cancel := context.WithCancel(context.Background())
-+			defer cancel()
-+			want := error(context.Canceled)
-+			var calls int
-+			repo := &memoryRepoMock{
-+				vectorSearchHook: func(context.Context, []float32, domain.MemoryFilter, int) ([]domain.Memory, error) {
-+					calls++
-+					if !deadline {
-+						cancel()
-+					}
-+					return nil, domain.ErrNamespaceVectorTimeout
-+				},
-+				keywordSearchHook: func(context.Context, string, domain.MemoryFilter, int) ([]domain.Memory, error) {
-+					t.Error("cancelled lookup must not use keyword fallback")
-+					return nil, nil
-+				},
-+			}
-+			svc, _ := vectorRetryService(t, repo)
-+			if deadline {
-+				var deadlineCancel context.CancelFunc
-+				ctx, deadlineCancel = context.WithTimeout(ctx, 200*time.Millisecond)
-+				defer deadlineCancel()
-+				want = context.DeadlineExceeded
-+			}
-+			_, err := svc.gatherExistingMemories(ctx, "fixture-agent", "fixture-app", []string{"Uses the synthetic fixture"})
-+			if !errors.Is(err, want) || calls != 1 {
-+				t.Fatalf("err=%v calls=%d; want %v and 1", err, calls, want)
-+			}
-+		})
++func TestReconcileNamespaceVectorRetryCancellation(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	var calls int
++	repo := &memoryRepoMock{
++		vectorSearchHook: func(context.Context, []float32, domain.MemoryFilter, int) ([]domain.Memory, error) {
++			calls++
++			cancel()
++			return nil, domain.ErrNamespaceVectorTimeout
++		},
++		keywordSearchHook: func(context.Context, string, domain.MemoryFilter, int) ([]domain.Memory, error) {
++			t.Error("cancelled lookup must not use keyword fallback")
++			return nil, nil
++		},
++	}
++	svc, _ := vectorRetryService(t, repo)
++	_, err := svc.gatherExistingMemories(ctx, "fixture-agent", "fixture-app", []string{"Uses the synthetic fixture"})
++	if !errors.Is(err, context.Canceled) || calls != 1 {
++		t.Fatalf("err=%v calls=%d; want cancellation and 1", err, calls)
++	}
++}
++
++func TestReconcileNamespaceVectorRetryDeadlineDuringBackoff(t *testing.T) {
++	var calls int
++	repo := &memoryRepoMock{vectorSearchHook: func(ctx context.Context, _ []float32, _ domain.MemoryFilter, _ int) ([]domain.Memory, error) {
++		calls++
++		deadline, _ := ctx.Deadline()
++		// Consume the read budget until less than one backoff remains. HTTP
++		// fixture startup and embedding latency are outside this deadline test.
++		timer := time.NewTimer(time.Until(deadline) - 50*time.Millisecond)
++		defer timer.Stop()
++		select {
++		case <-timer.C:
++		case <-ctx.Done():
++		}
++		return nil, domain.ErrNamespaceVectorTimeout
++	}}
++	svc := NewIngestService(repo, nil, nil, "", ModeSmart)
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	_, err := svc.reconciliationVectorSearch(ctx, []float32{0.8, 0.6}, domain.MemoryFilter{}, 5)
++	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
++		t.Fatalf("err=%v calls=%d; want deadline exceeded and 1", err, calls)
 +	}
 +}
 +
