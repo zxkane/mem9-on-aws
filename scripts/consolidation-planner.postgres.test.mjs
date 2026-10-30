@@ -5,6 +5,7 @@ import pg from 'pg';
 import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { ensureNamespaceIndexes } from './migrate-memory-namespaces.mjs';
 import { plannerRequest } from './lib/consolidation-model.mjs';
+import { createPlannerDatabase } from './consolidation-planner.mjs';
 
 const DSN = process.env.MEM9_PLANNER_TEST_DSN;
 const VECTOR = JSON.stringify([1, ...Array(1023).fill(0)]);
@@ -62,7 +63,7 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
         return id;
       };
       const consume = (count = 100) => scalar(planner, 'SELECT mem9_maintenance.consume_planner_changes($1,$2)', [ns, count]);
-      const claim = () => scalar(planner, 'SELECT mem9_maintenance.claim_neighborhood($1)', [ns]);
+      const claim = () => createPlannerDatabase(planner, ns).claim();
       const finish = (w, result = 'MERGE') => scalar(planner, 'SELECT mem9_maintenance.finish_neighborhood($1,$2,$3,$4)', [ns, w.anchor_id, w.lease_generation, result]);
       const reserve = w => scalar(planner, 'SELECT mem9_maintenance.reserve_planner_model($1,$2,$3,200000)', [ns, w.anchor_id, w.lease_generation]);
       const dispatch = a => scalar(planner, 'SELECT mem9_maintenance.dispatch_planner_model($1,$2)', [ns, a.attempt_id]);
@@ -79,6 +80,162 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
       await admin.query('DROP DATABASE "' + name + '" WITH (FORCE)');
     }
   }
+
+  it('PLAN-017: cancellation retains attempts, backs off, and lets later work progress', () => fixture(async f => {
+    const anchor = await f.seed('blocked anchor'), later = await f.seed('later work');
+    await f.consume();
+    await f.db.query("UPDATE mem9_maintenance.work SET first_seen_at=clock_timestamp()-interval '1 hour' WHERE memory_id=$1", [anchor]);
+    await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE memory_id=$1", [later]);
+    const firstSeen = await scalar(f.db, 'SELECT first_seen_at FROM mem9_maintenance.work WHERE memory_id=$1', [anchor]);
+    const blocker = await f.extraClient();
+    await blocker.query('BEGIN');
+    await blocker.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE', [anchor]);
+    try {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        await f.db.query('UPDATE mem9_maintenance.work SET due_at=clock_timestamp() WHERE memory_id=$1', [anchor]);
+        // The row lock makes cancellation independent of vector size or CPU speed.
+        // The first attempt exercises a real statement timeout; later attempts
+        // explicitly cancel the blocked statement with the same SQLSTATE.
+        if (attempt === 1) await f.planner.query("SET statement_timeout='1s'");
+        const pending = f.claim().catch(error => ({ error }));
+        try {
+          let blocked = false;
+          for (let poll = 0; poll < 200; poll++) {
+            blocked = await scalar(f.db, "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')", [f.planner.processID]);
+            if (blocked) break;
+            await delay(10);
+          }
+          expect(blocked).toBe(true);
+          if (attempt !== 1) await f.db.query('SELECT pg_cancel_backend($1)', [f.planner.processID]);
+          const result = await pending;
+          const work = (await rows(f.db, 'SELECT * FROM mem9_maintenance.work WHERE memory_id=$1', [anchor]))[0];
+          expect(work.attempts).toBe(attempt);
+          expect(Number(work.lease_generation)).toBe(attempt);
+          expect(work.first_seen_at).toEqual(firstSeen);
+          expect(work.completed_generation).toBe('0');
+          expect(work.lease_until).toBeNull();
+          expect(work.due_at.getTime()).toBeGreaterThan(Date.now());
+          expect(result).toMatchObject({ status: 'retry', failure: { phase: 'neighborhood', errorClass: '57014' } });
+        } finally {
+          await f.db.query('SELECT pg_cancel_backend($1)', [f.planner.processID]);
+          await pending;
+          await f.planner.query("SET statement_timeout='15s'");
+        }
+      }
+    } finally { await blocker.query('ROLLBACK'); }
+    expect(await scalar(f.db, 'SELECT reason FROM mem9_maintenance.work WHERE memory_id=$1', [anchor])).toBe('lease_exhausted');
+    await f.db.query('UPDATE mem9_maintenance.work SET due_at=clock_timestamp() WHERE memory_id=$1', [later]);
+    const next = await f.claim();
+    expect(next.anchor_id).toBe(later);
+    expect((await f.finish(next, 'KEEP')).status).toBe('keep');
+  }), 30000);
+
+  it('PLAN-018: a lost claimant keeps its attempt and cannot read a replacement lease', () => fixture(async f => {
+    const anchor = await f.seed('crash recovery'); await f.consume();
+    const crashed = await f.extraClient('planner_fixture');
+    const first = await scalar(crashed, 'SELECT mem9_maintenance.claim_planner_work($1)', [f.ns]);
+    await crashed.end();
+    expect(await scalar(f.db, 'SELECT attempts FROM mem9_maintenance.work WHERE memory_id=$1', [anchor])).toBe(1);
+    await f.db.query("UPDATE mem9_maintenance.work SET lease_until=clock_timestamp()-interval '1 second' WHERE memory_id=$1", [anchor]);
+    const replacement = await scalar(f.planner, 'SELECT mem9_maintenance.claim_planner_work($1)', [f.ns]);
+    expect(replacement.lease_generation).toBe(first.lease_generation + 1);
+    await expect(f.planner.query('SELECT mem9_maintenance.read_neighborhood($1,$2,$3)', [f.ns, anchor, first.lease_generation])).rejects.toMatchObject({ code: '55000' });
+    await f.planner.query('SELECT mem9_maintenance.defer_neighborhood($1,$2,$3,$4)', [f.ns, anchor, first.lease_generation, 'scan_failed']);
+    expect(await scalar(f.db, 'SELECT attempts FROM mem9_maintenance.work WHERE memory_id=$1', [anchor])).toBe(2);
+    const work = await scalar(f.planner, 'SELECT mem9_maintenance.read_neighborhood($1,$2,$3)', [f.ns, anchor, replacement.lease_generation]);
+    expect((await f.finish(work, 'KEEP')).status).toBe('keep');
+  }));
+
+  it('PLAN-019: split acquisition and scanning retain namespace and membership checks', () => fixture(async f => {
+    const anchor = await f.seed('authorized'); await f.consume();
+    await expect(f.stranger.query('SELECT mem9_maintenance.claim_planner_work($1)', [f.ns])).rejects.toMatchObject({ code: '42501' });
+    await expect(f.planner.query('SELECT mem9_maintenance.claim_planner_work($1)', [f.other])).rejects.toMatchObject({ code: '42501' });
+    const work = await scalar(f.planner, 'SELECT mem9_maintenance.claim_planner_work($1)', [f.ns]);
+    await expect(f.planner.query('SELECT mem9_maintenance.read_neighborhood($1,$2,$3)', [f.other, anchor, work.lease_generation])).rejects.toMatchObject({ code: '42501' });
+    await f.db.query("UPDATE memory_namespace_memberships SET status='revoked' WHERE namespace_id=$1", [f.ns]);
+    await expect(f.planner.query('SELECT mem9_maintenance.read_neighborhood($1,$2,$3)', [f.ns, anchor, work.lease_generation])).rejects.toMatchObject({ code: '42501' });
+    expect(await scalar(f.db, 'SELECT count(*)::int FROM mem9_maintenance.neighborhoods')).toBe(0);
+  }));
+
+  it('PLAN-017: the legacy combined entry point fails before claiming work', () => fixture(async f => {
+    const anchor = await f.seed('legacy entry point'); await f.consume();
+    await expect(f.planner.query('SELECT mem9_maintenance.claim_neighborhood($1)', [f.ns])).rejects.toMatchObject({ code: '55000' });
+    expect(await scalar(f.db, 'SELECT attempts FROM mem9_maintenance.work WHERE memory_id=$1', [anchor])).toBe(0);
+    expect((await f.claim()).anchor_id).toBe(anchor);
+  }));
+
+  it('PLAN-018: repeated abandoned claims exhaust until a real edit reopens the generation', () => fixture(async f => {
+    const anchor = await f.seed('abandoned'); await f.consume();
+    const age = await scalar(f.db, 'SELECT first_seen_at FROM mem9_maintenance.work WHERE memory_id=$1', [anchor]);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await scalar(f.planner, 'SELECT mem9_maintenance.claim_planner_work($1)', [f.ns]);
+      await f.db.query("UPDATE mem9_maintenance.work SET lease_until=clock_timestamp()-interval '1 second' WHERE memory_id=$1", [anchor]);
+    }
+    expect((await f.claim()).status).toBe('idle');
+    expect(await scalar(f.db, 'SELECT reason FROM mem9_maintenance.work WHERE memory_id=$1', [anchor])).toBe('lease_exhausted');
+    expect(await scalar(f.db, 'SELECT count(*)::int FROM mem9_maintenance.planner_deferrals')).toBe(0);
+    await f.db.query("UPDATE memories SET content='edited',version=version+1 WHERE id=$1", [anchor]);
+    await f.consume();
+    expect((await f.claim()).status).toBe('leased');
+    const row = (await rows(f.db, 'SELECT attempts,first_seen_at FROM mem9_maintenance.work WHERE memory_id=$1', [anchor]))[0];
+    expect(row).toEqual({ attempts: 1, first_seen_at: age });
+  }));
+
+  it('PLAN-018: an input change between acquisition and scan defers stale work without publishing', () => fixture(async f => {
+    const anchor = await f.seed('before edit'); await f.consume();
+    const lease = await scalar(f.planner, 'SELECT mem9_maintenance.claim_planner_work($1)', [f.ns]);
+    await f.db.query("UPDATE memories SET content='after edit',version=version+1 WHERE id=$1", [anchor]);
+    await f.consume();
+    expect(await scalar(f.planner, 'SELECT mem9_maintenance.read_neighborhood($1,$2,$3)', [f.ns, anchor, lease.lease_generation])).toEqual({ status: 'retry' });
+    expect(await scalar(f.db, 'SELECT count(*)::int FROM mem9_maintenance.neighborhoods')).toBe(0);
+    expect(await scalar(f.db, 'SELECT attempts FROM mem9_maintenance.work WHERE memory_id=$1', [anchor])).toBe(0);
+  }));
+
+  it('PLAN-022: synthetic dense-vector plans compare projections without changing candidate semantics', () => fixture(async f => {
+    const dense = JSON.stringify(Array.from({ length: 1024 }, (_, i) => Math.sin(i * 13.37 + 0.1)));
+    const anchor = await f.seed('synthetic dense anchor', f.ns, dense);
+    // Namespace enforcement does not use the legacy global HNSW index.
+    await f.db.query('DROP INDEX IF EXISTS public.idx_memories_embedding');
+    await f.db.query(`INSERT INTO memories(id,namespace_id,content,tags,metadata,embedding,memory_type,version,source,app_id,agent_id,created_by_principal_id,updated_by_principal_id)
+      SELECT md5('synthetic-plan-'||i)::uuid::text,$1,'synthetic dense '||i,'[]','{}',$2::vector,'insight',1,'fixture','fixture','fixture',$3,$3
+      FROM generate_series(1,26000) AS i`, [f.ns, dense, f.actor]);
+    await f.db.query('ANALYZE memories');
+    const source = await readFile(new URL('../docker/bootstrap/migrations/006_consolidation_planner.sql', import.meta.url), 'utf8');
+    const match = source.match(/FOR candidate IN (WITH scoped AS MATERIALIZED \([\s\S]*?ORDER BY distance,id LIMIT 10) LOOP/);
+    expect(match).not.toBeNull();
+    const original = match[1]
+      .replaceAll('to_jsonb(a)', '$5::jsonb')
+      .replaceAll('p_namespace', '$1::text').replaceAll('a.id', '$2::text')
+      .replaceAll('a.content', '$3::text').replaceAll('a.embedding', '$4::vector')
+      .replaceAll("(policy.policy->>'similarity')::float8", '$6::float8')
+      .replaceAll('progress.after_id', '$7::text').replaceAll('progress.after_distance', '$8::float8');
+    const proposed = original
+      .replace('WITH scoped AS MATERIALIZED', 'WITH distances AS MATERIALIZED')
+      .replace('SELECT m.id,m.embedding FROM', 'SELECT m.id,m.embedding OPERATOR(public.<=>) $4::vector AS distance FROM')
+      .replace(/, distances AS \(SELECT id,embedding OPERATOR\(public\.<=>\) \$4::vector AS distance FROM scoped\)/, '');
+    expect(proposed).not.toBe(original);
+    const memory = await scalar(f.db, "SELECT to_jsonb(m)-'embedding' FROM memories m WHERE id=$1", [anchor]);
+    const args = [f.ns, anchor, memory.content, dense, memory, 0.82, null, null];
+    const plans = [];
+    for (const [projection, sql] of [['embedding', original], ['distance', proposed]]) {
+      const plan = (await rows(f.db, 'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' + sql, args))[0]['QUERY PLAN'][0];
+      plans.push({ projection, executionMs: plan['Execution Time'], sharedHitBlocks: plan.Plan['Shared Hit Blocks'],
+        sharedReadBlocks: plan.Plan['Shared Read Blocks'], tempWrittenBlocks: plan.Plan['Temp Written Blocks'] });
+    }
+    process.stdout.write(JSON.stringify({ event: 'synthetic_planner_projection_comparison', syntheticRows: 26000, dimensions: 1024, plans }) + '\n');
+    const first = await rows(f.db, original, args);
+    expect(await rows(f.db, proposed, args)).toEqual(first);
+    expect(first).toHaveLength(10);
+    args[6] = first.at(-1).id; args[7] = first.at(-1).distance;
+    const second = await rows(f.db, original, args);
+    expect(await rows(f.db, proposed, args)).toEqual(second);
+    expect(second).toHaveLength(10);
+    expect(second.some(row => first.some(previous => row.id === previous.id))).toBe(false);
+    await f.consume();
+    await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE memory_id<>$1", [anchor]);
+    const work = await f.claim();
+    expect(work.members.map(member => member.id).sort()).toEqual([anchor, ...first.slice(0, 9).map(row => row.id)].sort());
+  }), 60000);
 
   it('PLAN-001/002: dormant policy, replay and scoped grants', () => fixture(async f => {
     expect(await scalar(f.db, 'SELECT enabled FROM mem9_maintenance.execution_control')).toBe(false);

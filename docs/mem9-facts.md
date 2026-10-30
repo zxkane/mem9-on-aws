@@ -553,6 +553,11 @@ still keep writers stopped through namespace cutover.
   uncertain calls retain both charge and capacity, and overages pause admission.
   No model contract is certified or activated by installation. Scheduling,
   credential cutover and measured production drain/foreground gates remain pending.
+  The current worker commits `claim_planner_work` before its separately fenced
+  `read_neighborhood` call, so scan cancellation cannot refund its retry attempt.
+  Recoverable scan failures back off and remain visible in bounded worker
+  diagnostics; the retired combined `claim_neighborhood` call rejects before
+  claiming work.
 - Decision and report artifacts carry stage/namespace identity and belong in
   owner-only files. JSON ID selections are checked against that binding; plain
   ID lists remain limited to the invocation's authorized namespace. Apply

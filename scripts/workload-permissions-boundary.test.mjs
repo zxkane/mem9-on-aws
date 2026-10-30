@@ -8506,7 +8506,7 @@ describe("operator entry point", { timeout: 10000 }, () => {
     expect(matching.result.status).toBe(1);
     const accepted=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true});
     expect(accepted.result.status,accepted.result.stderr).toBe(0);
-  });
+  }, 30_000); // Three complete CLI rehearsals share this test's deadline.
   it('TC-GW-BROKER-012 completes a guarded update with changed Gateway statements through the real broker, and fails without one',async()=>{
     const f=await runBoundaryDeployMock({guarded:true,gatewayStatementsChanged:true,runtimeGate:'broker'});
     expect(f.result.status,f.result.stderr).toBe(0);
