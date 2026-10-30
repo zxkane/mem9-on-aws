@@ -1143,6 +1143,20 @@ path. The administrator remains available for namespace operations and future
 schema upgrades. Preview behavior remains explicitly stage-scoped, and preview
 synthetic tenants/budgets are not imported into production.
 
+Planner retry fixes follow the existing owner-installed maintenance-function
+upgrade pattern, independently of the sealed base schema. The control operator
+installs the fixed, versioned SQL during preparation and release readmission,
+before enabling the new worker artifact. It verifies the expected old or new
+routine bodies, owners, execution grants, and function attributes; unknown drift
+fails closed. Installation and its immutable digest receipt share the caller's
+transaction and serialize with planner work. New entry points grant execution
+only to the planner group. The preview fixture uses the same installer. Base
+schema digest, credential-cutover history, runtime privileges, budgets, and
+operator pauses remain intact. A failed installation prevents readmission.
+For an existing unpromoted validation, `install-planner-upgrade` requires paused
+execution and dispatch and preserves the captured baseline and all counters.
+The deployment path verifies disabled schedules before invoking this operation.
+
 ### Ordered cutover and restoration
 
 1. Preflight while service remains available: verify exact account/region,

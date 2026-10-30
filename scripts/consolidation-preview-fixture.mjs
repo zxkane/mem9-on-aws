@@ -9,6 +9,7 @@ import {isConsolidationPreview,previewConfiguration,previewUuid,previewAcceptanc
 import {checkCredentialLogging,installCredentialGuard,setPreviewCredential} from './lib/consolidation-preview-secrets.mjs';
 import {withRuntimeBootstrapLock,bindRuntimeTenant} from './runtime-bootstrap.mjs';
 import {readPostRuntimeAuthority,assertPostRuntimeDatabase,postRuntimeDatabaseMarker,runtimeRowsFingerprint} from './lib/post-runtime-preview-authority.mjs';
+import {installPlannerUpgrade} from './lib/consolidation-planner-upgrade.mjs';
 
 const kinds=['planner','executor','backend','seed'];
 const hash=text=>createHash('sha256').update(text).digest('hex');
@@ -238,7 +239,14 @@ export async function previewFixture({connect,controlDatabase,config,credentials
       return await report(await verifyFixture(db,config,operation,batchBoundaryCrossings));
     }
     await checkCredentialLogging(control);await checkCredentialLogging(db);
-    await applySchema(db,schemaFile);
+    // A verified repeat must retain owner-installed maintenance functions.
+    // Reapplying sealed base SQL would overwrite them before validation.
+    if(!await scalar(db,"SELECT to_regclass('mem9_maintenance.planner_upgrade_history') IS NOT NULL AS result"))await applySchema(db,schemaFile);
+    await db.query('BEGIN');
+    try{
+      await installPlannerUpgrade(db,{invocation:hash(config.generation).slice(0,32)});
+      await db.query('COMMIT');
+    }catch(error){await db.query('ROLLBACK');throw error;}
     await db.query(`CREATE SCHEMA IF NOT EXISTS mem9_preview;
       REVOKE ALL ON SCHEMA mem9_preview FROM PUBLIC;
       CREATE TABLE IF NOT EXISTS mem9_preview.runs(generation TEXT PRIMARY KEY,namespaces TEXT[] NOT NULL,

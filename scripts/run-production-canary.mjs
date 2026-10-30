@@ -127,6 +127,8 @@ export async function readmitProductionRelease(clients,{region,ifPromoted=false}
     if(status.setupPhase!=='promote'){
       if([status.enabled,status.dispatcherEnabled].some(value=>value!==false&&value!==undefined))throw Error('ProductionReadmissionStateMismatch');
       await verify(clients,targets,{enabled:false});
+      if(await currentMain()!==revision)throw Error('ProductionReadmissionRequiresMain');
+      await administer(clients,{region,operation:'install-planner-upgrade'});
       return {phase:'not-promoted',changed:false,enabled:false};
     }
     if(typeof status.enabled!=='boolean'||status.dispatcherEnabled!==status.enabled)throw Error('ProductionReadmissionStateMismatch');

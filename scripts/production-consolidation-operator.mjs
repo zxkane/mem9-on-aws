@@ -17,6 +17,7 @@ import {decodeCanaryReport,verifyCanaryReport,decodeBenchmarkRefs,readCanaryRepo
 import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
 import {MERGE_POLICY_VERSION,MERGE_POLICY_SQL,mergePolicyBody} from './lib/consolidation-merge-policy.mjs';
+import {installPlannerUpgrade,verifyPlannerUpgrade} from './lib/consolidation-planner-upgrade.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
@@ -48,7 +49,7 @@ function validModelRequests(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission','dailyModelRequests'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -250,7 +251,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -264,10 +265,10 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     if(request.operation!=='prepare'){
       const setup=currentSetup;
       config={...config,targets:(setup?.targets??[]).map(requireNamespaceId).sort()};
-      if(!['status','pause','census'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
+      if(!['status','pause','census','install-planner-upgrade'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -291,6 +292,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     await db.query('BEGIN');
     try{
       await db.query("SET LOCAL TIME ZONE 'UTC'");
+      if(['plan','baseline','canary','resume-plan','promote'].includes(request.operation))await verifyPlannerUpgrade(db);
       if(request.operation==='begin-continuation'){
         await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
         const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
@@ -351,6 +353,11 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
         responseEvidence=await closeCanaryValidation(db,config,state,setup,request.invocation);
+      }else if(request.operation==='install-planner-upgrade'){
+        await db.query('SELECT mem9_maintenance.lock_model()');
+        if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton')||
+          await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('PauseBeforePlannerUpgrade');
+        responseEvidence=await installPlannerUpgrade(db,{invocation:request.invocation});
       }else if(request.operation==='install-merge-policy'){
         // Serialize with apply_action and planner queueing, then replace the
         // queueing function in place. Its owner and grants are unchanged.
@@ -460,7 +467,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         // activation seed, so deployed schedules stop matching the dispatcher.
         // Re-admit only the release this operator itself was deployed with;
         // budgets, receipts and the promotion record are otherwise unchanged.
-        await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
+        await db.query('SELECT mem9_maintenance.lock_model()');
         const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         const promoted=setup?.promotion_verification;
         if(setup?.phase!=='promote'||setup.generation!==config.generation||!/^[a-f0-9]{64}$/.test(promoted?.activationSeed??''))throw Error('ReadmissionRequiresPromotion');
@@ -472,6 +479,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         // The deployed schedules must already present this admission, so the
         // dispatcher never moves to a release its workers do not carry.
         if(admission!==request.expectedAdmission)throw Error('ReadmissionScheduleMismatch');
+        await installPlannerUpgrade(db,{invocation:request.invocation});
         const dispatcher=(await db.query('SELECT enabled,generation_key FROM mem9_maintenance.dispatcher_settings WHERE singleton FOR UPDATE')).rows[0];
         if(!dispatcher)throw Error('ReadmissionRequiresPromotion');
         if(dispatcher.generation_key!==admission){
@@ -555,6 +563,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       }else if(request.operation==='prepare'){
         if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton')||
           await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('ProductionWorkersMustBePaused');
+        await installPlannerUpgrade(db,{invocation:request.invocation});
         for(const kind of ['planner','executor'])await installWorker(db,kind,config[kind],config.database);
         const planner=await servicePrincipal(db,'consolidation-planner'),executor=await servicePrincipal(db,'consolidation');
         for(const namespace of config.targets){

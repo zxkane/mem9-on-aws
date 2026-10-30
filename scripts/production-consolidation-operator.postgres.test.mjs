@@ -19,6 +19,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {installCanaryContinuation,createCanaryAttempt,readCanaryAttempt,appendCanaryAttemptEvent,activateCanaryAttempt,recordCanaryAdmission} from './lib/production-canary-continuation.mjs';
 import {captureCanarySnapshot,verifyFrozenCanaryProjection} from './lib/production-canary-snapshot.mjs';
 import {auditPausedCanary} from './lib/production-canary-paused-audit.mjs';
+import {plannerUpgradeDefinitions} from './lib/consolidation-planner-upgrade.mjs';
 
 const dsn=process.env.MEM9_RUNTIME_TEST_DSN;
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
@@ -588,20 +589,47 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.execution_reviews')).toBe(1);
   }),60000);
 
-  it('re-admits a promoted dispatcher only for the deployed release artifacts',()=>fixture(async f=>{
+  async function restoreSealedPlanner(db){
+    // Reconstruct an installation prepared by the previous operator, without
+    // altering its canary, readiness, credential history or workload rows.
+    const sql=await readFile(new URL('../docker/bootstrap/migrations/006_consolidation_planner.sql',import.meta.url),'utf8');
+    for(const name of ['claim_neighborhood','dirty_planner_input','defer_neighborhood']){
+      const at=sql.indexOf('CREATE OR REPLACE FUNCTION mem9_maintenance.'+name+'(');
+      await db.query(sql.slice(at,sql.indexOf('END $$;',at)+8));
+    }
+    await db.query(`DROP FUNCTION mem9_maintenance.claim_planner_work(text);
+      DROP FUNCTION mem9_maintenance.read_neighborhood(text,text,bigint);
+      DROP TABLE mem9_maintenance.planner_upgrade_history;`);
+  }
+
+  it.each([true,false])('first installs the upgrade when re-admitting a legacy promoted dispatcher (enabled=%s)',enabled=>fixture(async f=>{
+    const sealed=await readRolloutState(f.admin);
+    const readiness=await scalar(f.admin,'SELECT to_jsonb(r) AS result FROM mem9_runtime.readiness r');
     await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await restoreSealedPlanner(f.admin);
+    expect(await scalar(f.admin,"SELECT to_regprocedure('mem9_maintenance.claim_planner_work(text)') AS result")).toBeNull();
     const seed='e'.repeat(64),old=productionArtifactAdmission(seed,f.config.sourceTag,f.config.workerImage);
     const readmit=(config,expectedAdmission=productionArtifactAdmission(seed,config.sourceTag,config.workerImage))=>
       runProductionConsolidation(f.admin,config,{...f.request('readmit'),invocation:randomUUID().replaceAll('-',''),expectedAdmission},{connect:f.connect});
     await expect(readmit(f.config)).rejects.toThrow('ReadmissionRequiresPromotion');
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote',promotion_verification=$1 WHERE singleton",[{activationSeed:seed,admission:old}]);
-    await f.admin.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',f.config.targets,old]);
-    expect(await readmit(f.config)).toMatchObject({phase:'readmit',admission:old,enabled:true,changed:false});
+    await f.admin.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,$3,$4)',['prod',f.config.targets,enabled,old]);
+    expect(await readmit(f.config)).toMatchObject({phase:'readmit',admission:old,enabled,changed:false});
+    const runtime=await f.connect(f.runtime);
+    try{
+      expect(await scalar(runtime,'SELECT mem9_runtime.ready_for($1,$2) AS result',['prod',sealed.identity.schemaDigest])).toBe(true);
+      for(const role of [f.runtime.username,f.executor.username])
+        expect(await scalar(runtime,"SELECT has_function_privilege($1,'mem9_maintenance.claim_planner_work(text)','EXECUTE') AS result",[role])).toBe(false);
+    }finally{await runtime.end();}
     const release={...f.config,sourceTag:'mem9-bbbbbbb',workerImage:f.config.workerImage.replace(/d{64}$/,'e'.repeat(64))};
     const expected=productionArtifactAdmission(seed,release.sourceTag,release.workerImage);
     await expect(readmit(release,old)).rejects.toThrow('ReadmissionScheduleMismatch');
     expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(old);
-    expect(await readmit(release)).toMatchObject({admission:expected,enabled:true,changed:true});
+    await f.admin.query('ALTER FUNCTION mem9_maintenance.read_neighborhood(text,text,bigint) SECURITY INVOKER');
+    await expect(readmit(release)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+    expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(old);
+    await f.admin.query(plannerUpgradeDefinitions[1].sql);
+    expect(await readmit(release)).toMatchObject({admission:expected,enabled,changed:true});
     expect(await scalar(f.admin,'SELECT generation_key AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(expected);
     const setup=(await f.admin.query('SELECT promotion_verification AS v FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0].v;
     expect(setup).toMatchObject({activationSeed:seed,admission:expected});
@@ -615,6 +643,21 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(await scalar(f.admin,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton')).toBe(false);
     const paused=(await f.admin.query('SELECT promotion_verification AS v FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0].v;
     expect(paused.readmissions.at(-1)).toMatchObject({sourceTag:'mem9-ccccccc',paused:true});
+    expect((await readRolloutState(f.admin)).last_hash).toBe(sealed.last_hash);
+    expect(await scalar(f.admin,'SELECT to_jsonb(r) AS result FROM mem9_runtime.readiness r')).toEqual(readiness);
+  }),60000);
+
+  it('upgrades an existing unpromoted validation only while paused and preserves its evidence',()=>fixture(async f=>{
+    await frozenPair(f);
+    await restoreSealedPlanner(f.admin);
+    const before=await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s');
+    const install=()=>runProductionConsolidation(f.admin,f.config,f.request('install-planner-upgrade'),{connect:f.connect});
+    await f.admin.query('UPDATE mem9_maintenance.dispatcher_settings SET enabled=true');
+    await expect(install()).rejects.toThrow('PauseBeforePlannerUpgrade');
+    await f.admin.query('UPDATE mem9_maintenance.dispatcher_settings SET enabled=false');
+    expect(await install()).toMatchObject({phase:'install-planner-upgrade',changed:true,version:1});
+    expect(await install()).toMatchObject({changed:false});
+    expect(await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s')).toEqual(before);
   }),60000);
 
   it('installs the cross-context merge policy once without changing its grants',()=>fixture(async f=>{
