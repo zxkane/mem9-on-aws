@@ -2149,6 +2149,14 @@ contract, so run the switch right after `readmit`.
 
 After a production release builds new workload images, Infra CI automatically
 re-admits a promoted dispatcher to those worker artifacts after bootstrap.
+Readmission also installs and verifies versioned planner maintenance functions
+before enabling the new worker protocol. The fixed SQL, owner, grants and
+immutable installation receipt are checked; unexpected drift fails the release.
+These maintenance upgrades preserve the sealed base schema and credential-cutover
+history. Initial worker preparation and preview setup use the same installer.
+An existing unpromoted validation is upgraded only while execution and dispatch
+are paused; its baseline, receipts and counters are retained. The guarded
+`install-planner-upgrade` operator command also supports this paused state.
 Infrastructure-only releases reuse the previous images and admission.
 The hard gate verifies
 the database admission and exact schedule targets before foreground E2E can

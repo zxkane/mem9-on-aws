@@ -28,7 +28,7 @@ describe('production deployment readmission',()=>{
   it('TC-CONS-WORKER-132 leaves unpromoted, disabled workers disabled',async()=>{
     const f=fixture({promoted:false,enabled:false});
     await expect(f.run()).resolves.toEqual({phase:'not-promoted',changed:false,enabled:false});
-    expect(f.deps.administer.mock.calls.map(([,o])=>o.operation)).toEqual(['status']);
+    expect(f.deps.administer.mock.calls.map(([,o])=>o.operation)).toEqual(['status','install-planner-upgrade']);
     expect(f.deps.verify).toHaveBeenCalledWith({},f.targets,{enabled:false});
   });
   it('accepts absent setup only when neither SQL control is enabled',async()=>{
@@ -41,6 +41,22 @@ describe('production deployment readmission',()=>{
     f.deps.verify.mockRejectedValue(Error('ProductionSchedulingNotVerified'));
     await expect(f.run()).rejects.toThrow('ProductionSchedulingNotVerified');
     expect(f.deps.administer.mock.calls.map(([,o])=>o.operation)).toEqual(['status']);
+  });
+  it('rejects a changed main revision before installing on an unpromoted deployment',async()=>{
+    const f=fixture({promoted:false,enabled:false});
+    f.deps.currentMain.mockResolvedValueOnce(revision).mockResolvedValue('c'.repeat(40));
+    await expect(f.run()).rejects.toThrow('ProductionReadmissionRequiresMain');
+    expect(f.deps.administer.mock.calls.map(([,o])=>o.operation)).toEqual(['status']);
+  });
+  it('propagates an unpromoted installation failure after verifying disabled schedules',async()=>{
+    const f=fixture({promoted:false,enabled:false});
+    f.deps.administer.mockImplementation(async(_,{operation})=>{
+      if(operation==='status')return f.status;
+      throw Error('PlannerUpgradeCatalogMismatch');
+    });
+    await expect(f.run()).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+    expect(f.deps.verify).toHaveBeenCalledWith({},f.targets,{enabled:false});
+    expect(f.deps.administer.mock.calls.map(([,o])=>o.operation)).toEqual(['status','install-planner-upgrade']);
   });
   it('keeps explicit operator readmission available without a conditional skip',async()=>{
     const f=fixture();

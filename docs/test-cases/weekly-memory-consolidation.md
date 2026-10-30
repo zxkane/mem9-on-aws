@@ -569,3 +569,13 @@ and checks tied-distance pagination plus the actual planner's selected members.
 The runtime query is unchanged by this fix. This is a reproducible local
 comparison, not an Aurora capacity estimate or a production latency guarantee;
 cache order and host load affect timing, so there is no timing-based pass/fail.
+
+### Planner upgrade after credential cutover
+
+| ID | Scenario | Expected evidence |
+|---|---|---|
+| PLAN-023 | Deploy the retry fix after the runtime schema has been sealed | Base schema digest remains identical; production preparation/readmission and preview setup install the same versioned functions |
+| PLAN-024 | Install, repeat, or roll back the maintenance-function upgrade | Expected bodies, owners, attributes and grants are checked; repeat is idempotent, transaction rollback leaves no partial upgrade, and the immutable receipt binds the installed SQL digest |
+| PLAN-025 | Encounter an unexpected body, owner, execution grant, or conflicting new entry point | Reject before installing or admitting workers; runtime, executor, public and unregistered users cannot call the new planner functions |
+| PLAN-026 | Upgrade an already promoted or paused production fixture | Preserve credential-cutover identity, readiness, memory rows, budgets and pause state; failed upgrades cannot refresh dispatcher admission |
+| PLAN-027 | Add, rename or parameterize a canonical canary case | The runtime integration gate validates the actual PostgreSQL test report against the canary runner's exact case list before deployment; mismatched names or counts fail locally |

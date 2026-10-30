@@ -78,6 +78,7 @@ export async function productionCoordinatorDigest(){
     '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
     '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
   paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
+    'scripts/lib/consolidation-planner-upgrade.mjs',
     'infra/post-runtime-preview.ts','scripts/consolidation-preview-fixture.mjs','scripts/lib/consolidation-preview-config.mjs',
     'scripts/lib/post-runtime-preview-authority.mjs','scripts/lib/post-runtime-preview-route.mjs','scripts/lib/post-runtime-preview-aws.mjs','scripts/consolidation-scheduler-e2e.mjs',
     'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',

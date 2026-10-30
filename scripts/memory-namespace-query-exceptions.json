@@ -380,11 +380,11 @@
     },
     {
       "owner": "docker/bootstrap/migrations/006_consolidation_planner.sql",
-      "statement_sha256": "c9d3f6ebdf07f16e0dcf0fbf58890968f92c77299bc177ac3819fe1aa812f09b",
+      "statement_sha256": "7b6d600876f0b3bfb2a1ea155ca17170132b5323bb1401b7dbf9059ffec8928f",
       "classification": "namespace_composed_or_compatibility",
-      "context": "Private incremental planner routine read_neighborhood; complete routine and grants reviewed.",
+      "context": "Private incremental planner routine claim_neighborhood; complete routine and grants reviewed.",
       "rationale": "The planner guard binds session_user login capability and active namespace viewer membership before any lookup. All memory aliases are restricted to p_namespace; vector retrieval materializes only that namespace, hydration is bounded, and only owner policy can enable this path.",
-      "namespace_evidence": "Explicit namespace predicates, current membership authorization, a matching unexpired lease generation, private per-lease snapshots and namespace-bound cursors/cache keys.",
+      "namespace_evidence": "Explicit namespace predicates, private per-lease snapshots and namespace-bound cursors/cache keys.",
       "coverage": [
         "scripts/consolidation-planner.postgres.test.mjs",
         "scripts/run-consolidation-planner-integration.sh"
@@ -532,6 +532,19 @@
         "scripts/runtime-credentials.postgres.test.mjs",
         "scripts/run-runtime-credentials-integration.sh",
         "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-planner-upgrade.mjs",
+      "statement_sha256": "c9d3f6ebdf07f16e0dcf0fbf58890968f92c77299bc177ac3819fe1aa812f09b",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed incremental planner routine read_neighborhood; complete routine and grants reviewed.",
+      "rationale": "The planner guard binds session_user login capability and active namespace viewer membership before any lookup. All memory aliases are restricted to p_namespace; vector retrieval materializes only that namespace, hydration is bounded, and only owner policy can enable this path.",
+      "namespace_evidence": "Explicit namespace predicates, current membership authorization, a matching unexpired lease generation, private per-lease snapshots and namespace-bound cursors/cache keys.",
+      "coverage": [
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/run-consolidation-planner-integration.sh",
+        "scripts/consolidation-planner-upgrade.test.mjs"
       ]
     }
   ]

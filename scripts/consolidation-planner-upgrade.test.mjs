@@ -1,0 +1,17 @@
+import {createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+import {describe,it,expect} from 'vitest';
+import {runtimeSchemaDigest} from './lib/runtime-credentials.mjs';
+import {productionOperatorDigest} from './production-runtime-operator.mjs';
+
+describe('sealed planner bootstrap contract',()=>{
+  it('PLAN-023 preserves the base SQL used by completed credential cutovers',()=>{
+    const sql=readFileSync(new URL('../docker/bootstrap/migrations/006_consolidation_planner.sql',import.meta.url));
+    expect(createHash('sha256').update(sql).digest('hex')).toBe('207e3868f40964103f7da708aa498c1256fdf752f58d1ceebef31b6826add774');
+  });
+  it('preserves both sealed credential-cutover artifact digests',async()=>{
+    expect(await runtimeSchemaDigest(new URL('../docker/bootstrap',import.meta.url).pathname))
+      .toBe('a3c910042ed7541f34f44b5da9a01743dd45962174aefad4f00b77cccdf34e78');
+    expect(await productionOperatorDigest()).toBe('cc2c304168e6c276c24d50b9c67ea22965a0009fc680e4899469cdbbbf3a827f');
+  });
+});

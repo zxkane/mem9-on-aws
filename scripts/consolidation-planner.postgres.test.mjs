@@ -6,6 +6,7 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { ensureNamespaceIndexes } from './migrate-memory-namespaces.mjs';
 import { plannerRequest } from './lib/consolidation-model.mjs';
 import { createPlannerDatabase } from './consolidation-planner.mjs';
+import {installPlannerUpgrade,verifyPlannerUpgrade,plannerUpgradeDefinitions,PLANNER_UPGRADE_HASH} from './lib/consolidation-planner-upgrade.mjs';
 
 const DSN = process.env.MEM9_PLANNER_TEST_DSN;
 const VECTOR = JSON.stringify([1, ...Array(1023).fill(0)]);
@@ -43,13 +44,18 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   }, 30000);
   afterAll(async () => { await admin?.end(); });
 
-  async function fixture(test) {
+  async function fixture(test,{upgrade=true}={}) {
     const name = 'planner_' + randomUUID().replaceAll('-', '');
     await admin.query('CREATE DATABASE "' + name + '" TEMPLATE consolidation_planner_test');
     const clients = [];
     try {
       const db = await connect(name), planner = await connect(name, 'planner_fixture'), stranger = await connect(name, 'planner_stranger');
       clients.push(db, planner, stranger);
+      if(upgrade){
+        await db.query('BEGIN');
+        try{await installPlannerUpgrade(db,{invocation:randomUUID().replaceAll('-','')});await db.query('COMMIT');}
+        catch(error){await db.query('ROLLBACK');throw error;}
+      }
       await db.query("INSERT INTO mem9_maintenance.database_callers VALUES('planner_fixture'::regrole::oid,'planner')");
       const actor = randomUUID(), ns = randomUUID(), other = randomUUID();
       await db.query("INSERT INTO memory_principals(principal_id,principal_key,principal_type) VALUES($1,$2,'service')", [actor, key('consolidation-planner')]);
@@ -80,6 +86,75 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
       await admin.query('DROP DATABASE "' + name + '" WITH (FORCE)');
     }
   }
+
+  async function upgrade(db){
+    await db.query('BEGIN');
+    try{
+      const result=await installPlannerUpgrade(db,{invocation:randomUUID().replaceAll('-','')});
+      await db.query('COMMIT');return result;
+    }catch(error){await db.query('ROLLBACK');throw error;}
+  }
+
+  it('PLAN-024: upgrades a sealed base once and verifies the live installation on replay',()=>fixture(async f=>{
+    expect(await upgrade(f.db)).toMatchObject({changed:true,version:1,sqlHash:PLANNER_UPGRADE_HASH});
+    expect(await upgrade(f.db)).toMatchObject({changed:false});
+    expect(await verifyPlannerUpgrade(f.db)).toMatchObject({version:1});
+    expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.planner_upgrade_history')).toBe(1);
+    await expect(f.db.query('DELETE FROM mem9_maintenance.planner_upgrade_history')).rejects.toMatchObject({code:'55000'});
+    const id=await f.seed('upgraded fixture');await f.consume();expect((await f.claim()).anchor_id).toBe(id);
+  },{upgrade:false}));
+
+  it('PLAN-024: rollback restores the base and removes both new routines and the receipt',()=>fixture(async f=>{
+    const before=await scalar(f.db,"SELECT prosrc FROM pg_proc WHERE oid='mem9_maintenance.claim_neighborhood(text)'::regprocedure");
+    await f.db.query('BEGIN');
+    await installPlannerUpgrade(f.db,{invocation:randomUUID().replaceAll('-','')});
+    await f.db.query('ROLLBACK');
+    expect(await scalar(f.db,"SELECT prosrc FROM pg_proc WHERE oid='mem9_maintenance.claim_neighborhood(text)'::regprocedure")).toBe(before);
+    expect(await scalar(f.db,"SELECT to_regprocedure('mem9_maintenance.claim_planner_work(text)')")).toBeNull();
+    expect(await scalar(f.db,"SELECT to_regclass('mem9_maintenance.planner_upgrade_history')")).toBeNull();
+    expect(await upgrade(f.db)).toMatchObject({changed:true});
+  },{upgrade:false}));
+
+  it.each([
+    "ALTER FUNCTION mem9_maintenance.claim_neighborhood(text) SECURITY INVOKER",
+    "ALTER FUNCTION mem9_maintenance.claim_neighborhood(text) SET search_path=public",
+    "ALTER FUNCTION mem9_maintenance.claim_neighborhood(text) OWNER TO planner_fixture",
+    "GRANT EXECUTE ON FUNCTION mem9_maintenance.claim_neighborhood(text) TO PUBLIC",
+    "GRANT EXECUTE ON FUNCTION mem9_maintenance.claim_neighborhood(text) TO planner_stranger",
+    "CREATE OR REPLACE FUNCTION mem9_maintenance.claim_neighborhood(p_namespace text) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER AS $$BEGIN RETURN '{}'; END $$",
+  ])('PLAN-025: rejects an unexpected base routine or grant (%s)',sql=>fixture(async f=>{
+    await f.db.query(sql);
+    await expect(upgrade(f.db)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+    expect(await scalar(f.db,"SELECT to_regprocedure('mem9_maintenance.claim_planner_work(text)')")).toBeNull();
+    expect(await scalar(f.db,"SELECT to_regclass('mem9_maintenance.planner_upgrade_history')")).toBeNull();
+  },{upgrade:false}));
+
+  it('PLAN-025: refuses to adopt a preexisting new signature',()=>fixture(async f=>{
+    await f.db.query(plannerUpgradeDefinitions[0].sql);
+    await f.db.query('REVOKE ALL ON FUNCTION mem9_maintenance.claim_planner_work(text) FROM PUBLIC');
+    await f.db.query('GRANT EXECUTE ON FUNCTION mem9_maintenance.claim_planner_work(text) TO mem9_maintenance_planner');
+    await expect(upgrade(f.db)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+  },{upgrade:false}));
+
+  it('PLAN-025: refuses a partial install and a conflicting immutable receipt',()=>fixture(async f=>{
+    await f.db.query("ALTER FUNCTION mem9_maintenance.read_neighborhood(text,text,bigint) SECURITY INVOKER");
+    await expect(upgrade(f.db)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+    await f.db.query(plannerUpgradeDefinitions[1].sql);
+    await f.db.query('ALTER TABLE mem9_maintenance.planner_upgrade_history DISABLE TRIGGER planner_upgrade_history_immutable');
+    await f.db.query("UPDATE mem9_maintenance.planner_upgrade_history SET sql_hash=repeat('a',64)");
+    await f.db.query('ALTER TABLE mem9_maintenance.planner_upgrade_history ENABLE TRIGGER planner_upgrade_history_immutable');
+    await expect(upgrade(f.db)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+  }));
+
+  it.each([
+    "GRANT UPDATE(sql_hash) ON mem9_maintenance.planner_upgrade_history TO planner_stranger",
+    `DROP TRIGGER planner_upgrade_history_immutable ON mem9_maintenance.planner_upgrade_history;
+     CREATE TRIGGER planner_upgrade_history_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.planner_upgrade_history
+       FOR EACH ROW WHEN (false) EXECUTE FUNCTION mem9_maintenance.immutable()`,
+  ])('PLAN-025: rejects altered receipt protection (%s)',sql=>fixture(async f=>{
+    await f.db.query(sql);
+    await expect(upgrade(f.db)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
+  }));
 
   it('PLAN-017: cancellation retains attempts, backs off, and lets later work progress', () => fixture(async f => {
     const anchor = await f.seed('blocked anchor'), later = await f.seed('later work');

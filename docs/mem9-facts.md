@@ -558,6 +558,10 @@ still keep writers stopped through namespace cutover.
   Recoverable scan failures back off and remain visible in bounded worker
   diagnostics; the retired combined `claim_neighborhood` call rejects before
   claiming work.
+  These routines are installed by the versioned maintenance-function upgrader
+  during production preparation/readmission and preview setup. The sealed base
+  migration and credential-cutover digests remain unchanged. Unknown routine or
+  permission drift prevents installation and worker admission.
 - Decision and report artifacts carry stage/namespace identity and belong in
   owner-only files. JSON ID selections are checked against that binding; plain
   ID lists remain limited to the invocation's authorized namespace. Apply
