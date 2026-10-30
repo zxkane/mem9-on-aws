@@ -32,7 +32,9 @@ export const fixtureCaseNames=Object.freeze([
   'installs a certified planner model and budgets only on a paused, prepared setup',
   'closes an open continuation attempt without rewriting its ledger',
   'reports content-free census counts and the fields behind blocked merges',
-  're-admits a promoted dispatcher only for the deployed release artifacts',
+  'first installs the upgrade when re-admitting a legacy promoted dispatcher (enabled=true)',
+  'first installs the upgrade when re-admitting a legacy promoted dispatcher (enabled=false)',
+  'upgrades an existing unpromoted validation only while paused and preserves its evidence',
   'installs the cross-context merge policy once without changing its grants',
   'marks only blocked cross-context merge anchors for re-planning once policy 2 is live',
 ]);
