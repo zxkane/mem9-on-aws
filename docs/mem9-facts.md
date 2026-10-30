@@ -451,6 +451,12 @@ still keep writers stopped through namespace cutover.
   `MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS`, applies a local statement timeout,
   and exactly orders cosine distance. Enforcement drops the old tenant-wide
   HNSW index.
+- Patch 0026 retries `ErrNamespaceVectorTimeout` only during the read-only
+  vector lookup preceding smart-write reconciliation: at most three attempts,
+  with 250 ms then 500 ms backoff and the same embedding, filter and scoped
+  repository. Cancellation, deadline expiry and capacity refusals are terminal.
+  Exhausted retries remain fatal to reconciliation; they never permit an empty
+  or keyword-only fallback write. Foreground search budgets are unchanged.
 - Startup with `MNEMO_NAMESPACE_REQUIRED=1` requires database phase
   `constraints_complete`; unset/`0` is compatibility mode for the initial
   additive deployment. There is no fallback to a default namespace in required

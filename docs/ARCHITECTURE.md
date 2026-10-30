@@ -546,6 +546,11 @@ the same namespace and filter predicates. Ordinary B-tree scans remain
 available for hydration. The materialization boundaries prevent tenant-wide
 HNSW candidate selection; enforcement also removes that index. ECS pins a
 30,000-active-vector ceiling per namespace and a two-second statement timeout.
+Smart-write reconciliation retries a transient vector statement timeout up to
+three total attempts, with 250 ms and 500 ms backoff. Only the read is retried,
+using the existing embedding and scoped repository. Caller cancellation and
+deadlines stop retries; capacity refusal or exhausted retries abort the write
+without a keyword-only fallback. Search requests retain their existing budgets.
 Content-free structured events expose the observed row count, an 80-percent
 pre-ceiling warning, hard capacity refusals, and SQL timeouts. Production log
 metric filters publish these in `mem9-on-aws/NamespaceVector` without

@@ -17,3 +17,23 @@ cutover; normal transcript ingestion must work before that cutover.
 The integration harness prepares separate additive and enforced database
 templates and executes all Go packages against both contracts. No production
 schema, namespace flag, or maintenance schedule changes are part of this fix.
+
+## Namespace vector reconciliation retries
+
+Smart writes must finish an exact namespace lookup before reconciling existing
+memories. A transient statement timeout may be retried in this read-only phase;
+it must never turn into an empty result or a keyword-only write decision.
+
+| ID | Scenario | Expected result |
+| --- | --- | --- |
+| TC-COMPAT-008 | Two namespace vector timeouts followed by a matching memory | Third lookup succeeds with the same filter, limit and embedding; embedding generation runs once for the lookup |
+| TC-COMPAT-009 | Every lookup times out | Stop after three attempts, return the timeout, and perform no memory mutation |
+| TC-COMPAT-010 | Namespace capacity refusal | Fail immediately without retry or keyword-only reconciliation |
+| TC-COMPAT-011 | Caller cancels after the first timeout | Stop before another lookup or keyword fallback and return cancellation |
+| TC-COMPAT-012 | Caller deadline expires during retry backoff | Return the deadline error without a second lookup or any write |
+| TC-COMPAT-013 | Lookup succeeds immediately or returns an unrelated backend error | Do not retry; retain existing successful and keyword-fallback behavior |
+| TC-COMPAT-014 | Full patched-upstream integration and deployed MCP smoke | Existing namespace isolation and atomic ingest suites pass; a smart write remains searchable under the unchanged hard E2E assertions |
+
+Use synthetic in-process repository and embedding fixtures for deterministic
+fault injection. Run the service tests with the race detector, then the complete
+`scripts/run-ingest-queue-integration.sh` suite before deployment.
