@@ -214,10 +214,18 @@ defaults are 1 ACU minimum for production, 0.5 ACU for development/previews, and
 4 ACU maximum. Verify capacity together with cache size, query results, and the
 two-second SQL guard. Public evidence must not describe a personal deployment.
 
-Production capacity configuration must preserve the 1 ACU floor and default
+Production capacity configuration must preserve the default 1 ACU minimum and
 4 ACU maximum when unset. Synthetic settings (including half-ACU values) must
 reach Aurora; invalid values, values below the floor, and values above the
 configuration's 256 ACU bound must fail before database resources are registered.
+
+The production minimum is separately configurable through `MEM9_AURORA_MIN_ACU`.
+Validate both bounds before resource registration: each is at least 1 ACU and
+the minimum cannot exceed the maximum. Test a synthetic 1.5–4 range, a 2–8 range,
+and equal 256-ACU bounds. Both production deployment paths must receive the
+private setting; development and preview stages ignore it, including malformed
+values. Operator verification must cover recurring planner scans after idle
+periods and scale-down, with query deadlines and exact-result checks unchanged.
 Development and preview stages must ignore the production setting. Both regular
 production deployment and credential-cutover deployment must read the same
 protected environment secret. Capacity changes must preserve namespace row and

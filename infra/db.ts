@@ -25,7 +25,7 @@
  * schema is applied by the one-shot schema-bootstrap task on deploy (§8), which
  * connects to this cluster. This stack only provisions the cluster + creds.
  *
- * Production retains a 1 ACU floor for the namespace search working set.
+ * Production defaults to a configurable 1 ACU floor for the search working set.
  * Development and previews retain 0.5 ACU. Capacity pricing is regional;
  * previews carry their idle cost until their stage is removed.
  */
@@ -50,6 +50,14 @@ export function db(): DbOutputs {
   const maxAcu = Number(capacity);
   if (!/^[1-9]\d*(?:\.[05])?$/.test(capacity) || maxAcu > 256) {
     throw new Error("MEM9_AURORA_MAX_ACU must be between 1 and 256 in increments of 0.5");
+  }
+  const minimum = $app.stage === "prod"
+    ? process.env.MEM9_AURORA_MIN_ACU?.trim() || "1"
+    : "0.5";
+  const minAcu = Number(minimum);
+  if ($app.stage === "prod" &&
+    (!/^[1-9]\d*(?:\.[05])?$/.test(minimum) || minAcu > 256 || minAcu > maxAcu)) {
+    throw new Error("MEM9_AURORA_MIN_ACU must be between 1 and MEM9_AURORA_MAX_ACU in increments of 0.5");
   }
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const { vpcId, privateSubnetIds } = resolveVpc();
@@ -129,7 +137,7 @@ export function db(): DbOutputs {
     version: "17.4",
     database: "mem9",
     scaling: {
-      min: $app.stage === "prod" ? "1 ACU" : "0.5 ACU",
+      min: `${minAcu} ACU`,
       max: `${maxAcu} ACU`,
     },
     vpc: {

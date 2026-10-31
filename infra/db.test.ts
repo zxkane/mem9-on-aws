@@ -84,6 +84,7 @@ function installGlobals(stage: string) {
 }
 
 beforeEach(() => {
+  vi.stubEnv("MEM9_AURORA_MIN_ACU", "");
   vi.stubEnv("MEM9_AURORA_MAX_ACU", "");
   sgs = [];
   rules = [];
@@ -176,6 +177,27 @@ describe("db stack", () => {
     expect(auroras[0].args.scaling).toEqual({ min: "1 ACU", max: `${capacity} ACU` });
   });
 
+  it.each([["1.5", "4"], ["2", "8"], ["256", "256"]])(
+    "accepts a production range of %s–%s ACU", async (minimum, maximum) => {
+      installGlobals("prod");
+      vi.stubEnv("MEM9_AURORA_MIN_ACU", minimum);
+      vi.stubEnv("MEM9_AURORA_MAX_ACU", maximum);
+      (await loadDb())();
+      expect(auroras[0].args.scaling).toEqual({ min: `${minimum} ACU`, max: `${maximum} ACU` });
+    },
+  );
+
+  it.each(["0", "0.5", "-1", "1.25", "4.5", "256.5", "Infinity", "NaN", "1e1", "2 ACU"])(
+    "rejects invalid or inverted production minimum %s before registering resources", async (minimum) => {
+      installGlobals("prod");
+      vi.stubEnv("MEM9_AURORA_MIN_ACU", minimum);
+      expect(await loadDb()).toThrow(/MEM9_AURORA_MIN_ACU/);
+      expect(sgs).toHaveLength(0);
+      expect(auroras).toHaveLength(0);
+      expect(params).toHaveLength(0);
+    },
+  );
+
   it.each(["0", "0.5", "-1", "1.25", "256.5", "Infinity", "NaN", "1e1", "6 ACU"])(
     "rejects invalid production capacity %s before registering resources", async (capacity) => {
       installGlobals("prod");
@@ -189,6 +211,7 @@ describe("db stack", () => {
 
   it.each(["dev", "pr-42"])("ignores production capacity settings in %s", async (stage) => {
     installGlobals(stage);
+    vi.stubEnv("MEM9_AURORA_MIN_ACU", "invalid-production-setting");
     vi.stubEnv("MEM9_AURORA_MAX_ACU", "invalid-production-setting");
     (await loadDb())();
     expect(auroras[0].args.scaling).toEqual({ min: "0.5 ACU", max: "4 ACU" });

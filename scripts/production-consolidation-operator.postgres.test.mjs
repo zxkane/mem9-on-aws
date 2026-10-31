@@ -681,6 +681,63 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await expect(f.admin.query('DELETE FROM mem9_maintenance.merge_policy_history')).rejects.toThrow();
   }),60000);
 
+  it('requeues only exhausted scan failures while preserving other work and namespace isolation',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const other=randomUUID();
+    await f.admin.query("INSERT INTO public.memory_namespaces(namespace_id,slug,display_name) VALUES($1,$1,'Synthetic outside namespace')",[other]);
+    const cases=[
+      {name:'eligible',attempts:3,deferral:'scan_failed'},
+      {name:'retrying',attempts:2,deferral:'scan_failed'},
+      {name:'oversized',attempts:3,deferral:'input_bound'},
+      {name:'invalid',attempts:3,deferral:'invalid_result'},
+      {name:'leased',attempts:3,deferral:'scan_failed',leased:true},
+      {name:'done',attempts:3,deferral:'scan_failed',done:true},
+      {name:'outside',attempts:3,deferral:'scan_failed',namespace:other},
+    ].map(c=>({...c,id:randomUUID(),namespace:c.namespace??f.namespace}));
+    for(const c of cases){
+      await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+        VALUES($1,$2,$3,$3,'Synthetic scan retry fixture','[]','{}','insight')`,[c.id,c.namespace,f.principal]);
+      await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,
+        lease_generation,lease_until,attempts,first_seen_at,due_at,reason)
+        VALUES($1,$2,2,2,$3,1,CASE WHEN $4 THEN clock_timestamp()+interval '5 minutes' ELSE NULL END,$5,
+          clock_timestamp()-interval '1 day',clock_timestamp()-interval '1 minute','lease_exhausted')`,[c.namespace,c.id,c.done?2:0,Boolean(c.leased),c.attempts]);
+      await f.admin.query('INSERT INTO mem9_maintenance.planner_deferrals(namespace_id,memory_id,reason) VALUES($1,$2,$3)',[c.namespace,c.id,c.deferral]);
+    }
+    const snapshot=async()=>JSON.stringify((await f.admin.query('SELECT * FROM mem9_maintenance.work ORDER BY namespace_id,memory_id')).rows);
+    const before=await snapshot();
+    const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request('requeue-scans'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    await expect(requeue()).rejects.toThrow('PlannerScanRequeueRequiresPromotion');
+    expect(await snapshot()).toBe(before);
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET generation=$1 WHERE singleton",['b'.repeat(64)]);
+    await expect(requeue()).rejects.toThrow('PlannerScanRequeueRequiresPromotion');
+    expect(await snapshot()).toBe(before);
+    await f.admin.query('UPDATE mem9_maintenance.production_worker_setup SET generation=$1 WHERE singleton',[f.config.generation]);
+    expect(await requeue()).toMatchObject({phase:'requeue-scans',anchors:1});
+    const after=JSON.parse(await snapshot()),original=JSON.parse(before),eligible=cases[0];
+    for(const row of after){
+      const prior=original.find(w=>w.namespace_id===row.namespace_id&&w.memory_id===row.memory_id);
+      if(row.memory_id!==eligible.id){expect(row).toEqual(prior);continue;}
+      expect(row).toMatchObject({attempts:0,reason:'audit',first_seen_at:prior.first_seen_at,completed_generation:prior.completed_generation});
+      expect(Number(row.desired_generation)).toBe(Number(prior.desired_generation)+1);
+    }
+    expect(await requeue()).toMatchObject({phase:'requeue-scans',anchors:0});
+  }),60000);
+
+  it('rejects oversized scan recovery before resetting any retry counters',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      SELECT md5('scan-recovery-'||i)::uuid::text,$1,$2,$2,'Synthetic bounded recovery fixture','[]','{}','insight'
+      FROM generate_series(1,1001) i`,[f.namespace,f.principal]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,
+      attempts,first_seen_at,due_at,reason) SELECT namespace_id,id,2,2,0,3,clock_timestamp(),clock_timestamp(),'lease_exhausted'
+      FROM public.memories WHERE namespace_id=$1`,[f.namespace]);
+    await f.admin.query("INSERT INTO mem9_maintenance.planner_deferrals(namespace_id,memory_id,reason) SELECT namespace_id,memory_id,'scan_failed' FROM mem9_maintenance.work WHERE namespace_id=$1",[f.namespace]);
+    await expect(runProductionConsolidation(f.admin,f.config,f.request('requeue-scans'),{connect:f.connect})).rejects.toThrow('PlannerScanRequeueTooLarge');
+    expect(await scalar(f.admin,"SELECT count(*)::int AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND attempts=3 AND desired_generation=2 AND reason='lease_exhausted'",[f.namespace])).toBe(1001);
+  }),60000);
+
   it('marks only blocked cross-context merge anchors for re-planning once policy 2 is live',()=>fixture(async f=>{
     await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
     const ids=[randomUUID(),randomUUID()].sort(),classId='8'.repeat(64);

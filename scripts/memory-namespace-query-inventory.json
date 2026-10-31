@@ -3042,9 +3042,27 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "6d5498ca9917f41bf342",
+      "id": "87860b6e81b37c088305",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 446,
+      "line": 437,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7b198e91f966e92c9994b0705b34bd4678182dbe4f8a613a114ac33f4741072e",
+      "statement": "SELECT w.memory_id FROM mem9_maintenance.work w JOIN mem9_maintenance.planner_deferrals d USING(namespace_id,memory_id) JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id WHERE w.namespace_id=$1 AND w.desired_generation>w.completed_generation AND w.attempts=3 AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND d.reason='scan_failed' AND m.state='active' AND m.memory_type<>'session' ORDER BY w.memory_id LIMIT 1001 FOR UPDATE OF w",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "2b4567a0ddc97e128cbe",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 468,
       "tables": [
         "memories"
       ],
@@ -3060,9 +3078,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "b62cc067a52e56fb6cf8",
+      "id": "44ee1ead598d4e0edbd7",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 540,
+      "line": 562,
       "tables": [
         "memories"
       ],
@@ -3078,9 +3096,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "cd1a42a19c5d896ba53f",
+      "id": "903a6ddce659e8d21af7",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 552,
+      "line": 574,
       "tables": [
         "memories"
       ],
@@ -3096,9 +3114,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "a6ee87006d16613a1205",
+      "id": "8b587a839081cd50578a",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 556,
+      "line": 578,
       "tables": [
         "memories"
       ],

@@ -1,0 +1,215 @@
+diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
+--- a/server/internal/service/ingest.go
++++ b/server/internal/service/ingest.go
+@@ -1678,6 +1678,32 @@
+ 	return result, nil
+ }
+ 
++// Retry only the read before reconciliation. Reusing the embedding and scoped
++// repository avoids repeating extraction, model calls, or memory mutations.
++// Exhaustion remains an error so incomplete lookup cannot create duplicates.
++func (s *IngestService) reconciliationVectorSearch(ctx context.Context, vector []float32, filter domain.MemoryFilter, limit int) ([]domain.Memory, error) {
++	for attempt := 1; ; attempt++ {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		matches, err := s.memories.VectorSearch(ctx, vector, filter, limit)
++		if contextErr := ctx.Err(); contextErr != nil {
++			return nil, contextErr
++		}
++		if !errors.Is(err, domain.ErrNamespaceVectorTimeout) || attempt == 3 {
++			return matches, err
++		}
++		slog.Warn("reconciliation vector lookup retry", "attempt", attempt, "error_class", "namespace_vector_timeout")
++		timer := time.NewTimer(time.Duration(attempt) * 250 * time.Millisecond)
++		select {
++		case <-ctx.Done():
++			timer.Stop()
++			return nil, ctx.Err()
++		case <-timer.C:
++		}
++	}
++}
++
+ func (s *IngestService) searchExistingMemoriesForFact(
+ 	ctx context.Context,
+ 	fact string,
+@@ -1742,10 +1768,11 @@
+ 			slog.Warn("gatherExistingMemories: embed failed for fact, continuing with keyword leg", "fact_len", len(fact), "err", embedErr)
+ 		} else {
+ 			var vecErr error
+-			vecMatches, vecErr = s.memories.VectorSearch(ctx, vec, filter, perFactLimit)
++			vecMatches, vecErr = s.reconciliationVectorSearch(ctx, vec, filter, perFactLimit)
+ 			if vecErr != nil {
+ 				if errors.Is(vecErr, domain.ErrNamespaceVectorCapacity) ||
+-					errors.Is(vecErr, domain.ErrNamespaceVectorTimeout) {
++					errors.Is(vecErr, domain.ErrNamespaceVectorTimeout) ||
++					errors.Is(vecErr, context.Canceled) || errors.Is(vecErr, context.DeadlineExceeded) {
+ 					result.fatalErr = vecErr
+ 					return result
+ 				}
+diff --git a/server/internal/service/ingest_vector_retry_test.go b/server/internal/service/ingest_vector_retry_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/internal/service/ingest_vector_retry_test.go
+@@ -0,0 +1,160 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"reflect"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/embed"
++)
++
++func vectorRetryService(t *testing.T, repo *memoryRepoMock) (*IngestService, *atomic.Int32) {
++	t.Helper()
++	calls := new(atomic.Int32)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		calls.Add(1)
++		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"embedding": []float32{0.8, 0.6}}}})
++	}))
++	t.Cleanup(server.Close)
++	return NewIngestService(repo, nil, embed.New(embed.Config{
++		APIKey: "synthetic", BaseURL: server.URL, Model: "fixture", Dims: 2,
++	}), "", ModeSmart), calls
++}
++
++func TestReconcileNamespaceVectorRetryRecoversWithSameLookup(t *testing.T) {
++	var calls int
++	var firstFilter domain.MemoryFilter
++	repo := &memoryRepoMock{vectorSearchHook: func(_ context.Context, vector []float32, filter domain.MemoryFilter, limit int) ([]domain.Memory, error) {
++		calls++
++		if !reflect.DeepEqual(vector, []float32{0.8, 0.6}) || limit != 5 {
++			t.Errorf("lookup changed: vector=%v limit=%d", vector, limit)
++		}
++		if calls == 1 {
++			firstFilter = filter
++		} else if !reflect.DeepEqual(filter, firstFilter) {
++			t.Errorf("retry changed the namespace repository filter")
++		}
++		if calls < 3 {
++			return nil, fmt.Errorf("synthetic cancellation: %w", domain.ErrNamespaceVectorTimeout)
++		}
++		return []domain.Memory{{ID: "existing", Content: "Uses the synthetic fixture"}}, nil
++	}}
++	svc, embeddings := vectorRetryService(t, repo)
++	got, err := svc.gatherExistingMemories(context.Background(), "fixture-agent", "fixture-app", []string{"Uses the synthetic fixture"})
++	if err != nil || len(got) != 1 || got[0].ID != "existing" {
++		t.Fatalf("gather = %v, %v; want existing memory", got, err)
++	}
++	if calls != 3 || embeddings.Load() != 1 {
++		t.Fatalf("vector calls=%d embeddings=%d; want 3 and 1", calls, embeddings.Load())
++	}
++	if firstFilter.AgentID != "fixture-agent" || firstFilter.AppID == nil || *firstFilter.AppID != "fixture-app" || firstFilter.State != "active" {
++		t.Fatalf("missing original filter: %+v", firstFilter)
++	}
++}
++
++func TestReconcileNamespaceVectorRetryFailsClosed(t *testing.T) {
++	for _, tc := range []struct {
++		name  string
++		err   error
++		calls int
++	}{
++		{"exhausted", domain.ErrNamespaceVectorTimeout, 3},
++		{"capacity", domain.ErrNamespaceVectorCapacity, 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var calls int
++			repo := &memoryRepoMock{
++				vectorSearchHook: func(context.Context, []float32, domain.MemoryFilter, int) ([]domain.Memory, error) {
++					calls++
++					return nil, tc.err
++				},
++				keywordSearchHook: func(context.Context, string, domain.MemoryFilter, int) ([]domain.Memory, error) {
++					t.Error("failed exact lookup must not use keyword fallback")
++					return nil, nil
++				},
++			}
++			svc, embeddings := vectorRetryService(t, repo)
++			changes, _, err := svc.reconcile(context.Background(), "fixture", "fixture-agent", "fixture-app", "fixture-session", []ExtractedFact{{Text: "Uses the synthetic fixture"}}, nil)
++			if !errors.Is(err, tc.err) || len(changes) != 0 || len(repo.createCalls) != 0 || len(repo.setStateCalls) != 0 {
++				t.Fatalf("reconcile must fail without writes: changes=%v err=%v", changes, err)
++			}
++			if calls != tc.calls || embeddings.Load() != 1 {
++				t.Fatalf("vector calls=%d embeddings=%d; want %d and 1", calls, embeddings.Load(), tc.calls)
++			}
++		})
++	}
++}
++
++func TestReconcileNamespaceVectorRetryCancellation(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	var calls int
++	repo := &memoryRepoMock{
++		vectorSearchHook: func(context.Context, []float32, domain.MemoryFilter, int) ([]domain.Memory, error) {
++			calls++
++			cancel()
++			return nil, domain.ErrNamespaceVectorTimeout
++		},
++		keywordSearchHook: func(context.Context, string, domain.MemoryFilter, int) ([]domain.Memory, error) {
++			t.Error("cancelled lookup must not use keyword fallback")
++			return nil, nil
++		},
++	}
++	svc, _ := vectorRetryService(t, repo)
++	_, err := svc.gatherExistingMemories(ctx, "fixture-agent", "fixture-app", []string{"Uses the synthetic fixture"})
++	if !errors.Is(err, context.Canceled) || calls != 1 {
++		t.Fatalf("err=%v calls=%d; want cancellation and 1", err, calls)
++	}
++}
++
++func TestReconcileNamespaceVectorRetryDeadlineDuringBackoff(t *testing.T) {
++	var calls int
++	repo := &memoryRepoMock{vectorSearchHook: func(ctx context.Context, _ []float32, _ domain.MemoryFilter, _ int) ([]domain.Memory, error) {
++		calls++
++		deadline, _ := ctx.Deadline()
++		// Consume the read budget until less than one backoff remains. HTTP
++		// fixture startup and embedding latency are outside this deadline test.
++		timer := time.NewTimer(time.Until(deadline) - 50*time.Millisecond)
++		defer timer.Stop()
++		select {
++		case <-timer.C:
++		case <-ctx.Done():
++		}
++		return nil, domain.ErrNamespaceVectorTimeout
++	}}
++	svc := NewIngestService(repo, nil, nil, "", ModeSmart)
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	_, err := svc.reconciliationVectorSearch(ctx, []float32{0.8, 0.6}, domain.MemoryFilter{}, 5)
++	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
++		t.Fatalf("err=%v calls=%d; want deadline exceeded and 1", err, calls)
++	}
++}
++
++func TestReconcileNamespaceVectorRetryPreservesOtherOutcomes(t *testing.T) {
++	for _, backendErr := range []error{nil, errors.New("synthetic backend failure")} {
++		t.Run(fmt.Sprintf("error_%t", backendErr != nil), func(t *testing.T) {
++			var calls int
++			repo := &memoryRepoMock{
++				vectorSearchHook: func(context.Context, []float32, domain.MemoryFilter, int) ([]domain.Memory, error) {
++					calls++
++					return nil, backendErr
++				},
++				kwResults: []domain.Memory{{ID: "keyword", Content: "Existing fixture"}},
++			}
++			svc, embeddings := vectorRetryService(t, repo)
++			got, err := svc.gatherExistingMemories(context.Background(), "fixture-agent", "fixture-app", []string{"Existing fixture"})
++			if err != nil || len(got) != 1 || got[0].ID != "keyword" || calls != 1 || embeddings.Load() != 1 {
++				t.Fatalf("got=%v err=%v vector calls=%d embeddings=%d", got, err, calls, embeddings.Load())
++			}
++		})
++	}
++}

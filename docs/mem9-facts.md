@@ -325,15 +325,18 @@ still keep writers stopped through namespace cutover.
   `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`,
   `0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`,
   `0010-group-memory-namespaces`, `0011-stabilize-ingest-deadline-test`,
-  `0012-preserve-postgres-update-embedding`, and
-  `0013-upstream-durable-compatibility`, and
-  `0014-recall-schema-budget-and-durable-facts`, and
-  `0015-ingest-namespace-compatibility`, and
-  `0016-namespace-vector-late-hydration`, and
+  `0012-preserve-postgres-update-embedding`,
+  `0013-upstream-durable-compatibility`,
+  `0014-recall-schema-budget-and-durable-facts`,
+  `0015-ingest-namespace-compatibility`,
+  `0016-namespace-vector-late-hydration`,
   `0017-namespace-lifecycle-fencing`,
-  `0018-service-maintenance-namespaces`, and
-  `0019-namespace-sampler`, `0020-namespace-performance-gates`, and
-  `0021-namespace-connection-attribution`. The Docker build applies the complete stack to
+  `0018-service-maintenance-namespaces`,
+  `0019-namespace-sampler`, `0020-namespace-performance-gates`,
+  `0021-namespace-connection-attribution`,
+  `0022-namespace-vector-observability`, `0023-consolidation-atomic-execution`,
+  `0024-runtime-schema-credentials`, `0025-namespace-capacity-sampling`, and
+  `0026-ingest-vector-retry`. The Docker build applies the complete stack to
   the pinned upstream commit in lexical order.
 - Patch `0021` adds the fixed low-cardinality
   `application_name=mem9-server-tenant` parameter to PostgreSQL per-tenant
@@ -451,6 +454,12 @@ still keep writers stopped through namespace cutover.
   `MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS`, applies a local statement timeout,
   and exactly orders cosine distance. Enforcement drops the old tenant-wide
   HNSW index.
+- Patch 0026 retries `ErrNamespaceVectorTimeout` only during the read-only
+  vector lookup preceding smart-write reconciliation: at most three attempts,
+  with 250 ms then 500 ms backoff and the same embedding, filter and scoped
+  repository. Cancellation, deadline expiry and capacity refusals are terminal.
+  Exhausted retries remain fatal to reconciliation; they never permit an empty
+  or keyword-only fallback write. Foreground search budgets are unchanged.
 - Startup with `MNEMO_NAMESPACE_REQUIRED=1` requires database phase
   `constraints_complete`; unset/`0` is compatibility mode for the initial
   additive deployment. There is no fallback to a default namespace in required
