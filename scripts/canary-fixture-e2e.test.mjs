@@ -16,7 +16,7 @@ function fixture(options={}){
   const extra=structuredClone(task);extra.taskArn=task.taskArn.replace(/9{32}$/,'8'.repeat(32));extra.lastStatus='RUNNING';
   let now=start,registered=false,launched=false,status='ACTIVE',discoveryAt=start,deployChecks=0,inventoryRound=0;
   const calls=[],states=[],events=[],stopped=[];
-  const record={event:'canary_fixture_database',phase:'complete',identity,cases:26,completedMs:start-1200,databaseHash:'8'.repeat(64),checks:Object.fromEntries(canaryFixtureChecks.map(k=>[k,true]))};
+  const record={event:'canary_fixture_database',phase:'complete',identity,cases:28,completedMs:start-1200,databaseHash:'8'.repeat(64),checks:Object.fromEntries(canaryFixtureChecks.map(k=>[k,true]))};
   const send=async command=>{
     const name=command.constructor.name,input=command.input;calls.push(name);
     if(name==='RegisterTaskDefinitionCommand'){registered=true;return {taskDefinition:{taskDefinitionArn:arn}};}

@@ -181,10 +181,14 @@ mcp_post() {  # $1 = method, $2 = params JSON  → sets MCP_RESP (body) + MCP_SE
   local hdrs body
   hdrs=$(mktemp)
   body=$(curl -sS -D "$hdrs" -X POST "$GATEWAY_URL" \
-    -H "Authorization: Bearer ${JWT}" \
+    -H @<(
+      printf 'Authorization: Bearer %s\n' "$JWT"
+      if [[ -n "${MCP_SESSION:-}" ]]; then
+        printf 'Mcp-Session-Id: %s\n' "$MCP_SESSION"
+      fi
+    ) \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    ${MCP_SESSION:+-H "Mcp-Session-Id: ${MCP_SESSION}"} \
     -d "$(jq -nc --arg m "$1" --argjson p "$2" \
       '{jsonrpc:"2.0", id:1, method:$m, params:$p}')" 2>&1)
   # Capture a session id from the response headers if the Gateway issued one.
@@ -210,7 +214,9 @@ mcp_result() {  # stdin = response body → stdout = .result (or empty)
 # 3a. MCP handshake: initialize (some Gateways require it + issue a session id).
 echo "run-mcp-e2e: MCP initialize"
 mcp_post "initialize" '{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mem9-e2e","version":"1"}}'
-echo "run-mcp-e2e: initialize response: $(printf '%s' "$MCP_RESP" | head -c 200)${MCP_SESSION:+ (session ${MCP_SESSION})}"
+# Responses can contain customer content or opaque session identifiers. Keep
+# diagnostics static; use the protected service logs for deeper investigation.
+echo "run-mcp-e2e: initialize response received${MCP_SESSION:+ (session established)}"
 
 # 3b. Resolve the actual tool names. AgentCore Gateway namespaces OpenAPI-target
 # tools (commonly `<target>___<operationId>`), so match by suffix rather than
@@ -225,11 +231,11 @@ ADD_TOOL=$(resolve_tool "add_memory")
 SEARCH_TOOL=$(resolve_tool "search_memories")
 INGEST_TOOL=$(resolve_tool "ingest_messages")
 INGEST_STATUS_TOOL=$(resolve_tool "get_ingest_job_status")
-echo "run-mcp-e2e: resolved tools — add='${ADD_TOOL:-?}' search='${SEARCH_TOOL:-?}'"
 if [[ -z "$ADD_TOOL" || -z "$SEARCH_TOOL" || -z "$INGEST_TOOL" || -z "$INGEST_STATUS_TOOL" ]]; then
-  echo "::error::Gateway tools/list did not expose add_memory/search_memories. tools/list result: $(printf '%s' "$TOOLS_JSON" | head -c 500)"
+  echo "::error::Gateway tools/list did not expose add_memory/search_memories"
   exit 1
 fi
+echo "run-mcp-e2e: resolved add_memory, search_memories, ingest_messages, get_ingest_job_status tools"
 COMBINED_SESSION="$MCP_SESSION"
 
 tools_call() {  # $1 = tool name, $2 = args JSON → sets MCP_RESP
@@ -246,16 +252,16 @@ scope_tools_list() { # $1 = token → sets SCOPED_TOOLS_JSON
 
 assert_tool_visible() { # $1 = scope label, $2 = tool suffix
   if ! printf '%s' "$SCOPED_TOOLS_JSON" | jq -e --arg suffix "$2" \
-    'any((.tools // [])[]; .name | endswith($suffix))' >/dev/null; then
-    echo "::error::$1 tools/list omitted required $2 tool: $(printf '%s' "$SCOPED_TOOLS_JSON" | head -c 500)"
+    'any((.tools // [])[]; .name | endswith($suffix))' >/dev/null 2>&1; then
+    echo "::error::$1 tools/list omitted required $2 tool"
     exit 1
   fi
 }
 
 assert_tool_hidden() { # $1 = scope label, $2 = tool suffix
   if printf '%s' "$SCOPED_TOOLS_JSON" | jq -e --arg suffix "$2" \
-    'any((.tools // [])[]; .name | endswith($suffix))' >/dev/null; then
-    echo "::error::$1 tools/list exposed forbidden $2 tool: $(printf '%s' "$SCOPED_TOOLS_JSON" | head -c 500)"
+    'any((.tools // [])[]; .name | endswith($suffix))' >/dev/null 2>&1; then
+    echo "::error::$1 tools/list exposed forbidden $2 tool"
     exit 1
   fi
 }
@@ -263,7 +269,7 @@ assert_tool_hidden() { # $1 = scope label, $2 = tool suffix
 assert_cross_scope_denied() { # $1 = scope label, $2 = full tool name
   tools_call "$2" '{}'
   if ! printf '%s' "$MCP_RESP" | grep -q '"code":-32003'; then
-    echo "::error::$1 token was not denied calling $2: $(printf '%s' "$MCP_RESP" | head -c 500)"
+    echo "::error::$1 token was not denied calling a forbidden tool"
     exit 1
   fi
 }
@@ -292,11 +298,11 @@ MCP_SESSION="$COMBINED_SESSION"
 # Lambda that reaches mnemo-server over Cloud Map DNS; on a fresh stage the first
 # calls can transiently fail (Lambda cold-start DNS / task just-registered) and the
 # gateway returns isError. Retry with backoff before treating it as a real failure.
-echo "run-mcp-e2e: calling ${ADD_TOOL} (marker ${MARKER})"
+echo "run-mcp-e2e: calling add_memory (marker ${MARKER})"
 ADD_OK=0
 for attempt in 1 2 3 4 5; do
   tools_call "$ADD_TOOL" "$(jq -nc --arg c "$MEMORY_TEXT" '{content:$c}')"
-  echo "run-mcp-e2e: add_memory attempt ${attempt} response: $(printf '%s' "$MCP_RESP" | head -c 300)"
+  echo "run-mcp-e2e: add_memory attempt ${attempt}: response received"
   if printf '%s' "$MCP_RESP" | grep -qiE '"isError":true|"code":-3[0-9]{4}'; then
     sleep 15
     continue
@@ -305,19 +311,23 @@ for attempt in 1 2 3 4 5; do
   break
 done
 if [[ "$ADD_OK" != "1" ]]; then
-  echo "::error::add_memory returned an MCP error after retries: $MCP_RESP"; exit 1
+  echo "::error::add_memory returned an MCP error after retries"; exit 1
 fi
 
 # Durable admission must be checked separately from the explicit-content path.
 # This runs before any soft search exit so enqueue failures cannot appear green.
 durable_result() {
-  local result
+  local result decoded
   result=$(printf '%s' "$MCP_RESP" | mcp_result)
-  if [[ -z "$result" ]] || ! printf '%s' "$result" | jq -e '.isError != true and (.content[0].text | type == "string")' >/dev/null; then
+  if [[ -z "$result" ]] || ! printf '%s' "$result" | jq -e '.isError != true and (.content[0].text | type == "string")' >/dev/null 2>&1; then
     echo "::error::durable ingest returned an MCP error or invalid response" >&2
     return 1
   fi
-  printf '%s' "$result" | jq -ec '.content[0].text | fromjson | select(type == "object")'
+  if ! decoded=$(printf '%s' "$result" | jq -ec '.content[0].text | fromjson | select(type == "object")' 2>/dev/null); then
+    echo "::error::durable ingest returned an invalid JSON payload" >&2
+    return 1
+  fi
+  printf '%s' "$decoded"
 }
 
 DURABLE_MARKER="ingest-e2e-${STAGE}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
@@ -326,9 +336,11 @@ INGEST_ARGS=$(jq -nc --arg marker "$DURABLE_MARKER" '{
   messages:[{role:"user",content:("The synthetic transcript fixture project " + $marker + " uses blue as its established documentation accent color.")}]
 }')
 tools_call "$INGEST_TOOL" "$INGEST_ARGS"
-JOB_ID=$(durable_result | jq -er '.job_id | select(type == "string" and length > 0)')
+JOB_RESULT=$(durable_result)
+JOB_ID=$(printf '%s' "$JOB_RESULT" | jq -er '.job_id | select(type == "string" and length > 0)')
 tools_call "$INGEST_TOOL" "$INGEST_ARGS"
-REPLAY_JOB_ID=$(durable_result | jq -er '.job_id | select(type == "string" and length > 0)')
+JOB_RESULT=$(durable_result)
+REPLAY_JOB_ID=$(printf '%s' "$JOB_RESULT" | jq -er '.job_id | select(type == "string" and length > 0)')
 if [[ "$JOB_ID" != "$REPLAY_JOB_ID" ]]; then
   echo "::error::durable ingest replay created a different job" >&2
   exit 1
@@ -358,7 +370,7 @@ fi
 echo "run-mcp-e2e: OK — durable transcript committed and replay deduplicated"
 
 # 4. Poll search_memories until the marker surfaces (async ingest → retry ~5 min).
-echo "run-mcp-e2e: polling ${SEARCH_TOOL} for the marker (async ingest; up to ~5 min)"
+echo "run-mcp-e2e: polling search_memories for the marker (async ingest; up to ~5 min)"
 DEADLINE=$((SECONDS + 300))
 FOUND=0
 SEARCH_RESP=""
@@ -373,7 +385,7 @@ while [[ $SECONDS -lt $DEADLINE ]]; do
 done
 
 if [[ "$FOUND" != "1" ]]; then
-  MSG="search_memories did not surface the marker within ~5 min (async ingest may be slow or the chain is broken). Last response: $(printf '%s' "${SEARCH_RESP:-}" | head -c 400)"
+  MSG="search_memories did not surface the marker within ~5 min (async ingest may be slow or the chain is broken)"
   if [[ "$SOFT" == "1" ]]; then
     echo "::warning::${MSG}"
     exit 0
@@ -421,7 +433,7 @@ if [[ "$NL_NONEMPTY" != "1" ]]; then
   # candidates. The previous wording asserted #23 unconditionally and sent the
   # last three prod investigations down the wrong path. Point at the log line
   # that actually discriminates instead.
-  MSG="natural-language recall probe returned ZERO results for query: ${NL_QUERY} — check the mnemo-server 'confidence recall search' log line for this window: cutoff_reason=min_confidence with non-zero candidates is the issue #23 cutoff regression; cutoff_reason=no_candidates means retrieval/embedding returned nothing and #23 is NOT implicated. Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
+  MSG="natural-language recall probe returned ZERO results for query: ${NL_QUERY} — check the mnemo-server 'confidence recall search' log line for this window: cutoff_reason=min_confidence with non-zero candidates is the issue #23 cutoff regression; cutoff_reason=no_candidates means retrieval/embedding returned nothing and #23 is NOT implicated"
   if [[ "$SOFT" == "1" ]]; then
     echo "::warning::${MSG}"
     exit 0

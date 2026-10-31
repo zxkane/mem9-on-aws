@@ -176,7 +176,7 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(meta.version===2&&(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest()))fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
-    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','set-model-budget','resolve-model-uncertainty'].includes(operation)?'admission':'inspection';
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','set-model-budget','resolve-model-uncertainty'].includes(operation)?'admission':'inspection';
     const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
