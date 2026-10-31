@@ -36,6 +36,8 @@ export const fixtureCaseNames=Object.freeze([
   'first installs the upgrade when re-admitting a legacy promoted dispatcher (enabled=false)',
   'upgrades an existing unpromoted validation only while paused and preserves its evidence',
   'installs the cross-context merge policy once without changing its grants',
+  'requeues only exhausted scan failures while preserving other work and namespace isolation',
+  'rejects oversized scan recovery before resetting any retry counters',
   'marks only blocked cross-context merge anchors for re-planning once policy 2 is live',
 ]);
 export function fixtureChecksFromReport(report){

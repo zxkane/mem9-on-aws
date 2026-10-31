@@ -646,14 +646,36 @@ Container resources are not ACUs, and these results do not establish an Aurora
 capacity limit. Measure an isolated Aurora deployment after scale-down before
 changing production capacity or the production row ceiling.
 
-Production's Aurora maximum can be configured with the `MEM9_AURORA_MAX_ACU`
-secret in the GitHub `prod` environment. Use a number without the `ACU` suffix;
-the configuration accepts 1–256 in increments of 0.5 and defaults to 4 when
-unset or empty. For a local production deployment, provide the same environment
-variable. The production minimum remains 1 ACU, and development/preview stages
-retain their 0.5–4 ACU range even when the variable is present. Both regular
-production deployment and credential cutover read this setting. Setting the
-secret alone does not deploy it: run `Infra CI` on `main` afterward.
+Production's Aurora range can be configured with the `MEM9_AURORA_MIN_ACU` and
+`MEM9_AURORA_MAX_ACU` secrets in the GitHub `prod` environment. Use numbers
+without the `ACU` suffix; each accepts 1–256 in increments of 0.5, and the minimum
+must not exceed the maximum. Unset or empty values default to 1 and 4,
+respectively. For a local production deployment, provide the same environment
+variables. Development/preview stages retain their 0.5–4 ACU range even when
+these variables are present. Both regular production deployment and credential
+cutover read these settings. Setting a secret alone does not deploy it: run
+`Infra CI` on `main` afterward.
+
+The minimum also determines how far memory capacity can shrink between periodic
+scans. Compare failures after idle periods with `ServerlessDatabaseCapacity`,
+`ReadIOPS`, and `BufferCacheHitRatio`, and compare cold and warm query plans.
+Choose a minimum that retains the measured working set; increasing only the
+maximum does not provide that floor. Validate multiple recurring planner and
+executor runs after diagnostic connections have closed, and distinguish a
+completed run from one that actually classified or changed rows. A higher
+minimum increases the capacity-cost floor. Keep deployment-specific settings
+and measurements in private operator records.
+
+After fixing the cause of repeated planner scan failures, an operator can run
+`node scripts/run-production-consolidation.mjs requeue-scans` from the deployed
+production revision using the established operator credentials and application
+region. This explicit recovery requires the matching promoted setup and verified
+planner routines. It requeues at most 1,000 exhausted `scan_failed` anchors per
+configured namespace, preserving their unresolved age and the normal retry
+limit. Leased or completed work, other failure reasons, memory rows, budgets and
+receipts are unchanged. A repeat without new exhaustion requeues nothing.
+Verify subsequent scheduled planning and execution; do not use repeated recovery
+to conceal an unresolved scan failure.
 
 Choose the ceiling from isolated measurements, verify that the deployed engine
 and platform support the selected range, and keep actual capacity decisions in

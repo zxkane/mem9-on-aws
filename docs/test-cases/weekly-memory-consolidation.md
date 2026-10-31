@@ -5,6 +5,15 @@ Preview E2E runs the deployed task in report-only mode.
 
 ## Continuous scheduling and preview rehearsal
 
+### Explicit recovery after scan failures
+
+| ID | Scenario | Expected result |
+|---|---|---|
+| TC-CONS-SCAN-RECOVERY-001 | Recover exhausted `scan_failed` work in a promoted deployment | Requeue only configured namespaces, preserve unresolved age, and create a new work generation with a fresh bounded retry budget |
+| TC-CONS-SCAN-RECOVERY-002 | Work is still leased, already complete, still has retries, or failed for another reason | Leave it unchanged; foreign namespace work is also unchanged |
+| TC-CONS-SCAN-RECOVERY-003 | Repeat recovery without another exhaustion | Report zero newly requeued anchors; memory rows, execution budgets and receipts are unchanged |
+| TC-CONS-SCAN-RECOVERY-004 | No matching promotion, unexpected request fields, or more than 1,000 eligible anchors in a namespace | Fail without partial requeue; callers cannot supply SQL or choose namespaces |
+
 ## Runtime credential preparation
 
 This increment exercises schema/runtime separation in numeric preview stages.

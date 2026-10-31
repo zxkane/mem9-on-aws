@@ -1043,14 +1043,13 @@ describe("reconciliation command fixtures", () => {
   });
 });
 
-it("production capacity is private and preserved by both production deployment paths", () => {
+it.each(["MEM9_AURORA_MIN_ACU", "MEM9_AURORA_MAX_ACU"])("production %s is private and preserved by both production deployment paths", (setting) => {
   const workflow = parse(readFileSync(workflowPath, "utf8"));
-  const setting = "MEM9_AURORA_MAX_ACU";
   expect(workflow.env).not.toHaveProperty(setting);
   for (const [name, job] of Object.entries(workflow.jobs)) {
     if (["deploy-prod", "runtime-cutover-prod"].includes(name)) {
       expect(job.environment).toBe("prod");
-      expect(job.env[setting]).toBe("${{ secrets.MEM9_AURORA_MAX_ACU }}");
+      expect(job.env[setting]).toBe("${{ secrets." + setting + " }}");
     } else {
       expect(JSON.stringify(job)).not.toContain(setting);
     }
