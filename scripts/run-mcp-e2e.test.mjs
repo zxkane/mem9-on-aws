@@ -36,6 +36,8 @@ const MARKER = `mcp-e2e-${STAGE}-${RUN_ID}-${RUN_ATTEMPT}`;
 const HASHED_LOG_GROUP =
   "/sst/cluster/mem9-on-aws-pr-137-Mem9ClusterCluster-aaaabbbb/mem9-on-aws-pr-137-Mem9Server-ccccdddd/mnemo-server";
 const temporaryPaths = [];
+const PRIVATE_RESPONSE = "SYNTHETIC_PRIVATE_MEMORY_MUST_NOT_BE_LOGGED";
+const PRIVATE_SESSION = "SYNTHETIC_PRIVATE_SESSION_MUST_NOT_BE_LOGGED";
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) {
@@ -56,6 +58,11 @@ function runFixture({
   ingestState = "succeeded",
   duplicateJobMismatch = false,
   statusJobMismatch = false,
+  privateResponse = false,
+  missingMarker = false,
+  privateToolNames = false,
+  malformedDurable = "",
+  crossScopeAllowed = false,
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-mcp-e2e-"));
   temporaryPaths.push(directory);
@@ -172,7 +179,10 @@ if (command === "ssm get-parameter") {
     `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
-appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["curl", ...args]) + "\\n");
+appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["curl-argv", ...args]) + "\\n");
+const expandedArgs = args.map((arg, index) => index > 0 && args[index - 1] === "-H" && arg.startsWith("@")
+  ? readFileSync(arg.slice(1), "utf8").trim() : arg);
+appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["curl", ...expandedArgs]) + "\\n");
 const option = (name) => {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
@@ -195,10 +205,14 @@ if (url.includes("token.example.com")) {
 }
 
 const headerFile = option("-D");
-if (headerFile) writeFileSync(headerFile, "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n");
+if (headerFile) writeFileSync(headerFile, "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n" +
+  (process.env.MOCK_SESSION_ID ? "Mcp-Session-Id: " + process.env.MOCK_SESSION_ID + "\\r\\n" : "") + "\\r\\n");
 
 const request = JSON.parse(body || "{}");
-const reply = (result) => console.log(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+const reply = (result) => console.log(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {
+  ...(process.env.MOCK_PRIVATE_RESPONSE ? { private_diagnostic: process.env.MOCK_PRIVATE_RESPONSE } : {}),
+  ...result,
+} }));
 const reject = () =>
   console.log(JSON.stringify({
     jsonrpc: "2.0",
@@ -206,8 +220,8 @@ const reject = () =>
     error: { code: -32003, message: "Insufficient OAuth scope" },
   }));
 const payload = (value) => ({ isError: false, content: [{ type: "text", text: JSON.stringify(value) }] });
-const authorization = args
-  .flatMap((arg, index) => (arg === "-H" ? [args[index + 1]] : []))
+const authorization = expandedArgs
+  .flatMap((arg, index) => (arg === "-H" ? [expandedArgs[index + 1]] : []))
   .find((header) => header?.toLowerCase().startsWith("authorization:")) ?? "";
 const readOnly = authorization.includes("fixture-read-jwt");
 const writeOnly = authorization.includes("fixture-write-jwt");
@@ -221,7 +235,8 @@ if (request.method === "initialize") {
     { name: "fixture-mem9-rest___search_memories" },
     { name: "fixture-mem9-rest___ingest_messages" },
     { name: "fixture-mem9-rest___get_ingest_job_status" },
-  ];
+  ].map(({ name }) => ({ name: process.env.MOCK_PRIVATE_TOOL_NAMES === "1"
+    ? process.env.MOCK_PRIVATE_RESPONSE + "___" + name.split("___").at(-1) : name }));
   reply({
     tools: tools.filter(({ name }) =>
       readOnly
@@ -238,7 +253,10 @@ if (request.method === "initialize") {
   const writeTool =
     name.endsWith("add_memory") || name.endsWith("ingest_messages");
   if ((readOnly && writeTool) || (writeOnly && readTool)) {
-    reject();
+    if (process.env.MOCK_CROSS_SCOPE_ALLOWED === "1") reply(payload({ status: "accepted" }));
+    else reject();
+  } else if (process.env.MOCK_MALFORMED_DURABLE && name.endsWith(process.env.MOCK_MALFORMED_DURABLE)) {
+    reply({ isError: false, content: [{ type: "text", text: process.env.MOCK_PRIVATE_RESPONSE + " invalid JSON" }] });
   } else if (name.endsWith("add_memory")) {
     reply(payload({ status: "accepted" }));
   } else if (name.endsWith("ingest_messages")) {
@@ -260,7 +278,9 @@ if (request.method === "initialize") {
       limit: 5,
       offset: 0,
       total: 1,
-      memories: [{ content: "mem9 MCP e2e probe: the secret marker is " + process.env.MOCK_MARKER + "." }],
+      memories: [{ content: process.env.MOCK_MISSING_MARKER === "1"
+        ? process.env.MOCK_PRIVATE_RESPONSE
+        : "mem9 MCP e2e probe: the secret marker is " + process.env.MOCK_MARKER + "." }],
     }));
   } else {
     // NL probe. The response shape is the REAL one: no cutoff_reason field
@@ -281,7 +301,15 @@ if (request.method === "initialize") {
   writeFileSync(sleep, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   chmodSync(sleep, 0o755);
 
-  const result = spawnSync("bash", [script], {
+  let fixtureScript = script;
+  if (missingMarker) {
+    // Keep the real failure branch; shorten only its five-minute wait.
+    fixtureScript = join(directory, "run-mcp-e2e.sh");
+    writeFileSync(fixtureScript, readFileSync(script, "utf8").replace(
+      "\nDEADLINE=$((SECONDS + 300))", "\nDEADLINE=$((SECONDS + 1))",
+    ));
+  }
+  const result = spawnSync("bash", [fixtureScript], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -301,6 +329,12 @@ if (request.method === "initialize") {
       MOCK_INGEST_STATE: ingestState,
       MOCK_DUPLICATE_JOB_MISMATCH: duplicateJobMismatch ? "1" : "0",
       MOCK_STATUS_JOB_MISMATCH: statusJobMismatch ? "1" : "0",
+      MOCK_PRIVATE_RESPONSE: privateResponse ? PRIVATE_RESPONSE : "",
+      MOCK_SESSION_ID: privateResponse ? PRIVATE_SESSION : "",
+      MOCK_MISSING_MARKER: missingMarker ? "1" : "0",
+      MOCK_PRIVATE_TOOL_NAMES: privateToolNames ? "1" : "0",
+      MOCK_MALFORMED_DURABLE: malformedDurable,
+      MOCK_CROSS_SCOPE_ALLOWED: crossScopeAllowed ? "1" : "0",
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE,
     },
@@ -342,12 +376,47 @@ function curlRequests(callRecords) {
         return null;
       }
       const headers = args.flatMap((arg, index) =>
-        arg === "-H" ? [args[index + 1]] : [],
+        arg === "-H" ? args[index + 1].split("\n") : [],
       );
       return { headers, request };
     })
     .filter(Boolean);
 }
+
+describe("MCP response privacy", () => {
+  it("passes bearer tokens and session IDs by reference rather than process arguments", () => {
+    const { callRecords, result } = runFixture({ privateResponse: true });
+    expect(result.status, result.stderr).toBe(0);
+    const argumentsOnly = JSON.stringify(callRecords.filter(([kind]) => kind === "curl-argv"));
+    for (const token of ["fixture-read-jwt", "fixture-write-jwt", "fixture-combined-jwt", PRIVATE_SESSION]) {
+      expect(argumentsOnly).not.toContain(token);
+    }
+    const requests = curlRequests(callRecords);
+    for (const { headers, request } of requests) {
+      expect(headers.filter((header) => header.startsWith("Mcp-Session-Id:"))).toEqual(
+        request.method === "initialize" ? [] : [`Mcp-Session-Id: ${PRIVATE_SESSION}`],
+      );
+    }
+    const writes = requests.filter(({ request }) => request.params?.arguments?.content);
+    expect(writes).toHaveLength(1);
+    expect(writes[0].headers).toContain("Authorization: Bearer " + "fixture-combined-jwt");
+  });
+  it.each([
+    { name: "successful smoke", expected: 0 },
+    { name: "missing marker", expected: 1, missingMarker: true },
+    { name: "empty natural-language recall", expected: 1, nlTotal: "0" },
+    { name: "untrusted tool names", expected: 0, privateToolNames: true },
+    { name: "cross-scope acceptance with an untrusted tool name", expected: 1, privateToolNames: true, crossScopeAllowed: true },
+    { name: "malformed ingest response", expected: 1, malformedDurable: "ingest_messages" },
+    { name: "malformed status response", expected: 1, malformedDurable: "get_ingest_job_status" },
+  ])("does not print response data for $name", ({ expected, ...options }) => {
+    const { result } = runFixture({ ...options, privateResponse: true });
+    expect(result.status, result.stderr).toBe(expected);
+    expect(result.stdout + result.stderr).not.toContain(PRIVATE_RESPONSE);
+    expect(result.stdout + result.stderr).not.toContain(PRIVATE_SESSION);
+    if (expected === 1) expect(result.stdout + result.stderr).toContain("::error::");
+  });
+});
 
 describe("Gateway scope enforcement", () => {
   it("requests combined, read-only, and write-only Cognito tokens", () => {

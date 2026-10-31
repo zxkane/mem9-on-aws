@@ -33,6 +33,8 @@ it must never turn into an empty result or a keyword-only write decision.
 | TC-COMPAT-012 | Caller deadline expires during retry backoff | Return the deadline error without a second lookup or any write |
 | TC-COMPAT-013 | Lookup succeeds immediately or returns an unrelated backend error | Do not retry; retain existing successful and keyword-fallback behavior |
 | TC-COMPAT-014 | Full patched-upstream integration and deployed MCP smoke | Existing namespace isolation and atomic ingest suites pass; a smart write remains searchable under the unchanged hard E2E assertions |
+| TC-COMPAT-015 | MCP responses contain synthetic private data in successful or failed recall, tool names, or malformed durable payloads | Public smoke output and parser diagnostics never include response content or session identifiers; invalid payloads and failed authorization or recall still fail the hard gate |
+| TC-COMPAT-016 | The smoke sends bearer tokens and an opaque MCP session ID | Headers are passed by file reference; secret values do not appear in curl process arguments; subsequent requests forward the session and restore the combined token after scope checks |
 
 Use synthetic in-process repository and embedding fixtures for deterministic
 fault injection. Run the service tests with the race detector, then the complete
