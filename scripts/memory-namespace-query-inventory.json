@@ -3282,15 +3282,15 @@
       "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests."
     },
     {
-      "id": "b92c2a14fa551b1fc22f",
+      "id": "a6d842e84ede10c6fc8f",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 450,
+      "line": 452,
       "tables": [
         "memories",
         "source_recoveries"
       ],
-      "statement_sha256": "4aff18074cc67275d7b7749abaa29aea58d633b6caefc62102e5b886357fb758",
-      "statement": "SELECT w.memory_id,candidate.classification_id,w.first_seen_at::text AS first_seen_at FROM mem9_maintenance.work w JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id JOIN public.memory_namespaces live ON live.namespace_id=w.namespace_id AND live.status='active' JOIN mem9_maintenance.namespace_state n ON n.namespace_id=w.namespace_id AND n.capture_enabled JOIN LATERAL ( SELECT c.classification_id,CASE WHEN c.payload->'details'->>'reason'='snapshot_input_bound' OR r.reason='snapshot_input_bound' THEN 0 ELSE 1 END AS priority FROM mem9_maintenance.publications p JOIN mem9_maintenance.classifications c ON c.namespace_id=p.namespace_id AND c.classification_id=p.classification_id AND c.context_hash=n.context_hash LEFT JOIN mem9_maintenance.execution_reviews r ON r.namespace_id=c.namespace_id AND r.classification_id=c.classification_id CROSS JOIN LATERAL ( SELECT count(*) AS count,jsonb_agg(jsonb_build_object('id',cm.memory_id,'version',cm.revision,'fingerprint',cm.fingerprint) ORDER BY cm.memory_id) AS members, bool_and(coalesce(current.id IS NOT NULL AND current.state='active' AND current.memory_type<>'session' AND current.version=cm.revision AND encode(sha256(convert_to(to_jsonb(current)::text,'UTF8')),'hex')=cm.fingerprint,FALSE)) AS matches FROM mem9_maintenance.classification_members cm LEFT JOIN public.memories current ON current.namespace_id=cm.namespace_id AND current.id=cm.memory_id WHERE cm.namespace_id=c.namespace_id AND cm.classification_id=c.classification_id ) inputs WHERE p.namespace_id=w.namespace_id AND p.memory_id=w.memory_id AND ((c.result='REVIEW' AND c.payload->'details'->>'reason' IN ('snapshot_input_bound','model_input_bound')) OR r.reason IN ('snapshot_input_bound','input_bound','output_bound')) AND inputs.count BETWEEN 1 AND 10 AND inputs.matches AND inputs.members=c.payload->'members' AND inputs.members @> jsonb_build_array(jsonb_build_object('id',w.memory_id)) AND c.input_hash=mem9_maintenance.input_fingerprint(n.context_hash,inputs.members,w.memory_id) AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications newer JOIN mem9_maintenance.publications published ON published.namespace_id=newer.namespace_id AND published.classification_id=newer.classification_id WHERE newer.namespace_id=c.namespace_id AND newer.input_hash=c.input_hash AND newer.classification_id<>c.classification_id AND (newer.created_at>=c.created_at OR (published.memory_id=p.memory_id AND published.lease_generation>p.lease_generation))) AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications executed JOIN mem9_maintenance.actions a ON a.namespace_id=executed.namespace_id AND a.classification_id=executed.classification_id WHERE executed.namespace_id=c.namespace_id AND executed.input_hash=c.input_hash) AND NOT EXISTS(SELECT FROM mem9_maintenance.source_recoveries done WHERE done.namespace_id=p.namespace_id AND done.memory_id=p.memory_id AND done.classification_id=p.classification_id) ORDER BY priority,c.created_at DESC,p.lease_generation DESC,c.classification_id LIMIT 1 ) candidate ON TRUE WHERE w.namespace_id=$1 AND w.desired_generation=w.completed_generation AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND m.state='active' AND m.memory_type<>'session' ORDER BY candidate.priority,w.first_seen_at,w.memory_id LIMIT 101 FOR UPDATE OF w",
+      "statement_sha256": "04c695d6879f018adb98623c545fa67951f7abd96b655eba3c53b4834178020d",
+      "statement": "WITH review_rows AS MATERIALIZED ( SELECT c.namespace_id,c.classification_id,c.payload FROM mem9_maintenance.classifications c JOIN mem9_maintenance.namespace_state n ON n.namespace_id=c.namespace_id AND n.context_hash=c.context_hash AND n.capture_enabled WHERE c.namespace_id=$1 AND c.result='REVIEW' ),size_classification_ids AS MATERIALIZED ( SELECT namespace_id,classification_id FROM review_rows WHERE payload->'details'->>'reason' IN ('snapshot_input_bound','model_input_bound') UNION SELECT namespace_id,classification_id FROM mem9_maintenance.execution_reviews WHERE namespace_id=$1 AND reason IN ('snapshot_input_bound','input_bound','output_bound') ),size_classifications AS MATERIALIZED ( SELECT c.namespace_id,c.classification_id,c.input_hash,c.context_hash,c.created_at,c.payload->'members' AS members, CASE WHEN c.payload->'details'->>'reason'='snapshot_input_bound' OR r.reason='snapshot_input_bound' THEN 0 ELSE 1 END AS priority FROM size_classification_ids selected JOIN mem9_maintenance.classifications c ON c.namespace_id=selected.namespace_id AND c.classification_id=selected.classification_id LEFT JOIN mem9_maintenance.execution_reviews r ON r.namespace_id=c.namespace_id AND r.classification_id=c.classification_id ),size_publications AS MATERIALIZED ( SELECT c.namespace_id,c.classification_id,c.input_hash,c.context_hash,c.created_at,c.members,c.priority, p.memory_id,max(p.lease_generation) AS lease_generation FROM size_classifications c JOIN mem9_maintenance.publications p ON p.namespace_id=c.namespace_id AND p.classification_id=c.classification_id WHERE NOT EXISTS(SELECT FROM mem9_maintenance.source_recoveries done WHERE done.namespace_id=p.namespace_id AND done.memory_id=p.memory_id AND done.classification_id=p.classification_id) GROUP BY c.namespace_id,c.classification_id,c.input_hash,c.context_hash,c.created_at,c.members,c.priority,p.memory_id ),size_anchors AS MATERIALIZED ( SELECT namespace_id,memory_id,jsonb_agg(to_jsonb(p)) AS candidates FROM size_publications p GROUP BY namespace_id,memory_id ) SELECT w.memory_id,candidate.classification_id,w.first_seen_at::text AS first_seen_at FROM size_anchors anchor JOIN mem9_maintenance.work w ON w.namespace_id=anchor.namespace_id AND w.memory_id=anchor.memory_id JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id JOIN public.memory_namespaces live ON live.namespace_id=w.namespace_id AND live.status='active' JOIN mem9_maintenance.namespace_state n ON n.namespace_id=w.namespace_id AND n.capture_enabled JOIN LATERAL ( SELECT c.classification_id,c.priority FROM jsonb_to_recordset(anchor.candidates) AS c(namespace_id TEXT,classification_id TEXT,input_hash TEXT, context_hash TEXT,created_at TIMESTAMPTZ,members JSONB,priority INTEGER,memory_id TEXT,lease_generation BIGINT) CROSS JOIN LATERAL ( SELECT count(*) AS count,jsonb_agg(jsonb_build_object('id',cm.memory_id,'version',cm.revision,'fingerprint',cm.fingerprint) ORDER BY cm.memory_id) AS members, bool_and(coalesce(current.id IS NOT NULL AND current.state='active' AND current.memory_type<>'session' AND current.version=cm.revision AND encode(sha256(convert_to(to_jsonb(current)::text,'UTF8')),'hex')=cm.fingerprint,FALSE)) AS matches FROM mem9_maintenance.classification_members cm LEFT JOIN public.memories current ON current.namespace_id=cm.namespace_id AND current.id=cm.memory_id WHERE cm.namespace_id=c.namespace_id AND cm.classification_id=c.classification_id ) inputs WHERE c.namespace_id=w.namespace_id AND c.memory_id=w.memory_id AND c.context_hash=n.context_hash AND inputs.count BETWEEN 1 AND 10 AND inputs.matches AND inputs.members=c.members AND inputs.members @> jsonb_build_array(jsonb_build_object('id',w.memory_id)) AND c.input_hash=mem9_maintenance.input_fingerprint(n.context_hash,inputs.members,w.memory_id) AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications newer JOIN mem9_maintenance.publications published ON published.namespace_id=newer.namespace_id AND published.classification_id=newer.classification_id WHERE newer.namespace_id=c.namespace_id AND newer.input_hash=c.input_hash AND newer.classification_id<>c.classification_id AND (newer.created_at>=c.created_at OR (published.memory_id=c.memory_id AND published.lease_generation>c.lease_generation))) AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications executed JOIN mem9_maintenance.actions a ON a.namespace_id=executed.namespace_id AND a.classification_id=executed.classification_id WHERE executed.namespace_id=c.namespace_id AND executed.input_hash=c.input_hash) ORDER BY priority,c.created_at DESC,c.lease_generation DESC,c.classification_id LIMIT 1 ) candidate ON TRUE WHERE w.namespace_id=$1 AND w.desired_generation=w.completed_generation AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND m.state='active' AND m.memory_type<>'session' ORDER BY candidate.priority,w.first_seen_at,w.memory_id LIMIT 101 FOR UPDATE OF w",
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
@@ -3301,9 +3301,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "8403df18aaccc7a195a8",
+      "id": "d831b11e867fcf635520",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 491,
+      "line": 517,
       "tables": [
         "source_recoveries"
       ],
@@ -3319,9 +3319,9 @@
       "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests."
     },
     {
-      "id": "a309d9b85e14535a6249",
+      "id": "c8a15788a54dfa278070",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 501,
+      "line": 527,
       "tables": [
         "source_recovery_invocations"
       ],
@@ -3337,9 +3337,9 @@
       "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests."
     },
     {
-      "id": "f4aa9e5280bc64d52ebb",
+      "id": "7d77bfdcf4000bbd0bf7",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 517,
+      "line": 543,
       "tables": [
         "memories"
       ],
@@ -3355,9 +3355,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "0f537d2188eeef971f4f",
+      "id": "41ee8a4328156e5002b3",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 550,
+      "line": 576,
       "tables": [
         "memories"
       ],
@@ -3373,9 +3373,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "737f1efc5ba19c3b7721",
+      "id": "496657246f8431159eb1",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 644,
+      "line": 670,
       "tables": [
         "memories"
       ],
@@ -3391,9 +3391,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "8a884b593c0a41ece7cd",
+      "id": "ee0f3853caf219aebcb0",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 656,
+      "line": 682,
       "tables": [
         "memories"
       ],
@@ -3409,9 +3409,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "1c60fe18ce19c3990fa2",
+      "id": "73dfb09230827ac78997",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 660,
+      "line": 686,
       "tables": [
         "memories"
       ],

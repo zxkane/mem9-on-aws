@@ -2297,6 +2297,9 @@ operator supports `requeue-provenance`. It recovers unresolved size-derived
 reviews for current inputs in the configured active namespaces, including
 reviews from earlier completed planner pages. Each invocation processes at most
 100 anchors per namespace, preserves their original age and skips live leases.
+Selection starts with size-derived classifications and their published anchors,
+groups repeated publications, and evaluates each anchor's own candidates. This
+avoids repeating full history scans for ordinary work or unrelated anchors.
 Retries retain the same batch; `hasMore` indicates that a new invocation may be
 needed. Recovery only queues ordinary planning: subsequent classification and
 execution retain all model, mutation, context and protected-memory guards.

@@ -447,15 +447,44 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           // A completed later page says nothing about an earlier input set.
           // Pick one still-current unresolved set per anchor, preserving later
           // decisions on the same inputs, including publications by other anchors.
-          const candidates=(await db.query(`SELECT w.memory_id,candidate.classification_id,w.first_seen_at::text AS first_seen_at
-            FROM mem9_maintenance.work w JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id
+          // Materialize the size-derived history before visiting work: ordinary
+          // KEEP anchors must not each repeat the classification/publication scan.
+          const candidates=(await db.query(`WITH review_rows AS MATERIALIZED (
+              SELECT c.namespace_id,c.classification_id,c.payload
+              FROM mem9_maintenance.classifications c JOIN mem9_maintenance.namespace_state n
+                ON n.namespace_id=c.namespace_id AND n.context_hash=c.context_hash AND n.capture_enabled
+              WHERE c.namespace_id=$1 AND c.result='REVIEW'
+            ),size_classification_ids AS MATERIALIZED (
+              SELECT namespace_id,classification_id FROM review_rows
+              WHERE payload->'details'->>'reason' IN ('snapshot_input_bound','model_input_bound')
+              UNION
+              SELECT namespace_id,classification_id FROM mem9_maintenance.execution_reviews
+              WHERE namespace_id=$1 AND reason IN ('snapshot_input_bound','input_bound','output_bound')
+            ),size_classifications AS MATERIALIZED (
+              SELECT c.namespace_id,c.classification_id,c.input_hash,c.context_hash,c.created_at,c.payload->'members' AS members,
+                CASE WHEN c.payload->'details'->>'reason'='snapshot_input_bound' OR r.reason='snapshot_input_bound' THEN 0 ELSE 1 END AS priority
+              FROM size_classification_ids selected JOIN mem9_maintenance.classifications c
+                ON c.namespace_id=selected.namespace_id AND c.classification_id=selected.classification_id
+              LEFT JOIN mem9_maintenance.execution_reviews r ON r.namespace_id=c.namespace_id AND r.classification_id=c.classification_id
+            ),size_publications AS MATERIALIZED (
+              SELECT c.namespace_id,c.classification_id,c.input_hash,c.context_hash,c.created_at,c.members,c.priority,
+                p.memory_id,max(p.lease_generation) AS lease_generation
+              FROM size_classifications c JOIN mem9_maintenance.publications p ON p.namespace_id=c.namespace_id AND p.classification_id=c.classification_id
+              WHERE NOT EXISTS(SELECT FROM mem9_maintenance.source_recoveries done
+                WHERE done.namespace_id=p.namespace_id AND done.memory_id=p.memory_id AND done.classification_id=p.classification_id)
+              GROUP BY c.namespace_id,c.classification_id,c.input_hash,c.context_hash,c.created_at,c.members,c.priority,p.memory_id
+            ),size_anchors AS MATERIALIZED (
+              SELECT namespace_id,memory_id,jsonb_agg(to_jsonb(p)) AS candidates
+              FROM size_publications p GROUP BY namespace_id,memory_id
+            ) SELECT w.memory_id,candidate.classification_id,w.first_seen_at::text AS first_seen_at
+            FROM size_anchors anchor JOIN mem9_maintenance.work w ON w.namespace_id=anchor.namespace_id AND w.memory_id=anchor.memory_id
+            JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id
             JOIN public.memory_namespaces live ON live.namespace_id=w.namespace_id AND live.status='active'
             JOIN mem9_maintenance.namespace_state n ON n.namespace_id=w.namespace_id AND n.capture_enabled
             JOIN LATERAL (
-              SELECT c.classification_id,CASE WHEN c.payload->'details'->>'reason'='snapshot_input_bound' OR r.reason='snapshot_input_bound' THEN 0 ELSE 1 END AS priority
-              FROM mem9_maintenance.publications p
-              JOIN mem9_maintenance.classifications c ON c.namespace_id=p.namespace_id AND c.classification_id=p.classification_id AND c.context_hash=n.context_hash
-              LEFT JOIN mem9_maintenance.execution_reviews r ON r.namespace_id=c.namespace_id AND r.classification_id=c.classification_id
+              SELECT c.classification_id,c.priority
+              FROM jsonb_to_recordset(anchor.candidates) AS c(namespace_id TEXT,classification_id TEXT,input_hash TEXT,
+                context_hash TEXT,created_at TIMESTAMPTZ,members JSONB,priority INTEGER,memory_id TEXT,lease_generation BIGINT)
               CROSS JOIN LATERAL (
                 SELECT count(*) AS count,jsonb_agg(jsonb_build_object('id',cm.memory_id,'version',cm.revision,'fingerprint',cm.fingerprint) ORDER BY cm.memory_id) AS members,
                   bool_and(coalesce(current.id IS NOT NULL AND current.state='active' AND current.memory_type<>'session'
@@ -464,21 +493,18 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
                 LEFT JOIN public.memories current ON current.namespace_id=cm.namespace_id AND current.id=cm.memory_id
                 WHERE cm.namespace_id=c.namespace_id AND cm.classification_id=c.classification_id
               ) inputs
-              WHERE p.namespace_id=w.namespace_id AND p.memory_id=w.memory_id
-                AND ((c.result='REVIEW' AND c.payload->'details'->>'reason' IN ('snapshot_input_bound','model_input_bound'))
-                  OR r.reason IN ('snapshot_input_bound','input_bound','output_bound'))
+              WHERE c.namespace_id=w.namespace_id AND c.memory_id=w.memory_id AND c.context_hash=n.context_hash
                 AND inputs.count BETWEEN 1 AND 10 AND inputs.matches
-                AND inputs.members=c.payload->'members' AND inputs.members @> jsonb_build_array(jsonb_build_object('id',w.memory_id))
+                AND inputs.members=c.members AND inputs.members @> jsonb_build_array(jsonb_build_object('id',w.memory_id))
                 AND c.input_hash=mem9_maintenance.input_fingerprint(n.context_hash,inputs.members,w.memory_id)
                 AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications newer
                   JOIN mem9_maintenance.publications published ON published.namespace_id=newer.namespace_id AND published.classification_id=newer.classification_id
                   WHERE newer.namespace_id=c.namespace_id AND newer.input_hash=c.input_hash AND newer.classification_id<>c.classification_id
-                    AND (newer.created_at>=c.created_at OR (published.memory_id=p.memory_id AND published.lease_generation>p.lease_generation)))
+                    AND (newer.created_at>=c.created_at OR (published.memory_id=c.memory_id AND published.lease_generation>c.lease_generation)))
                 AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications executed
                   JOIN mem9_maintenance.actions a ON a.namespace_id=executed.namespace_id AND a.classification_id=executed.classification_id
                   WHERE executed.namespace_id=c.namespace_id AND executed.input_hash=c.input_hash)
-                AND NOT EXISTS(SELECT FROM mem9_maintenance.source_recoveries done WHERE done.namespace_id=p.namespace_id AND done.memory_id=p.memory_id AND done.classification_id=p.classification_id)
-              ORDER BY priority,c.created_at DESC,p.lease_generation DESC,c.classification_id LIMIT 1
+              ORDER BY priority,c.created_at DESC,c.lease_generation DESC,c.classification_id LIMIT 1
             ) candidate ON TRUE
             WHERE w.namespace_id=$1 AND w.desired_generation=w.completed_generation
               AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND m.state='active' AND m.memory_type<>'session'

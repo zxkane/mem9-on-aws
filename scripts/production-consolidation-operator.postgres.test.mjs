@@ -824,6 +824,178 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries')).toBe(0);
   }),60000);
 
+  it('filters size reviews once before visiting work with unrelated KEEP history',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    const ordinaryAnchors=1000,pages=8;
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      SELECT md5('synthetic-ordinary-'||i)::uuid::text,$1,$2,$2,'Synthetic ordinary history','[]','{}','insight'
+      FROM generate_series(1,$3::int) i`,[f.namespace,f.principal,ordinaryAnchors]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+      SELECT namespace_id,id,1,1,1,$2,clock_timestamp()-interval '2 days',clock_timestamp(),'changed'
+      FROM public.memories WHERE namespace_id=$1`,[f.namespace,pages]);
+    await f.admin.query(`WITH history AS (
+      SELECT w.namespace_id,w.memory_id,lease,encode(sha256(convert_to(w.memory_id||'/'||lease,'UTF8')),'hex') AS classification_id
+      FROM mem9_maintenance.work w CROSS JOIN generate_series(1,$2::int) lease WHERE w.namespace_id=$1
+    ),inserted AS (
+      INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until)
+      SELECT h.namespace_id,h.classification_id,h.classification_id,n.context_hash,'KEEP',
+        '{"result":"KEEP","details":{"reason":"classified"}}',clock_timestamp()+interval '1 hour'
+      FROM history h JOIN mem9_maintenance.namespace_state n USING(namespace_id)
+    ) INSERT INTO mem9_maintenance.publications(namespace_id,memory_id,lease_generation,classification_id)
+      SELECT namespace_id,memory_id,lease,classification_id FROM history`,[f.namespace,pages]);
+    const expected=[];
+    for(const executionReason of [undefined,'output_bound']){
+      const ids=[randomUUID(),randomUUID(),randomUUID()];
+      for(const id of ids)await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+        VALUES($1,$2,$3,$3,'Synthetic size-derived history','[]','{}','insight')`,[id,f.namespace,f.principal]);
+      await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+        VALUES($1,$2,3,3,3,3,clock_timestamp()-interval '1 day',clock_timestamp(),'changed')`,[f.namespace,ids[0]]);
+      const classification=await recoveryPublication(f,{anchor:ids[0],members:ids.slice(0,2),
+        ...(executionReason?{result:'MERGE',reason:'classified',executionReason}:{})});
+      if(!executionReason)await recoveryPublication(f,{anchor:ids[0],members:[ids[0],ids[2]],lease:2,reason:'model_input_bound'});
+      await recoveryPublication(f,{anchor:ids[0],lease:3,result:'KEEP',reason:'classified'});
+      expected.push({memory_id:ids[0],classification_id:classification});
+    }
+    for(const table of ['work','classifications','classification_members','publications','execution_reviews'])
+      await f.admin.query('ANALYZE mem9_maintenance.'+table);
+    await f.admin.query('ANALYZE public.memories');
+    let plan;
+    const query=f.admin.query.bind(f.admin),probe=vi.spyOn(f.admin,'query').mockImplementation(async(sql,...args)=>{
+      if(typeof sql==='string'&&sql.includes('LIMIT 101 FOR UPDATE OF w')){
+        expect(plan).toBeUndefined();
+        plan=(await query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+sql,...args)).rows[0]['QUERY PLAN'][0].Plan;
+      }
+      return query(sql,...args);
+    });
+    try{expect(await runProductionConsolidation(f.admin,f.config,f.request('requeue-provenance'),{connect:f.connect})).toMatchObject({anchors:2,hasMore:false});}
+    finally{probe.mockRestore();}
+    expect((await f.admin.query('SELECT memory_id,classification_id FROM mem9_maintenance.source_recoveries WHERE namespace_id=$1 ORDER BY memory_id',[f.namespace])).rows)
+      .toEqual(expected.sort((a,b)=>a.memory_id.localeCompare(b.memory_id)));
+    expect(await scalar(f.admin,"SELECT count(*)::int AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND desired_generation=completed_generation",[f.namespace])).toBe(ordinaryAnchors);
+    const nodes=node=>[node,...(node.Plans??[]).flatMap(nodes)];
+    // A constant allowance for the three eligible input sets, including their
+    // supersession probes. Repeating a history lookup for 1,000 ordinary work
+    // anchors fails even when a warm local database finishes it quickly.
+    for(const relation of ['classifications','publications']){
+      const scans=nodes(plan).filter(node=>node['Relation Name']===relation);
+      expect(scans.length).toBeGreaterThan(0);
+      expect(scans.reduce((count,node)=>count+node['Actual Loops'],0),relation+' scan executions').toBeLessThan(32);
+    }
+  }),60000);
+
+  it('checks repeated size-review publications once per original input set',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    const anchorCount=128,pages=8,shared=randomUUID(),leaseCases=[];
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic shared provenance','[]',jsonb_build_object('source_turns',repeat('synthetic-source-',17000)),'insight')`,[shared,f.namespace,f.principal]);
+    for(let i=0;i<anchorCount;i++){
+      const anchor=randomUUID();
+      await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+        VALUES($1,$2,$3,$3,'Synthetic repeated size review','[]','{}','insight')`,[anchor,f.namespace,f.principal]);
+      await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+        VALUES($1,$2,1,1,1,$3,clock_timestamp()-interval '1 day',clock_timestamp(),'changed')`,[f.namespace,anchor,pages]);
+      const classification=await recoveryPublication(f,{anchor,members:[anchor,shared]});
+      await f.admin.query(`INSERT INTO mem9_maintenance.publications(namespace_id,memory_id,lease_generation,classification_id)
+        SELECT $1,$2,lease,$3 FROM generate_series(2,$4::int) lease WHERE lease<>$5`,[f.namespace,anchor,classification,pages,i===1?4:0]);
+      if(i<2){
+        const older=createHash('sha256').update(randomUUID()).digest('hex');
+        await f.admin.query(`INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until,created_at)
+          SELECT namespace_id,$3,input_hash,context_hash,'KEEP',payload||'{"result":"KEEP","details":{"reason":"classified"}}',valid_until,created_at-interval '1 minute'
+          FROM mem9_maintenance.classifications WHERE namespace_id=$1 AND classification_id=$2`,[f.namespace,classification,older]);
+        await f.admin.query(`INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint)
+          SELECT namespace_id,$3,memory_id,revision,fingerprint FROM mem9_maintenance.classification_members
+          WHERE namespace_id=$1 AND classification_id=$2`,[f.namespace,classification,older]);
+        await f.admin.query('INSERT INTO mem9_maintenance.publications VALUES($1,$2,$3,$4)',[f.namespace,anchor,i===0?9:4,older]);
+        leaseCases.push(anchor);
+      }
+    }
+    for(const table of ['work','classifications','classification_members','publications','execution_reviews'])
+      await f.admin.query('ANALYZE mem9_maintenance.'+table);
+    await f.admin.query('ANALYZE public.memories');
+    let plan;
+    const query=f.admin.query.bind(f.admin),probe=vi.spyOn(f.admin,'query').mockImplementation(async(sql,...args)=>{
+      if(typeof sql==='string'&&sql.includes('LIMIT 101 FOR UPDATE OF w'))
+        plan=(await query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+sql,...args)).rows[0]['QUERY PLAN'][0].Plan;
+      return query(sql,...args);
+    });
+    try{expect(await runProductionConsolidation(f.admin,f.config,f.request('requeue-provenance'),{connect:f.connect})).toMatchObject({anchors:100,hasMore:true});}
+    finally{probe.mockRestore();}
+    const selected=new Set((await f.admin.query('SELECT memory_id FROM mem9_maintenance.source_recoveries WHERE namespace_id=$1',[f.namespace])).rows.map(row=>row.memory_id));
+    // Even an older classification supersedes through a later publication.
+    // The latest repeated size publication still wins over an earlier lease.
+    expect(selected.has(leaseCases[0])).toBe(false);expect(selected.has(leaseCases[1])).toBe(true);
+    const nodes=node=>[node,...(node.Plans??[]).flatMap(nodes)];
+    // Repeated publication of one immutable verdict must not multiply its
+    // complete-row fingerprint evaluation or same-input history checks.
+    for(const relation of ['classification_members','classifications']){
+      const scans=nodes(plan).filter(node=>node['Relation Name']===relation);
+      expect(scans.length).toBeGreaterThan(0);
+      expect(scans.reduce((count,node)=>count+node['Actual Loops'],0),relation+' scan executions').toBeLessThan(anchorCount*4);
+    }
+  }),60000);
+
+  it('visits large size history once before checking each anchor candidate bucket',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    const anchors=512,revisions=64,deliveries=4,currentInputs=anchors*revisions,oldContext='f'.repeat(64);
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type,version)
+      SELECT md5('synthetic-size-history-'||i)::uuid::text,$1,$2,$2,'Synthetic historical size review','[]','{}','insight',$4
+      FROM generate_series(1,$3::int) i`,[f.namespace,f.principal,anchors,revisions]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+      SELECT namespace_id,id,1,1,1,$2,clock_timestamp()-interval '1 day',clock_timestamp(),'changed'
+      FROM public.memories WHERE namespace_id=$1`,[f.namespace,revisions*deliveries*2]);
+    await f.admin.query(`WITH originals AS MATERIALIZED (
+      SELECT m.namespace_id,m.id,n.context_hash,to_jsonb(m) AS image FROM public.memories m
+      JOIN mem9_maintenance.namespace_state n USING(namespace_id) WHERE m.namespace_id=$1
+    ),history AS MATERIALIZED (
+      SELECT o.namespace_id,o.id,revision,era,CASE WHEN era=0 THEN o.context_hash ELSE $3 END AS context_hash,
+        encode(sha256(convert_to(o.id||'/'||revision||'/'||era,'UTF8')),'hex') AS classification_id,
+        jsonb_build_array(jsonb_build_object('id',o.id,'version',revision,'fingerprint',
+          encode(sha256(convert_to(jsonb_set(o.image,'{version}',to_jsonb(revision))::text,'UTF8')),'hex'))) AS members
+      FROM originals o CROSS JOIN generate_series(1,$2::int) revision CROSS JOIN generate_series(0,1) era
+    ),inserted AS (
+      INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until)
+      SELECT namespace_id,classification_id,mem9_maintenance.input_fingerprint(context_hash,members,id),context_hash,'REVIEW',
+        jsonb_build_object('context_hash',context_hash,'members',members,'result','REVIEW','details',jsonb_build_object('reason','snapshot_input_bound')),
+        clock_timestamp()+interval '1 hour' FROM history RETURNING namespace_id,classification_id
+    ),member_rows AS (
+      INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint)
+      SELECT h.namespace_id,h.classification_id,h.id,h.revision,h.members->0->>'fingerprint'
+      FROM history h JOIN inserted i USING(namespace_id,classification_id)
+    ) INSERT INTO mem9_maintenance.publications(namespace_id,memory_id,lease_generation,classification_id)
+      SELECT h.namespace_id,h.id,((h.era*$2+h.revision-1)*$4+delivery)::bigint,h.classification_id
+      FROM history h JOIN inserted i USING(namespace_id,classification_id) CROSS JOIN generate_series(1,$4::int) delivery`,
+      [f.namespace,revisions,oldContext,deliveries]);
+    for(const table of ['work','classifications','classification_members','publications','execution_reviews'])
+      await f.admin.query('ANALYZE mem9_maintenance.'+table);
+    await f.admin.query('ANALYZE public.memories');
+    let plan;
+    const query=f.admin.query.bind(f.admin),probe=vi.spyOn(f.admin,'query').mockImplementation(async(sql,...args)=>{
+      if(typeof sql==='string'&&sql.includes('LIMIT 101 FOR UPDATE OF w'))
+        plan=(await query('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+sql,...args)).rows[0]['QUERY PLAN'][0].Plan;
+      return query(sql,...args);
+    });
+    try{expect(await runProductionConsolidation(f.admin,f.config,f.request('requeue-provenance'),{connect:f.connect})).toMatchObject({anchors:100,hasMore:true});}
+    finally{probe.mockRestore();}
+    expect(await scalar(f.admin,`SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries r
+      JOIN mem9_maintenance.classification_members cm USING(namespace_id,classification_id)
+      JOIN mem9_maintenance.classifications c USING(namespace_id,classification_id)
+      JOIN mem9_maintenance.namespace_state n USING(namespace_id)
+      WHERE r.namespace_id=$1 AND cm.revision=$2 AND c.context_hash=n.context_hash`,[f.namespace,revisions])).toBe(100);
+    const nodes=node=>[node,...(node.Plans??[]).flatMap(nodes)],all=nodes(plan);
+    const visits=node=>node['Actual Loops']*(node['Actual Rows']+(node['Rows Removed by Filter']??0));
+    // Count rejected rows as well as output: the repeated full CTE scans
+    // otherwise look cheap because each anchor returns only its own history.
+    const publicationScans=all.filter(node=>node['CTE Name']==='size_publications');
+    expect(publicationScans.length).toBeGreaterThan(0);
+    expect(publicationScans.reduce((count,node)=>count+visits(node),0)).toBeLessThan(currentInputs*3);
+    const members=all.filter(node=>node['Relation Name']==='classification_members');
+    expect(members.length).toBeGreaterThan(0);
+    expect(members.reduce((count,node)=>count+visits(node),0)).toBeLessThan(currentInputs*2);
+  }),60000);
+
   it('rolls back recovery work and journals when its invocation receipt cannot commit',()=>fixture(async f=>{
     await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
