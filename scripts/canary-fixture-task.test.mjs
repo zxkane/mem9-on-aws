@@ -1,6 +1,7 @@
 import {it,expect} from 'vitest';
 import {createCanaryFixtureDefinition,verifyCanaryFixtureDefinition,verifyCanaryFixtureTask,fixtureEvidenceFromRecord} from './lib/canary-fixture-task.mjs';
 import {canaryFixtureChecks} from './lib/production-canary-fixture-evidence.mjs';
+import {fixtureCaseNames} from './canary-fixture-runner.mjs';
 const region='ap-northeast-1',account='123456789012',stage='pr-7',cluster='mem9-on-aws-pr-7-Fixture';
 const digest=n=>'sha256:'+n.repeat(64),repo=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/preview/bootstrap`;
 function fixture(){
@@ -46,10 +47,10 @@ it('rejects credential injection, different code, overrides and foreign or unfin
  }
 });
 it('requires matching complete database evidence within the immutable task deadline',()=>{
- const f=fixture(),record={event:'canary_fixture_database',phase:'complete',identity:f.identity,cases:28,databaseHash:'8'.repeat(64),completedMs:1800000400000,
+ const f=fixture(),record={event:'canary_fixture_database',phase:'complete',identity:f.identity,cases:fixtureCaseNames.length,databaseHash:'8'.repeat(64),completedMs:1800000400000,
   checks:Object.fromEntries(canaryFixtureChecks.map(k=>[k,true]))};
  expect(fixtureEvidenceFromRecord(record,f.identity,f.task,1800000500001)).toMatchObject({kind:'synthetic-canary-continuation',stage});
- for(const patch of [{cases:16},{cases:24},{completedMs:f.identity.deadlineMs+1},{identity:{...f.identity,nonce:'a'.repeat(32)}},{checks:{...record.checks,cleanup:false}}]){
+ for(const patch of [{cases:16},{cases:24},{cases:fixtureCaseNames.length-1},{cases:fixtureCaseNames.length+1},{completedMs:f.identity.deadlineMs+1},{identity:{...f.identity,nonce:'a'.repeat(32)}},{checks:{...record.checks,cleanup:false}}]){
   expect(()=>fixtureEvidenceFromRecord({...record,...patch},f.identity,f.task,1800000500001)).toThrow();
  }
 });

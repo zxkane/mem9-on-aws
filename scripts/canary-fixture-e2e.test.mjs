@@ -2,6 +2,7 @@ import {it,expect} from 'vitest';
 import {runCanaryFixtureTask,createCanaryFixtureJournal} from './canary-fixture-e2e.mjs';
 import {createCanaryFixtureDefinition} from './lib/canary-fixture-task.mjs';
 import {canaryFixtureChecks} from './lib/production-canary-fixture-evidence.mjs';
+import {fixtureCaseNames} from './canary-fixture-runner.mjs';
 function fixture(options={}){
   const account='123456789012',region='ap-northeast-1',stage='pr-7',cluster='mem9-on-aws-pr-7-Fixture',start=1800000000000;
   const meta={account,region,stage,cluster,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/${cluster}`,subnets:['subnet-abcd'],securityGroup:'sg-abcd',
@@ -16,7 +17,7 @@ function fixture(options={}){
   const extra=structuredClone(task);extra.taskArn=task.taskArn.replace(/9{32}$/,'8'.repeat(32));extra.lastStatus='RUNNING';
   let now=start,registered=false,launched=false,status='ACTIVE',discoveryAt=start,deployChecks=0,inventoryRound=0;
   const calls=[],states=[],events=[],stopped=[];
-  const record={event:'canary_fixture_database',phase:'complete',identity,cases:28,completedMs:start-1200,databaseHash:'8'.repeat(64),checks:Object.fromEntries(canaryFixtureChecks.map(k=>[k,true]))};
+  const record={event:'canary_fixture_database',phase:'complete',identity,cases:fixtureCaseNames.length,completedMs:start-1200,databaseHash:'8'.repeat(64),checks:Object.fromEntries(canaryFixtureChecks.map(k=>[k,true]))};
   const send=async command=>{
     const name=command.constructor.name,input=command.input;calls.push(name);
     if(name==='RegisterTaskDefinitionCommand'){registered=true;return {taskDefinition:{taskDefinitionArn:arn}};}
