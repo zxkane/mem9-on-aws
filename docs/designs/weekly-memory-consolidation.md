@@ -614,6 +614,11 @@ fingerprint, and the normal cursor continues after the reviewed neighbor.
 Original content and provenance remain intact. The review reason is
 `snapshot_input_bound`, distinct from the model-request limit. Only the explicit
 maintenance-size error takes this path; unrelated database limit errors fail.
+Cache hits retain this review requirement. The original cached verdict remains
+immutable, while the current lease publishes against that same record and adds
+a snapshot-size review instead of queueing an action. This avoids both an unsafe
+cache override and a conflicting-publication retry loop. An anchor changed
+between ranking and hydration still retries to rebuild a consistent window.
 
 Planner upgrade version 2 preserves and verifies version 1's immutable receipt
 before appending its own receipt. Installation and rollback are transactional,

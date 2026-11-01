@@ -343,7 +343,8 @@ BEGIN
           (SELECT coalesce(jsonb_agg(value-'memory' ORDER BY value->>'id'),'[]') FROM jsonb_array_elements(members)),w.memory_id)
       ORDER BY c.valid_until DESC LIMIT 1;
   END IF;
-  IF cached IS NOT NULL THEN forced_result:=NULL; END IF;
+  IF cached IS NOT NULL AND NOT EXISTS(SELECT FROM jsonb_array_elements(members) m WHERE m->'memory'='null'::jsonb) THEN
+    forced_result:=NULL; END IF;
   INSERT INTO mem9_maintenance.neighborhoods(namespace_id,memory_id,lease_generation,claimed_generation,context_hash,phase,members,cached,forced_result,next_phase,after_id,after_distance)
     VALUES(p_namespace,w.memory_id,w.lease_generation,w.claimed_generation,policy.context_hash,phase,members,cached,forced_result,next_phase,last_id,last_distance);
   result:=jsonb_build_object('status','leased','anchor_id',w.memory_id,'lease_generation',w.lease_generation,
@@ -356,7 +357,7 @@ export const plannerUpgradeDefinitions=legacyPlannerUpgradeDefinitions.map(defin
     ?{...definition,sql:snapshotReviewSql}:definition);
 plannerUpgradeDefinitions.push({signature:"mem9_maintenance.finish_neighborhood(text,text,bigint,text)",previousHash:"5e93ea544d3fa8fa83a7a5ec357e52a6dd67e14f2d579868768115b9da76a680",planner:true,argNames:["p_namespace","p_anchor","p_lease","p_result"],result:"jsonb",settings:["search_path=pg_catalog, pg_temp","TimeZone=UTC"],sql:String.raw`CREATE OR REPLACE FUNCTION mem9_maintenance.finish_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT,p_result TEXT) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$
-DECLARE n mem9_maintenance.neighborhoods; w mem9_maintenance.work; payload JSONB; members JSONB; id TEXT; result JSONB; pending_change TIMESTAMPTZ;
+DECLARE n mem9_maintenance.neighborhoods; w mem9_maintenance.work; payload JSONB; members JSONB; id TEXT; result JSONB; pending_change TIMESTAMPTZ; snapshot_review BOOLEAN;
 BEGIN
   PERFORM mem9_maintenance.planner_guard(p_namespace);
   IF p_result IS NULL OR p_result NOT IN ('MERGE','KEEP','REVIEW') THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='invalid planner result'; END IF;
@@ -364,6 +365,8 @@ BEGIN
   IF FOUND THEN RETURN result; END IF;
   SELECT * INTO n FROM mem9_maintenance.neighborhoods WHERE namespace_id=p_namespace AND memory_id=p_anchor AND lease_generation=p_lease;
   IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='missing neighborhood'; END IF;
+  snapshot_review:=coalesce(n.forced_result='REVIEW',FALSE) AND
+    EXISTS(SELECT FROM jsonb_array_elements(n.members) m WHERE m->'memory'='null'::jsonb);
   IF n.forced_result IS NOT NULL AND p_result<>n.forced_result THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='bounded neighborhood requires review'; END IF;
   -- No time/sequence watermark: an earlier transaction may have committed late.
   -- If consumption already ran, it advanced desired_generation through these
@@ -376,13 +379,17 @@ BEGIN
   SELECT * INTO w FROM mem9_maintenance.work WHERE namespace_id=p_namespace AND memory_id=p_anchor FOR UPDATE;
   SELECT coalesce(jsonb_agg(value-'memory' ORDER BY value->>'id'),'[]') INTO members FROM jsonb_array_elements(n.members);
   payload:=jsonb_build_object('context_hash',n.context_hash,'members',members,'result',p_result,
-    'valid_until',clock_timestamp()+interval '23 hours','details',jsonb_build_object('planner','neighborhood-v1','reason',CASE WHEN n.forced_result IS NOT NULL AND EXISTS(SELECT FROM jsonb_array_elements(n.members) m WHERE m->'memory'='null'::jsonb) THEN 'snapshot_input_bound' WHEN n.forced_result IS NOT NULL THEN 'model_input_bound' ELSE 'classified' END));
+    'valid_until',clock_timestamp()+interval '23 hours','details',jsonb_build_object('planner','neighborhood-v1','reason',CASE WHEN snapshot_review THEN 'snapshot_input_bound' WHEN n.forced_result IS NOT NULL THEN 'model_input_bound' ELSE 'classified' END));
   IF n.cached IS NOT NULL THEN
     payload:=n.cached->'payload';
-    IF payload->>'result' IS DISTINCT FROM p_result THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='cache verdict mismatch'; END IF;
+    -- Keep the prior immutable verdict and its publication key. A current
+    -- snapshot-size override is recorded separately as review, never queued.
+    IF payload->>'result' IS DISTINCT FROM p_result AND NOT snapshot_review THEN
+      RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='cache verdict mismatch'; END IF;
   END IF;
   id:=mem9_maintenance.publish_classification(p_namespace,p_anchor,p_lease,payload);
-  IF p_result='MERGE' THEN result:=mem9_maintenance.queue_classification(p_namespace,id);
+  IF snapshot_review THEN result:=mem9_maintenance.review_execution(p_namespace,id,'snapshot_input_bound');
+  ELSIF p_result='MERGE' THEN result:=mem9_maintenance.queue_classification(p_namespace,id);
   ELSE result:=jsonb_build_object('status',lower(p_result)); END IF;
   IF w.desired_generation=w.claimed_generation AND n.next_phase IS NOT NULL THEN
     UPDATE mem9_maintenance.work SET desired_generation=desired_generation+1,first_seen_at=w.first_seen_at,due_at=clock_timestamp()
