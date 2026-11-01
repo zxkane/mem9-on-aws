@@ -41,6 +41,12 @@ export const fixtureCaseNames=Object.freeze([
   'requeue-scans rejects oversized recovery atomically',
   'requeue-inputs rejects oversized recovery atomically',
   'marks only blocked cross-context merge anchors for re-planning once policy 2 is live',
+  'requeues current size reviews once while preserving age and live leases',
+  'recovers an earlier size REVIEW after the exact pass completes with singleton KEEP',
+  'recovers only unchanged input sets without a later same-input decision or action',
+  'persists empty recovery results and rejects replay against a different target scope',
+  'rolls back recovery work and journals when its invocation receipt cannot commit',
+  'continues size-review recovery in bounded batches without reopening completed selections',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;

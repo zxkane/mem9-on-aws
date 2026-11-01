@@ -19,7 +19,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {installCanaryContinuation,createCanaryAttempt,readCanaryAttempt,appendCanaryAttemptEvent,activateCanaryAttempt,recordCanaryAdmission} from './lib/production-canary-continuation.mjs';
 import {captureCanarySnapshot,verifyFrozenCanaryProjection} from './lib/production-canary-snapshot.mjs';
 import {auditPausedCanary} from './lib/production-canary-paused-audit.mjs';
-import {plannerUpgradeDefinitions} from './lib/consolidation-planner-upgrade.mjs';
+import {plannerUpgradeDefinitions,snapshotPlannerUpgradeDefinitions} from './lib/consolidation-planner-upgrade.mjs';
 
 const dsn=process.env.MEM9_RUNTIME_TEST_DSN;
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
@@ -97,6 +97,23 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
       }
       await root.end();
     }
+  }
+
+  async function recoveryPublication(f,{anchor,members=[anchor],lease=1,result='REVIEW',reason='snapshot_input_bound',
+    classification=createHash('sha256').update(randomUUID()).digest('hex'),context,executionReason}={}){
+    context??=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    const snapshots=await scalar(f.admin,`SELECT jsonb_agg(jsonb_build_object('id',m.id,'version',m.version,
+      'fingerprint',encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex')) ORDER BY m.id) AS result
+      FROM public.memories m WHERE m.namespace_id=$1 AND m.id=ANY($2)`,[f.namespace,members]);
+    const input=await scalar(f.admin,'SELECT mem9_maintenance.input_fingerprint($1,$2,$3) AS result',[context,JSON.stringify(snapshots),anchor]);
+    const payload={context_hash:context,members:snapshots,result,details:{planner:'neighborhood-v1',reason},valid_until:new Date(Date.now()+3600000).toISOString()};
+    await f.admin.query(`INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until)
+      VALUES($1,$2,$3,$4,$5,$6,$7)`,[f.namespace,classification,input,context,result,JSON.stringify(payload),payload.valid_until]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.classification_members(namespace_id,classification_id,memory_id,revision,fingerprint)
+      SELECT $1,$2,m->>'id',(m->>'version')::integer,m->>'fingerprint' FROM jsonb_array_elements($3::jsonb) m`,[f.namespace,classification,JSON.stringify(snapshots)]);
+    await f.admin.query('INSERT INTO mem9_maintenance.publications VALUES($1,$2,$3,$4)',[f.namespace,anchor,lease,classification]);
+    if(executionReason)await f.admin.query('INSERT INTO mem9_maintenance.execution_reviews(namespace_id,classification_id,reason) VALUES($1,$2,$3)',[f.namespace,classification,executionReason]);
+    return classification;
   }
 
   async function frozenPair({admin,config,request,connect,namespace,principal},{pairs=1}={}){
@@ -655,7 +672,7 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await f.admin.query('UPDATE mem9_maintenance.dispatcher_settings SET enabled=true');
     await expect(install()).rejects.toThrow('PauseBeforePlannerUpgrade');
     await f.admin.query('UPDATE mem9_maintenance.dispatcher_settings SET enabled=false');
-    expect(await install()).toMatchObject({phase:'install-planner-upgrade',changed:true,version:2});
+    expect(await install()).toMatchObject({phase:'install-planner-upgrade',changed:true,version:3});
     expect(await install()).toMatchObject({changed:false});
     expect(await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s')).toEqual(before);
   }),60000);
@@ -667,18 +684,190 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     const install=()=>runProductionConsolidation(f.admin,f.config,{...f.request('install-merge-policy'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
     await expect(install()).rejects.toThrow('MergePolicyRequiresPromotion');
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
-    expect(await install()).toMatchObject({mergePolicyVersion:2,changed:true});
-    expect(await install()).toMatchObject({mergePolicyVersion:2,changed:false});
+    expect(await install()).toMatchObject({mergePolicyVersion:3,changed:false});
+    expect(await install()).toMatchObject({mergePolicyVersion:3,changed:false});
     // A bootstrap repair that replays migration 005 restores the sealed body;
     // the next installation detects that from the live routine.
     const sealed=await readFile(new URL('../docker/bootstrap/migrations/005_consolidation_execution.sql',import.meta.url),'utf8');
     const startAt=sealed.indexOf('CREATE OR REPLACE FUNCTION mem9_maintenance.queue_classification(');
     await f.admin.query(sealed.slice(startAt,sealed.indexOf('END $$;',startAt)+'END $$;'.length));
     expect(await install()).toMatchObject({changed:true});
-    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.merge_policy_history')).toBe(2);
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.provenance_upgrade_history')).toBe(1);
     expect(await acl()).toBe(before);
     expect(await scalar(f.admin,"SELECT prosrc LIKE '%merged_tags%' AS result FROM pg_proc WHERE oid='mem9_maintenance.queue_classification(text,text)'::regprocedure")).toBe(true);
-    await expect(f.admin.query('DELETE FROM mem9_maintenance.merge_policy_history')).rejects.toThrow();
+    await expect(f.admin.query('DELETE FROM mem9_maintenance.provenance_upgrade_history')).rejects.toThrow();
+  }),60000);
+
+  it('requeues current size reviews once while preserving age and live leases',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const context=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    const cases=[{name:'snapshot',reason:'snapshot_input_bound'},{name:'model',reason:'model_input_bound'},
+      {name:'ordinary',reason:'classified'},{name:'leased',reason:'snapshot_input_bound',leased:true},
+      {name:'inactive',reason:'snapshot_input_bound',state:'archived'},{name:'session',reason:'snapshot_input_bound',type:'session'}]
+      .map(item=>({...item,id:randomUUID(),classification:createHash('sha256').update(item.name).digest('hex')}));
+    for(const item of cases){
+      await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type,state)
+        VALUES($1,$2,$3,$3,'Synthetic size-review recovery','[]','{}',$4,$5)`,[item.id,f.namespace,f.principal,item.type??'insight',item.state??'active']);
+      await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,lease_until,attempts,first_seen_at,due_at,reason)
+        VALUES($1,$2,1,1,1,1,CASE WHEN $3 THEN clock_timestamp()+interval '5 minutes' ELSE NULL END,0,clock_timestamp()-interval '1 day',clock_timestamp(),'changed')`,[f.namespace,item.id,Boolean(item.leased)]);
+      await recoveryPublication(f,{anchor:item.id,classification:item.classification,context,reason:item.reason});
+    }
+    const state=async()=>(await f.admin.query('SELECT * FROM mem9_maintenance.work WHERE namespace_id=$1 ORDER BY memory_id',[f.namespace])).rows;
+    const before=await state();
+    const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request('requeue-provenance'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    await expect(requeue()).rejects.toThrow('ProvenanceRequeueRequiresPromotion');expect(await state()).toEqual(before);
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    expect(await requeue()).toMatchObject({phase:'requeue-provenance',anchors:2,hasMore:false});
+    const eligible=new Set(cases.slice(0,2).map(item=>item.id));
+    for(const row of await state()){
+      const prior=before.find(item=>item.memory_id===row.memory_id);
+      if(!eligible.has(row.memory_id)){expect(row).toEqual(prior);continue;}
+      expect(row.first_seen_at).toEqual(prior.first_seen_at);expect(Number(row.desired_generation)).toBe(Number(prior.desired_generation)+1);
+    }
+    // Even if the same old publication remains after a completed pass, the
+    // immutable recovery marker prevents repeatedly reopening it.
+    await f.admin.query('UPDATE mem9_maintenance.work SET claimed_generation=desired_generation,completed_generation=desired_generation WHERE namespace_id=$1 AND memory_id=ANY($2)',[f.namespace,[...eligible]]);
+    expect(await requeue()).toMatchObject({anchors:0,hasMore:false});
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries')).toBe(2);
+    await expect(f.admin.query('DELETE FROM mem9_maintenance.source_recoveries')).rejects.toMatchObject({code:'55000'});
+  }),60000);
+
+  it('recovers an earlier size REVIEW after the exact pass completes with singleton KEEP',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const signature='mem9_maintenance.read_neighborhood(text,text,bigint)',ids=[randomUUID(),randomUUID()];
+    await f.admin.query(snapshotPlannerUpgradeDefinitions.find(d=>d.signature===signature).sql);
+    for(const id of ids)await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic identical fact','[]',$4,'insight')`,[id,f.namespace,f.principal,{source_turns:[{content:'x'.repeat(550000)}]}]);
+    const planner=await f.connect(f.config.planner);
+    try{
+      await planner.query('SELECT mem9_maintenance.consume_planner_changes($1,1000)',[f.namespace]);
+      await f.admin.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE namespace_id=$1 AND memory_id<>$2",[f.namespace,ids[0]]);
+      const claim=async()=>{
+        const lease=await scalar(planner,'SELECT mem9_maintenance.claim_planner_work($1) AS result',[f.namespace]);
+        return scalar(planner,'SELECT mem9_maintenance.read_neighborhood($1,$2,$3) AS result',[f.namespace,lease.anchor_id,lease.lease_generation]);
+      };
+      const reviewed=await claim();expect(reviewed.forced_result).toBe('REVIEW');
+      await planner.query("SELECT mem9_maintenance.finish_neighborhood($1,$2,$3,'REVIEW')",[f.namespace,ids[0],reviewed.lease_generation]);
+      const tail=await claim();expect(tail.phase).toBe('vector');expect(tail.members).toHaveLength(1);
+      await planner.query("SELECT mem9_maintenance.finish_neighborhood($1,$2,$3,'KEEP')",[f.namespace,ids[0],tail.lease_generation]);
+      const before=(await f.admin.query('SELECT * FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,ids[0]])).rows[0];
+      const classes=await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.classifications WHERE namespace_id=$1',[f.namespace]);
+      await f.admin.query(plannerUpgradeDefinitions.find(d=>d.signature===signature).sql);
+      await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+      expect(await runProductionConsolidation(f.admin,f.config,f.request('requeue-provenance'),{connect:f.connect})).toMatchObject({anchors:1,hasMore:false});
+      const after=(await f.admin.query('SELECT * FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,ids[0]])).rows[0];
+      expect(after.first_seen_at).toEqual(before.first_seen_at);
+      expect(Number(after.desired_generation)).toBe(Number(before.desired_generation)+1);
+      expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.classifications WHERE namespace_id=$1',[f.namespace])).toBe(classes);
+      const recovered=await claim();expect(recovered.members).toHaveLength(2);expect(recovered.cached).toBeNull();
+      expect(await scalar(planner,"SELECT mem9_maintenance.finish_neighborhood($1,$2,$3,'MERGE') AS result",[f.namespace,ids[0],recovered.lease_generation])).toMatchObject({status:'queued'});
+    }finally{await planner.end();}
+  }),60000);
+
+  it('recovers only unchanged input sets without a later same-input decision or action',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    const context=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    const cases=['eligible','neighbor_changed','neighbor_removed','context_changed','same_review','same_review_other_anchor','same_keep','same_action','duplicate_pages'];
+    const anchors=new Map();
+    for(const kind of cases){
+      const ids=[randomUUID(),randomUUID(),randomUUID()];anchors.set(kind,ids[0]);
+      for(const id of ids)await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+        VALUES($1,$2,$3,$3,'Synthetic review input','[]','{}','insight')`,[id,f.namespace,f.principal]);
+      await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+        VALUES($1,$2,3,3,3,3,clock_timestamp()-interval '1 day',clock_timestamp(),'changed')`,[f.namespace,ids[0]]);
+      await recoveryPublication(f,{anchor:ids[0],members:ids.slice(0,2),context:kind==='context_changed'?'f'.repeat(64):context});
+      if(kind==='neighbor_changed')await f.admin.query("UPDATE public.memories SET metadata='{\"source_seqs\":[42]}' WHERE namespace_id=$1 AND id=$2",[f.namespace,ids[1]]);
+      if(kind==='neighbor_removed')await f.admin.query('DELETE FROM public.memories WHERE namespace_id=$1 AND id=$2',[f.namespace,ids[1]]);
+      if(kind==='same_review'||kind==='same_keep')await recoveryPublication(f,{anchor:ids[0],members:ids.slice(0,2),lease:2,reason:'classified',result:kind==='same_keep'?'KEEP':'REVIEW'});
+      if(kind==='same_review_other_anchor')await recoveryPublication(f,{anchor:ids[1],members:ids.slice(0,2),reason:'classified'});
+      if(kind==='same_action'){
+        const classification=await recoveryPublication(f,{anchor:ids[1],members:ids.slice(0,2),lease:1,reason:'classified',result:'MERGE'});
+        await f.admin.query(`INSERT INTO mem9_maintenance.actions(namespace_id,action_id,classification_id,kind,context_hash,semantic_hash,members,output,cost)
+          VALUES($1,$2,$2,'MERGE',$3,$2,'[]','{}','{"total":2,"rewrite":0,"delete":1,"archive":0,"mark":0}')`,[f.namespace,classification,context]);
+      }
+      if(kind==='duplicate_pages')await recoveryPublication(f,{anchor:ids[0],members:[ids[0],ids[2]],lease:2});
+      // A later decision on a different input set must not hide the pair.
+      await recoveryPublication(f,{anchor:ids[0],lease:3,result:'KEEP',reason:'classified'});
+    }
+    const work=async()=>(await f.admin.query('SELECT * FROM mem9_maintenance.work WHERE namespace_id=$1 ORDER BY memory_id',[f.namespace])).rows;
+    const before=await work();
+    expect(await runProductionConsolidation(f.admin,f.config,f.request('requeue-provenance'),{connect:f.connect})).toMatchObject({anchors:2,hasMore:false});
+    const eligible=new Set([anchors.get('eligible'),anchors.get('duplicate_pages')]);
+    for(const row of await work()){
+      const prior=before.find(item=>item.memory_id===row.memory_id);
+      if(!eligible.has(row.memory_id))expect(row).toEqual(prior);
+      else{expect(Number(row.desired_generation)).toBe(4);expect(row.first_seen_at).toEqual(prior.first_seen_at);}
+    }
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries')).toBe(2);
+  }),60000);
+
+  it('persists empty recovery results and rejects replay against a different target scope',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    const request=f.request('requeue-provenance'),run=()=>runProductionConsolidation(f.admin,f.config,request,{connect:f.connect});
+    const first=await run();expect(first).toMatchObject({anchors:0,hasMore:false});
+    const id=randomUUID();
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic later recovery','[]','{}','insight')`,[id,f.namespace,f.principal]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+      VALUES($1,$2,1,1,1,1,clock_timestamp(),clock_timestamp(),'changed')`,[f.namespace,id]);
+    await recoveryPublication(f,{anchor:id});
+    expect(await run()).toEqual(first);
+    expect(await scalar(f.admin,'SELECT desired_generation::int AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,id])).toBe(1);
+    await f.admin.query('UPDATE mem9_maintenance.production_worker_setup SET targets=$1 WHERE singleton',[JSON.stringify([f.namespace,randomUUID()].sort())]);
+    await expect(run()).rejects.toThrow('ProvenanceRecoveryInvocationMismatch');
+    const generation='b'.repeat(64);
+    await f.admin.query('UPDATE mem9_maintenance.production_worker_setup SET targets=$1,generation=$2 WHERE singleton',[JSON.stringify([f.namespace]),generation]);
+    await expect(runProductionConsolidation(f.admin,{...f.config,generation},request,{connect:f.connect})).rejects.toThrow('ProvenanceRecoveryInvocationMismatch');
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recovery_invocations')).toBe(1);
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries')).toBe(0);
+  }),60000);
+
+  it('rolls back recovery work and journals when its invocation receipt cannot commit',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    const id=randomUUID();
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      VALUES($1,$2,$3,$3,'Synthetic rollback fixture','[]','{}','insight')`,[id,f.namespace,f.principal]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+      VALUES($1,$2,1,1,1,1,clock_timestamp()-interval '1 day',clock_timestamp(),'changed')`,[f.namespace,id]);
+    await recoveryPublication(f,{anchor:id});
+    const state=async()=>(await f.admin.query('SELECT * FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,id])).rows[0];
+    const before=await state(),request=f.request('requeue-provenance');
+    const query=f.admin.query.bind(f.admin),failure=vi.spyOn(f.admin,'query').mockImplementation((sql,...args)=>{
+      if(typeof sql==='string'&&sql.startsWith('INSERT INTO mem9_maintenance.source_recovery_invocations'))throw Error('SyntheticRecoveryReceiptFailure');
+      return query(sql,...args);
+    });
+    try{await expect(runProductionConsolidation(f.admin,f.config,request,{connect:f.connect})).rejects.toThrow('SyntheticRecoveryReceiptFailure');}
+    finally{failure.mockRestore();}
+    expect(await state()).toEqual(before);
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries')).toBe(0);
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recovery_invocations')).toBe(0);
+    expect(await runProductionConsolidation(f.admin,f.config,request,{connect:f.connect})).toMatchObject({anchors:1,hasMore:false});
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recovery_invocations')).toBe(1);
+  }),60000);
+
+  it('continues size-review recovery in bounded batches without reopening completed selections',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+      SELECT md5('synthetic-provenance-'||i)::uuid::text,$1,$2,$2,'Synthetic batch fixture','[]','{}','insight' FROM generate_series(1,105) i`,[f.namespace,f.principal]);
+    await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,lease_generation,first_seen_at,due_at,reason)
+      SELECT namespace_id,id,1,1,1,1,clock_timestamp()-interval '1 day',clock_timestamp(),'changed' FROM public.memories WHERE namespace_id=$1`,[f.namespace]);
+    for(const {id} of (await f.admin.query('SELECT id FROM public.memories WHERE namespace_id=$1',[f.namespace])).rows)
+      await recoveryPublication(f,{anchor:id});
+    const firstRequest={...f.request('requeue-provenance'),invocation:randomUUID().replaceAll('-','')};
+    const requeue=(request={...f.request('requeue-provenance'),invocation:randomUUID().replaceAll('-','')})=>runProductionConsolidation(f.admin,f.config,request,{connect:f.connect});
+    const first=await requeue(firstRequest);expect(first).toMatchObject({anchors:100,hasMore:true});
+    const work=async()=>(await f.admin.query('SELECT * FROM mem9_maintenance.work WHERE namespace_id=$1 ORDER BY memory_id',[f.namespace])).rows;
+    const afterFirst=await work();
+    expect(await requeue(firstRequest)).toEqual(first);expect(await work()).toEqual(afterFirst);
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries WHERE invocation=$1',[firstRequest.invocation])).toBe(100);
+    await f.admin.query('UPDATE mem9_maintenance.work SET claimed_generation=desired_generation,completed_generation=desired_generation WHERE namespace_id=$1',[f.namespace]);
+    expect(await requeue()).toMatchObject({anchors:5,hasMore:false});
+    expect(await requeue()).toMatchObject({anchors:0});
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.source_recoveries')).toBe(105);
   }),60000);
 
   it.each([['requeue-scans','scan_failed','PlannerScan'],['requeue-inputs','input_bound','PlannerInput']])('%s preserves other work, inactive memories and namespace isolation',(operation,reason,errorPrefix)=>fixture(async f=>{
@@ -756,7 +945,10 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request('requeue-merges'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
     await expect(requeue()).rejects.toThrow('MergeRequeueRequiresPromotion');
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
-    await expect(requeue()).rejects.toThrow('MergeRequeueRequiresPolicy');
+    const sealed=await readFile(new URL('../docker/bootstrap/migrations/005_consolidation_execution.sql',import.meta.url),'utf8');
+    const at=sealed.indexOf('CREATE OR REPLACE FUNCTION mem9_maintenance.queue_classification(');
+    await f.admin.query(sealed.slice(at,sealed.indexOf('END $$;',at)+8));
+    await expect(requeue()).rejects.toThrow('ProvenanceUpgradeCatalogMismatch');
     await runProductionConsolidation(f.admin,f.config,{...f.request('install-merge-policy'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
     expect(await requeue()).toMatchObject({phase:'requeue-merges',anchors:1});
     const work=(await f.admin.query('SELECT reason,desired_generation,completed_generation,attempts FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2',[f.namespace,ids[0]])).rows[0];

@@ -24,6 +24,16 @@ function sameRows(left,right){
   const a=byId(left),b=byId(right);
   return a.size===b.size&&[...a].every(([id,row])=>isDeepStrictEqual(row,b.get(id)));
 }
+function sourceImagesValid(sources,before,action,namespace){
+  if(action.source_images===undefined)return sameRows(sources,before.map(row=>without(row,['embedding'])));
+  const proof=action.source_images;
+  if(!Array.isArray(sources)||!Array.isArray(proof)||proof.length!==before.length||sources.length!==before.length)return false;
+  if(proof.some(item=>!object(item)||!object(item.reference)||!object(item.image)))return false;
+  if(!sameRows(sources,proof.map(item=>item.reference))||!sameRows(before,proof.map(item=>item.image)))return false;
+  return proof.every(({reference,image})=>object(reference)&&Object.keys(reference).length===4&&
+    reference.format==='mem9-image-v1'&&/^[a-f0-9]{64}$/.test(reference.image_hash??'')&&
+    reference.id===image.id&&reference.version===image.version&&image.namespace_id===namespace);
+}
 function protectedRow(row){
   const tags=row.tags??[];
   const tagged=Array.isArray(tags)?tags.some(tag=>['protected','pinned'].includes(tag)):
@@ -74,7 +84,7 @@ export function verifyCanaryReceipt(receipt,action,currentRows){
     !isDeepStrictEqual(without(targetAfter.metadata,['consolidation']),without(targetBefore.metadata??{},['consolidation']))||
     !isDeepStrictEqual(without(targetAfter.metadata?.consolidation??{},['sources']),without(targetBefore.metadata?.consolidation??{},['sources']))||
     !object(targetAfter.metadata?.consolidation)||
-    !sameRows(targetAfter.metadata.consolidation.sources,before.map(row=>without(row,['embedding']))))fail();
+    !sourceImagesValid(targetAfter.metadata.consolidation.sources,before,action,receipt.namespace_id))fail();
   for(const [id,row] of prior){
     const actual=post.get(id);
     if(actual.namespace_id!==row.namespace_id||actual.version!==row.version+1)fail();

@@ -166,7 +166,9 @@ describe("namespace cleanup report-only task launcher", () => {
     expect(result.status).not.toBe(0); expectPrivateOutputAbsent(result);
   });
   it("bounds polling without stopping the task or launching another", () => {
-    const { result, records } = runFixture({ statuses: ["RUNNING"], waitSeconds: 1 });
+    // Bash SECONDS can tick over before the first subprocess with a one-second
+    // budget. Ten seconds still allows exactly one poll (ceil(wait / 10)).
+    const { result, records } = runFixture({ statuses: ["RUNNING"], waitSeconds: 10 });
     expect(result.status).not.toBe(0); expect(result.stderr).toContain("may still be running");
     expect(records.filter(({ args }) => args[1] === "run-task")).toHaveLength(1);
     expect(records.filter(({ args }) => args[1] === "describe-tasks")).toHaveLength(1);

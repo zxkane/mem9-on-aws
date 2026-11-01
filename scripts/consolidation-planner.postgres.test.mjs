@@ -6,7 +6,7 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { ensureNamespaceIndexes } from './migrate-memory-namespaces.mjs';
 import { plannerRequest } from './lib/consolidation-model.mjs';
 import { createPlannerDatabase } from './consolidation-planner.mjs';
-import {installPlannerUpgrade,verifyPlannerUpgrade,plannerUpgradeDefinitions,legacyPlannerUpgradeDefinitions,PLANNER_UPGRADE_VERSION,PLANNER_UPGRADE_HASH,LEGACY_PLANNER_UPGRADE_HASH} from './lib/consolidation-planner-upgrade.mjs';
+import {installPlannerUpgrade,verifyPlannerUpgrade,plannerUpgradeDefinitions,snapshotPlannerUpgradeDefinitions,legacyPlannerUpgradeDefinitions,PLANNER_UPGRADE_VERSION,PLANNER_UPGRADE_HASH,LEGACY_PLANNER_UPGRADE_HASH} from './lib/consolidation-planner-upgrade.mjs';
 
 const DSN = process.env.MEM9_PLANNER_TEST_DSN;
 const VECTOR = JSON.stringify([1, ...Array(1023).fill(0)]);
@@ -96,14 +96,23 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   }
 
   async function firstVersionFixture(db){
-    for(const definition of legacyPlannerUpgradeDefinitions)await db.query(definition.sql);
-    const base=await readFile(new URL('../docker/bootstrap/migrations/006_consolidation_planner.sql',import.meta.url),'utf8');
-    const start=base.indexOf('CREATE OR REPLACE FUNCTION mem9_maintenance.finish_neighborhood(');
-    await db.query(base.slice(start,base.indexOf('END $$;',start)+8));
-    // Only disposable fixtures reconstruct the historical immutable receipt.
-    await db.query(`ALTER TABLE mem9_maintenance.planner_upgrade_history DISABLE TRIGGER planner_upgrade_history_immutable;
-      DELETE FROM mem9_maintenance.planner_upgrade_history WHERE version=2;
-      ALTER TABLE mem9_maintenance.planner_upgrade_history ENABLE TRIGGER planner_upgrade_history_immutable;`);
+    for(const definition of legacyPlannerUpgradeDefinitions){
+      await db.query(definition.sql);
+      if(!definition.previousHash){
+        await db.query(`REVOKE ALL ON FUNCTION ${definition.signature} FROM PUBLIC`);
+        await db.query(`GRANT EXECUTE ON FUNCTION ${definition.signature} TO mem9_maintenance_planner`);
+      }
+    }
+    // Construct the actual first release, without later storage/functions.
+    await db.query(`CREATE TABLE mem9_maintenance.planner_upgrade_history(
+      version INTEGER PRIMARY KEY CHECK(version>0),sql_hash TEXT NOT NULL CHECK(sql_hash~'^[a-f0-9]{64}$'),
+      invocation TEXT NOT NULL CHECK(invocation~'^[a-f0-9]{32}$'),installed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());
+      REVOKE ALL ON mem9_maintenance.planner_upgrade_history FROM PUBLIC,mem9_maintenance_backend,
+        mem9_maintenance_planner,mem9_maintenance_executor,mem9_maintenance_operator;
+      CREATE TRIGGER planner_upgrade_history_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.planner_upgrade_history
+        FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
+    await db.query('INSERT INTO mem9_maintenance.planner_upgrade_history(version,sql_hash,invocation) VALUES(1,$1,$2)',
+      [LEGACY_PLANNER_UPGRADE_HASH,randomUUID().replaceAll('-','')]);
   }
 
   it('PLAN-030: upgrades the first release atomically without rewriting its receipt',()=>fixture(async f=>{
@@ -114,24 +123,24 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
     await f.db.query('BEGIN');await installPlannerUpgrade(f.db,{invocation:randomUUID().replaceAll('-','')});await f.db.query('ROLLBACK');
     expect(await rows(f.db,'SELECT * FROM mem9_maintenance.planner_upgrade_history')).toEqual(original);
     expect(await scalar(f.db,"SELECT prosrc FROM pg_proc WHERE oid='mem9_maintenance.read_neighborhood(text,text,bigint)'::regprocedure")).toBe(firstBody);
-    expect(await upgrade(f.db)).toMatchObject({changed:true,version:2});
+    expect(await upgrade(f.db)).toMatchObject({changed:true,version:PLANNER_UPGRADE_VERSION});
     expect(await rows(f.db,'SELECT * FROM mem9_maintenance.planner_upgrade_history WHERE version=1')).toEqual(original);
-    expect(await upgrade(f.db)).toMatchObject({changed:false,version:2});
+    expect(await upgrade(f.db)).toMatchObject({changed:false,version:PLANNER_UPGRADE_VERSION});
     await expect(f.db.query('UPDATE mem9_maintenance.planner_upgrade_history SET installed_at=clock_timestamp() WHERE version=1')).rejects.toMatchObject({code:'55000'});
-  }));
+  },{upgrade:false}));
 
   it('PLAN-030: drift in the first release rejects the upgrade without new receipts',()=>fixture(async f=>{
     await firstVersionFixture(f.db);
     await f.db.query('ALTER FUNCTION mem9_maintenance.read_neighborhood(text,text,bigint) STABLE');
     await expect(upgrade(f.db)).rejects.toThrow('PlannerUpgradeCatalogMismatch');
     expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.planner_upgrade_history')).toBe(1);
-  }));
+  },{upgrade:false}));
 
   it('PLAN-024: upgrades a sealed base once and verifies the live installation on replay',()=>fixture(async f=>{
     expect(await upgrade(f.db)).toMatchObject({changed:true,version:PLANNER_UPGRADE_VERSION,sqlHash:PLANNER_UPGRADE_HASH});
     expect(await upgrade(f.db)).toMatchObject({changed:false});
     expect(await verifyPlannerUpgrade(f.db)).toMatchObject({version:PLANNER_UPGRADE_VERSION});
-    expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.planner_upgrade_history')).toBe(2);
+    expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.planner_upgrade_history')).toBe(PLANNER_UPGRADE_VERSION);
     await expect(f.db.query('DELETE FROM mem9_maintenance.planner_upgrade_history')).rejects.toMatchObject({code:'55000'});
     const id=await f.seed('upgraded fixture');await f.consume();expect((await f.claim()).anchor_id).toBe(id);
   },{upgrade:false}));
@@ -379,7 +388,7 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
     const w = await f.claim(); expect(w.status).toBe('leased');
     expect(await scalar(f.db, 'SELECT first_seen_at FROM mem9_maintenance.work WHERE namespace_id=$1 AND memory_id=$2', [f.ns, id])).toEqual(before);
     expect((await f.finish(w, 'KEEP')).status).toBe('keep');
-  }));
+  },{upgrade:false}));
 
   it('PLAN-003/006: exact groups page durably, retain age, and reuse classification', () => fixture(async f => {
     for (let i = 0; i < 23; i++) await f.seed('same');
@@ -429,12 +438,12 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   }));
   it('PLAN-004: a foreground delete during hydration retries without skipping a neighbor', () => fixture(async f => {
     await f.seed('same'); const donor = await f.seed('same'); await f.consume();
-    await f.db.query('ALTER FUNCTION mem9_maintenance.read_memories(TEXT,TEXT[]) RENAME TO read_memories_fixture_base');
-    await f.db.query(`CREATE FUNCTION mem9_maintenance.read_memories(p_namespace TEXT,p_ids TEXT[])
+    await f.db.query('ALTER FUNCTION mem9_maintenance.read_planner_memories(TEXT,TEXT[]) RENAME TO read_planner_memories_fixture_base');
+    await f.db.query(`CREATE FUNCTION mem9_maintenance.read_planner_memories(p_namespace TEXT,p_ids TEXT[])
       RETURNS TABLE(memory_id VARCHAR(36),version INTEGER,fingerprint TEXT,memory JSONB)
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
       BEGIN PERFORM pg_advisory_xact_lock(718239);
-        RETURN QUERY SELECT * FROM mem9_maintenance.read_memories_fixture_base(p_namespace,p_ids);
+        RETURN QUERY SELECT * FROM mem9_maintenance.read_planner_memories_fixture_base(p_namespace,p_ids);
       END $$`);
     await f.db.query('SELECT pg_advisory_lock(718239)');
     const pending = f.claim();
@@ -458,12 +467,12 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
     await f.seed('third'+'x'.repeat(12000), f.ns, vector(0.03));
     await f.consume();
     await f.db.query('UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval \'1 hour\' WHERE namespace_id=$1 AND memory_id<>$2', [f.ns, anchor]);
-    await f.db.query('ALTER FUNCTION mem9_maintenance.read_memories(TEXT,TEXT[]) RENAME TO read_memories_fixture_base');
-    await f.db.query(`CREATE FUNCTION mem9_maintenance.read_memories(p_namespace TEXT,p_ids TEXT[])
+    await f.db.query('ALTER FUNCTION mem9_maintenance.read_planner_memories(TEXT,TEXT[]) RENAME TO read_planner_memories_fixture_base');
+    await f.db.query(`CREATE FUNCTION mem9_maintenance.read_planner_memories(p_namespace TEXT,p_ids TEXT[])
       RETURNS TABLE(memory_id VARCHAR(36),version INTEGER,fingerprint TEXT,memory JSONB)
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
       BEGIN PERFORM pg_advisory_xact_lock(718240);
-        RETURN QUERY SELECT * FROM mem9_maintenance.read_memories_fixture_base(p_namespace,p_ids);
+        RETURN QUERY SELECT * FROM mem9_maintenance.read_planner_memories_fixture_base(p_namespace,p_ids);
       END $$`);
     await f.db.query('SELECT pg_advisory_lock(718240)');
     const pending = f.claim(); let blocked = false;
@@ -531,11 +540,61 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
     expect((await f.finish(w)).status).toBe('queued');
     expect(await scalar(f.db, 'SELECT count(*)::int FROM mem9_maintenance.planner_progress WHERE namespace_id=$1', [f.ns])).toBe(1);
   }));
+  it('PROV-001/002: large provenance stays out of the model window but inside its full-row fence',()=>fixture(async f=>{
+    const ids=[await f.seed('first short fact'),await f.seed('second short fact')];
+    for(const id of ids)await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[id,{
+      source_turns:[{seq:0,content:'x'.repeat(550000)}],source_seqs:[0],
+      semantic_context:'retained',consolidation:{sources:[{large:'y'.repeat(10000)}],stale:false}}]);
+    await f.consume();
+    const w=await f.claim();
+    expect(w.status).toBe('leased');expect(w.forced_result).toBeNull();
+    expect(JSON.stringify(w.members).length).toBeLessThan(12000);
+    for(const member of w.members){
+      expect(member.memory.metadata).toEqual({semantic_context:'retained',consolidation:{stale:false}});
+      expect(member.fingerprint).toBe(await scalar(f.db,"SELECT encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex') FROM memories m WHERE id=$1",[member.id]));
+    }
+    await f.db.query("UPDATE memories SET metadata=jsonb_set(metadata,'{source_turns,0,content}',to_jsonb('changed original source'::text)) WHERE id=$1",[ids[0]]);
+    await expect(f.finish(w,'MERGE')).rejects.toMatchObject({code:'55000'});
+    expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.actions')).toBe(0);
+  }));
+  it.each(['snapshot_input_bound','model_input_bound'])('PROV-008: an admissible window supersedes cached %s in selection and publication',reason=>fixture(async f=>{
+    const signature='mem9_maintenance.read_neighborhood(text,text,bigint)';
+    await f.db.query(snapshotPlannerUpgradeDefinitions.find(d=>d.signature===signature).sql);
+    const ids=[await f.seed('first short fact'),await f.seed('second short fact')],anchor=ids[0];
+    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[ids,{source_turns:[{content:'x'.repeat(reason==='snapshot_input_bound'?550000:30000)}]}]);
+    await f.consume();
+    await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE namespace_id=$1 AND memory_id<>$2",[f.ns,anchor]);
+    const old=await f.claim();expect(old.forced_result).toBe('REVIEW');await f.finish(old,'REVIEW');
+    const original=await rows(f.db,'SELECT classification_id,payload FROM mem9_maintenance.classifications');
+    expect(original[0].payload.details.reason).toBe(reason);
+    await f.db.query(plannerUpgradeDefinitions.find(d=>d.signature===signature).sql);
+    await f.db.query("SELECT mem9_maintenance.dirty_planner_input($1,$2,clock_timestamp(),'audit')",[f.ns,anchor]);
+    const claim=await scalar(f.planner,'SELECT mem9_maintenance.claim_planner_work($1)',[f.ns]);
+    const forged={...original[0].payload,result:'MERGE',valid_until:new Date(Date.now()+3600000).toISOString(),details:{planner:'neighborhood-v1',reason:'classified'}};
+    // Caller flags alone cannot supersede the review before a server-created
+    // admissible neighborhood exists for this exact work lease.
+    await expect(f.planner.query('SELECT mem9_maintenance.publish_classification($1,$2,$3,$4)',[f.ns,anchor,claim.lease_generation,forged])).rejects.toMatchObject({code:'55000'});
+    const next=await scalar(f.planner,'SELECT mem9_maintenance.read_neighborhood($1,$2,$3)',[f.ns,anchor,claim.lease_generation]);
+    expect(next.cached).toBeNull();expect(next.forced_result).toBeNull();
+    expect(await f.finish(next,'MERGE')).toMatchObject({status:'queued'});
+    expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.classifications')).toBe(2);
+    expect(await rows(f.db,'SELECT classification_id,payload FROM mem9_maintenance.classifications WHERE classification_id=$1',[original[0].classification_id])).toEqual(original);
+    expect(await f.finish(next,'MERGE')).toMatchObject({status:'queued'});
+  }));
+  it('PROV-008: an ordinary model REVIEW remains immutable and cannot be relabeled MERGE',()=>fixture(async f=>{
+    await f.seed('first fact');await f.seed('second fact');await f.consume();
+    const first=await f.claim();await f.finish(first,'REVIEW');
+    await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE namespace_id=$1 AND memory_id<>$2",[f.ns,first.anchor_id]);
+    await f.db.query("SELECT mem9_maintenance.dirty_planner_input($1,$2,clock_timestamp(),'audit')",[f.ns,first.anchor_id]);
+    const next=await f.claim();expect(next.cached.payload.result).toBe('REVIEW');
+    await expect(f.finish(next,'MERGE')).rejects.toMatchObject({code:'22023'});
+    await f.finish(next,'REVIEW');expect(await scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.classifications')).toBe(1);
+  }));
   it.each([1,2])('PLAN-028: oversized %i-member inputs become fingerprint-fenced review without source changes', count => fixture(async f => {
     const ids=[];
     for(let i=0;i<count;i++){
       const id=await f.seed('short synthetic fact '+i);ids.push(id);
-      await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[id,{source_turns:[{seq:0,content:'x'.repeat(count===1?1100000:550000)}]}]);
+      await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[id,{necessary_context:[{seq:0,content:'x'.repeat(count===1?1100000:550000)}]}]);
     }
     await f.consume();
     await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE namespace_id=$1 AND memory_id<>$2",[f.ns,ids[0]]);
@@ -556,7 +615,7 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   it('PLAN-029: oversized pairs do not block subsequent vector neighbors',()=>fixture(async f=>{
     const anchor=await f.seed('anchor'),large=await f.seed('large neighbor');
     const tail=await f.seed('later neighbor',f.ns,JSON.stringify([1,0.1,...Array(1022).fill(0)]));
-    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[[anchor,large],{source_turns:[{seq:0,content:'x'.repeat(550000)}]}]);
+    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[[anchor,large],{necessary_context:[{seq:0,content:'x'.repeat(550000)}]}]);
     await f.consume();
     await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE namespace_id=$1 AND memory_id<>$2",[f.ns,anchor]);
     const first=await f.claim();expect(first.status).toBe('leased');
@@ -582,7 +641,7 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   }));
   it.each(['MERGE','KEEP','REVIEW'])('PLAN-032: cached %s cannot override a snapshot review or cause a publication loop',verdict=>fixture(async f=>{
     const anchor=await f.seed('anchor'),peer=await f.seed('peer');
-    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[[anchor,peer],{source_turns:[{seq:0,content:'x'.repeat(550000)}]}]);
+    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[[anchor,peer],{necessary_context:[{seq:0,content:'x'.repeat(550000)}]}]);
     await f.consume();
     await f.db.query("UPDATE mem9_maintenance.work SET due_at=clock_timestamp()+interval '1 hour' WHERE namespace_id=$1 AND memory_id<>$2",[f.ns,anchor]);
     const lease=await scalar(f.planner,'SELECT mem9_maintenance.claim_planner_work($1)',[f.ns]);
@@ -608,12 +667,12 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
     const anchor=await f.seed('anchor',f.ns,null);
     await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[anchor,{source_turns:[{seq:0,content:'x'.repeat(1100000)}]}]);
     await f.consume();
-    await f.db.query('ALTER FUNCTION mem9_maintenance.read_memories(TEXT,TEXT[]) RENAME TO read_memories_fixture_base');
-    await f.db.query(`CREATE FUNCTION mem9_maintenance.read_memories(p_namespace TEXT,p_ids TEXT[])
+    await f.db.query('ALTER FUNCTION mem9_maintenance.read_planner_memories(TEXT,TEXT[]) RENAME TO read_planner_memories_fixture_base');
+    await f.db.query(`CREATE FUNCTION mem9_maintenance.read_planner_memories(p_namespace TEXT,p_ids TEXT[])
       RETURNS TABLE(memory_id VARCHAR(36),version INTEGER,fingerprint TEXT,memory JSONB)
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
       BEGIN PERFORM pg_advisory_xact_lock(732029);
-        RETURN QUERY SELECT * FROM mem9_maintenance.read_memories_fixture_base(p_namespace,p_ids); END $$;`);
+        RETURN QUERY SELECT * FROM mem9_maintenance.read_planner_memories_fixture_base(p_namespace,p_ids); END $$;`);
     const pid=await scalar(f.planner,'SELECT pg_backend_pid()'),observer=await f.extraClient();
     await f.db.query('SELECT pg_advisory_lock(732029)');
     const pending=f.claim();
@@ -634,7 +693,7 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   }));
   it.each(['update','delete','metadata','embedding'])('PLAN-029: reference-only review rejects a member %s before publication',change=>fixture(async f=>{
     const anchor=await f.seed('anchor'),peer=await f.seed('peer');
-    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[[anchor,peer],{source_turns:[{seq:0,content:'x'.repeat(550000)}]}]);
+    await f.db.query('UPDATE memories SET metadata=$2 WHERE id=ANY($1)',[[anchor,peer],{necessary_context:[{seq:0,content:'x'.repeat(550000)}]}]);
     await f.consume();
     const w=await f.claim(),changed=w.members.find(m=>m.id!==w.anchor_id).id;
     if(change==='update')await f.db.query("UPDATE memories SET content='changed',version=version+1 WHERE id=$1",[changed]);
@@ -646,7 +705,7 @@ describe.skipIf(!DSN)('incremental planner with real PostgreSQL', () => {
   }));
   it('PLAN-030: unrelated database program-limit errors cannot become input reviews',()=>fixture(async f=>{
     await f.seed('small');await f.consume();
-    await f.db.query(`CREATE OR REPLACE FUNCTION mem9_maintenance.read_memories(p_namespace TEXT,p_ids TEXT[])
+    await f.db.query(`CREATE OR REPLACE FUNCTION mem9_maintenance.read_planner_memories(p_namespace TEXT,p_ids TEXT[])
       RETURNS TABLE(memory_id VARCHAR(36),version INTEGER,fingerprint TEXT,memory JSONB)
       LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
       BEGIN RAISE EXCEPTION USING ERRCODE='54000',MESSAGE='unrelated synthetic limit'; END $$;`);
