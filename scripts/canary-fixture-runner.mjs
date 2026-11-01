@@ -47,6 +47,9 @@ export const fixtureCaseNames=Object.freeze([
   'persists empty recovery results and rejects replay against a different target scope',
   'rolls back recovery work and journals when its invocation receipt cannot commit',
   'continues size-review recovery in bounded batches without reopening completed selections',
+  'filters size reviews once before visiting work with unrelated KEEP history',
+  'checks repeated size-review publications once per original input set',
+  'visits large size history once before checking each anchor candidate bucket',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;

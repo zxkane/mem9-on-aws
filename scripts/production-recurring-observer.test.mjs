@@ -17,7 +17,7 @@ function fixture(){
     const name=c.constructor.name;calls.push(name);
     if(name==='GetRoleCommand')return {Role:planner.input.role};
     if(name==='DescribeTaskDefinitionCommand')return {taskDefinition:fixtures.find(f=>f.target.taskDefinitionArn===c.input.taskDefinition).input.definition};
-    if(name==='ListSchedulesCommand')return {Schedules:fixtures.map(f=>({Name:f.target.template.Name,State:'ENABLED'}))};
+    if(name==='ListSchedulesCommand')return {Schedules:[...new Set(fixtures.map(f=>f.target.template.Name))].map(Name=>({Name,State:'ENABLED'}))};
     if(name==='ListTasksCommand')return {taskArns:fixtures.filter(f=>f.target.taskDefinitionArn.includes(c.input.family+':')).map(f=>f.input.task.taskArn)};
     if(name==='DescribeTasksCommand')return {tasks:fixtures.filter(f=>c.input.tasks.includes(f.input.task.taskArn)).map(f=>f.input.task)};
     if(name==='FilterLogEventsCommand')return {events:fixtures.filter(f=>c.input.logStreamNames[0].endsWith(f.input.task.taskArn.split('/').at(-1))).map(f=>({eventId:f.target.kind,message:JSON.stringify(f.input.record)}))};
@@ -35,4 +35,43 @@ it('waits for actual launch events and returns both authenticated task proofs wi
 });
 it('does not certify tasks when CloudTrail attribution never arrives',async()=>{
   const f=fixture();await expect(observeProductionRecurringDeliveries(f.clients,f.targets,{...f.options,readEvents:async()=>[]})).rejects.toThrow('RecurringObservationDeadline');expect(f.saved).toHaveLength(0);
+});
+it.each([0,1])('excludes a prior delivery that cold-started inside the observation window (exit %s)',async exitCode=>{
+  const f=fixture(),previous=structuredClone(f.fixtures[0]);
+  previous.input.task.taskArn=previous.input.task.taskArn.replace(/d{32}$/,'f'.repeat(32));
+  previous.input.task.containers[0].exitCode=exitCode;
+  previous.input.task.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_SCHEDULER_TIME').value=new Date(f.options.afterMs-1).toISOString();
+  previous.input.event.responseElements.tasks[0].taskArn=previous.input.task.taskArn;
+  previous.input.event.eventID='cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa';
+  // AWS startup time overlaps the window; the Scheduler time does not.
+  expect(new Date(previous.input.task.startedAt).getTime()).toBeGreaterThan(f.options.afterMs);
+  f.fixtures.unshift(previous);
+  const result=await observeProductionRecurringDeliveries(f.clients,f.targets,{...f.options,readEvents:async()=>f.fixtures.map(f=>f.input.event)});
+  expect(result.planner.taskArn).not.toBe(previous.input.task.taskArn);expect(f.saved).toHaveLength(2);
+});
+it('rejects malformed scheduler context before classifying task health',async()=>{
+  const f=fixture();f.fixtures[0].input.task.containers[0].exitCode=1;
+  f.fixtures[0].input.task.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_SCHEDULER_TIME').value='invalid';
+  await expect(observeProductionRecurringDeliveries(f.clients,f.targets,{...f.options,readEvents:async()=>f.fixtures.map(f=>f.input.event)})).rejects.toThrow('RecurringTaskContextUnverifiable');
+  expect(f.saved).toHaveLength(0);
+});
+it('still rejects a failed delivery scheduled inside the observation window',async()=>{
+  const f=fixture();f.fixtures[0].input.task.containers[0].exitCode=1;
+  await expect(observeProductionRecurringDeliveries(f.clients,f.targets,{...f.options,readEvents:async()=>f.fixtures.map(f=>f.input.event)})).rejects.toThrow('ProductionRecurringTaskFailed');
+  expect(f.saved).toHaveLength(0);
+});
+it('includes deliveries scheduled exactly at the observation cutoff',async()=>{
+  const f=fixture();f.options.afterMs=Date.parse(f.fixtures[0].input.task.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_SCHEDULER_TIME').value);
+  const result=await observeProductionRecurringDeliveries(f.clients,f.targets,{...f.options,readEvents:async()=>f.fixtures.map(f=>f.input.event)});
+  expect(result.planner.scheduledMs).toBe(f.options.afterMs);expect(f.saved).toHaveLength(2);
+});
+it('waits for a task whose desired status is stopped while it is still deprovisioning',async()=>{
+  const f=fixture(),send=f.clients.ecs.send;let descriptions=0;
+  f.clients.ecs.send=async command=>{
+    const result=await send(command);
+    if(command.constructor.name==='DescribeTasksCommand'&&++descriptions===1)return {...result,tasks:result.tasks.map(task=>({...task,lastStatus:'DEPROVISIONING'}))};
+    return result;
+  };
+  const result=await observeProductionRecurringDeliveries(f.clients,f.targets,{...f.options,readEvents:async()=>f.fixtures.map(f=>f.input.event)});
+  expect(descriptions).toBeGreaterThan(2);expect(result.planner.exitCode).toBe(0);expect(f.saved).toHaveLength(2);
 });

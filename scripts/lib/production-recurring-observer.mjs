@@ -8,6 +8,7 @@ import {ListSchedulesCommand} from '@aws-sdk/client-scheduler';
 import {verifyProductionRecurringDelivery,verifyProductionSchedulerIdentity} from './production-recurring-verification.mjs';
 import {verifyProductionScheduling} from './production-scheduling.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
+import {readProductionSchedulerContext} from './production-scheduler-context.mjs';
 
 const execute=promisify(execFile),fail=code=>{throw Error(code);};
 const send=(client,command,deadline)=>client.send(command,{abortSignal:AbortSignal.timeout(Math.max(1,Math.min(30000,deadline-Date.now())))});
@@ -76,7 +77,19 @@ export async function observeProductionRecurringDeliveries(clients,targets,{admi
         if(r.failures?.length||!Array.isArray(r.tasks)||hash(r.tasks.map(t=>t.taskArn).sort())!==hash([...requested].sort()))fail('RecurringTaskCoverageIncomplete');
         for(const task of r.tasks){
           if(task.taskDefinitionArn!==target.taskDefinitionArn||new Date(task.startedAt).getTime()<afterMs)continue;
-          if(task.clusterArn!==target.clusterArn||task.lastStatus!=='STOPPED'||task.containers?.length!==1||task.containers[0].exitCode!==0)fail('ProductionRecurringTaskFailed');
+          const overrides=task.overrides?.containerOverrides,override=overrides?.[0];
+          if(overrides?.length!==1||override.name!==target.containerName)fail('RecurringTaskContextUnverifiable');
+          const scheduleArn=`arn:aws:scheduler:${target.region}:${target.account}:schedule/${target.groupName}/${target.template.Name}`;
+          let context;
+          try{context=readProductionSchedulerContext(override.environment,{scheduleArn,generation:target.generation,admission});}
+          catch{fail('RecurringTaskContextUnverifiable');}
+          // A delivery before the window can finish starting inside it. Context
+          // selects the window; counted proofs still require CloudTrail identity.
+          if(context.scheduledMs<afterMs)continue;
+          if(task.clusterArn!==target.clusterArn)fail('ProductionRecurringTaskFailed');
+          // ListTasks filters desired status; final task state can still lag it.
+          if(task.lastStatus!=='STOPPED')continue;
+          if(task.containers?.length!==1||task.containers[0].exitCode!==0)fail('ProductionRecurringTaskFailed');
           const options=target.logOptions,group=options?.['awslogs-group'],prefix=options?.['awslogs-stream-prefix'];
           if(!group||!prefix)fail('RecurringLogMetadataMissing');
           const records=[],logIds=new Set(),logTokens=new Set();let nextToken;

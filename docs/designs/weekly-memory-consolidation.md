@@ -671,8 +671,20 @@ completed pages; a later singleton KEEP does not supersede an earlier pair.
 Each invocation retains its original batch and result on retry, with at most
 100 anchors per namespace. Ordinary model reviews, protected records, operator
 suppression and genuine context conflicts retain their existing restrictions.
+Candidate discovery separates current-context payload reviews from execution
+reviews, then materializes their publications before joining the work queue.
+Repeated publications of one classification retain the latest lease for each
+anchor. Each anchor carries only its own candidate history into the full checks,
+so neither ordinary KEEP work nor unrelated size reviews multiply history scans.
+The existing statement timeout, age ordering, fingerprint fences and batch limit
+still apply.
 Recovery and periodic execution report actual classifications and commits;
 neither a requeue nor a completed REVIEW is counted as a merge.
+Recurring verification uses the scheduled-time window even when a prior task
+finishes starting inside it. Malformed context remains unverifiable; counted
+deliveries retain the full image, admission, role and CloudTrail checks.
+Task listings filter desired status, so verification waits for the actual STOPPED
+state before assessing the final exit code and worker report.
 
 For approximately 17,000 active memories, the proposed steady-state envelope is
 up to 3,000 changed rows/day, including at most 1,000 rewrites and 2,000 soft
