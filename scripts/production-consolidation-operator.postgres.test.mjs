@@ -593,7 +593,7 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     // Reconstruct an installation prepared by the previous operator, without
     // altering its canary, readiness, credential history or workload rows.
     const sql=await readFile(new URL('../docker/bootstrap/migrations/006_consolidation_planner.sql',import.meta.url),'utf8');
-    for(const name of ['claim_neighborhood','dirty_planner_input','defer_neighborhood']){
+    for(const name of ['claim_neighborhood','dirty_planner_input','defer_neighborhood','finish_neighborhood']){
       const at=sql.indexOf('CREATE OR REPLACE FUNCTION mem9_maintenance.'+name+'(');
       await db.query(sql.slice(at,sql.indexOf('END $$;',at)+8));
     }
@@ -655,7 +655,7 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await f.admin.query('UPDATE mem9_maintenance.dispatcher_settings SET enabled=true');
     await expect(install()).rejects.toThrow('PauseBeforePlannerUpgrade');
     await f.admin.query('UPDATE mem9_maintenance.dispatcher_settings SET enabled=false');
-    expect(await install()).toMatchObject({phase:'install-planner-upgrade',changed:true,version:1});
+    expect(await install()).toMatchObject({phase:'install-planner-upgrade',changed:true,version:2});
     expect(await install()).toMatchObject({changed:false});
     expect(await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s')).toEqual(before);
   }),60000);
@@ -681,22 +681,24 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await expect(f.admin.query('DELETE FROM mem9_maintenance.merge_policy_history')).rejects.toThrow();
   }),60000);
 
-  it('requeues only exhausted scan failures while preserving other work and namespace isolation',()=>fixture(async f=>{
+  it.each([['requeue-scans','scan_failed','PlannerScan'],['requeue-inputs','input_bound','PlannerInput']])('%s preserves other work, inactive memories and namespace isolation',(operation,reason,errorPrefix)=>fixture(async f=>{
     await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
     const other=randomUUID();
     await f.admin.query("INSERT INTO public.memory_namespaces(namespace_id,slug,display_name) VALUES($1,$1,'Synthetic outside namespace')",[other]);
     const cases=[
-      {name:'eligible',attempts:3,deferral:'scan_failed'},
-      {name:'retrying',attempts:2,deferral:'scan_failed'},
-      {name:'oversized',attempts:3,deferral:'input_bound'},
+      {name:'eligible',attempts:3,deferral:reason},
+      {name:'retrying',attempts:2,deferral:reason},
+      {name:'other-reason',attempts:3,deferral:reason==='input_bound'?'scan_failed':'input_bound'},
       {name:'invalid',attempts:3,deferral:'invalid_result'},
-      {name:'leased',attempts:3,deferral:'scan_failed',leased:true},
-      {name:'done',attempts:3,deferral:'scan_failed',done:true},
-      {name:'outside',attempts:3,deferral:'scan_failed',namespace:other},
+      {name:'inactive',attempts:3,deferral:reason,state:'archived'},
+      {name:'session',attempts:3,deferral:reason,memoryType:'session'},
+      {name:'leased',attempts:3,deferral:reason,leased:true},
+      {name:'done',attempts:3,deferral:reason,done:true},
+      {name:'outside',attempts:3,deferral:reason,namespace:other},
     ].map(c=>({...c,id:randomUUID(),namespace:c.namespace??f.namespace}));
     for(const c of cases){
-      await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
-        VALUES($1,$2,$3,$3,'Synthetic scan retry fixture','[]','{}','insight')`,[c.id,c.namespace,f.principal]);
+      await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type,state)
+        VALUES($1,$2,$3,$3,'Synthetic retry fixture','[]','{}',$4,$5)`,[c.id,c.namespace,f.principal,c.memoryType??'insight',c.state??'active']);
       await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,
         lease_generation,lease_until,attempts,first_seen_at,due_at,reason)
         VALUES($1,$2,2,2,$3,1,CASE WHEN $4 THEN clock_timestamp()+interval '5 minutes' ELSE NULL END,$5,
@@ -705,15 +707,15 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     }
     const snapshot=async()=>JSON.stringify((await f.admin.query('SELECT * FROM mem9_maintenance.work ORDER BY namespace_id,memory_id')).rows);
     const before=await snapshot();
-    const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request('requeue-scans'),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
-    await expect(requeue()).rejects.toThrow('PlannerScanRequeueRequiresPromotion');
+    const requeue=()=>runProductionConsolidation(f.admin,f.config,{...f.request(operation),invocation:randomUUID().replaceAll('-','')},{connect:f.connect});
+    await expect(requeue()).rejects.toThrow(errorPrefix+'RequeueRequiresPromotion');
     expect(await snapshot()).toBe(before);
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET generation=$1 WHERE singleton",['b'.repeat(64)]);
-    await expect(requeue()).rejects.toThrow('PlannerScanRequeueRequiresPromotion');
+    await expect(requeue()).rejects.toThrow(errorPrefix+'RequeueRequiresPromotion');
     expect(await snapshot()).toBe(before);
     await f.admin.query('UPDATE mem9_maintenance.production_worker_setup SET generation=$1 WHERE singleton',[f.config.generation]);
-    expect(await requeue()).toMatchObject({phase:'requeue-scans',anchors:1});
+    expect(await requeue()).toMatchObject({phase:operation,anchors:1});
     const after=JSON.parse(await snapshot()),original=JSON.parse(before),eligible=cases[0];
     for(const row of after){
       const prior=original.find(w=>w.namespace_id===row.namespace_id&&w.memory_id===row.memory_id);
@@ -721,10 +723,10 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
       expect(row).toMatchObject({attempts:0,reason:'audit',first_seen_at:prior.first_seen_at,completed_generation:prior.completed_generation});
       expect(Number(row.desired_generation)).toBe(Number(prior.desired_generation)+1);
     }
-    expect(await requeue()).toMatchObject({phase:'requeue-scans',anchors:0});
+    expect(await requeue()).toMatchObject({phase:operation,anchors:0});
   }),60000);
 
-  it('rejects oversized scan recovery before resetting any retry counters',()=>fixture(async f=>{
+  it.each([['requeue-scans','scan_failed','PlannerScan'],['requeue-inputs','input_bound','PlannerInput']])('%s rejects oversized recovery atomically',(operation,reason,errorPrefix)=>fixture(async f=>{
     await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
     await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
     await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
@@ -733,8 +735,8 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await f.admin.query(`INSERT INTO mem9_maintenance.work(namespace_id,memory_id,desired_generation,claimed_generation,completed_generation,
       attempts,first_seen_at,due_at,reason) SELECT namespace_id,id,2,2,0,3,clock_timestamp(),clock_timestamp(),'lease_exhausted'
       FROM public.memories WHERE namespace_id=$1`,[f.namespace]);
-    await f.admin.query("INSERT INTO mem9_maintenance.planner_deferrals(namespace_id,memory_id,reason) SELECT namespace_id,memory_id,'scan_failed' FROM mem9_maintenance.work WHERE namespace_id=$1",[f.namespace]);
-    await expect(runProductionConsolidation(f.admin,f.config,f.request('requeue-scans'),{connect:f.connect})).rejects.toThrow('PlannerScanRequeueTooLarge');
+    await f.admin.query("INSERT INTO mem9_maintenance.planner_deferrals(namespace_id,memory_id,reason) SELECT namespace_id,memory_id,$2 FROM mem9_maintenance.work WHERE namespace_id=$1",[f.namespace,reason]);
+    await expect(runProductionConsolidation(f.admin,f.config,f.request(operation),{connect:f.connect})).rejects.toThrow(errorPrefix+'RequeueTooLarge');
     expect(await scalar(f.admin,"SELECT count(*)::int AS result FROM mem9_maintenance.work WHERE namespace_id=$1 AND attempts=3 AND desired_generation=2 AND reason='lease_exhausted'",[f.namespace])).toBe(1001);
   }),60000);
 

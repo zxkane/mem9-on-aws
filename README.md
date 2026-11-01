@@ -677,6 +677,18 @@ receipts are unchanged. A repeat without new exhaustion requeues nothing.
 Verify subsequent scheduled planning and execution; do not use repeated recovery
 to conceal an unresolved scan failure.
 
+Planner input limits include complete records and provenance, so short memory
+text can still belong to an oversized neighborhood. The planner reduces the
+group first. A pair or singleton that still exceeds 1 MiB becomes an explicit
+`snapshot_input_bound` review with versions and full-row fingerprints, without
+truncating sources or sending the oversized payload to a model. It then continues
+to later neighbors. These reviews are planning outcomes, not completed merges.
+After deploying planner upgrade version 2, run
+`node scripts/run-production-consolidation.mjs requeue-inputs` from the deployed
+revision to recover older exhausted `input_bound` work. The command uses the
+same namespace, lease, promotion and 1,000-anchor transaction safeguards as scan
+recovery; other failure reasons remain separate.
+
 Choose the ceiling from isolated measurements, verify that the deployed engine
 and platform support the selected range, and keep actual capacity decisions in
 private operator records. After deployment, check the cluster's scaling range,

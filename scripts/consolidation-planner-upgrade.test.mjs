@@ -3,8 +3,12 @@ import {readFileSync} from 'node:fs';
 import {describe,it,expect} from 'vitest';
 import {runtimeSchemaDigest} from './lib/runtime-credentials.mjs';
 import {productionOperatorDigest} from './production-runtime-operator.mjs';
+import {LEGACY_PLANNER_UPGRADE_HASH} from './lib/consolidation-planner-upgrade.mjs';
 
 describe('sealed planner bootstrap contract',()=>{
+  it('PLAN-030 preserves the installed first-release SQL digest',()=>{
+    expect(LEGACY_PLANNER_UPGRADE_HASH).toBe('e9ab6cf18e45102621b14d56f7303b350509bf98752aed7919376c1937b8d51c');
+  });
   it('PLAN-023 preserves the base SQL used by completed credential cutovers',()=>{
     const sql=readFileSync(new URL('../docker/bootstrap/migrations/006_consolidation_planner.sql',import.meta.url));
     expect(createHash('sha256').update(sql).digest('hex')).toBe('207e3868f40964103f7da708aa498c1256fdf752f58d1ceebef31b6826add774');
