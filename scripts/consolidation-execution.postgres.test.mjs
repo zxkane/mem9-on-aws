@@ -1,5 +1,8 @@
 import {randomUUID,createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
+import {installProvenanceUpgrade,verifyProvenanceUpgrade,hydrateCanaryImages} from './lib/consolidation-provenance.mjs';
+import {verifyCanaryReceiptChains} from './lib/production-canary-verification.mjs';
+import {captureCanarySnapshot,verifyFrozenCanaryProjection} from './lib/production-canary-snapshot.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 import pg from 'pg';
 import {beforeAll,afterAll,describe,it,expect} from 'vitest';
@@ -39,12 +42,17 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
   }finally{await source.end();}
  },30000);
  afterAll(async()=>{await admin?.end();});
- async function fixture(work){
+ async function fixture(work,{provenance=true}={}){
   const name='execution_'+randomUUID().replaceAll('-','');
   await admin.query('CREATE DATABASE "'+name+'" TEMPLATE consolidation_execution_test');
   const sessions=[];
   try{
    const db=await connect(name);sessions.push(db);
+   if(provenance){
+    await db.query('BEGIN');
+    try{await installProvenanceUpgrade(db,{invocation:randomUUID().replaceAll('-','')});await db.query('COMMIT');}
+    catch(error){await db.query('ROLLBACK');throw error;}
+   }
    const clients={};for(const r of roles){clients[r]=await connect(name,'execution_'+r);sessions.push(clients[r]);await db.query('INSERT INTO mem9_maintenance.database_callers(role_oid,capability) VALUES($1::regrole::oid,$2)',['execution_'+r,r]);}
    const actors={planner:randomUUID(),consolidation:randomUUID(),operator:randomUUID()};
    for(const [r,id] of Object.entries(actors))await db.query('INSERT INTO memory_principals(principal_id,principal_key,principal_type) VALUES($1,$2,$3)',[id,key(r==='planner'?'consolidation-planner':r),r==='operator'?'human':'service']);
@@ -70,7 +78,7 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
     const anchor=[...pendingClaims.values()].find(w=>ids.includes(w.memory_id));
     if(!anchor)throw Error('missing anchor');
     pendingClaims.delete(anchor.memory_id);
-    const members=(await rows(clients.planner,'SELECT * FROM mem9_maintenance.read_memories($1,$2)',[namespace,ids])).map(m=>({id:m.memory_id,version:m.version,fingerprint:m.fingerprint}));
+    const members=(await rows(clients.planner,provenance?'SELECT * FROM mem9_maintenance.read_planner_memories($1,$2)':'SELECT * FROM mem9_maintenance.read_memories($1,$2)',[namespace,ids])).map(m=>({id:m.memory_id,version:m.version,fingerprint:m.fingerprint}));
     return scalar(clients.planner,'SELECT mem9_maintenance.publish_classification($1,$2,$3,$4)',[namespace,anchor.memory_id,anchor.lease_generation,{context_hash:CONTEXT,members,result:kind,details,valid_until:new Date(Date.now()+23*3600_000).toISOString()}]);
    };
    const queue=(id,namespace=ns)=>scalar(clients.planner,'SELECT mem9_maintenance.queue_classification($1,$2)',[namespace,id]);
@@ -88,6 +96,165 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
    await admin.query('DROP DATABASE "'+name+'" WITH (FORCE)');
   }
  }
+ it('PROV-003/006: large source images survive atomic merge, replay, undo and suppression',()=>fixture(async f=>{
+  const ids=[await f.seed('short duplicate fact'),await f.seed('short duplicate fact')];
+  for(let i=0;i<ids.length;i++)await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[ids[i],{source_turns:[{seq:i,content:String(i).repeat(550000)}],source_seqs:[i]}]);
+  const before=await f.rows(f.db,'SELECT to_jsonb(m) AS image FROM memories m WHERE namespace_id=$1 AND id=ANY($2) ORDER BY id',[f.ns,ids]);
+  await f.enable();
+  const queued=await f.queue(await f.classify(ids));expect(queued.status).toBe('queued');
+  const action=await f.claim();await f.ready(action);
+  const result=await f.apply(action);expect(result).toMatchObject({status:'applied',changed_rows:2});
+  expect(await f.apply(action)).toEqual(result);
+  const receipt=await f.scalar(f.db,'SELECT to_jsonb(r) FROM mem9_maintenance.receipts r WHERE namespace_id=$1 AND action_id=$2',[f.ns,action.action_id]);
+  expect(JSON.stringify(receipt.before_images).length).toBeLessThan(2000);
+  const original=await f.scalar(f.db,'SELECT mem9_maintenance.load_images($1,$2)',[f.ns,JSON.stringify(receipt.before_images)]);
+  expect(original).toEqual(before.map(r=>r.image));
+  const counts=await f.scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.source_images WHERE namespace_id=$1',[f.ns]);
+  await f.apply(action);
+  expect(await f.scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.source_images WHERE namespace_id=$1',[f.ns])).toBe(counts);
+  expect(await f.scalar(f.operator,'SELECT mem9_maintenance.undo_action($1,$2)',[f.ns,action.action_id])).toMatchObject({status:'undone',restored_rows:2});
+  for(const {image} of before){const row=await f.row(image.id);expect(row.metadata).toEqual(image.metadata);expect(row.embedding).toEqual(image.embedding);expect(row.state).toBe('active');}
+  const blocked=await f.queue(await f.classify(ids));expect(blocked).toMatchObject({status:'review',reason:'operator_suppressed'});
+ }));
+ it('PROV-004/010: chained large merges retain original sources and verify through read-only hydration',()=>fixture(async f=>{
+  const first=[await f.seed('stable fact'),await f.seed('stable fact')];
+  // Two merges change four rows in the fixed daily window, including the
+  // survivor twice. Provide the denominator before the first reservation.
+  await f.seed('synthetic allowance baseline one');await f.seed('synthetic allowance baseline two');
+  for(let i=0;i<first.length;i++)await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[first[i],{source_turns:[{content:String(i).repeat(550000)}]}]);
+  const original=await Promise.all(first.map(f.row));await f.enable();
+  await f.queue(await f.classify(first));const a=await f.claim();await f.ready(a);await f.apply(a);
+  const target=await f.scalar(f.db,"SELECT output->>'target' FROM mem9_maintenance.actions WHERE namespace_id=$1 AND action_id=$2",[f.ns,a.action_id]);
+  const third=await f.seed('stable fact',f.ns,'2024-02-01T00:00:00Z');
+  await f.db.query('UPDATE memories SET metadata=$2 WHERE id=$1',[third,{source_turns:[{content:'2'.repeat(550000)}]}]);
+  await f.queue(await f.classify([target,third]));const b=await f.claim();await f.ready(b);await f.apply(b);
+  const survivor=await f.row(target),links=survivor.metadata.consolidation.sources;
+  expect(JSON.stringify(links).length).toBeLessThan(1000);
+  const prior=await f.scalar(f.db,'SELECT mem9_maintenance.load_image($1,$2)',[f.ns,links.find(r=>r.id===target)]);
+  const roots=await f.scalar(f.db,'SELECT mem9_maintenance.load_images($1,$2)',[f.ns,JSON.stringify(prior.metadata.consolidation.sources)]);
+  expect(roots).toEqual([...original].sort((x,y)=>x.id.localeCompare(y.id)));
+  expect(await f.scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.source_images WHERE namespace_id=$1',[f.ns])).toBe(7);
+  const entries=await f.rows(f.db,`SELECT to_jsonb(r) AS receipt,to_jsonb(a) AS action FROM mem9_maintenance.receipts r
+    JOIN mem9_maintenance.actions a USING(namespace_id,action_id) WHERE r.namespace_id=$1 ORDER BY r.committed_at`,[f.ns]);
+  const current=await Promise.all([...first,third].map(f.row));
+  await f.db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  try{
+   await hydrateCanaryImages(f.db,entries);
+   expect(verifyCanaryReceiptChains(entries,current)).toMatchObject({receipts:2,changedRows:4,sourceRows:2});
+  }finally{await f.db.query('ROLLBACK');}
+  const forged=structuredClone(entries);
+  forged[1].action.source_images[0].reference.image_hash='f'.repeat(64);
+  expect(()=>verifyCanaryReceiptChains(forged,current)).toThrow('ProductionCanaryReceiptMismatch');
+ }));
+ it('PROV-005: source images remain private, immutable and bound to exact namespace, identity and version',()=>fixture(async f=>{
+  const ids=[await f.seed('A'),await f.seed('A')];const proposal=await f.queue(await f.classify(ids));
+  const refs=await f.scalar(f.db,'SELECT members FROM mem9_maintenance.actions WHERE namespace_id=$1 AND action_id=$2',[f.ns,proposal.action_id]);
+  for(const client of [f.planner,f.executor,f.backend,f.operator])await expect(client.query('SELECT image FROM mem9_maintenance.source_images')).rejects.toMatchObject({code:'42501'});
+  for(const client of [f.planner,f.executor,f.backend]){
+   await expect(client.query('SELECT mem9_maintenance.load_image($1,$2)',[f.ns,refs[0]])).rejects.toMatchObject({code:'42501'});
+   await expect(client.query('SELECT mem9_maintenance.read_provenance_image($1,$2)',[f.ns,refs[0]])).rejects.toMatchObject({code:'42501'});
+  }
+  expect(await f.scalar(f.operator,'SELECT mem9_maintenance.read_provenance_image($1,$2)',[f.ns,refs[0]])).toMatchObject({id:refs[0].id,namespace_id:f.ns});
+  await expect(f.operator.query('SELECT mem9_maintenance.read_provenance_image($1,$2)',[f.other,refs[0]])).rejects.toMatchObject({code:'55000'});
+  for(const changed of [{...refs[0],id:randomUUID()},{...refs[0],version:refs[0].version+1},{...refs[0],image_hash:'f'.repeat(64)}])
+   await expect(f.operator.query('SELECT mem9_maintenance.read_provenance_image($1,$2)',[f.ns,changed])).rejects.toMatchObject({code:'55000'});
+  await expect(f.db.query("UPDATE mem9_maintenance.source_images SET image=image||'{\"altered\":true}'")).rejects.toMatchObject({code:'55000'});
+  await expect(f.db.query('DELETE FROM mem9_maintenance.source_images')).rejects.toMatchObject({code:'55000'});
+  await expect(f.db.query('TRUNCATE mem9_maintenance.source_images')).rejects.toMatchObject({code:'55000'});
+  await expect(f.db.query('INSERT INTO mem9_maintenance.source_images(namespace_id,image_hash,memory_id,version,image) SELECT $1,image_hash,memory_id,version,image FROM mem9_maintenance.source_images LIMIT 1',[f.other])).rejects.toMatchObject({code:'23514'});
+  await f.db.query("UPDATE memory_namespace_memberships SET status='revoked' WHERE namespace_id=$1 AND principal_id=$2",[f.ns,f.actors.operator]);
+  await expect(f.operator.query('SELECT mem9_maintenance.read_provenance_image($1,$2)',[f.ns,refs[0]])).rejects.toMatchObject({code:'42501'});
+ }));
+ it('PROV-010: both production canary loaders verify a mixed inline/reference receipt chain',()=>fixture(async f=>{
+  const ids=[await f.seed('stable fact'),await f.seed('stable fact'),await f.seed('baseline one'),await f.seed('baseline two')];
+  const started=await f.scalar(f.db,'SELECT clock_timestamp()');await f.enable();
+  await f.queue(await f.classify(ids.slice(0,2)));const first=await f.claim();await f.ready(first);await f.apply(first);
+  const target=await f.scalar(f.db,"SELECT output->>'target' FROM mem9_maintenance.actions WHERE action_id=$1",[first.action_id]);
+  await f.db.query('BEGIN');await installProvenanceUpgrade(f.db,{invocation:randomUUID().replaceAll('-','')});await f.db.query('COMMIT');
+  const third=await f.seed('stable fact',f.ns,'2024-02-01T00:00:00Z');
+  await f.queue(await f.classify([target,third]));const second=await f.claim();await f.ready(second);await f.apply(second);
+  const representations=await f.rows(f.db,'SELECT action_id,before_images FROM mem9_maintenance.receipts ORDER BY committed_at');
+  expect(representations[0].before_images[0]).toHaveProperty('namespace_id',f.ns);
+  expect(representations[1].before_images[0]).toHaveProperty('format','mem9-image-v1');
+  const cluster='arn:aws:ecs:ap-northeast-1:123456789012:cluster/mem9-on-aws-prod-Fixture';
+  const backend={taskArn:cluster.replace(':cluster/',':task/')+'/'+'a'.repeat(32),
+   taskDefinitionArn:'arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Fixture-Mem9RuntimeServer:1',
+   containers:['mnemo-server','qwen3-embed','llm-proxy'].map(name=>({name,imageDigest:'sha256:'+'e'.repeat(64)}))};
+  const setup={canary_started_at:started,baseline_receipts:[],canary_used:4,protected_baseline:[],backend_binding:backend,
+   validation_id:'a'.repeat(32),planner_oid:1,executor_oid:2};
+  const config={targets:[f.ns],generation:'a'.repeat(64),workerImage:'synthetic',sourceTag:'mem9-aaaaaaa',
+   acceptance:{sourceTree:'a'.repeat(40),coordinatorDigest:'b'.repeat(64)}};
+  const snapshot=await captureCanarySnapshot(f.db,config,{identity:{clusterArn:cluster}},setup);
+  expect(snapshot.verification).toMatchObject({receipts:2,changedRows:4,sourceRows:2});
+  await f.db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  try{expect(await verifyFrozenCanaryProjection(f.db,snapshot.projection,snapshot.verification)).toEqual({receipts:2,changedRows:4});}
+  finally{await f.db.query('ROLLBACK');}
+ },{provenance:false}));
+ it.each(['table_grant','column_grant','function_grant','constraint','trigger','volatility','recovery_constraint','history_constraint'])('PROV-007: provenance verification rejects %s drift',kind=>fixture(async f=>{
+  await expect(verifyProvenanceUpgrade(f.db)).resolves.toMatchObject({version:1});
+  const sql={table_grant:'GRANT SELECT ON mem9_maintenance.source_images TO execution_planner',
+   column_grant:'GRANT SELECT(image) ON mem9_maintenance.source_images TO execution_planner',
+   function_grant:'GRANT EXECUTE ON FUNCTION mem9_maintenance.load_image(TEXT,JSONB) TO mem9_maintenance_executor',
+   constraint:'ALTER TABLE mem9_maintenance.source_images DROP CONSTRAINT source_images_valid',
+   trigger:'ALTER TABLE mem9_maintenance.source_images DISABLE TRIGGER source_images_immutable',
+   volatility:'ALTER FUNCTION mem9_maintenance.load_image(TEXT,JSONB) STABLE',
+   recovery_constraint:'ALTER TABLE mem9_maintenance.source_recoveries DROP CONSTRAINT source_recoveries_invocation_check',
+   history_constraint:'ALTER TABLE mem9_maintenance.provenance_upgrade_history DROP CONSTRAINT provenance_upgrade_history_sql_hash_check'}[kind];
+  await f.db.query(sql);await expect(verifyProvenanceUpgrade(f.db)).rejects.toThrow('ProvenanceUpgradeCatalogMismatch');
+ }));
+ it('PROV-011: admission rejects incomplete images even with intact schema and upgrade history',()=>fixture(async f=>{
+  const ids=[await f.seed('A'),await f.seed('A')];await f.enable();
+  await f.queue(await f.classify(ids));const action=await f.claim();await f.ready(action);await f.apply(action);
+  await expect(verifyProvenanceUpgrade(f.db)).resolves.toMatchObject({version:1});
+  // Simulate a partial data restore, then restore the exact trigger catalog.
+  await f.db.query('ALTER TABLE mem9_maintenance.source_images DISABLE TRIGGER source_images_immutable');
+  await f.db.query('DELETE FROM mem9_maintenance.source_images WHERE namespace_id=$1',[f.ns]);
+  await f.db.query('ALTER TABLE mem9_maintenance.source_images ENABLE TRIGGER source_images_immutable');
+  await expect(verifyProvenanceUpgrade(f.db)).rejects.toThrow('ProvenanceUpgradeImageMismatch');
+ }));
+ it('PROV-009: a late image-size failure rolls back every row and receipt and releases the reservation into REVIEW',()=>fixture(async f=>{
+  const ids=[await f.seed('A'),await f.seed('A')],before=await Promise.all(ids.map(f.row));
+  await f.enable();await f.queue(await f.classify(ids));const a=await f.claim();await f.ready(a);
+  await f.db.query(`CREATE FUNCTION public.reject_synthetic_post_image() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+   BEGIN IF NEW.image->>'state'='deleted' THEN RAISE EXCEPTION USING ERRCODE='54000',MESSAGE='maintenance source image too large'; END IF;RETURN NEW;END $$;
+   CREATE TRIGGER synthetic_image_bound BEFORE INSERT ON mem9_maintenance.source_images FOR EACH ROW EXECUTE FUNCTION public.reject_synthetic_post_image();`);
+  expect(await f.apply(a)).toMatchObject({status:'review',reason:'source_image_bound'});
+  expect(await Promise.all(ids.map(f.row))).toEqual(before);
+  expect(await f.scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.receipts WHERE namespace_id=$1',[f.ns])).toBe(0);
+  expect((await f.budget()).every(w=>w.used.total===0&&w.reserved.total===0)).toBe(true);
+  expect((await f.claim()).status).toBe('idle');
+ }));
+ it('PROV-009: the image store accepts exactly one MiB and rejects the next byte',()=>fixture(async f=>{
+  const id=await f.seed('bounded fact');
+  const image=await f.scalar(f.db,`WITH base AS (SELECT to_jsonb(m)||jsonb_build_object('metadata',jsonb_build_object('source_turns','')) AS image
+    FROM public.memories m WHERE m.namespace_id=$1 AND m.id=$2)
+    SELECT jsonb_set(image,'{metadata,source_turns}',to_jsonb(repeat('x',1048576-octet_length(image::text)))) FROM base`,[f.ns,id]);
+  const reference=await f.scalar(f.db,'SELECT mem9_maintenance.store_images($1,$2)',[f.ns,JSON.stringify([image])]);
+  expect(await f.scalar(f.db,'SELECT octet_length(mem9_maintenance.load_image($1,$2)::text)',[f.ns,reference[0]])).toBe(1048576);
+  image.metadata.source_turns+='x';
+  await expect(f.db.query('SELECT mem9_maintenance.store_images($1,$2)',[f.ns,JSON.stringify([image])])).rejects.toMatchObject({code:'54000'});
+ }));
+ it.each([980000,990000])('PROV-009: complete %i-byte multibyte rows reserve replacement embedding space before queueing',size=>fixture(async f=>{
+  const ids=[await f.seed('A'),await f.seed('B',f.ns,'2024-02-01T00:00:00Z')];
+  await f.db.query("UPDATE memories SET metadata=jsonb_build_object('source_turns','') WHERE namespace_id=$1 AND id=$2",[f.ns,ids[0]]);
+  const base=await f.scalar(f.db,'SELECT octet_length(to_jsonb(m)::text) FROM memories m WHERE m.namespace_id=$1 AND m.id=$2',[f.ns,ids[0]]);
+  await f.db.query("UPDATE memories SET metadata=jsonb_build_object('source_turns',repeat('é',$3::integer)) WHERE namespace_id=$1 AND id=$2",[f.ns,ids[0],Math.floor((size-base)/2)]);
+  const before=await Promise.all(ids.map(f.row));await f.enable();
+  const proposal=await f.queue(await f.classify(ids));
+  if(size===990000){
+   expect(proposal).toMatchObject({status:'review',reason:'output_bound'});
+   expect(await Promise.all(ids.map(f.row))).toEqual(before);
+   expect(await f.scalar(f.db,'SELECT count(*)::int FROM mem9_maintenance.source_images')).toBe(0);
+  }else{
+   expect(proposal.status).toBe('queued');const action=await f.claim(),prepared=await f.prepare(action);
+   expect(prepared.status).toBe('embed');
+   await f.backend.query('SELECT mem9_maintenance.finish_preparation($1,$2,$3,$4,$5,$6::vector)',
+    [f.ns,action.action_id,action.lease_generation,prepared.owner_token,prepared.content_hash,JSON.stringify(Array(1024).fill(0.03125))]);
+   expect(await f.apply(action)).toMatchObject({status:'applied',changed_rows:2});
+   expect(await f.scalar(f.db,'SELECT max(octet_length(image::text)) FROM mem9_maintenance.source_images')).toBeLessThanOrEqual(1048576);
+   expect((await f.row(ids[0])).metadata.source_turns).toBe(before[0].metadata.source_turns);
+  }
+ }));
  it('EXEC-001 default closed and migration repeat preserves policy',()=>fixture(async f=>{
   await expect(f.claim()).rejects.toMatchObject({code:'55000'});
   const before=await f.rows(f.db,'SELECT * FROM mem9_maintenance.budget_policies ORDER BY scope');
@@ -314,7 +481,7 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
   expect(keeper.content).toContain('Shared fact from one agent.');expect(keeper.content).toContain('Shared fact from another agent.');
   expect(keeper.metadata.consolidation.sources.map(r=>r.agent_id).sort()).toEqual(['fixture','other-agent']);
   expect(donor).toMatchObject({state:'deleted',superseded_by:ids[0]});
- }));
+ },{provenance:false}));
  it('EXEC-015 missing chronology cannot authorize an archive',()=>fixture(async f=>{
   const a=await f.seed('A'),b=await f.seed('B');
   await f.db.query('UPDATE memories SET created_at=NULL WHERE id=$1',[a]);

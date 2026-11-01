@@ -1,5 +1,6 @@
 import {verifyCanaryReceiptChains,verifyProtectedCanaryBaseline,canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {validateProductionBackendBinding} from './production-artifacts.mjs';
+import {hydrateCanaryImages} from './consolidation-provenance.mjs';
 
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 export async function verifyFrozenCanaryProjection(db,projection,proof){
@@ -16,6 +17,7 @@ export async function verifyFrozenCanaryProjection(db,projection,proof){
     JOIN mem9_maintenance.actions a USING(namespace_id,action_id)
     ORDER BY r.committed_at,r.namespace_id,r.action_id`,[JSON.stringify(ids)])).rows;
   if(rows.length!==ids.length)fail();
+  await hydrateCanaryImages(db,rows);
   const terminal=new Map();
   for(const row of rows)for(const image of row.receipt.post_images){
     const key=image.namespace_id+'/'+image.id;
@@ -70,6 +72,7 @@ export async function captureCanarySnapshot(db,config,state,setup,{backend=setup
   const rows=(await db.query(`SELECT to_jsonb(r) AS receipt,to_jsonb(a) AS action FROM mem9_maintenance.receipts r
     JOIN mem9_maintenance.actions a USING(namespace_id,action_id) WHERE r.committed_at >= $1 AND r.namespace_id=ANY($2)
     ORDER BY r.committed_at,r.namespace_id,r.action_id LIMIT 21`,[setup.canary_started_at,config.targets])).rows;
+  await hydrateCanaryImages(db,rows);
   const current=[];
   for(const namespace of config.targets){
     const ids=[...new Set(rows.filter(r=>r.receipt.namespace_id===namespace).flatMap(r=>r.receipt.post_images.map(image=>image.id)))];

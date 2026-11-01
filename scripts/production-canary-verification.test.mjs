@@ -13,6 +13,27 @@ describe('real-data canary receipt verification',()=>{
   it('verifies lossless provenance, unchanged vectors and the actual committed post-image',()=>{
     const f=fixture();expect(verifyCanaryReceipt(f.receipt,f.action,f.current)).toEqual({changedRows:2,sourceRows:1});
   });
+  const referenced=()=>{
+    const f=fixture();
+    const links=f.receipt.before_images.map((row,index)=>({format:'mem9-image-v1',id:row.id,version:row.version,image_hash:String(index+1).repeat(64)}));
+    f.action.source_images=links.map((reference,index)=>({reference:structuredClone(reference),image:structuredClone(f.receipt.before_images[index])}));
+    f.action.output.metadata.consolidation.sources=links;
+    f.current=structuredClone(f.receipt.post_images);return f;
+  };
+  it('checks independently resolved source-link evidence against complete before-images',()=>{
+    const f=referenced();expect(verifyCanaryReceipt(f.receipt,f.action,f.current)).toEqual({changedRows:2,sourceRows:1});
+  });
+  it.each(['missing','link','namespace','version','content','embedding','shape'])('rejects corrupted reference proof %s',kind=>{
+    const f=referenced();
+    if(kind==='missing')delete f.action.source_images;
+    if(kind==='link')f.action.source_images[0].reference.image_hash='f'.repeat(64);
+    if(kind==='namespace')f.action.source_images[0].image.namespace_id='another';
+    if(kind==='version')f.action.source_images[0].image.version++;
+    if(kind==='content')f.action.source_images[0].image.content='substituted source';
+    if(kind==='embedding')f.action.source_images[0].image.embedding='[0,1,0]';
+    if(kind==='shape')f.action.source_images[0]=null;
+    expect(()=>verifyCanaryReceipt(f.receipt,f.action,f.current)).toThrow('ProductionCanaryReceiptMismatch');
+  });
   it.each(['content','embedding','provenance','protected','current','count'])('rejects corrupted %s evidence',kind=>{
     const f=fixture();
     if(kind==='content')f.action.output.content='Lost fact';

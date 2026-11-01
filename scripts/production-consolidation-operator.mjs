@@ -18,6 +18,7 @@ import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
 import {MERGE_POLICY_VERSION,MERGE_POLICY_SQL,mergePolicyBody} from './lib/consolidation-merge-policy.mjs';
 import {installPlannerUpgrade,verifyPlannerUpgrade} from './lib/consolidation-planner-upgrade.mjs';
+import {installProvenanceUpgrade,verifyProvenanceUpgrade,provenanceMergePolicyBody} from './lib/consolidation-provenance.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
@@ -49,7 +50,7 @@ function validModelRequests(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission','dailyModelRequests'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -251,7 +252,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -268,7 +269,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census','install-planner-upgrade'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -366,6 +367,10 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         // policy is installed only after promotion.
         const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('MergePolicyRequiresPromotion');
+        if(await scalar(db,"SELECT to_regclass('mem9_maintenance.provenance_upgrade_history') IS NOT NULL AS result")){
+          responseEvidence=await installProvenanceUpgrade(db,{invocation:request.invocation,repairLegacyQueue:true});
+          responseEvidence.mergePolicyVersion=3;
+        }else{
         {
           await db.query(`CREATE TABLE IF NOT EXISTS mem9_maintenance.merge_policy_history(
             version INTEGER NOT NULL CHECK(version>0),sql_hash TEXT NOT NULL CHECK(sql_hash~'^[a-f0-9]{64}$'),
@@ -389,6 +394,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           if(JSON.stringify(before)!==JSON.stringify(after))throw Error('MergePolicyGrantChanged');
           if((await db.query('SELECT mem9_runtime.acl_valid($1::oid) AS valid',[state.identity.runtimeRoleOid])).rows[0]?.valid!==true)throw Error('MergePolicyRuntimeAclInvalid');
           responseEvidence={mergePolicyVersion:MERGE_POLICY_VERSION,sqlHash,changed};
+        }
         }
       }else if(request.operation==='set-model-budget'){
         // Usage, reservations and breaker state are never reset; only the
@@ -424,6 +430,78 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         let resumed=false;
         if(control.paused&&expired.length&&open===0){await db.query("SELECT mem9_maintenance.resolve_model_uncertainty(NULL,'operator_resume')");resumed=true;}
         responseEvidence={resolved:expired.length,resumed,paused:control.paused&&!resumed,open};
+      }else if(request.operation==='requeue-provenance'){
+        await db.query('SELECT mem9_maintenance.lock_model()');
+        const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('ProvenanceRequeueRequiresPromotion');
+        await verifyPlannerUpgrade(db);
+        const previous=(await db.query(`SELECT generation,targets,anchors,has_more FROM mem9_maintenance.source_recovery_invocations
+          WHERE invocation=$1`,[request.invocation])).rows[0];
+        if(previous){
+          if(previous.generation!==config.generation||JSON.stringify(previous.targets)!==JSON.stringify(config.targets))throw Error('ProvenanceRecoveryInvocationMismatch');
+          responseEvidence={anchors:previous.anchors,hasMore:previous.has_more};
+        }else{
+        let anchors=0,hasMore=false;
+        for(const namespace of config.targets){
+          await db.query('SELECT mem9_maintenance.lock_queue($1)',[namespace]);
+          // A completed later page says nothing about an earlier input set.
+          // Pick one still-current unresolved set per anchor, preserving later
+          // decisions on the same inputs, including publications by other anchors.
+          const candidates=(await db.query(`SELECT w.memory_id,candidate.classification_id,w.first_seen_at::text AS first_seen_at
+            FROM mem9_maintenance.work w JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id
+            JOIN public.memory_namespaces live ON live.namespace_id=w.namespace_id AND live.status='active'
+            JOIN mem9_maintenance.namespace_state n ON n.namespace_id=w.namespace_id AND n.capture_enabled
+            JOIN LATERAL (
+              SELECT c.classification_id,CASE WHEN c.payload->'details'->>'reason'='snapshot_input_bound' OR r.reason='snapshot_input_bound' THEN 0 ELSE 1 END AS priority
+              FROM mem9_maintenance.publications p
+              JOIN mem9_maintenance.classifications c ON c.namespace_id=p.namespace_id AND c.classification_id=p.classification_id AND c.context_hash=n.context_hash
+              LEFT JOIN mem9_maintenance.execution_reviews r ON r.namespace_id=c.namespace_id AND r.classification_id=c.classification_id
+              CROSS JOIN LATERAL (
+                SELECT count(*) AS count,jsonb_agg(jsonb_build_object('id',cm.memory_id,'version',cm.revision,'fingerprint',cm.fingerprint) ORDER BY cm.memory_id) AS members,
+                  bool_and(coalesce(current.id IS NOT NULL AND current.state='active' AND current.memory_type<>'session'
+                    AND current.version=cm.revision AND encode(sha256(convert_to(to_jsonb(current)::text,'UTF8')),'hex')=cm.fingerprint,FALSE)) AS matches
+                FROM mem9_maintenance.classification_members cm
+                LEFT JOIN public.memories current ON current.namespace_id=cm.namespace_id AND current.id=cm.memory_id
+                WHERE cm.namespace_id=c.namespace_id AND cm.classification_id=c.classification_id
+              ) inputs
+              WHERE p.namespace_id=w.namespace_id AND p.memory_id=w.memory_id
+                AND ((c.result='REVIEW' AND c.payload->'details'->>'reason' IN ('snapshot_input_bound','model_input_bound'))
+                  OR r.reason IN ('snapshot_input_bound','input_bound','output_bound'))
+                AND inputs.count BETWEEN 1 AND 10 AND inputs.matches
+                AND inputs.members=c.payload->'members' AND inputs.members @> jsonb_build_array(jsonb_build_object('id',w.memory_id))
+                AND c.input_hash=mem9_maintenance.input_fingerprint(n.context_hash,inputs.members,w.memory_id)
+                AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications newer
+                  JOIN mem9_maintenance.publications published ON published.namespace_id=newer.namespace_id AND published.classification_id=newer.classification_id
+                  WHERE newer.namespace_id=c.namespace_id AND newer.input_hash=c.input_hash AND newer.classification_id<>c.classification_id
+                    AND (newer.created_at>=c.created_at OR (published.memory_id=p.memory_id AND published.lease_generation>p.lease_generation)))
+                AND NOT EXISTS(SELECT FROM mem9_maintenance.classifications executed
+                  JOIN mem9_maintenance.actions a ON a.namespace_id=executed.namespace_id AND a.classification_id=executed.classification_id
+                  WHERE executed.namespace_id=c.namespace_id AND executed.input_hash=c.input_hash)
+                AND NOT EXISTS(SELECT FROM mem9_maintenance.source_recoveries done WHERE done.namespace_id=p.namespace_id AND done.memory_id=p.memory_id AND done.classification_id=p.classification_id)
+              ORDER BY priority,c.created_at DESC,p.lease_generation DESC,c.classification_id LIMIT 1
+            ) candidate ON TRUE
+            WHERE w.namespace_id=$1 AND w.desired_generation=w.completed_generation
+              AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND m.state='active' AND m.memory_type<>'session'
+            ORDER BY candidate.priority,w.first_seen_at,w.memory_id
+            LIMIT 101 FOR UPDATE OF w`,[namespace])).rows;
+          hasMore||=candidates.length>100;
+          const selected=candidates.slice(0,100);
+          if(!selected.length)continue;
+          const record=JSON.stringify(selected);
+          await db.query(`INSERT INTO mem9_maintenance.source_recoveries(namespace_id,memory_id,classification_id,invocation)
+            SELECT $1,t.memory_id,t.classification_id,$3 FROM jsonb_to_recordset($2::jsonb) AS t(memory_id TEXT,classification_id TEXT,first_seen_at TEXT)`,[namespace,record,request.invocation]);
+          await db.query("SELECT count(mem9_maintenance.dirty_planner_input($1,t.id,clock_timestamp(),'audit')) FROM unnest($2::text[]) AS t(id)",[namespace,selected.map(row=>row.memory_id)]);
+          await db.query(`UPDATE mem9_maintenance.work w SET first_seen_at=least(w.first_seen_at,t.first_seen_at::timestamptz)
+            FROM jsonb_to_recordset($2::jsonb) AS t(memory_id TEXT,classification_id TEXT,first_seen_at TEXT)
+            WHERE w.namespace_id=$1 AND w.memory_id=t.memory_id`,[namespace,record]);
+          anchors+=selected.length;
+        }
+        // Record even an empty result. A lost response cannot let the same
+        // invocation expand its selection, consume another batch, or change counts.
+        await db.query(`INSERT INTO mem9_maintenance.source_recovery_invocations(invocation,generation,targets,anchors,has_more)
+          VALUES($1,$2,$3,$4,$5)`,[request.invocation,config.generation,JSON.stringify(config.targets),anchors,hasMore]);
+        responseEvidence={anchors,hasMore};
+        }
       }else if(['requeue-scans','requeue-inputs'].includes(request.operation)){
         // Recover only the requested failure class after its fix is installed.
         const inputRecovery=request.operation==='requeue-inputs';
@@ -459,7 +537,9 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('MergeRequeueRequiresPromotion');
         const signature="'mem9_maintenance.queue_classification(text,text)'::regprocedure";
-        if(await scalar(db,`SELECT prosrc AS result FROM pg_proc WHERE oid=${signature}`)!==mergePolicyBody())throw Error('MergeRequeueRequiresPolicy');
+        const hasProvenance=await scalar(db,"SELECT to_regclass('mem9_maintenance.provenance_upgrade_history') IS NOT NULL AS result");
+        if(hasProvenance)await verifyProvenanceUpgrade(db);
+        if(await scalar(db,`SELECT prosrc AS result FROM pg_proc WHERE oid=${signature}`)!==(hasProvenance?provenanceMergePolicyBody():mergePolicyBody()))throw Error('MergeRequeueRequiresPolicy');
         let anchors=0;
         for(const namespace of config.targets){
           // The planner's lock order: execution and model control, the

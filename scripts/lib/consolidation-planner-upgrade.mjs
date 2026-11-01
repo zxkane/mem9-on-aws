@@ -1,8 +1,9 @@
 // Versioned owner-installed maintenance functions. The base bootstrap SQL is sealed.
+import {installProvenanceUpgrade,verifyProvenanceUpgrade} from './consolidation-provenance.mjs';
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 
-export const PLANNER_UPGRADE_VERSION=2;
+export const PLANNER_UPGRADE_VERSION=3;
 // Keep the first release byte-for-byte: its immutable receipt already exists
 // in deployed databases and is checked before any later replacement.
 export const legacyPlannerUpgradeDefinitions=[
@@ -352,10 +353,10 @@ BEGIN
   RETURN result;
 END $$;`;
 
-export const plannerUpgradeDefinitions=legacyPlannerUpgradeDefinitions.map(definition=>
+export const snapshotPlannerUpgradeDefinitions=legacyPlannerUpgradeDefinitions.map(definition=>
   definition.signature==='mem9_maintenance.read_neighborhood(text,text,bigint)'
     ?{...definition,sql:snapshotReviewSql}:definition);
-plannerUpgradeDefinitions.push({signature:"mem9_maintenance.finish_neighborhood(text,text,bigint,text)",previousHash:"5e93ea544d3fa8fa83a7a5ec357e52a6dd67e14f2d579868768115b9da76a680",planner:true,argNames:["p_namespace","p_anchor","p_lease","p_result"],result:"jsonb",settings:["search_path=pg_catalog, pg_temp","TimeZone=UTC"],sql:String.raw`CREATE OR REPLACE FUNCTION mem9_maintenance.finish_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT,p_result TEXT) RETURNS JSONB
+snapshotPlannerUpgradeDefinitions.push({signature:"mem9_maintenance.finish_neighborhood(text,text,bigint,text)",previousHash:"5e93ea544d3fa8fa83a7a5ec357e52a6dd67e14f2d579868768115b9da76a680",planner:true,argNames:["p_namespace","p_anchor","p_lease","p_result"],result:"jsonb",settings:["search_path=pg_catalog, pg_temp","TimeZone=UTC"],sql:String.raw`CREATE OR REPLACE FUNCTION mem9_maintenance.finish_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT,p_result TEXT) RETURNS JSONB
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$
 DECLARE n mem9_maintenance.neighborhoods; w mem9_maintenance.work; payload JSONB; members JSONB; id TEXT; result JSONB; pending_change TIMESTAMPTZ; snapshot_review BOOLEAN;
 BEGIN
@@ -403,10 +404,165 @@ BEGIN
   RETURN result;
 END $$;
 `});
+const provenanceNeighborhoodSql=String.raw`CREATE OR REPLACE FUNCTION mem9_maintenance.read_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT) RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$
+DECLARE w RECORD; a public.memories; progress mem9_maintenance.planner_progress; policy mem9_maintenance.planner_policies;
+  chosen TEXT[]; observed_ids TEXT[]; candidate RECORD; members JSONB; cached JSONB; phase TEXT:='exact'; next_phase TEXT;
+  last_id TEXT; last_distance DOUBLE PRECISION; ranked_distances DOUBLE PRECISION[]:=ARRAY[NULL::double precision];
+  limit_message TEXT; count_neighbors INTEGER:=0; prompt_bytes BIGINT; result JSONB; forced_result TEXT;
+BEGIN
+  PERFORM mem9_maintenance.planner_guard(p_namespace);
+  SELECT * INTO policy FROM mem9_maintenance.planner_policies WHERE namespace_id=p_namespace;
+  SELECT * INTO w FROM mem9_maintenance.work WHERE namespace_id=p_namespace AND memory_id=p_anchor FOR UPDATE;
+  IF NOT FOUND OR p_lease IS NULL OR w.lease_generation<>p_lease OR w.lease_until IS NULL
+    OR w.lease_until<=clock_timestamp() OR w.claimed_generation<=w.completed_generation THEN
+    RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='invalid planner lease'; END IF;
+  IF w.desired_generation<>w.claimed_generation THEN
+    PERFORM mem9_maintenance.defer_neighborhood(p_namespace,p_anchor,p_lease,'inputs_changed');
+    RETURN jsonb_build_object('status','retry');
+  END IF;
+  SELECT * INTO progress FROM mem9_maintenance.planner_progress WHERE namespace_id=p_namespace AND memory_id=w.memory_id;
+  IF FOUND AND progress.expected_generation=w.claimed_generation THEN phase:=progress.phase;
+  ELSE
+    IF FOUND THEN
+      INSERT INTO mem9_maintenance.planner_deferrals AS d(namespace_id,memory_id,reason,resets) VALUES(p_namespace,w.memory_id,'generation_reset',1)
+        ON CONFLICT(namespace_id,memory_id) DO UPDATE SET resets=d.resets+1;
+    END IF;
+    progress.after_id:=NULL; progress.after_distance:=NULL;
+    DELETE FROM mem9_maintenance.planner_progress WHERE namespace_id=p_namespace AND memory_id=w.memory_id;
+  END IF;
+  SELECT * INTO a FROM public.memories WHERE namespace_id=p_namespace AND id=w.memory_id AND state='active' AND memory_type<>'session';
+  chosen:=ARRAY[w.memory_id::text];
+  observed_ids:=chosen;
+  IF FOUND THEN
+    IF phase='exact' THEN
+      FOR candidate IN SELECT m.id FROM public.memories m WHERE m.namespace_id=p_namespace AND m.state='active' AND m.memory_type<>'session'
+        AND md5(m.content)=md5(a.content) AND m.content=a.content AND m.id<>a.id AND (progress.after_id IS NULL OR m.id>progress.after_id)
+        AND mem9_maintenance.material_context(to_jsonb(m)-'embedding')=mem9_maintenance.material_context(to_jsonb(a)-'embedding')
+        ORDER BY m.id LIMIT 10 LOOP
+        observed_ids:=array_append(observed_ids,candidate.id);
+        count_neighbors:=count_neighbors+1;
+        IF count_neighbors<=9 THEN chosen:=array_append(chosen,candidate.id); last_id:=candidate.id; END IF;
+      END LOOP;
+      IF count_neighbors>9 THEN next_phase:='exact';
+      ELSIF count_neighbors>0 OR progress.after_id IS NOT NULL THEN next_phase:='vector'; last_id:=NULL;
+      ELSE phase:='vector'; END IF;
+    END IF;
+    IF phase='vector' AND a.embedding IS NOT NULL THEN
+      count_neighbors:=0;
+      FOR candidate IN WITH scoped AS MATERIALIZED (
+        SELECT m.id,m.embedding FROM public.memories m WHERE m.namespace_id=p_namespace AND m.state='active' AND m.memory_type<>'session'
+          AND m.id<>a.id AND (m.content<>a.content OR mem9_maintenance.material_context(to_jsonb(m)-'embedding')<>mem9_maintenance.material_context(to_jsonb(a)-'embedding')) AND m.embedding IS NOT NULL
+      ), distances AS (SELECT id,embedding OPERATOR(public.<=>) a.embedding AS distance FROM scoped)
+      SELECT id,distance FROM distances WHERE distance<=1-(policy.policy->>'similarity')::float8
+        AND (progress.after_id IS NULL OR (distance,id)>(progress.after_distance,progress.after_id)) ORDER BY distance,id LIMIT 10 LOOP
+        observed_ids:=array_append(observed_ids,candidate.id);
+        count_neighbors:=count_neighbors+1;
+        IF count_neighbors<=9 THEN
+          chosen:=array_append(chosen,candidate.id); ranked_distances:=array_append(ranked_distances,candidate.distance);
+          last_id:=candidate.id; last_distance:=candidate.distance;
+        END IF;
+      END LOOP;
+      IF count_neighbors>9 THEN next_phase:='vector'; END IF;
+    END IF;
+  END IF;
+  -- Publish reverse dependencies before hydration, including the lookahead and
+  -- candidates later dropped for size. They survive blocked/retry outcomes.
+  INSERT INTO mem9_maintenance.planner_dependencies(namespace_id,memory_id,anchor_id)
+    SELECT p_namespace,id,w.memory_id FROM unnest(observed_ids) id ON CONFLICT DO NOTHING;
+  LOOP
+  BEGIN
+    SELECT coalesce(jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint,'memory',memory-'embedding') ORDER BY memory_id),'[]')
+      INTO members FROM mem9_maintenance.read_planner_memories(p_namespace,chosen);
+    IF octet_length(members::text)>1048576 THEN
+      RAISE EXCEPTION USING ERRCODE='54000',MESSAGE='maintenance input too large'; END IF;
+    EXIT;
+  EXCEPTION WHEN program_limit_exceeded THEN
+    GET STACKED DIAGNOSTICS limit_message=MESSAGE_TEXT;
+    IF limit_message<>'maintenance input too large' THEN RAISE; END IF;
+    IF cardinality(chosen)>2 THEN
+      chosen:=chosen[1:cardinality(chosen)-1]; next_phase:=phase; last_id:=chosen[cardinality(chosen)];
+      IF phase='vector' THEN last_distance:=ranked_distances[cardinality(chosen)]; END IF;
+      CONTINUE;
+    END IF;
+    -- A minimal oversized window is reviewable through immutable references.
+    -- Hash complete rows under the same ordered SHARE locks; no source content
+    -- is truncated, transported to the worker, or submitted to a model.
+    SELECT coalesce(jsonb_agg(jsonb_build_object('id',m.id,'version',m.version,
+      'fingerprint',encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex'),
+      'memory',NULL) ORDER BY m.id),'[]') INTO members
+      FROM (SELECT r.* FROM public.memories r WHERE r.namespace_id=p_namespace AND r.id=ANY(chosen)
+        AND r.state='active' AND r.memory_type<>'session' ORDER BY r.id FOR SHARE) m;
+    forced_result:='REVIEW';
+    EXIT;
+  END;
+  END LOOP;
+  IF a.id IS NOT NULL AND (jsonb_array_length(members)<>cardinality(chosen) OR NOT EXISTS(
+    SELECT FROM jsonb_array_elements(members) m WHERE m->>'id'=a.id
+      AND m->>'fingerprint'=encode(sha256(convert_to(to_jsonb(a)::text,'UTF8')),'hex')) OR
+    (phase='vector' AND EXISTS(SELECT FROM public.memories m WHERE m.namespace_id=p_namespace AND m.id=ANY(chosen) AND m.id<>a.id
+      AND (m.embedding OPERATOR(public.<=>) a.embedding) IS DISTINCT FROM ranked_distances[array_position(chosen,m.id::text)]))) THEN
+    -- A delete/update between ranking and hydration cannot advance a cursor
+    -- built from a different anchor or a missing last neighbor.
+    UPDATE mem9_maintenance.work SET lease_until=NULL,attempts=greatest(0,attempts-1),due_at=clock_timestamp()+interval '1 second'
+      WHERE namespace_id=p_namespace AND memory_id=w.memory_id;
+    RETURN jsonb_build_object('status','retry');
+  END IF;
+  -- Leave room for source-preserving output before classifying an exact group.
+  -- This splits discovery only; the existing queue still computes the actual
+  -- immutable action/output bounds, including a pair larger than this target.
+  WHILE octet_length(members::text)>256000 AND cardinality(chosen)>2 LOOP
+    chosen:=chosen[1:cardinality(chosen)-1]; next_phase:=phase; last_id:=chosen[cardinality(chosen)];
+    SELECT coalesce(jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint,'memory',memory-'embedding') ORDER BY memory_id),'[]')
+      INTO members FROM mem9_maintenance.read_planner_memories(p_namespace,chosen);
+    IF phase='vector' THEN last_distance:=ranked_distances[cardinality(chosen)]; END IF;
+  END LOOP;
+  prompt_bytes:=mem9_maintenance.model_request_bytes(members);
+  -- The provider limit cannot block deterministic KEEP/exact MERGE work. For
+  -- model windows, shrink discovery (before any proposal) and keep the cursor
+  -- at the last included neighbor. An oversized pair becomes explicit review,
+  -- never a truncated prompt or a permanent obstacle to subsequent neighbors.
+  WHILE prompt_bytes>32768 AND jsonb_array_length(members)>2 AND
+    (SELECT count(DISTINCT value->'memory'->>'content') FROM jsonb_array_elements(members))>1 LOOP
+    chosen:=chosen[1:cardinality(chosen)-1];
+    SELECT coalesce(jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint,'memory',memory-'embedding') ORDER BY memory_id),'[]')
+      INTO members FROM mem9_maintenance.read_planner_memories(p_namespace,chosen);
+    next_phase:=phase; last_id:=chosen[cardinality(chosen)];
+    IF phase='vector' THEN last_distance:=ranked_distances[cardinality(chosen)]; END IF;
+    prompt_bytes:=mem9_maintenance.model_request_bytes(members);
+  END LOOP;
+  IF prompt_bytes>32768 AND jsonb_array_length(members)>1 AND
+    (SELECT count(DISTINCT value->'memory'->>'content') FROM jsonb_array_elements(members))>1 THEN forced_result:='REVIEW'; END IF;
+  IF octet_length(members::text)>1048576 OR (jsonb_array_length(members)>0 AND NOT members @> jsonb_build_array(jsonb_build_object('id',w.memory_id))) THEN
+    UPDATE mem9_maintenance.work SET lease_until=NULL,attempts=3,reason='lease_exhausted' WHERE namespace_id=p_namespace AND memory_id=w.memory_id;
+    INSERT INTO mem9_maintenance.planner_deferrals(namespace_id,memory_id,reason) VALUES(p_namespace,w.memory_id,'input_bound')
+      ON CONFLICT(namespace_id,memory_id) DO UPDATE SET reason='input_bound';
+    RETURN jsonb_build_object('status','blocked'); END IF;
+  -- Reuse the already SHARE-locked snapshots, preserving the legacy cache's
+  -- missing-member check. Keep the exact cached payload/validity at publication.
+  IF jsonb_array_length(members)=cardinality(chosen) OR (jsonb_array_length(members)=0 AND cardinality(chosen)=1) THEN
+    SELECT jsonb_build_object('classification_id',c.classification_id,'payload',c.payload) INTO cached
+      FROM mem9_maintenance.classifications c WHERE c.namespace_id=p_namespace AND c.valid_until>clock_timestamp()
+        AND NOT coalesce(forced_result IS NULL AND c.result='REVIEW' AND c.payload->'details'->>'reason' IN ('snapshot_input_bound','model_input_bound'),FALSE)
+        AND c.input_hash=mem9_maintenance.input_fingerprint(policy.context_hash,
+          (SELECT coalesce(jsonb_agg(value-'memory' ORDER BY value->>'id'),'[]') FROM jsonb_array_elements(members)),w.memory_id)
+      ORDER BY c.valid_until DESC LIMIT 1;
+  END IF;
+  IF cached IS NOT NULL AND NOT EXISTS(SELECT FROM jsonb_array_elements(members) m WHERE m->'memory'='null'::jsonb) THEN
+    forced_result:=NULL; END IF;
+  INSERT INTO mem9_maintenance.neighborhoods(namespace_id,memory_id,lease_generation,claimed_generation,context_hash,phase,members,cached,forced_result,next_phase,after_id,after_distance)
+    VALUES(p_namespace,w.memory_id,w.lease_generation,w.claimed_generation,policy.context_hash,phase,members,cached,forced_result,next_phase,last_id,last_distance);
+  result:=jsonb_build_object('status','leased','anchor_id',w.memory_id,'lease_generation',w.lease_generation,
+    'phase',phase,'members',members,'cached',cached,'forced_result',forced_result,'lease_until',w.lease_until,'context_hash',policy.context_hash,'model_contract',policy.policy->'model');
+  RETURN result;
+END $$;`;
+export const plannerUpgradeDefinitions=snapshotPlannerUpgradeDefinitions.map(d=>d.signature==='mem9_maintenance.read_neighborhood(text,text,bigint)'?{...d,sql:provenanceNeighborhoodSql}:d);
+export const SNAPSHOT_PLANNER_UPGRADE_HASH=hash(snapshotPlannerUpgradeDefinitions.map(d=>d.sql).join('\n'));
 export const LEGACY_PLANNER_UPGRADE_HASH=hash(legacyPlannerUpgradeDefinitions.map(d=>d.sql).join('\n'));
 export const PLANNER_UPGRADE_HASH=hash(plannerUpgradeDefinitions.map(d=>d.sql).join('\n'));
 const releases=[{version:1,definitions:legacyPlannerUpgradeDefinitions,hash:LEGACY_PLANNER_UPGRADE_HASH},
-  {version:2,definitions:plannerUpgradeDefinitions,hash:PLANNER_UPGRADE_HASH}];
+  {version:2,definitions:snapshotPlannerUpgradeDefinitions,hash:SNAPSHOT_PLANNER_UPGRADE_HASH},
+  {version:3,definitions:plannerUpgradeDefinitions,hash:PLANNER_UPGRADE_HASH}];
 const fail=()=>{throw Error('PlannerUpgradeCatalogMismatch');};
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 
@@ -453,7 +609,7 @@ async function history(db){
       AND t.tgqual IS NULL AND t.tgnargs=0 AND t.tgattr::text='' AND octet_length(t.tgargs)=0) AS result
     FROM pg_class c WHERE c.oid='mem9_maintenance.planner_upgrade_history'::regclass`);
   if(!valid)fail();
-  const rows=(await db.query('SELECT version,sql_hash,invocation FROM mem9_maintenance.planner_upgrade_history ORDER BY version LIMIT 3')).rows;
+  const rows=(await db.query('SELECT version,sql_hash,invocation FROM mem9_maintenance.planner_upgrade_history ORDER BY version LIMIT 4')).rows;
   if(!rows.length||rows.length>releases.length||rows.some((row,index)=>row.version!==releases[index].version||
     row.sql_hash!==releases[index].hash||!/^[a-f0-9]{32}$/.test(row.invocation)))fail();
   return rows;
@@ -461,6 +617,7 @@ async function history(db){
 
 /** Read back both the immutable receipt and live functions; a receipt alone is insufficient. */
 export async function verifyPlannerUpgrade(db){
+  await verifyProvenanceUpgrade(db);
   if((await history(db))?.length!==releases.length)fail();
   for(const definition of plannerUpgradeDefinitions)
     if(functionState(await catalog(db,definition),definition)!=='current')fail();
@@ -483,6 +640,7 @@ export async function installPlannerUpgrade(db,{invocation}){
       return {changed:false,version:PLANNER_UPGRADE_VERSION,sqlHash:PLANNER_UPGRADE_HASH};
     }
     for(const release of releases.slice(receipts?.length??0)){
+      if(release.version===3)await installProvenanceUpgrade(db,{invocation});
       const previous=releases[release.version-2]?.definitions??[];
       // Validate the entire installed prefix and every newly replaced base
       // routine before changing any function. Each receipt remains immutable.

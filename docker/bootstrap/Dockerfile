@@ -50,6 +50,7 @@ COPY scripts/production-consolidation-operator.mjs /bootstrap/operator/scripts/p
 COPY scripts/lib/production-canary-continuation.mjs /bootstrap/operator/scripts/lib/production-canary-continuation.mjs
 COPY scripts/lib/consolidation-merge-policy.mjs /bootstrap/operator/scripts/lib/consolidation-merge-policy.mjs
 COPY scripts/lib/consolidation-planner-upgrade.mjs /bootstrap/operator/scripts/lib/consolidation-planner-upgrade.mjs
+COPY scripts/lib/consolidation-provenance.mjs /bootstrap/operator/scripts/lib/consolidation-provenance.mjs
 COPY scripts/lib/production-canary-compatibility.mjs /bootstrap/operator/scripts/lib/production-canary-compatibility.mjs
 COPY scripts/lib/production-canary-snapshot.mjs /bootstrap/operator/scripts/lib/production-canary-snapshot.mjs
 COPY scripts/lib/production-canary-paused-audit.mjs /bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs

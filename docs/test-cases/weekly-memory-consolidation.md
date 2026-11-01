@@ -593,3 +593,20 @@ cache order and host load affect timing, so there is no timing-based pass/fail.
 | PLAN-030 | Upgrade an installed first-version planner, repeat, roll back, or encounter catalog drift | Preserve the original immutable receipt; append the new receipt atomically, verify all live routines and grants, and reject unrelated program-limit errors |
 | PLAN-031 | Recover exhausted input-bound work after installing the fix | Requeue only active non-session anchors with the matching deferral and no live lease; preserve age, namespace boundaries, other deferrals and the atomic 1,000-anchor recovery cap |
 | PLAN-032 | An oversized window matches a valid cached MERGE, KEEP or REVIEW | Keep the forced review, preserve the immutable cached payload, attach a durable snapshot-size review without queueing an action, and complete publication without conflicting-cache retries |
+
+### Large provenance through planning, execution and recovery
+
+| ID | Scenario | Expected evidence |
+|---|---|---|
+| PROV-001 | Two short facts each carry a large synthetic source transcript | A compact model window retains full-row fingerprints, excludes only provenance fields, and reaches classification within the existing request limit |
+| PROV-002 | A projected member changes its source metadata before publication or apply | The original full-row fence rejects the stale result; no partial memory write occurs |
+| PROV-003 | A valid large-provenance merge is queued and executed | Bounded references resolve to complete original rows; one commit preserves content, tags, provenance, embedding, exact accounting and receipts; retry changes nothing |
+| PROV-004 | A merged survivor participates in another merge | Source history grows through verified references without recursively copying previous snapshots; every original image remains recoverable |
+| PROV-005 | Reference is missing, altered, from another namespace, or requested by a foreign/revoked caller | Reject resolution and execution without exposing another namespace or mutating memory; ordinary workers cannot edit images |
+| PROV-006 | Undo a reference-based receipt, including mixed historical inline/reference chains | Exact original data is restored only while post-images match, stale undo rejects and protected semantic suppressions continue to prevent automatic reapplication |
+| PROV-007 | Install, repeat, roll back or drift the provenance upgrade | Preserve old immutable receipts and sealed migration digest; verify table, trigger, function, ownership and grant contracts atomically; changing provenance implementation bytes changes the release coordinator digest |
+| PROV-008 | Recover a previous size-derived REVIEW after upgrade | Reclassify the eligible current inputs despite the old size-review cache, skip active leases and unrelated reviews, and enforce the configured namespace and recovery bounds |
+| PROV-009 | An individual source image, actual fact input or merged output still exceeds its bound | Retain explicit review without truncation, unbounded storage, or a retry loop |
+| PROV-010 | Production-shaped canary verification reads old and reference-based receipts | Resolve references with exact namespace/digest checks before checking content conservation, receipt chains, protected rows and foreground edits; emit no private payload |
+| PROV-011 | A partial restore leaves catalog/history intact but loses referenced images | Admission rejects missing or mismatched images across actions, receipts and retained provenance; TRUNCATE and recovery/history constraint drift are also rejected |
+| PROV-012 | Completed pagination ends in KEEP after an earlier size-derived review, or the recovery invocation is replayed | Recover the unresolved current input set; unrelated later pages do not supersede it, and replay returns the original batch without consuming more capacity |

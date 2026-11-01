@@ -627,6 +627,53 @@ The existing operator may requeue exhausted input-bound anchors only after the
 current upgrade has been verified, within the configured namespaces and the
 bounded recovery cap.
 
+### Bounded references for large provenance
+
+Large source transcripts and nested `consolidation.sources` can exceed an input
+or action limit even when the facts themselves are short. The provenance protocol
+keeps complete immutable row images in a namespace-bound maintenance table,
+addressed by the SHA-256 of PostgreSQL's canonical JSON representation. Each
+image remains limited to 1 MiB and each action to ten members. References retain
+the member ID and version; internal resolution verifies the namespace, digest
+and member identity. Workers receive no direct table access, and missing or
+mismatched images fail closed. Historical inline images remain readable.
+
+The planner projects only the known provenance fields out of the model input:
+`metadata.source_turns`, `metadata.source_seqs`, and
+`metadata.consolidation.sources`. Content, protection flags, source/agent/app
+identity, other metadata and temporal context remain available. Full original
+rows still supply fingerprints and publication fences. The model request limit
+and the bound on serialized worker payloads stay unchanged. Individually
+oversized rows and genuinely oversized model inputs still produce review.
+
+Queued action members, before/post images and newly merged source histories use
+immutable references. Existing input checks, ordered locks, exact row/version
+comparisons, mutation budgets and the single atomic commit remain authoritative.
+Images for an applied result and its receipt commit with the memory changes.
+Undo resolves the original images, checks the exact post-images and retains
+semantic suppressions; normalization must not turn a rejected or undone merge
+back into an automatic action. A namespace owner can resolve provenance through
+an authorized accessor. Ordinary memory writes and unrelated metadata keep
+their existing representation.
+
+The owner installs and verifies this storage/function upgrade without editing
+the sealed bootstrap migrations. Preview and production install the same code;
+catalog drift, unexpected ownership/grants or an incomplete image store block
+admission. The release coordinator digest includes the provenance implementation
+bytes, so changes invalidate prior release evidence. Existing canary readers resolve and verify references before applying
+their content-conservation checks, including chains with old and new receipts.
+
+A bounded operator recovery revisits only size-limited classifications with no
+executable action, within the configured namespaces and without stealing live
+leases. A size-derived cached REVIEW cannot prevent a newly admissible window
+from being classified. Recovery considers unresolved current input sets across
+completed pages; a later singleton KEEP does not supersede an earlier pair.
+Each invocation retains its original batch and result on retry, with at most
+100 anchors per namespace. Ordinary model reviews, protected records, operator
+suppression and genuine context conflicts retain their existing restrictions.
+Recovery and periodic execution report actual classifications and commits;
+neither a requeue nor a completed REVIEW is counted as a merge.
+
 For approximately 17,000 active memories, the proposed steady-state envelope is
 up to 3,000 changed rows/day, including at most 1,000 rewrites and 2,000 soft
 deletions, subject to the shared total and stage limits. This is materially

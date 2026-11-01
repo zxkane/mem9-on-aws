@@ -16,6 +16,9 @@ export const SCOPED_TABLES = [
   "ingest_jobs",
   "upload_tasks",
   "memories",
+  "source_images",
+  "source_recoveries",
+  "source_recovery_invocations",
   "sessions",
 ];
 
@@ -362,6 +365,11 @@ export function statementHash(text) {
 }
 
 const SCOPED_COVERAGE = new Map([
+  ['scripts/lib/consolidation-provenance.mjs',[
+    'scripts/consolidation-execution.postgres.test.mjs',
+    'scripts/consolidation-planner.postgres.test.mjs',
+    'scripts/production-consolidation-operator.postgres.test.mjs',
+  ]],
   ...['scripts/production-consolidation-operator.mjs','scripts/lib/production-canary-paused-audit.mjs',
     'scripts/lib/production-canary-snapshot.mjs','scripts/lib/production-canary-continuation.mjs'].map(owner=>[owner,[
     'scripts/production-consolidation-operator.postgres.test.mjs',
@@ -407,7 +415,7 @@ export function classifyStatement(statement, trustedExceptions = []) {
   // These definitions execute at runtime through SECURITY DEFINER. Their
   // location in a migration is not an operator-only authorization boundary.
   // Review the complete routine hash, predicates, grants and real DB tests.
-  if (["docker/bootstrap/runtime-contract.sql", "docker/bootstrap/migrations/004_consolidation_storage.sql", "docker/bootstrap/migrations/005_consolidation_execution.sql", "docker/bootstrap/migrations/006_consolidation_planner.sql", "docker/bootstrap/migrations/007_consolidation_scheduling.sql", "scripts/lib/consolidation-planner-upgrade.mjs"].includes(owner) &&
+  if (["docker/bootstrap/runtime-contract.sql", "docker/bootstrap/migrations/004_consolidation_storage.sql", "docker/bootstrap/migrations/005_consolidation_execution.sql", "docker/bootstrap/migrations/006_consolidation_planner.sql", "docker/bootstrap/migrations/007_consolidation_scheduling.sql", "scripts/lib/consolidation-planner-upgrade.mjs", "scripts/lib/consolidation-provenance.mjs"].includes(owner) &&
     /^CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b/i.test(text)) {
     const reviewed = trustedExceptions.find(exception =>
       exception.owner === owner && exception.statement_sha256 === statementHash(text));

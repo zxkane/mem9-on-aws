@@ -571,6 +571,21 @@ still keep writers stopped through namespace cutover.
   during production preparation/readmission and preview setup. The sealed base
   migration and credential-cutover digests remain unchanged. Unknown routine or
   permission drift prevents installation and worker admission.
+- Planner upgrade v3 installs private immutable provenance storage in the
+  existing database. Full-row images are namespace/digest-bound and limited to
+  1 MiB each; action members, receipts and new source lists use verified image
+  references with legacy inline compatibility. Model projection removes only
+  source transcripts, source sequence lists and nested consolidation sources;
+  classification fingerprints still cover complete original rows. Post-image
+  preflight reserves room for replacement embeddings and audit fields, and the
+  atomic commit checks actual complete images again. Undo and canary checks
+  hydrate references before proving exact row conservation. Upgrade admission
+  verifies both the catalog and retained reference completeness.
+  `requeue-provenance` recovers unresolved size-derived inputs through the normal
+  planner in invocation-stable batches of at most 100 anchors per namespace.
+  Recovery preserves age and namespace/lease fences; a later unrelated planner
+  page does not supersede an earlier input set. Review recovery is not evidence
+  that a merge occurred.
 - Decision and report artifacts carry stage/namespace identity and belong in
   owner-only files. JSON ID selections are checked against that binding; plain
   ID lists remain limited to the invocation's authorized namespace. Apply

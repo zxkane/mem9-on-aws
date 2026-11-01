@@ -559,6 +559,175 @@
         "scripts/run-consolidation-planner-integration.sh",
         "scripts/consolidation-planner-upgrade.test.mjs"
       ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-planner-upgrade.mjs",
+      "statement_sha256": "256e0849bc5530b41ceaaac171d2a8acd6914a83324c844adbc4559f0874d37c",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine read_neighborhood; complete SQL, caller path and grants reviewed.",
+      "rationale": "The planner guard binds session login capability and namespace membership; every memory alias, cursor, lease, cache and publication input remains namespace-bound. Version 3 uses bounded provenance-free model projection with original complete-row fingerprints and excludes only admissible size-derived REVIEW cache entries. Oversized facts still force explicit REVIEW; publication independently verifies the server neighborhood.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "dd37a8e3d7f45f971c0dbfd32fe8975fa8a61ae9c85bf8694f29da98962d3b0e",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine store_images; complete SQL, caller path and grants reviewed.",
+      "rationale": "Owner-only image insertion binds both namespace and digest, validates original row namespace/identity/version and the one-MiB bound, and rejects conflicting stored images. Only guarded classification/apply routines call it; worker roles have no table or resolver grants.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "cadeef6733eef06a509c92f31efe20fe27a41e9070fbecd90217203ff5ff99c6",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine load_image; complete SQL, caller path and grants reviewed.",
+      "rationale": "The private resolver uses namespace plus digest, validates reference format/identity/version and rehashes the full image. Legacy inline images must carry the same namespace. Worker calls are denied; the separate operator accessor requires current registered namespace-owner authority.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "10dd8d5f99fbeb220ad09fe62c3590b6e52b6d32fc07e09b86541c7004e87086",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine verify_source_images; complete SQL, caller path and grants reviewed.",
+      "rationale": "The schema owner audits every retained action, receipt, memory provenance and stored historical source chain during upgrade admission. Each reference is resolved within its originating namespace and rehashed. The read-only whole-tenant audit is unavailable to worker/operator logins and returns no payload.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "9daf8469b364d8fd9b540faa21c25dc0c71e81bd39454cd603d5f8ef66ecc969",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine read_planner_memories; complete SQL, caller path and grants reviewed.",
+      "rationale": "Planner capability and current namespace membership are checked before bounded memory reads. Every alias is restricted by namespace and requested IDs, active/non-session eligibility and shared row locks. Only transcript and nested source fields are removed from model projection; fingerprints cover the complete original rows.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "bfca0cc1570288884bea54f761cc323dd749fb9b7890e1ea63df4dd711c786a9",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine queue_classification; complete SQL, caller path and grants reviewed.",
+      "rationale": "The execution guard binds planner identity and namespace before scoped classification, policy and memory lookups. Original-row fingerprints, protected context, size bounds and suppression checks precede private image storage. Action/source references preserve namespace-bound complete images without direct worker DML.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "ae19be194dd0b44370dd997ef27d2e8530c0120d1fc790ed94b0a0ef66acbd27",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine action_inputs_valid; complete SQL, caller path and grants reviewed.",
+      "rationale": "The owner-only execution helper reads the namespace-bound action, validates current context/expiry/suppression and resolves private images in that namespace. Each current memory row is locked by namespace and ID and compared to the complete saved image; guarded claim/apply callers retain authorization.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "31246e0d3029834226ce630ad428b21a000e7fd8597128e6ffd5da8da716512e",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine apply_action; complete SQL, caller path and grants reviewed.",
+      "rationale": "Backend authorization, generation and namespace queue locks precede reference hydration and exact before-image validation. Atomic writes use namespace and ID predicates; complete post-images, receipt and accounting commit together. A late bound failure rolls back the mutation and reauthorizes before releasing the reservation into review.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "91f35c057129b7209f63fc954d374825e3847a324b0de08d2c2766635f0c4c39",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine undo_action; complete SQL, caller path and grants reviewed.",
+      "rationale": "Registered operator namespace-owner authority and execution guards protect undo. Before/post references resolve in the same namespace; every current row must match its full post-image under lock. Scoped restoration, immutable undo receipt and hydrated semantic suppression hashes commit atomically.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-provenance.mjs",
+      "statement_sha256": "3709ae3620cf671d19702dedd6f85b4be0d2fce7c2fda60e3156fda2f2ba294e",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-installed provenance protocol routine publish_classification; complete SQL, caller path and grants reviewed.",
+      "rationale": "Planner authorization and a matching unexpired namespace work lease precede every scoped member lock and complete fingerprint check. Superseding an old size review requires the actual same-lease server neighborhood, exact context/member set and no forced/cached result; caller flags alone do not grant supersession.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "statement_sha256": "22b63a1972a4324d03b32333b5be4a38b81df1bbcc7b6ee112164097691dd008",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Production recovery journal statement; exact owner admission and namespace/target binding reviewed.",
+      "rationale": "The schema-owner recovery operation requires the matching promoted production generation, verified upgrade and configured active namespaces under model/setup and namespace queue locks. Journal inserts use only the bounded server-selected namespace input set. Invocation receipts bind exact generation/targets and return the original aggregate result on retry, including empty batches. Private tables expose no memory payload and have no worker/operator grants.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "statement_sha256": "3941442bc7b2c894b53863dc55ed3b186f59b692222ff23fa903535970ff1af7",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Production recovery journal statement; exact owner admission and namespace/target binding reviewed.",
+      "rationale": "The schema-owner recovery operation requires the matching promoted production generation, verified upgrade and configured active namespaces under model/setup and namespace queue locks. Journal inserts use only the bounded server-selected namespace input set. Invocation receipts bind exact generation/targets and return the original aggregate result on retry, including empty batches. Private tables expose no memory payload and have no worker/operator grants.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "statement_sha256": "d299c77dfc35e68ab5bd746e4a0cb097aeba087d051408bf28825b791a3a287b",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Production recovery journal statement; exact owner admission and namespace/target binding reviewed.",
+      "rationale": "The schema-owner recovery operation requires the matching promoted production generation, verified upgrade and configured active namespaces under model/setup and namespace queue locks. Journal inserts use only the bounded server-selected namespace input set. Invocation receipts bind exact generation/targets and return the original aggregate result on retry, including empty batches. Private tables expose no memory payload and have no worker/operator grants.",
+      "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
     }
   ]
 }

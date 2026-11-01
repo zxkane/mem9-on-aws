@@ -26,10 +26,16 @@ const javascript = (source, owner = "scripts/example.mjs") =>
   extractSqlStatements({ kind: "javascript", owner, source });
 
 describe("memory namespace query inventory", () => {
-  it('requires exact authorization review for owner-installed planner functions',()=>{
-    const owner='scripts/lib/consolidation-planner-upgrade.mjs';
+  it.each(['scripts/lib/consolidation-planner-upgrade.mjs','scripts/lib/consolidation-provenance.mjs'])('requires exact authorization review for owner-installed functions in %s',owner=>{
     const text='CREATE FUNCTION fixture() RETURNS void AS $$ SELECT id FROM memories WHERE namespace_id=p_namespace $$ LANGUAGE SQL';
     expect(classifyStatement({owner,text}).classification).toBe('unclassified');
+  });
+  it('tracks private provenance image and recovery queries as scoped data access',()=>{
+    for(const table of ['source_images','source_recoveries','source_recovery_invocations']){
+      const [statement]=javascript('db.query(`SELECT * FROM mem9_maintenance.'+table+'`)');
+      expect(statement.tables).toEqual([table]);
+      expect(classifyStatement(statement).classification).toBe('unclassified');
+    }
   });
   it.each(["004_consolidation_storage.sql", "005_consolidation_execution.sql", "006_consolidation_planner.sql", "007_consolidation_scheduling.sql"])("STORE-007: stored routine %s cannot inherit a schema-operator exemption", name => {
     const owner = "docker/bootstrap/migrations/" + name;

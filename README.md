@@ -2275,6 +2275,33 @@ initial planner configuration is exact-only (`model: null`); semantic automation
 requires its separate model-bound quality certificate and model budget. Neither
 synthetic acceptance nor the active-memory count is an eligible-backlog estimate.
 
+Planner upgrade v3 keeps large provenance out of the model request while retaining
+complete-row fingerprints. It excludes only `metadata.source_turns`,
+`metadata.source_seqs`, and `metadata.consolidation.sources`; the remaining fact
+and context still pass the existing model limits. A fact that remains too large
+receives an explicit REVIEW.
+
+Consolidation stores immutable complete row images in the existing database.
+Actions, receipts and new merged source lists contain small `mem9-image-v1`
+references, scoped by namespace and image digest. Each image is limited to 1 MiB
+and an action to ten members. Original transcripts remain available; earlier
+inline receipts and source chains remain readable and undoable. Worker roles
+cannot read or modify the image table directly. A registered namespace-owner
+operator can resolve a reference through
+`mem9_maintenance.read_provenance_image(namespace, reference)`. Keep its returned
+memory content in private operator tooling. Admission verifies that all retained
+references resolve to the correct images, including after a database restore.
+
+After deploying and readmitting the matching release, the existing production
+operator supports `requeue-provenance`. It recovers unresolved size-derived
+reviews for current inputs in the configured active namespaces, including
+reviews from earlier completed planner pages. Each invocation processes at most
+100 anchors per namespace, preserves their original age and skips live leases.
+Retries retain the same batch; `hasMore` indicates that a new invocation may be
+needed. Recovery only queues ordinary planning: subsequent classification and
+execution retain all model, mutation, context and protected-memory guards.
+Count committed MERGE receipts separately from requeued work, KEEP and REVIEW.
+
 After deploying the task definitions and granting the corresponding service:
 
 ```bash
