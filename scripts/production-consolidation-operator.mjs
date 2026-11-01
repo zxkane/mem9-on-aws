@@ -49,7 +49,7 @@ function validModelRequests(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission','dailyModelRequests'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -251,7 +251,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -268,7 +268,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census','install-planner-upgrade'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -424,12 +424,14 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         let resumed=false;
         if(control.paused&&expired.length&&open===0){await db.query("SELECT mem9_maintenance.resolve_model_uncertainty(NULL,'operator_resume')");resumed=true;}
         responseEvidence={resolved:expired.length,resumed,paused:control.paused&&!resumed,open};
-      }else if(request.operation==='requeue-scans'){
-        // Explicit operator recovery after correcting a scan failure's cause.
-        // Other exhaustion reasons retain their existing review/block state.
+      }else if(['requeue-scans','requeue-inputs'].includes(request.operation)){
+        // Recover only the requested failure class after its fix is installed.
+        const inputRecovery=request.operation==='requeue-inputs';
+        const deferral=inputRecovery?'input_bound':'scan_failed';
+        const errorPrefix=inputRecovery?'PlannerInput':'PlannerScan';
         await db.query('SELECT mem9_maintenance.lock_model()');
         const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
-        if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('PlannerScanRequeueRequiresPromotion');
+        if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error(errorPrefix+'RequeueRequiresPromotion');
         await verifyPlannerUpgrade(db);
         let anchors=0;
         for(const namespace of config.targets){
@@ -438,10 +440,10 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
             JOIN mem9_maintenance.planner_deferrals d USING(namespace_id,memory_id)
             JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id
             WHERE w.namespace_id=$1 AND w.desired_generation>w.completed_generation AND w.attempts=3
-              AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND d.reason='scan_failed'
+              AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND d.reason=$2
               AND m.state='active' AND m.memory_type<>'session'
-            ORDER BY w.memory_id LIMIT 1001 FOR UPDATE OF w`,[namespace])).rows.map(row=>row.memory_id);
-          if(ids.length>1000)throw Error('PlannerScanRequeueTooLarge');
+            ORDER BY w.memory_id LIMIT 1001 FOR UPDATE OF w`,[namespace,deferral])).rows.map(row=>row.memory_id);
+          if(ids.length>1000)throw Error(errorPrefix+'RequeueTooLarge');
           await db.query("SELECT count(mem9_maintenance.dirty_planner_input($1,t.id,clock_timestamp(),'audit')) FROM unnest($2::text[]) AS t(id)",[namespace,ids]);
           anchors+=ids.length;
         }

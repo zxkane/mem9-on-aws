@@ -4,10 +4,10 @@ import {schemaAdministratorRole} from './lib/production-runtime-config.mjs';
 
 const request=operation=>({operation,invocation:'a'.repeat(32),deadline:Date.now()+60000});
 describe('production worker administration request boundary',()=>{
-  it('accepts an explicit scan requeue without caller-supplied targets or SQL',()=>{
-    expect(parseProductionConsolidationRequest(JSON.stringify(request('requeue-scans'))).operation).toBe('requeue-scans');
+  it.each(['requeue-scans','requeue-inputs'])('accepts %s without caller-supplied targets or SQL',operation=>{
+    expect(parseProductionConsolidationRequest(JSON.stringify(request(operation))).operation).toBe(operation);
     for(const patch of [{targets:['synthetic']},{sql:'SELECT 1'},{force:true},{dailyRows:20}])
-      expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request('requeue-scans'),...patch}))).toThrow();
+      expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request(operation),...patch}))).toThrow();
   });
   it('uses the approved slow lossless-only twenty-row canary policy',()=>{
     expect(canaryPolicy()).toMatchObject({limits:{total:20,rewrite:20,delete:20,archive:0,mark:0},rate:0.05,burst:1});

@@ -546,6 +546,19 @@
         "scripts/run-consolidation-planner-integration.sh",
         "scripts/consolidation-planner-upgrade.test.mjs"
       ]
+    },
+    {
+      "owner": "scripts/lib/consolidation-planner-upgrade.mjs",
+      "statement_sha256": "8643ee41e865a4402cf67113da2db36b4792bd84e4276b66223951f5f03f94a2",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Version 2 owner-installed read_neighborhood with bounded reference-only review; complete routine and unchanged grants reviewed.",
+      "rationale": "The planner guard verifies login capability and active namespace membership before lookup. Both ordinary hydration and oversized fallback restrict every memory alias to p_namespace and the chosen IDs. The fallback locks at most two active non-session rows in ID order and retains their complete fingerprints; a forced REVIEW prevents new model inference or merge approval without content. Publication rechecks every fingerprint. Cached verdicts cannot clear the forced snapshot review; the finisher preserves cached history and records the current review without queueing.",
+      "namespace_evidence": "Explicit namespace predicates including r.namespace_id=p_namespace in fallback hydration, current membership authorization, matching unexpired lease generation, scoped snapshots, dependencies and continuation cursors.",
+      "coverage": [
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/run-consolidation-planner-integration.sh",
+        "scripts/consolidation-planner-upgrade.test.mjs"
+      ]
     }
   ]
 }

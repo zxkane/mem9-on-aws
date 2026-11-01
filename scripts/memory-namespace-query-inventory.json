@@ -2224,9 +2224,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "53392ebf53246ac795b8",
+      "id": "16a7ab2739b30c1ae0a4",
       "owner": "scripts/lib/consolidation-planner-upgrade.mjs",
-      "line": 16,
+      "line": 18,
       "tables": [
         "memories"
       ],
@@ -2240,6 +2240,24 @@
         "scripts/consolidation-planner-upgrade.test.mjs"
       ],
       "namespace_evidence": "Explicit namespace predicates, current membership authorization, a matching unexpired lease generation, private per-lease snapshots and namespace-bound cursors/cache keys."
+    },
+    {
+      "id": "955ab8e4b52ce2c4ef3c",
+      "owner": "scripts/lib/consolidation-planner-upgrade.mjs",
+      "line": 203,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8643ee41e865a4402cf67113da2db36b4792bd84e4276b66223951f5f03f94a2",
+      "statement": "CREATE OR REPLACE FUNCTION mem9_maintenance.read_neighborhood(p_namespace TEXT,p_anchor TEXT,p_lease BIGINT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$ DECLARE w RECORD; a public.memories; progress mem9_maintenance.planner_progress; policy mem9_maintenance.planner_policies; chosen TEXT[]; observed_ids TEXT[]; candidate RECORD; members JSONB; cached JSONB; phase TEXT:='exact'; next_phase TEXT; last_id TEXT; last_distance DOUBLE PRECISION; ranked_distances DOUBLE PRECISION[]:=ARRAY[NULL::double precision]; limit_message TEXT; count_neighbors INTEGER:=0; prompt_bytes BIGINT; result JSONB; forced_result TEXT; BEGIN PERFORM mem9_maintenance.planner_guard(p_namespace); SELECT * INTO policy FROM mem9_maintenance.planner_policies WHERE namespace_id=p_namespace; SELECT * INTO w FROM mem9_maintenance.work WHERE namespace_id=p_namespace AND memory_id=p_anchor FOR UPDATE; IF NOT FOUND OR p_lease IS NULL OR w.lease_generation<>p_lease OR w.lease_until IS NULL OR w.lease_until<=clock_timestamp() OR w.claimed_generation<=w.completed_generation THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='invalid planner lease'; END IF; IF w.desired_generation<>w.claimed_generation THEN PERFORM mem9_maintenance.defer_neighborhood(p_namespace,p_anchor,p_lease,'inputs_changed'); RETURN jsonb_build_object('status','retry'); END IF; SELECT * INTO progress FROM mem9_maintenance.planner_progress WHERE namespace_id=p_namespace AND memory_id=w.memory_id; IF FOUND AND progress.expected_generation=w.claimed_generation THEN phase:=progress.phase; ELSE IF FOUND THEN INSERT INTO mem9_maintenance.planner_deferrals AS d(namespace_id,memory_id,reason,resets) VALUES(p_namespace,w.memory_id,'generation_reset',1) ON CONFLICT(namespace_id,memory_id) DO UPDATE SET resets=d.resets+1; END IF; progress.after_id:=NULL; progress.after_distance:=NULL; DELETE FROM mem9_maintenance.planner_progress WHERE namespace_id=p_namespace AND memory_id=w.memory_id; END IF; SELECT * INTO a FROM public.memories WHERE namespace_id=p_namespace AND id=w.memory_id AND state='active' AND memory_type<>'session'; chosen:=ARRAY[w.memory_id::text]; observed_ids:=chosen; IF FOUND THEN IF phase='exact' THEN FOR candidate IN SELECT m.id FROM public.memories m WHERE m.namespace_id=p_namespace AND m.state='active' AND m.memory_type<>'session' AND md5(m.content)=md5(a.content) AND m.content=a.content AND m.id<>a.id AND (progress.after_id IS NULL OR m.id>progress.after_id) AND mem9_maintenance.material_context(to_jsonb(m)-'embedding')=mem9_maintenance.material_context(to_jsonb(a)-'embedding') ORDER BY m.id LIMIT 10 LOOP observed_ids:=array_append(observed_ids,candidate.id); count_neighbors:=count_neighbors+1; IF count_neighbors<=9 THEN chosen:=array_append(chosen,candidate.id); last_id:=candidate.id; END IF; END LOOP; IF count_neighbors>9 THEN next_phase:='exact'; ELSIF count_neighbors>0 OR progress.after_id IS NOT NULL THEN next_phase:='vector'; last_id:=NULL; ELSE phase:='vector'; END IF; END IF; IF phase='vector' AND a.embedding IS NOT NULL THEN count_neighbors:=0; FOR candidate IN WITH scoped AS MATERIALIZED ( SELECT m.id,m.embedding FROM public.memories m WHERE m.namespace_id=p_namespace AND m.state='active' AND m.memory_type<>'session' AND m.id<>a.id AND (m.content<>a.content OR mem9_maintenance.material_context(to_jsonb(m)-'embedding')<>mem9_maintenance.material_context(to_jsonb(a)-'embedding')) AND m.embedding IS NOT NULL ), distances AS (SELECT id,embedding OPERATOR(public.<=>) a.embedding AS distance FROM scoped) SELECT id,distance FROM distances WHERE distance<=1-(policy.policy->>'similarity')::float8 AND (progress.after_id IS NULL OR (distance,id)>(progress.after_distance,progress.after_id)) ORDER BY distance,id LIMIT 10 LOOP observed_ids:=array_append(observed_ids,candidate.id); count_neighbors:=count_neighbors+1; IF count_neighbors<=9 THEN chosen:=array_append(chosen,candidate.id); ranked_distances:=array_append(ranked_distances,candidate.distance); last_id:=candidate.id; last_distance:=candidate.distance; END IF; END LOOP; IF count_neighbors>9 THEN next_phase:='vector'; END IF; END IF; END IF; INSERT INTO mem9_maintenance.planner_dependencies(namespace_id,memory_id,anchor_id) SELECT p_namespace,id,w.memory_id FROM unnest(observed_ids) id ON CONFLICT DO NOTHING; LOOP BEGIN SELECT coalesce(jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint,'memory',memory-'embedding') ORDER BY memory_id),'[]') INTO members FROM mem9_maintenance.read_memories(p_namespace,chosen); IF octet_length(members::text)>1048576 THEN RAISE EXCEPTION USING ERRCODE='54000',MESSAGE='maintenance input too large'; END IF; EXIT; EXCEPTION WHEN program_limit_exceeded THEN GET STACKED DIAGNOSTICS limit_message=MESSAGE_TEXT; IF limit_message<>'maintenance input too large' THEN RAISE; END IF; IF cardinality(chosen)>2 THEN chosen:=chosen[1:cardinality(chosen)-1]; next_phase:=phase; last_id:=chosen[cardinality(chosen)]; IF phase='vector' THEN last_distance:=ranked_distances[cardinality(chosen)]; END IF; CONTINUE; END IF; SELECT coalesce(jsonb_agg(jsonb_build_object('id',m.id,'version',m.version, 'fingerprint',encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex'), 'memory',NULL) ORDER BY m.id),'[]') INTO members FROM (SELECT r.* FROM public.memories r WHERE r.namespace_id=p_namespace AND r.id=ANY(chosen) AND r.state='active' AND r.memory_type<>'session' ORDER BY r.id FOR SHARE) m; forced_result:='REVIEW'; EXIT; END; END LOOP; IF a.id IS NOT NULL AND (jsonb_array_length(members)<>cardinality(chosen) OR NOT EXISTS( SELECT FROM jsonb_array_elements(members) m WHERE m->>'id'=a.id AND m->>'fingerprint'=encode(sha256(convert_to(to_jsonb(a)::text,'UTF8')),'hex')) OR (phase='vector' AND EXISTS(SELECT FROM public.memories m WHERE m.namespace_id=p_namespace AND m.id=ANY(chosen) AND m.id<>a.id AND (m.embedding OPERATOR(public.<=>) a.embedding) IS DISTINCT FROM ranked_distances[array_position(chosen,m.id::text)]))) THEN UPDATE mem9_maintenance.work SET lease_until=NULL,attempts=greatest(0,attempts-1),due_at=clock_timestamp()+interval '1 second' WHERE namespace_id=p_namespace AND memory_id=w.memory_id; RETURN jsonb_build_object('status','retry'); END IF; WHILE octet_length(members::text)>256000 AND cardinality(chosen)>2 LOOP chosen:=chosen[1:cardinality(chosen)-1]; next_phase:=phase; last_id:=chosen[cardinality(chosen)]; SELECT coalesce(jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint,'memory',memory-'embedding') ORDER BY memory_id),'[]') INTO members FROM mem9_maintenance.read_memories(p_namespace,chosen); IF phase='vector' THEN last_distance:=ranked_distances[cardinality(chosen)]; END IF; END LOOP; prompt_bytes:=mem9_maintenance.model_request_bytes(members); WHILE prompt_bytes>32768 AND jsonb_array_length(members)>2 AND (SELECT count(DISTINCT value->'memory'->>'content') FROM jsonb_array_elements(members))>1 LOOP chosen:=chosen[1:cardinality(chosen)-1]; SELECT coalesce(jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint,'memory',memory-'embedding') ORDER BY memory_id),'[]') INTO members FROM mem9_maintenance.read_memories(p_namespace,chosen); next_phase:=phase; last_id:=chosen[cardinality(chosen)]; IF phase='vector' THEN last_distance:=ranked_distances[cardinality(chosen)]; END IF; prompt_bytes:=mem9_maintenance.model_request_bytes(members); END LOOP; IF prompt_bytes>32768 AND jsonb_array_length(members)>1 AND (SELECT count(DISTINCT value->'memory'->>'content') FROM jsonb_array_elements(members))>1 THEN forced_result:='REVIEW'; END IF; IF octet_length(members::text)>1048576 OR (jsonb_array_length(members)>0 AND NOT members @> jsonb_build_array(jsonb_build_object('id',w.memory_id))) THEN UPDATE mem9_maintenance.work SET lease_until=NULL,attempts=3,reason='lease_exhausted' WHERE namespace_id=p_namespace AND memory_id=w.memory_id; INSERT INTO mem9_maintenance.planner_deferrals(namespace_id,memory_id,reason) VALUES(p_namespace,w.memory_id,'input_bound') ON CONFLICT(namespace_id,memory_id) DO UPDATE SET reason='input_bound'; RETURN jsonb_build_object('status','blocked'); END IF; IF jsonb_array_length(members)=cardinality(chosen) OR (jsonb_array_length(members)=0 AND cardinality(chosen)=1) THEN SELECT jsonb_build_object('classification_id',c.classification_id,'payload',c.payload) INTO cached FROM mem9_maintenance.classifications c WHERE c.namespace_id=p_namespace AND c.valid_until>clock_timestamp() AND c.input_hash=mem9_maintenance.input_fingerprint(policy.context_hash, (SELECT coalesce(jsonb_agg(value-'memory' ORDER BY value->>'id'),'[]') FROM jsonb_array_elements(members)),w.memory_id) ORDER BY c.valid_until DESC LIMIT 1; END IF; IF cached IS NOT NULL AND NOT EXISTS(SELECT FROM jsonb_array_elements(members) m WHERE m->'memory'='null'::jsonb) THEN forced_result:=NULL; END IF; INSERT INTO mem9_maintenance.neighborhoods(namespace_id,memory_id,lease_generation,claimed_generation,context_hash,phase,members,cached,forced_result,next_phase,after_id,after_distance) VALUES(p_namespace,w.memory_id,w.lease_generation,w.claimed_generation,policy.context_hash,phase,members,cached,forced_result,next_phase,last_id,last_distance); result:=jsonb_build_object('status','leased','anchor_id',w.memory_id,'lease_generation',w.lease_generation, 'phase',phase,'members',members,'cached',cached,'forced_result',forced_result,'lease_until',w.lease_until,'context_hash',policy.context_hash,'model_contract',policy.policy->'model'); RETURN result; END $$",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "The planner guard verifies login capability and active namespace membership before lookup. Both ordinary hydration and oversized fallback restrict every memory alias to p_namespace and the chosen IDs. The fallback locks at most two active non-session rows in ID order and retains their complete fingerprints; a forced REVIEW prevents new model inference or merge approval without content. Publication rechecks every fingerprint. Cached verdicts cannot clear the forced snapshot review; the finisher preserves cached history and records the current review without queueing.",
+      "coverage": [
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/run-consolidation-planner-integration.sh",
+        "scripts/consolidation-planner-upgrade.test.mjs"
+      ],
+      "namespace_evidence": "Explicit namespace predicates including r.namespace_id=p_namespace in fallback hydration, current membership authorization, matching unexpired lease generation, scoped snapshots, dependencies and continuation cursors."
     },
     {
       "id": "7317e3a65a2fcb77ed87",
@@ -3042,14 +3060,14 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "87860b6e81b37c088305",
+      "id": "4723943bb80e4a08d95c",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 437,
+      "line": 439,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "7b198e91f966e92c9994b0705b34bd4678182dbe4f8a613a114ac33f4741072e",
-      "statement": "SELECT w.memory_id FROM mem9_maintenance.work w JOIN mem9_maintenance.planner_deferrals d USING(namespace_id,memory_id) JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id WHERE w.namespace_id=$1 AND w.desired_generation>w.completed_generation AND w.attempts=3 AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND d.reason='scan_failed' AND m.state='active' AND m.memory_type<>'session' ORDER BY w.memory_id LIMIT 1001 FOR UPDATE OF w",
+      "statement_sha256": "cd81f4889fd061b293609cc147b0a6ef0fae0866317856aefa4c09812d4453bb",
+      "statement": "SELECT w.memory_id FROM mem9_maintenance.work w JOIN mem9_maintenance.planner_deferrals d USING(namespace_id,memory_id) JOIN public.memories m ON m.namespace_id=w.namespace_id AND m.id=w.memory_id WHERE w.namespace_id=$1 AND w.desired_generation>w.completed_generation AND w.attempts=3 AND (w.lease_until IS NULL OR w.lease_until<=clock_timestamp()) AND d.reason=$2 AND m.state='active' AND m.memory_type<>'session' ORDER BY w.memory_id LIMIT 1001 FOR UPDATE OF w",
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
@@ -3060,9 +3078,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "2b4567a0ddc97e128cbe",
+      "id": "03fb4a1f210dc48c4af4",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 468,
+      "line": 470,
       "tables": [
         "memories"
       ],
@@ -3078,9 +3096,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "44ee1ead598d4e0edbd7",
+      "id": "cc50e94d4e3ead79ae8f",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 562,
+      "line": 564,
       "tables": [
         "memories"
       ],
@@ -3096,9 +3114,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "903a6ddce659e8d21af7",
+      "id": "6d6deea87ebaeeca4bfb",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 574,
+      "line": 576,
       "tables": [
         "memories"
       ],
@@ -3114,9 +3132,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "8b587a839081cd50578a",
+      "id": "a50d401887dc18e3d2b4",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 578,
+      "line": 580,
       "tables": [
         "memories"
       ],

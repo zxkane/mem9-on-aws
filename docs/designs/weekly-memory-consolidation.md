@@ -605,6 +605,28 @@ not whether a larger arbitrary constant can be substituted for 20.
 | Execution revalidation | At most 24 hours between full input/policy revalidation, plus fresh fences at every commit | An unchanged, temporally valid classification can be reused without another model call |
 | Retry | Three bounded attempts for transient failures, then durable review/error state | No infinite bad-model or transport loops |
 
+The planner shrinks an oversized neighborhood before classification. If even a
+pair or singleton exceeds the complete-row or serialized-snapshot 1 MiB limit,
+it records `REVIEW` with member IDs, versions and full-row fingerprints under
+ordered row locks. The worker receives no source payload for that window and
+cannot turn it into a new automatic merge. Publication rechecks every complete
+fingerprint, and the normal cursor continues after the reviewed neighbor.
+Original content and provenance remain intact. The review reason is
+`snapshot_input_bound`, distinct from the model-request limit. Only the explicit
+maintenance-size error takes this path; unrelated database limit errors fail.
+Cache hits retain this review requirement. The original cached verdict remains
+immutable, while the current lease publishes against that same record and adds
+a snapshot-size review instead of queueing an action. This avoids both an unsafe
+cache override and a conflicting-publication retry loop. An anchor changed
+between ranking and hydration still retries to rebuild a consistent window.
+
+Planner upgrade version 2 preserves and verifies version 1's immutable receipt
+before appending its own receipt. Installation and rollback are transactional,
+including the live function bodies, ownership, attributes and execution grants.
+The existing operator may requeue exhausted input-bound anchors only after the
+current upgrade has been verified, within the configured namespaces and the
+bounded recovery cap.
+
 For approximately 17,000 active memories, the proposed steady-state envelope is
 up to 3,000 changed rows/day, including at most 1,000 rewrites and 2,000 soft
 deletions, subject to the shared total and stage limits. This is materially
