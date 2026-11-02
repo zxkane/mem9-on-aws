@@ -96,6 +96,25 @@ acquisition, renewal and target selection. Action/work leases and immutable
 receipts still own data correctness. Scheduled executors cannot reserve a
 second action concurrently in the same namespace.
 
+An executor slice may end after the backend explicitly acknowledges a
+`rate_wait` for its current action. The worker retains that continuation in its
+private child-process protocol and resumes the same namespace, action and lease
+generation before making another claim. Reserved rows, batch accounting and
+consumed uncertainty attempts carry forward; changing slices cannot create a
+new reservation or replenish the retry allowance. Malformed or mismatched
+continuations fail closed. Parent task reports contain aggregate counts only.
+
+The short final worker tail settles or reconciles a carried action without
+claiming a fresh long-lived lease. The fixed worker deadline, dispatcher
+heartbeat and cancellation remain authoritative. The private protocol carries
+absolute execution and claim cutoffs; process startup and database connection
+consume that same allowance. An expired or subsecond remainder never becomes a
+fresh full slice. A `lease_busy` response waits within the remaining execution
+window so normal expiry and reaping can make progress after a restart; reaching
+a claim cutoff retains the waiting state. Ambiguous preparation or exhausted uncertainty retries
+remain subject to durable recovery. These rules do not extend action leases,
+change scheduling or policy, or promote review into executable work.
+
 The bootstrap's fixed preview operations create a journal-owned synthetic tenant
 database on preview Aurora. Stable generated SSM credentials use SCRAM role
 verifiers; sensitive SQL is parameterized and effective logging settings are

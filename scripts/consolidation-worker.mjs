@@ -4,6 +4,7 @@ import {StringDecoder} from 'node:string_decoder';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 import {consolidationFailure,withDatabaseFailures} from './lib/consolidation-diagnostics.mjs';
+import {validateExecutorContinuation} from './consolidation-executor.mjs';
 
 const maxima={planner:3000,executor:600};
 const number=value=>Number.isSafeInteger(value)&&value>=0&&value<=1_000_000_000;
@@ -43,7 +44,8 @@ export function safeWorkerRecord(line,kind,stage){
     return {progress:classified,classified,changedRows:0,batches:0,
       ...(scanFailures?{scanFailures,lastFailure:consolidationFailure(record.lastFailure)}:{})};
   }
-  return {progress:record.applied+record.noop,classified:0,changedRows:record.changedRows,batches:record.batches};
+  return {progress:record.applied+record.noop,classified:0,changedRows:record.changedRows,batches:record.batches,
+    ...(['lease_busy','deadline'].includes(record.stopReason)?{waiting:true}:{})};
 }
 
 function safeWorkerFailure(line,kind){
@@ -61,7 +63,10 @@ export async function runWorker(deps,config,{clock=()=>performance.now(),signal,
   const lease=await deps.acquire();
   if(['busy','disabled'].includes(lease.status))return {...report,outcome:lease.status};
   if(lease.status!=='acquired'||!number(lease.generation)||lease.generation<1||typeof lease.owner_token!=='string')throw Error('invalid dispatcher lease');
-  const deadline=clock()+config.runtimeMs,abort=new AbortController();
+  const started=clock(),deadline=started+config.runtimeMs,abort=new AbortController();
+  // Preserve the configured first slice and short runs. Later slices share
+  // one fixed cutoff, leaving the final lease-duration tail for settlement.
+  const claimDeadline=config.runtimeMs<120000?deadline:started+Math.max(config.sliceMs,config.runtimeMs-120000);
   let stoppedBy,renewal,stopHeartbeat;
   const stop=reason=>{stoppedBy??=reason;abort.abort();};
   const onAbort=()=>stop('interrupted');signal?.addEventListener('abort',onAbort,{once:true});
@@ -74,15 +79,21 @@ export async function runWorker(deps,config,{clock=()=>performance.now(),signal,
   };
   try{
     stopHeartbeat=startHeartbeat(heartbeat);
-    let idle=0;
+    let idle=0,pending;
     while(!abort.signal.aborted&&clock()<deadline){
-      const position=await deps.next(lease);
+      if(config.kind==='executor'&&!pending&&clock()>=claimDeadline)break;
+      const position=pending?pending.position:await deps.next(lease);
       if(!Number.isInteger(position)||position<0||position>=config.targets.length)throw Error('invalid dispatcher target');
+      if(abort.signal.aborted)break;
+      if(config.kind==='executor'&&!pending&&clock()>=claimDeadline)break;
       const budgetMs=Math.floor(Math.min(config.sliceMs,deadline-clock()));
       if(budgetMs<1000){stoppedBy='deadline';break;}
       let result;
-      try{result=await deps.runSlice(config.targets[position],{budgetMs,signal:abort.signal});}
+      try{result=await deps.runSlice(config.targets[position],{budgetMs,signal:abort.signal,
+        ...(config.kind==='executor'?{claimRuntimeMs:Math.max(0,Math.floor(Math.min(budgetMs,claimDeadline-clock())))}:{}),
+        ...(pending?{continuation:pending.continuation,settlementOnly:true}:{})});}
       catch{result={ok:false,progress:0};}
+      const previous=pending?.continuation;pending=undefined;
       report.slices++;
       if(result?.failure)report.lastFailure=consolidationFailure(result.failure,'unknown',config.kind);
       if(result?.scanFailures){
@@ -95,7 +106,11 @@ export async function runWorker(deps,config,{clock=()=>performance.now(),signal,
         if(!number(result.progress)||!number(result.classified??0)||!number(result.changedRows??0))throw Error('invalid slice result');
         report.classified+=result.classified??0;report.changedRows+=result.changedRows??0;
         if((result.changedRows??0)>100&&(result.batches??0)>=2)report.batchBoundaryCrossings++;
-        idle=result.progress>0?0:idle+1;
+        if(result.continuation!==undefined){
+          if(config.kind!=='executor')throw Error('invalid executor continuation');
+          pending={position,continuation:validateExecutorContinuation(result.continuation,config.targets[position],previous)};
+        }
+        idle=result.progress>0||pending||result.waiting?0:idle+1;
       }
       if(idle>=config.targets.length)break;
     }
@@ -112,11 +127,18 @@ export async function runWorker(deps,config,{clock=()=>performance.now(),signal,
   }
 }
 
-export function runWorkerSlice(namespace,{kind,stage,environment=process.env,budgetMs,signal,spawnChild=spawn}){
+export function runWorkerSlice(namespace,{kind,stage,environment=process.env,budgetMs,claimRuntimeMs=budgetMs,signal,spawnChild=spawn,continuation,settlementOnly=false}){
   requireNamespaceId(namespace);
   if(!Object.hasOwn(maxima,kind)||!Number.isSafeInteger(budgetMs)||budgetMs<1000||budgetMs>maxima[kind]*1000)throw Error('invalid worker slice');
+  if(!Number.isSafeInteger(claimRuntimeMs)||claimRuntimeMs<0||claimRuntimeMs>budgetMs)throw Error('invalid executor claim duration');
+  if(typeof settlementOnly!=='boolean'||kind!=='executor'&&(continuation!==undefined||settlementOnly))throw Error('invalid executor continuation');
+  if(continuation!==undefined){
+    if(!settlementOnly)throw Error('invalid executor continuation');
+    continuation=validateExecutorContinuation(continuation,namespace);
+  }
+  if(signal?.aborted)return Promise.resolve({ok:false,progress:0});
   return new Promise(resolve=>{
-    let child,terminal,failure,failed=false,closed=false,killTimer,bytes=0;
+    let child,terminal,terminalPending=false,failure,control,failed=false,closed=false,killTimer,bytes=0;
     const stop=()=>{
       failed=true;if(closed)return;
       try{child?.kill('SIGTERM');}catch{}
@@ -125,10 +147,44 @@ export function runWorkerSlice(namespace,{kind,stage,environment=process.env,bud
     try{
       const env={...environment,MEM9_NAMESPACE_ID:namespace,MEM9_CONSOLIDATION_SLICE_SECONDS:String(Math.floor(budgetMs/1000))};
       delete env.MEM9_WORKER_TARGETS;
-      child=spawnChild(process.execPath,[fileURLToPath(new URL(`consolidation-${kind}.mjs`,import.meta.url))],{env,stdio:['ignore','pipe','pipe']});
+      delete env.MEM9_EXECUTOR_CONTINUATION;delete env.MEM9_EXECUTOR_SLICE_PROTOCOL;delete env.MEM9_EXECUTOR_SETTLEMENT_ONLY;
+      delete env.MEM9_EXECUTOR_CLAIM_DEADLINE_MS;delete env.MEM9_EXECUTOR_EXECUTION_DEADLINE_MS;
+      if(kind==='executor'){
+        const started=Date.now();
+        env.MEM9_EXECUTOR_SLICE_PROTOCOL='1';env.MEM9_EXECUTOR_SETTLEMENT_ONLY=settlementOnly?'1':'0';
+        env.MEM9_EXECUTOR_CLAIM_DEADLINE_MS=String(started+(settlementOnly?0:claimRuntimeMs));
+        env.MEM9_EXECUTOR_EXECUTION_DEADLINE_MS=String(started+budgetMs);
+        if(continuation!==undefined)env.MEM9_EXECUTOR_CONTINUATION=JSON.stringify(continuation);
+      }
+      child=spawnChild(process.execPath,[fileURLToPath(new URL(`consolidation-${kind}.mjs`,import.meta.url))],
+        {env,stdio:kind==='executor'?['ignore','pipe','pipe','pipe']:['ignore','pipe','pipe']});
     }catch{resolve({ok:false,progress:0});return;}
     const timer=setTimeout(stop,budgetMs+1000);timer.unref();
     signal?.addEventListener('abort',stop,{once:true});if(signal?.aborted)stop();
+    if(kind==='executor'){
+      const stream=child.stdio?.[3];let privateBytes=0,pending='';
+      const decoder=new StringDecoder('utf8');
+      if(!stream)stop();
+      else{
+        stream.on('data',chunk=>{
+          if(closed||failed)return;
+          if(control){stop();return;}
+          privateBytes+=Buffer.byteLength(chunk);
+          if(privateBytes>2048){stop();return;}
+          pending+=decoder.write(chunk);
+          const newline=pending.indexOf('\n');if(newline<0)return;
+          try{
+            if(control||newline!==pending.length-1)throw Error('invalid continuation protocol');
+            const value=JSON.parse(pending.slice(0,newline));
+            if(!value||value.version!==1||Object.keys(value).length!==2||!Object.hasOwn(value,'continuation'))throw Error('invalid continuation protocol');
+            control={continuation:value.continuation===null?undefined:validateExecutorContinuation(value.continuation,namespace,continuation)};
+          }catch{stop();}
+          pending='';
+        });
+        stream.on('end',()=>{if(pending||!control)stop();});
+        stream.on('error',stop);
+      }
+    }
     for(const stream of [child.stdout,child.stderr]){
       if(!stream){stop();continue;}
       const decoder=new StringDecoder('utf8');let pending='';
@@ -138,7 +194,15 @@ export function runWorkerSlice(namespace,{kind,stage,environment=process.env,bud
         pending+=decoder.write(chunk);const lines=pending.split('\n');pending=lines.pop();
         for(const line of lines){
           const value=safeWorkerRecord(line,kind,stage);
-          if(value){if(terminal){stop();return;}terminal=value;}
+          if(value){
+            if(terminal){stop();return;}
+            if(kind==='executor'){
+              const record=JSON.parse(line);
+              if(settlementOnly&&record.claimed!==0){stop();return;}
+              terminalPending=record.stopReason==='pending_action';
+            }
+            terminal=value;
+          }
           failure=safeWorkerFailure(line,kind)??failure;
         }
       });
@@ -147,7 +211,9 @@ export function runWorkerSlice(namespace,{kind,stage,environment=process.env,bud
     child.on('error',stop);
     child.once('close',(code,terminationSignal)=>{
       closed=true;clearTimeout(timer);clearTimeout(killTimer);signal?.removeEventListener('abort',stop);
-      resolve(!failed&&code===0&&!terminationSignal&&terminal&&!failure?{ok:true,...terminal}:
+      resolve(!failed&&code===0&&!terminationSignal&&terminal&&!failure&&(kind!=='executor'||control)&&
+        (!control?.continuation||terminalPending&&terminal.batches===control.continuation.batches&&(!continuation||terminal.progress===0))?
+        {ok:true,...terminal,...(control?.continuation?{continuation:control.continuation}:{})}:
         {ok:false,progress:0,...(failure?{failure}:{})});
     });
   });
