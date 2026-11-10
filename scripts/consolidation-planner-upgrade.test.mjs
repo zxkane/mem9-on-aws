@@ -6,21 +6,22 @@ import {productionOperatorDigest} from './production-runtime-operator.mjs';
 import {LEGACY_PLANNER_UPGRADE_HASH} from './lib/consolidation-planner-upgrade.mjs';
 import {productionCoordinatorDigest} from './run-production-runtime.mjs';
 
-const provenanceRead=vi.hoisted(()=>({changed:false}));
+const provenanceRead=vi.hoisted(()=>({changedPath:null}));
 vi.mock('node:fs/promises',async importOriginal=>{
   const actual=await importOriginal();
   return {...actual,readFile:async(...args)=>{
     const content=await actual.readFile(...args);
-    return provenanceRead.changed&&String(args[0]).endsWith('/scripts/lib/consolidation-provenance.mjs')
-      ?Buffer.concat([Buffer.from(content),Buffer.from('\n// Synthetic provenance change\n')]):content;
+    return provenanceRead.changedPath&&String(args[0]).endsWith('/'+provenanceRead.changedPath)
+      ?Buffer.concat([Buffer.from(content),Buffer.from('\n// Synthetic implementation change\n')]):content;
   }};
 });
 
 describe('sealed planner bootstrap contract',()=>{
-  it('PROV-007 binds provenance implementation bytes into release evidence',async()=>{
-    const original=await productionCoordinatorDigest();provenanceRead.changed=true;
+  it.each(['scripts/lib/consolidation-provenance.mjs','scripts/lib/maintenance-task-nonroot.mjs',
+    'infra/ecs-task-definition.ts','infra/slack-approval.ts'])('PROV-007 binds %s implementation bytes into release evidence',async path=>{
+    const original=await productionCoordinatorDigest();provenanceRead.changedPath=path;
     try{expect(await productionCoordinatorDigest()).not.toBe(original);}
-    finally{provenanceRead.changed=false;}
+    finally{provenanceRead.changedPath=null;}
   });
   it('PLAN-030 preserves the installed first-release SQL digest',()=>{
     expect(LEGACY_PLANNER_UPGRADE_HASH).toBe('e9ab6cf18e45102621b14d56f7303b350509bf98752aed7919376c1937b8d51c');

@@ -5,6 +5,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 import {consolidationFailure,withDatabaseFailures} from './lib/consolidation-diagnostics.mjs';
 import {validateExecutorContinuation} from './consolidation-executor.mjs';
+import {requireMaintenanceProcess} from './lib/maintenance-task-nonroot.mjs';
 
 const maxima={planner:3000,executor:600};
 const number=value=>Number.isSafeInteger(value)&&value>=0&&value<=1_000_000_000;
@@ -220,6 +221,7 @@ export function runWorkerSlice(namespace,{kind,stage,environment=process.env,bud
 }
 
 async function main(){
+  await requireMaintenanceProcess();
   const startedMs=Date.now(),invocation=process.env.MEM9_WORKER_INVOCATION;
   if(invocation!==undefined&&!/^[a-f0-9]{32}$/.test(invocation))throw Error('invalid worker invocation');
   const config=parseWorkerConfig();

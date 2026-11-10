@@ -5,7 +5,7 @@ import type { TenantIdentityOutputs } from "./tenant-identity";
 import { accountId, applicationRegion, workloadImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 import { taskContainerLogGroupName } from "./consolidation";
-import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
+import { hardenMaintenanceTask } from "./ecs-task-definition";
 import {protectLegacyRuntimeCredentials} from "./production-runtime";
 
 // Keep the existing cleanup task/execution-role family allowed by the boundary.
@@ -96,7 +96,7 @@ export function standaloneCleanupTask(
       executionRole: args=>protectLegacyRuntimeCredentials(args),
       taskRole: args=>protectLegacyRuntimeCredentials(args),
       taskDefinition: (args) => {
-        disableTaskContainerPseudoTerminal(args, CLEANUP_CONTAINER_NAME);
+        hardenMaintenanceTask(args, CLEANUP_CONTAINER_NAME);
         args.tags = { ...(args.tags ?? {}), ...tags };
       },
     },

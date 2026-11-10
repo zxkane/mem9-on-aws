@@ -11,6 +11,7 @@ import {requireNamespaceId} from './maintenance-scope.mjs';
 import {discoverSchedulerTasks} from '../consolidation-scheduler-e2e.mjs';
 import {loadWorkerDataRelease} from './production-data-release-loader.mjs';
 import {productionSourceTree} from '../run-production-runtime.mjs';
+import {assertHardenedMaintenanceContainer} from './maintenance-task-nonroot.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=()=>{throw Error('ProductionCanaryDeliveryFailed');};
@@ -101,9 +102,10 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
   const secrets={MEM9_WORKER_TARGETS:parameter+'maintenance/targets',[kind==='planner'?'MEM9_PLANNER_DB_SECRET':'MEM9_EXECUTOR_DB_SECRET']:parameter+`consolidation-runtime/${kind}-credential`,
     ...(kind==='executor'?{MEM9_TENANT_ID:parameter+'consolidation-runtime/tenant',MEM9_SERVICE_TRANSPORT_SIGNING_KEYS:parameter+'namespace/service-consolidation-signing-keys'}:{})};
   const actual=Object.fromEntries((container?.secrets??[]).map(secret=>[secret.name,secret.valueFrom]));
+  try{assertHardenedMaintenanceContainer(container);}catch{fail();}
   if(definition?.taskDefinitionArn!==worker.taskDefinitionArn||definition.containerDefinitions?.length!==1||container.name!==containerName||
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||container.environmentFiles?.length||
-    container.entryPoint?.join()!=='node'||container.command?.join()!=='/app/scripts/consolidation-worker.mjs'||
+    container.command?.join()!=='/app/scripts/consolidation-worker.mjs'||
     container.image!==worker.image||
     values.MEM9_STAGE!=='prod'||values.MEM9_WORKER_KIND!==kind||values.MEM9_WORKER_GENERATION!==manifest.generation||
     values.MEM9_DB_HOST!==approved.host||values.MEM9_DB_NAME!==approved.database||values.MEM9_DB_PORT!==String(approved.port)||

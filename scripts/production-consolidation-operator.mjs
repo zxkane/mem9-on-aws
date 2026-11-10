@@ -50,7 +50,7 @@ function validModelRequests(value){
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark','close-canary','configure-model','switch-model','census','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty','retry-preparations'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
     Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility','plannerModel','expectedAdmission','dailyModelRequests'].includes(k)))throw Error('InvalidProductionWorkerRequest');
@@ -245,6 +245,63 @@ export async function consolidationCensus(db,targets){
     planner:{work:total.work,deferrals:total.deferrals},model:total.model};
 }
 
+async function retryPreparationFailures(db,config,request){
+  const setup=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0];
+  if(setup?.phase!=='promote'||setup.generation!==config.generation)throw Error('PreparationRecoveryRequiresPromotion');
+  // Match the authorization-before-control lock order used by normal workers.
+  for(const namespace of config.targets){
+    if(!(await db.query("SELECT namespace_id FROM public.memory_namespaces WHERE namespace_id=$1 AND status='active' FOR SHARE",[namespace])).rows.length)
+      throw Error('PreparationRecoveryNamespaceDenied');
+    for(const kind of ['planner','executor']){
+      const principal=hash('mem9-service-principal-v1\0'+(kind==='planner'?'consolidation-planner':'consolidation'));
+      const admitted=(await db.query(`SELECT m.role FROM public.memory_namespace_memberships m
+        JOIN public.memory_principals p USING(principal_id)
+        WHERE m.namespace_id=$1 AND p.principal_key=$2 AND p.principal_type='service' AND p.status='active'
+          AND m.status='active' AND m.source_type='service' AND ($3='planner' OR m.role IN ('member','owner'))
+        FOR SHARE OF m,p`,[namespace,principal,kind])).rows;
+      if(admitted.length!==1)throw Error('PreparationRecoveryMembershipDenied');
+    }
+  }
+  await db.query('SELECT mem9_maintenance.lock_model()');
+  const locked=(await db.query('SELECT phase,generation FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+  if(locked?.phase!=='promote'||locked.generation!==config.generation)throw Error('PreparationRecoveryRequiresPromotion');
+  if(!await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton'))
+    throw Error('PreparationRecoveryRequiresEnabledExecution');
+  await verifyPlannerUpgrade(db);
+  await db.query(`CREATE TABLE IF NOT EXISTS mem9_maintenance.preparation_recovery_invocations(
+    invocation TEXT PRIMARY KEY CHECK(invocation~'^[a-f0-9]{32}$'),generation TEXT NOT NULL,targets JSONB NOT NULL,
+    decisions JSONB NOT NULL,result JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());
+    REVOKE ALL ON mem9_maintenance.preparation_recovery_invocations FROM PUBLIC,mem9_maintenance_planner,mem9_maintenance_executor,mem9_maintenance_backend,mem9_maintenance_operator;
+    DROP TRIGGER IF EXISTS maintenance_immutable ON mem9_maintenance.preparation_recovery_invocations;
+    CREATE TRIGGER maintenance_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.preparation_recovery_invocations
+      FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
+  const previous=(await db.query('SELECT generation,targets,result FROM mem9_maintenance.preparation_recovery_invocations WHERE invocation=$1',[request.invocation])).rows[0];
+  if(previous){
+    if(previous.generation!==config.generation||JSON.stringify(previous.targets)!==JSON.stringify(config.targets))throw Error('PreparationRecoveryInvocationMismatch');
+    return previous.result;
+  }
+  // One explicit retry after the original three attempts. Further failures
+  // retain attempts=4 and cannot be reopened by repeated operator invocations.
+  const rows=(await db.query(`SELECT s.namespace_id,s.action_id,s.generation FROM mem9_maintenance.action_state s
+    JOIN mem9_maintenance.actions a USING(namespace_id,action_id)
+    WHERE s.namespace_id=ANY($1) AND a.kind='MERGE' AND s.status='review' AND s.reason='preparation_failed' AND s.attempts=3
+      AND s.reservation IS NULL AND (s.lease_until IS NULL OR s.lease_until<=clock_timestamp())
+      AND NOT EXISTS(SELECT FROM mem9_maintenance.preparations p WHERE p.namespace_id=s.namespace_id AND p.action_id=s.action_id AND p.status='preparing')
+    ORDER BY s.first_seen_at,s.namespace_id,s.action_id LIMIT 101 FOR UPDATE OF s SKIP LOCKED`,[config.targets])).rows;
+  const result={retried:0,invalidated:0,hasMore:rows.length>100},decisions=[];
+  for(const row of rows.slice(0,100)){
+    if(await scalar(db,'SELECT EXISTS(SELECT FROM mem9_maintenance.receipts WHERE namespace_id=$1 AND action_id=$2) AS result',[row.namespace_id,row.action_id]))
+      throw Error('PreparationRecoveryReceiptConflict');
+    const valid=await scalar(db,'SELECT mem9_maintenance.action_inputs_valid($1,$2) AS result',[row.namespace_id,row.action_id]);
+    const status=valid?'queued':'invalidated',reason=valid?'operator_preparation_retry':'member_or_context_changed';
+    await db.query('SELECT mem9_maintenance.release_action($1,$2,$3,$4)',[row.namespace_id,row.action_id,status,reason]);
+    decisions.push({...row,status});result[valid?'retried':'invalidated']++;
+  }
+  await db.query(`INSERT INTO mem9_maintenance.preparation_recovery_invocations(invocation,generation,targets,decisions,result)
+    VALUES($1,$2,$3,$4,$5)`,[request.invocation,config.generation,JSON.stringify(config.targets),JSON.stringify(decisions),result]);
+  return result;
+}
+
 export async function runProductionConsolidation(db,config,request,{connect}={}){
   return withRolloutLock(db,'prod',async owns=>{
     const checkpoint=async()=>{
@@ -252,7 +309,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status','census'].includes(request.operation)});
       if(config.dataRelease&&!['pause','status','census'].includes(request.operation)){
         if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
-        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty'].includes(request.operation)&&
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty','retry-preparations'].includes(request.operation)&&
           !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
       }
       return state;
@@ -269,7 +326,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       if(!['status','pause','census','install-planner-upgrade'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
     const active=currentSetup?await currentCanaryAttempt(db):null;
-    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty'].includes(request.operation)){
+    if(!['status','pause','census','cleanup-benchmark','prepare','begin-continuation','close-canary','configure-model','switch-model','readmit','install-merge-policy','install-planner-upgrade','requeue-merges','requeue-scans','requeue-inputs','requeue-provenance','set-model-budget','resolve-model-uncertainty','retry-preparations'].includes(request.operation)){
       if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
       if(active){
         if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
@@ -287,6 +344,8 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       ...(currentSetup?.phase==='promote'?{admission:runningAdmission(currentSetup),activationSeed:currentSetup.promotion_verification?.activationSeed}:{}),
       enabled:await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton'),
       dispatcherEnabled:await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'),
+      reviewActions:Number(await scalar(db,"SELECT count(*)::text AS result FROM mem9_maintenance.action_state WHERE namespace_id=ANY($1) AND status='review'",[config.targets])),
+      preparationFailures:Number(await scalar(db,"SELECT count(*)::text AS result FROM mem9_maintenance.action_state WHERE namespace_id=ANY($1) AND status='review' AND reason='preparation_failed'",[config.targets])),
       queuedActions:Number(await scalar(db,"SELECT count(*)::text AS result FROM mem9_maintenance.action_state WHERE namespace_id=ANY($1) AND status='queued'",[config.targets])),
       queuedRows:Number(await scalar(db,"SELECT coalesce(sum((a.cost->>'total')::integer),0)::text AS result FROM mem9_maintenance.action_state s JOIN mem9_maintenance.actions a USING(namespace_id,action_id) WHERE s.namespace_id=ANY($1) AND s.status='queued'",[config.targets]))};
     let responseEvidence;
@@ -294,7 +353,10 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     try{
       await db.query("SET LOCAL TIME ZONE 'UTC'");
       if(['plan','baseline','canary','resume-plan','promote'].includes(request.operation))await verifyPlannerUpgrade(db);
-      if(request.operation==='begin-continuation'){
+      if(request.operation==='retry-preparations'){
+        if(active&&!active.promoted)throw Error('PreparationRecoveryRequiresPromotion');
+        responseEvidence=await retryPreparationFailures(db,config,request);
+      }else if(request.operation==='begin-continuation'){
         await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
         const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         for(const kind of ['planner','executor']){

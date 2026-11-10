@@ -1,5 +1,6 @@
 import {readProductionSchedulerContext} from './production-scheduler-context.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
+import {assertHardenedMaintenanceContainer} from './maintenance-task-nonroot.mjs';
 
 const fail=()=>{throw Error('ProductionRecurringDeliveryUnverified');};
 const millis=v=>v instanceof Date?v.getTime():typeof v==='string'?Date.parse(v):NaN;
@@ -30,6 +31,7 @@ export function verifyProductionRecurringDelivery({task,definition,record,event,
     !target.template?.Name?.startsWith('mem9-on-aws-prod-'+target.kind+'-')||!number(afterMs,1)||!number(now,afterMs))fail();
   const identity=verifyProductionSchedulerIdentity(role,target),scheduleArn=`arn:aws:scheduler:${target.region}:${target.account}:schedule/${target.groupName}/${target.template.Name}`;
   const container=task?.containers?.[0],configured=definition?.containerDefinitions?.[0],override=task?.overrides?.containerOverrides?.[0];
+  try{assertHardenedMaintenanceContainer(configured);}catch{fail();}
   if(task?.taskDefinitionArn!==target.taskDefinitionArn||definition?.taskDefinitionArn!==target.taskDefinitionArn||task.clusterArn!==target.clusterArn||
     task.lastStatus!=='STOPPED'||task.launchType!=='FARGATE'||task.containers?.length!==1||definition.containerDefinitions?.length!==1||
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||definition.runtimePlatform.operatingSystemFamily!=='LINUX'||

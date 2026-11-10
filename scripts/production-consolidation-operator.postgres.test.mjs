@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import pg from 'pg';
 import {describe,it,expect,vi} from 'vitest';
-import {runProductionConsolidation,verifyWorkerPrivileges} from './production-consolidation-operator.mjs';
+import {runProductionConsolidation,verifyWorkerPrivileges,canaryPolicy} from './production-consolidation-operator.mjs';
 import {productionArtifactAdmission} from './lib/production-artifacts.mjs';
 import {bootstrapRuntime} from './runtime-bootstrap.mjs';
 import {applyBootstrapSchema,runtimeRoleName,runtimeSchemaDigest} from './lib/runtime-credentials.mjs';
@@ -285,10 +285,13 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
       expect(await scalar(f.admin,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton')).toBe(false);
       expect(await scalar(f.admin,'SELECT jsonb_agg(to_jsonb(p) ORDER BY scope) AS result FROM mem9_maintenance.budget_policies p')).toEqual(policies);
       expect((await readCanaryAttempt(f.admin,c.attemptId)).promoted).toBe(false);
+      await expect(run('retry-preparations')).rejects.toThrow('PreparationRecoveryRequiresPromotion');
       const canaryReport=encodeCanaryReport(report);
       await runProductionConsolidation(f.admin,{...c.config,canaryReport},{...c.request('promote'),dailyRows:1000,basisPoints:5000,canaryReportHash:canaryReportDigest(canaryReport)},{connect:f.connect});
     }finally{clock.mockRestore();}
     expect((await run('status')).setupPhase).toBe('promote');
+    expect((await readCanaryAttempt(f.admin,c.attemptId)).promoted).toBe(true);
+    expect(await run('retry-preparations')).toMatchObject({phase:'retry-preparations',retried:0,invalidated:0});
     expect((await run('begin-continuation')).repeated).toBe(true);
     const membershipBefore=await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.production_canary_validation_receipts');
     const steady=await executablePair(f,'a'.repeat(64)),steadyExecutor=await f.connect(f.config.executor),steadyRuntime=await f.connect(f.runtime);
@@ -675,6 +678,83 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     expect(await install()).toMatchObject({phase:'install-planner-upgrade',changed:true,version:3});
     expect(await install()).toMatchObject({changed:false});
     expect(await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s')).toEqual(before);
+  }),60000);
+
+  it('recovers preparation failures once without resetting attempts, ages or budgets',()=>fixture(async f=>{
+    await runProductionConsolidation(f.admin,f.config,f.request('prepare'),{connect:f.connect});
+    const context=await scalar(f.admin,'SELECT context_hash AS result FROM mem9_maintenance.namespace_state WHERE namespace_id=$1',[f.namespace]);
+    const cases=[];
+    for(const kind of ['current','changed','fingerprint','suppressed','expired','reserved','other_reason','already_retried','live_preparation']){
+      const members=[randomUUID(),randomUUID()].sort(),id=createHash('sha256').update(kind).digest('hex');
+      for(const [index,memory] of members.entries())await f.admin.query(`INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,tags,metadata,memory_type)
+        VALUES($1,$2,$3,$3,$4,'[]','{}','insight')`,[memory,f.namespace,f.principal,'Synthetic preparation '+kind+' '+index]);
+      const rows=(await f.admin.query('SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2) ORDER BY id',[f.namespace,members])).rows.map(r=>r.value);
+      await f.admin.query(`INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until)
+        VALUES($1,$2,$2,$3,'MERGE','{}',clock_timestamp()+CASE WHEN $4 THEN interval '-1 minute' ELSE interval '1 hour' END)`,[f.namespace,id,context,kind==='expired']);
+      const cost={total:2,rewrite:1,delete:1,archive:0,mark:0};
+      await f.admin.query(`INSERT INTO mem9_maintenance.actions(namespace_id,action_id,classification_id,kind,context_hash,semantic_hash,members,output,cost)
+        VALUES($1,$2,$2,'MERGE',$3,$2,$4,$5,$6)`,[f.namespace,id,context,JSON.stringify(rows),{target:members[0],content:rows.map(r=>r.content).join('\n\n'),tags:[],metadata:{}},cost]);
+      await f.admin.query(`INSERT INTO mem9_maintenance.action_state(namespace_id,action_id,status,reason,generation,attempts,first_seen_at,reservation)
+        VALUES($1,$2,'review',$3,7,$4,clock_timestamp()-interval '2 days',$5)`,[f.namespace,id,kind==='other_reason'?'lease_expired':'preparation_failed',kind==='already_retried'?4:3,kind==='reserved'?cost:null]);
+      if(kind==='changed')await f.admin.query('UPDATE public.memories SET version=version+1 WHERE namespace_id=$1 AND id=$2',[f.namespace,members[0]]);
+      if(kind==='fingerprint')await f.admin.query("UPDATE public.memories SET metadata='{\"protected\":true}' WHERE namespace_id=$1 AND id=$2",[f.namespace,members[0]]);
+      if(kind==='suppressed')await f.admin.query("INSERT INTO mem9_maintenance.suppressions(namespace_id,semantic_hash,kind,member_hashes,reason) VALUES($1,$2,'MERGE','[]','synthetic_operator_suppression')",[f.namespace,id]);
+      if(kind==='live_preparation')await f.admin.query(`INSERT INTO mem9_maintenance.preparations(namespace_id,action_id,generation,owner_token,status,content_hash,embedding_model)
+        VALUES($1,$2,7,$3,'preparing',$2,'qwen3-embedding-0.6b')`,[f.namespace,id,randomUUID()]);
+      cases.push({kind,id});
+    }
+    const snapshot=async()=>({
+      states:(await f.admin.query('SELECT action_id,status,reason,generation,attempts,first_seen_at,reservation FROM mem9_maintenance.action_state WHERE namespace_id=$1 ORDER BY action_id',[f.namespace])).rows,
+      actions:(await f.admin.query('SELECT * FROM mem9_maintenance.actions WHERE namespace_id=$1 ORDER BY action_id',[f.namespace])).rows,
+      budgets:(await f.admin.query('SELECT * FROM mem9_maintenance.budget_windows ORDER BY scope,day')).rows,
+    });
+    const request={...f.request('retry-preparations'),invocation:randomUUID().replaceAll('-','')};
+    const recover=()=>runProductionConsolidation(f.admin,f.config,request,{connect:f.connect});
+    await expect(recover()).rejects.toThrow('PreparationRecoveryRequiresPromotion');
+    await f.admin.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote' WHERE singleton");
+    await expect(recover()).rejects.toThrow('PreparationRecoveryRequiresEnabledExecution');
+    for(const scope of ['stage',f.namespace])await f.admin.query('SELECT mem9_maintenance.set_budget_policy($1,$2)',[scope,canaryPolicy()]);
+    await f.admin.query("SELECT mem9_maintenance.set_execution_mode('prod',true,ARRAY[$1::regrole::oid],'qwen3-embedding-0.6b')",[f.legacy]);
+    await f.admin.query("UPDATE public.memory_namespace_memberships SET status='revoked' WHERE namespace_id=$1 AND source_type='service'",[f.namespace]);
+    await expect(recover()).rejects.toThrow('PreparationRecoveryMembershipDenied');
+    await f.admin.query("UPDATE public.memory_namespace_memberships SET status='active' WHERE namespace_id=$1 AND source_type='service'",[f.namespace]);
+    await f.admin.query('SELECT mem9_maintenance.open_windows($1)',[f.namespace]);
+    await f.admin.query(`UPDATE mem9_maintenance.budget_windows SET used='{"total":3,"rewrite":1,"delete":2,"archive":0,"mark":0}',
+      reserved='{"total":2,"rewrite":1,"delete":1,"archive":0,"mark":0}' WHERE scope=ANY($1)`,[['stage',f.namespace]]);
+    const before=await snapshot();
+    const query=f.admin.query.bind(f.admin),fault=vi.spyOn(f.admin,'query').mockImplementation((sql,...args)=>{
+      if(typeof sql==='string'&&sql.trimStart().startsWith('INSERT INTO mem9_maintenance.preparation_recovery_invocations'))throw Error('SyntheticRecoveryJournalFailure');
+      return query(sql,...args);
+    });
+    try{await expect(recover()).rejects.toThrow('SyntheticRecoveryJournalFailure');}finally{fault.mockRestore();}
+    expect(await snapshot()).toEqual(before);
+    const result=await recover();expect(result).toMatchObject({phase:'retry-preparations',retried:1,invalidated:4,hasMore:false});
+    expect(await recover()).toEqual(result);
+    const after=await snapshot();expect(after.actions).toEqual(before.actions);expect(after.budgets).toEqual(before.budgets);
+    for(const item of cases){
+      const prior=before.states.find(r=>r.action_id===item.id),current=after.states.find(r=>r.action_id===item.id);
+      expect(current.attempts).toBe(prior.attempts);expect(current.first_seen_at).toEqual(prior.first_seen_at);
+      if(['current','changed','fingerprint','suppressed','expired'].includes(item.kind)){
+        expect(current.generation).toBe('8');expect(current.status).toBe(item.kind==='current'?'queued':'invalidated');
+      }else expect(current).toEqual(prior);
+    }
+    const retry=cases.find(x=>x.kind==='current');
+    await f.admin.query('UPDATE mem9_maintenance.action_state SET next_at=clock_timestamp() WHERE namespace_id=$1 AND action_id=$2',[f.namespace,retry.id]);
+    const executor=await f.connect(f.config.executor),runtime=await f.connect(f.runtime);
+    try{
+      const claim=await scalar(executor,'SELECT mem9_maintenance.claim_action($1,120,100) AS result',[f.namespace]);
+      expect(claim).toMatchObject({status:'leased',action_id:retry.id});
+      const preparation=await scalar(runtime,'SELECT mem9_maintenance.prepare_action($1,$2,$3) AS result',[f.namespace,retry.id,claim.lease_generation]);
+      expect(preparation.status).toBe('embed');
+      await runtime.query('SELECT mem9_maintenance.abandon_preparation($1,$2,$3,$4)',[f.namespace,retry.id,claim.lease_generation,preparation.owner_token]);
+    }finally{await executor.end();await runtime.end();}
+    expect((await snapshot()).budgets).toEqual(before.budgets);
+    expect(await recover()).toEqual(result);
+    expect(await runProductionConsolidation(f.admin,f.config,{...request,invocation:randomUUID().replaceAll('-','')},{connect:f.connect})).toMatchObject({retried:0,invalidated:0});
+    expect(await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.preparation_recovery_invocations')).toBe(2);
+    await expect(f.admin.query('DELETE FROM mem9_maintenance.preparation_recovery_invocations')).rejects.toThrow();
+    const status=await runProductionConsolidation(f.admin,f.config,f.request('status'),{connect:f.connect});
+    expect(status).toMatchObject({reviewActions:5,preparationFailures:4});
   }),60000);
 
   it('installs the cross-context merge policy once without changing its grants',()=>fixture(async f=>{

@@ -62,8 +62,11 @@ COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs
 COPY scripts/lib/memory-namespace.mjs /app/scripts/lib/memory-namespace.mjs
 COPY scripts/lib/maintenance-scope.mjs /app/scripts/lib/maintenance-scope.mjs
 COPY scripts/lib/maintenance-runtime.mjs /app/scripts/lib/maintenance-runtime.mjs
+COPY scripts/lib/maintenance-task-nonroot.mjs /app/scripts/lib/maintenance-task-nonroot.mjs
 COPY infra/gateway/namespace-auth.mjs /app/infra/gateway/namespace-auth.mjs
 COPY infra/gateway/service-auth.mjs /app/infra/gateway/service-auth.mjs
+
+USER node
 
 # Fail the BUILD, not the weekly run, if that import graph ever breaks again.
 # Per entrypoint, not once: both COPY the sidecar as `../docker/llm-proxy/`, but a
@@ -93,4 +96,4 @@ RUN node --input-type=module -e "await import('/app/scripts/consolidation-canary
 EXPOSE 8082
 ENV NODE_ENV=production
 ENV NODE_EXTRA_CA_CERTS=/app/global-bundle.pem
-ENTRYPOINT ["node", "server.mjs"]
+ENTRYPOINT ["/usr/bin/setpriv", "--no-new-privs", "--", "node", "server.mjs"]

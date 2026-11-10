@@ -271,12 +271,14 @@ describe("standalone namespace cleanup task", () => {
     }
   });
 
-  it("preserves task settings while disabling the cleanup pseudo-terminal", async () => {
+  it("preserves task settings while enforcing the cleanup process boundary", async () => {
     const { task } = await render();
-    const container = { name: "Mem9Cleanup", pseudoTerminal: true, image: "fixture", environment: [] };
+    const container = { name: "Mem9Cleanup", entryPoint: ["node"], pseudoTerminal: true, image: "fixture", environment: [] };
     const definition = { containerDefinitions: out(JSON.stringify([container])), tags: { Existing: "tag" } };
     task.args.transform.taskDefinition(definition);
-    expect(JSON.parse(materialize(definition.containerDefinitions))).toEqual([{ ...container, pseudoTerminal: false }]);
+    expect(JSON.parse(materialize(definition.containerDefinitions))).toEqual([{ ...container, pseudoTerminal: false,
+      user: "1000:1000", entryPoint: ["/usr/bin/setpriv", "--no-new-privs", "--", "/usr/local/bin/node"],
+      linuxParameters: { capabilities: { add: [], drop: ["ALL"] } } }]);
     expect(definition.tags).toEqual({ Existing: "tag", Project: "mem9-on-aws", Stage: "prod", ManagedBy: "sst" });
   });
 });

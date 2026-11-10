@@ -8,6 +8,7 @@
     "source_images",
     "source_recoveries",
     "source_recovery_invocations",
+    "preparation_recovery_invocations",
     "sessions"
   ],
   "upstream_ref": "5af03a68c072651e9c64d1b8b1265e36b7354671",
@@ -3246,9 +3247,57 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "3647304afef8a610b0e8",
+      "id": "80dfafacdd8fd40cbe9a",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 331,
+      "line": 271,
+      "tables": [
+        "preparation_recovery_invocations"
+      ],
+      "statement_sha256": "362120fd5b08d61f57350edd2b86abb4ee42d7ae775ab6ac5c8f0af7e3bf5557",
+      "statement": "CREATE TABLE IF NOT EXISTS mem9_maintenance.preparation_recovery_invocations( invocation TEXT PRIMARY KEY CHECK(invocation~'^[a-f0-9]{32}$'),generation TEXT NOT NULL,targets JSONB NOT NULL, decisions JSONB NOT NULL,result JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()); REVOKE ALL ON mem9_maintenance.preparation_recovery_invocations FROM PUBLIC,mem9_maintenance_planner,mem9_maintenance_executor,mem9_maintenance_backend,mem9_maintenance_operator; DROP TRIGGER IF EXISTS maintenance_immutable ON mem9_maintenance.preparation_recovery_invocations; CREATE TRIGGER maintenance_immutable BEFORE UPDATE OR DELETE ON mem9_maintenance.preparation_recovery_invocations FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable()",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "The schema administrator validates promoted state, enabled execution, active namespaces and service memberships before recording bounded server-selected action decisions. The immutable invocation record returns the original result only for matching generation and targets. Worker roles receive no table privileges; no memory content or credential is stored.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ],
+      "namespace_evidence": "The operation selects action rows only within verified setup targets, retains immutable proposal identity, and records exact targets with each invocation."
+    },
+    {
+      "id": "460edcc6e008b41bb5c8",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 278,
+      "tables": [
+        "preparation_recovery_invocations"
+      ],
+      "statement_sha256": "195187187802206915e66145287b64ada7cb46b9377f02b2904968bc394f1391",
+      "statement": "SELECT generation,targets,result FROM mem9_maintenance.preparation_recovery_invocations WHERE invocation=$1",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "The schema administrator validates promoted state, enabled execution, active namespaces and service memberships before recording bounded server-selected action decisions. The immutable invocation record returns the original result only for matching generation and targets. Worker roles receive no table privileges; no memory content or credential is stored.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ],
+      "namespace_evidence": "The operation selects action rows only within verified setup targets, retains immutable proposal identity, and records exact targets with each invocation."
+    },
+    {
+      "id": "c9a001ff8bcfca450f0c",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 300,
+      "tables": [
+        "preparation_recovery_invocations"
+      ],
+      "statement_sha256": "2932aea99fb9a98b671250e020c12df969a2b9d97f10dec4d2526c2cc3c20f60",
+      "statement": "INSERT INTO mem9_maintenance.preparation_recovery_invocations(invocation,generation,targets,decisions,result) VALUES($1,$2,$3,$4,$5)",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "The schema administrator validates promoted state, enabled execution, active namespaces and service memberships before recording bounded server-selected action decisions. The immutable invocation record returns the original result only for matching generation and targets. Worker roles receive no table privileges; no memory content or credential is stored.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ],
+      "namespace_evidence": "The operation selects action rows only within verified setup targets, retains immutable proposal identity, and records exact targets with each invocation."
+    },
+    {
+      "id": "cc727de68ca03ca32893",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 393,
       "tables": [
         "memories"
       ],
@@ -3264,9 +3313,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "b8bf04fac31896d99478",
+      "id": "d43a444f80c7f431cb36",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 438,
+      "line": 500,
       "tables": [
         "source_recovery_invocations"
       ],
@@ -3282,9 +3331,9 @@
       "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests."
     },
     {
-      "id": "a6d842e84ede10c6fc8f",
+      "id": "8adb3ee439ab680ef8c9",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 452,
+      "line": 514,
       "tables": [
         "memories",
         "source_recoveries"
@@ -3301,9 +3350,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "d831b11e867fcf635520",
+      "id": "f8486cdf25b9436536aa",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 517,
+      "line": 579,
       "tables": [
         "source_recoveries"
       ],
@@ -3319,9 +3368,9 @@
       "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests."
     },
     {
-      "id": "c8a15788a54dfa278070",
+      "id": "f79b436639b5543ab4fb",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 527,
+      "line": 589,
       "tables": [
         "source_recovery_invocations"
       ],
@@ -3337,9 +3386,9 @@
       "namespace_evidence": "Namespace-bound identities, image keys and row predicates; private helper grants and current guarded caller authorization are verified by real PostgreSQL tests."
     },
     {
-      "id": "7d77bfdcf4000bbd0bf7",
+      "id": "73331d8d7f098f5b747c",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 543,
+      "line": 605,
       "tables": [
         "memories"
       ],
@@ -3355,9 +3404,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "41ee8a4328156e5002b3",
+      "id": "cf49d3b79fd9f5c2fc53",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 576,
+      "line": 638,
       "tables": [
         "memories"
       ],
@@ -3373,9 +3422,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "496657246f8431159eb1",
+      "id": "76f2ddaf0e0f92c91546",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 670,
+      "line": 732,
       "tables": [
         "memories"
       ],
@@ -3391,9 +3440,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "ee0f3853caf219aebcb0",
+      "id": "860a864d95c347c98fd9",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 682,
+      "line": 744,
       "tables": [
         "memories"
       ],
@@ -3409,9 +3458,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "73dfb09230827ac78997",
+      "id": "4fbbe80eeb94f5dcbdc8",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 686,
+      "line": 748,
       "tables": [
         "memories"
       ],

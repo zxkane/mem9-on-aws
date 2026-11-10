@@ -19,6 +19,7 @@ export const SCOPED_TABLES = [
   "source_images",
   "source_recoveries",
   "source_recovery_invocations",
+  "preparation_recovery_invocations",
   "sessions",
 ];
 

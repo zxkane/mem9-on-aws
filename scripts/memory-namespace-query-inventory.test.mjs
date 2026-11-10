@@ -31,7 +31,7 @@ describe("memory namespace query inventory", () => {
     expect(classifyStatement({owner,text}).classification).toBe('unclassified');
   });
   it('tracks private provenance image and recovery queries as scoped data access',()=>{
-    for(const table of ['source_images','source_recoveries','source_recovery_invocations']){
+    for(const table of ['source_images','source_recoveries','source_recovery_invocations','preparation_recovery_invocations']){
       const [statement]=javascript('db.query(`SELECT * FROM mem9_maintenance.'+table+'`)');
       expect(statement.tables).toEqual([table]);
       expect(classifyStatement(statement).classification).toBe('unclassified');

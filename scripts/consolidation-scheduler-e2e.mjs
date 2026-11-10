@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {assertHardenedMaintenanceContainer} from './lib/maintenance-task-nonroot.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
 import {execFileSync} from 'node:child_process';
@@ -174,6 +175,7 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,po
   for(const worker of manifest.workers){
     const def=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:worker.taskDefinitionArn}))).taskDefinition;
     if(def?.containerDefinitions?.find(c=>c.name===worker.containerName)?.environment?.find(e=>e.name==='MEM9_WORKER_GENERATION')?.value!==generation)fail('GenerationDeployMismatch');
+    try{assertHardenedMaintenanceContainer(def.containerDefinitions.find(c=>c.name===worker.containerName));}catch{fail('WorkerProcessPrivileges');}
     defs.set(worker.taskDefinitionArn,def);
   }
   const records=async(task,containerName,event)=>{

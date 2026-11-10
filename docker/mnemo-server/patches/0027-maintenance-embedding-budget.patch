@@ -1,0 +1,82 @@
+diff --git a/server/internal/embed/embedder.go b/server/internal/embed/embedder.go
+--- a/server/internal/embed/embedder.go
++++ b/server/internal/embed/embedder.go
+@@ -124,6 +124,9 @@
+ 	if maintenance {
+ 		req.Header.Set("X-Mem9-Maintenance", "1")
+ 		local := *e.client
++		// Bounded maintenance inputs may need longer than interactive embeddings.
++		// The handler still caps the full preparation and commit at 50 seconds.
++		local.Timeout = 45 * time.Second
+ 		local.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+ 		client = &local
+ 	}
+diff --git a/server/internal/embed/maintenance_budget_test.go b/server/internal/embed/maintenance_budget_test.go
+new file mode 100644
+--- /dev/null
++++ b/server/internal/embed/maintenance_budget_test.go
+@@ -0,0 +1,64 @@
++package embed
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++	"time"
++)
++
++type maintenanceBudgetTransport func(*http.Request) (*http.Response, error)
++
++func (f maintenanceBudgetTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++func TestMaintenanceEmbeddingBudgetPreservesForegroundAndCallerDeadlines(t *testing.T) {
++	e := New(Config{BaseURL: "http://localhost:8081/v1", Model: "qwen3-embedding-0.6b", Dims: 1024})
++	var remaining time.Duration
++	e.client.Transport = maintenanceBudgetTransport(func(r *http.Request) (*http.Response, error) {
++		deadline, ok := r.Context().Deadline()
++		if !ok {
++			t.Fatal("embedding request lacks a deadline")
++		}
++		remaining = time.Until(deadline)
++		if err := r.Context().Err(); err != nil {
++			return nil, err
++		}
++		vector := make([]float32, 1024)
++		vector[0] = 1
++		body, err := json.Marshal(map[string]any{"data": []any{map[string]any{"embedding": vector}}})
++		if err != nil {
++			t.Fatal(err)
++		}
++		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Mem9-Maintenance": []string{"1"}}, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
++	})
++	if _, err := e.EmbedMaintenance(context.Background(), "Synthetic bounded maintenance input."); err != nil {
++		t.Fatal(err)
++	}
++	if remaining < 40*time.Second || remaining > 45*time.Second {
++		t.Fatalf("maintenance deadline = %s, want bounded 45-second budget", remaining)
++	}
++	if e.client.Timeout != 30*time.Second {
++		t.Fatalf("shared foreground client timeout changed: %s", e.client.Timeout)
++	}
++	if _, err := e.Embed(context.Background(), "Synthetic foreground query."); err != nil {
++		t.Fatal(err)
++	}
++	if remaining < 25*time.Second || remaining > 30*time.Second {
++		t.Fatalf("foreground deadline changed: %s", remaining)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	if _, err := e.EmbedMaintenance(ctx, "Synthetic short caller."); err != nil {
++		t.Fatal(err)
++	}
++	if remaining <= 0 || remaining > time.Second {
++		t.Fatalf("caller deadline was extended: %s", remaining)
++	}
++	cancel()
++	if _, err := e.EmbedMaintenance(ctx, "Synthetic cancelled caller."); err == nil {
++		t.Fatal("cancelled caller succeeded")
++	}
++}
