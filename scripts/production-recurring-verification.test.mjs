@@ -20,7 +20,10 @@ it('rejects a manual caller even if its user agent claims to be Scheduler',()=>{
 it('rejects altered trust, task identity, context, execution settings and report failure',()=>{
   for(const change of [f=>{f.input.role.AssumeRolePolicyDocument.Statement[0].Principal={AWS:'*'};},f=>{f.input.event.responseElements.tasks[0].taskArn+='wrong';},
     f=>{f.input.task.overrides.containerOverrides[0].environment[2].value+='wrong';},f=>{f.input.task.overrides.containerOverrides[0].command=['unapproved'];},
-    f=>{f.input.record.failedSlices=1;},f=>{f.options.afterMs=now-30000;}]){
+    f=>{f.input.record.failedSlices=1;},f=>{f.options.afterMs=now-30000;},
+    f=>{f.input.definition.containerDefinitions[0].user='0';},
+    f=>{f.input.definition.containerDefinitions[0].linuxParameters.capabilities.add=['SYS_ADMIN'];},
+    f=>{f.input.definition.containerDefinitions[0].entryPoint=['node'];}]){
     const f=fixture();change(f);expect(()=>verifyProductionRecurringDelivery(f.input,f.target,f.options)).toThrow();
   }
 });

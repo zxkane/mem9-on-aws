@@ -126,7 +126,8 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
       if(kind==='GetParametersByPathCommand')return {Parameters:[...store].filter(([key])=>key.startsWith(input.Path)).map(([Name,Value])=>({Name,Value}))};
       if(kind==='DescribeTaskDefinitionCommand'){
         const w=manifest.workers.find(w=>w.taskDefinitionArn===input.taskDefinition),name=w?.containerName??'Mem9Bootstrap';
-        return {taskDefinition:{containerDefinitions:[{name,environment:[{name:w?'MEM9_WORKER_GENERATION':'MEM9_PREVIEW_GENERATION',value:generation},{name:'MEM9_DB_HOST',value:'writer.example.com'}],
+        return {taskDefinition:{containerDefinitions:[{name,...(w?{user:'1000:1000',entryPoint:['/usr/bin/setpriv','--no-new-privs','--','/usr/local/bin/node'],linuxParameters:{capabilities:{add:[],drop:['ALL']}}}:{}),
+          environment:[{name:w?'MEM9_WORKER_GENERATION':'MEM9_PREVIEW_GENERATION',value:generation},{name:'MEM9_DB_HOST',value:'writer.example.com'}],
           logConfiguration:{options:{'awslogs-group':'/sst/synthetic','awslogs-stream-prefix':'ecs'}}}]}};
       }
       if(kind==='DescribeDBClustersCommand')return {DBClusters:[{Endpoint:'writer.example.com',DBClusterIdentifier:'mem9-on-aws-pr-7-db',DBClusterArn:'synthetic-db-arn',DBClusterMembers:[{DBInstanceIdentifier:'mem9-on-aws-pr-7-instance'}]}]};

@@ -589,6 +589,7 @@ describe("consolidation task and schedule", () => {
     expect(resources.filter((resource) => resource.kind === "Role")).toEqual([]);
     const originalDefinition = {
       name: "Mem9Consolidation",
+      entryPoint: ["node"],
       pseudoTerminal: true,
       logConfiguration: {
         logDriver: "awslogs",
@@ -616,6 +617,9 @@ describe("consolidation task and schedule", () => {
       {
         ...originalDefinition,
         pseudoTerminal: false,
+        user: "1000:1000",
+        entryPoint: ["/usr/bin/setpriv", "--no-new-privs", "--", "/usr/local/bin/node"],
+        linuxParameters: { capabilities: { add: [], drop: ["ALL"] } },
       },
     ]);
 

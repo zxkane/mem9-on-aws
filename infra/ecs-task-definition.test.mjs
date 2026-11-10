@@ -11,6 +11,7 @@ import {
   disableMnemoServerPseudoTerminal,
   disableTaskContainerPseudoTerminal,
   hardenMemoryServiceTask,
+  hardenMaintenanceTask,
 } from "./ecs-task-definition";
 
 const registered = [];
@@ -51,6 +52,26 @@ bootstrap.forRegion = async () => ({
 });
 
 describe("real SST task-definition synthesis", () => {
+  it.each(['Mem9ConsolidationPlanner','Mem9ConsolidationExecutor'])('hardens the actual synthesized %s task and preserves command, IAM and secrets',async name=>{
+    registered.length=0;
+    const parent=new ComponentResource('test:index:Parent',name+'-parent');
+    const command=['/app/scripts/consolidation-worker.mjs'];
+    const containers=[{name,image:'example.com/worker:test',entrypoint:['node'],command,
+      environment:{FIXTURE:'preserved'},ssm:{CREDENTIAL:'arn:aws:ssm:ap-northeast-1:123456789012:parameter/example/credential'},
+      logging:{name:'/fixture/worker',retention:'1 month'}}];
+    const taskDefinition=createTaskDefinition(name,{cluster:{nodes:{cluster:{name:output('mem9-cluster')}}},
+      transform:{taskDefinition:args=>hardenMaintenanceTask(args,name)}},{},parent,output(containers),output('arm64'),output('0.5 vCPU'),output('1 GB'),output('20 GB'),
+      {arn:output('arn:aws:iam::123456789012:role/task')},{arn:output('arn:aws:iam::123456789012:role/execution')});
+    const task=await taskDefinition.promise();await task.urn.promise();
+    const resource=registered.find(r=>r.type==='aws:ecs/taskDefinition:TaskDefinition');
+    const [container]=JSON.parse(resource.inputs.containerDefinitions);
+    expect(container.user).toBe('1000:1000');expect(container.pseudoTerminal).toBe(false);
+    expect(container.entryPoint).toEqual(['/usr/bin/setpriv','--no-new-privs','--','/usr/local/bin/node']);
+    expect(container.linuxParameters.capabilities).toEqual({add:[],drop:['ALL']});
+    expect(container.command).toEqual(command);expect(container.secrets).toContainEqual({name:'CREDENTIAL',valueFrom:'arn:aws:ssm:ap-northeast-1:123456789012:parameter/example/credential'});
+    expect(resource.inputs.taskRoleArn).toBe('arn:aws:iam::123456789012:role/task');
+    expect(resource.inputs.executionRoleArn).toBe('arn:aws:iam::123456789012:role/execution');
+  });
   it('synthesizes the same nonroot security fields while retaining SST settings', async()=>{
     registered.length=0;
     const parent=new ComponentResource('test:index:Parent','nonroot-parent');

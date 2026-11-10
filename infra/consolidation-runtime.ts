@@ -2,7 +2,7 @@ import type {DbOutputs} from "./db";
 import type {EcsOutputs} from "./ecs";
 import type {MaintenanceIdentityOutputs} from "./namespace-identity";
 import {accountId,applicationRegion,workloadImage} from "./ecr";
-import {disableTaskContainerPseudoTerminal} from "./ecs-task-definition";
+import {hardenMaintenanceTask} from "./ecs-task-definition";
 import {isConsolidationPreview,previewGeneration,previewConfiguration,previewAcceptanceContext} from "../scripts/lib/consolidation-preview-config.mjs";
 import {verifiedPostRuntimePreview} from './post-runtime-preview';
 import type {PostRuntimePreviewContext} from '../scripts/lib/consolidation-preview-config.mjs';
@@ -117,7 +117,7 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
         MEM9_WORKER_SLICE_SECONDS:config.production?'180':kind==="executor"?"450":"180",
         ...(config.production?{MEM9_WORKER_MAX_SECONDS:kind==='planner'?'780':'240'}:{}),...model.environment},
       ssm:secrets,permissions:model.permissions,logging:{retention:"1 month"},
-      transform:{taskDefinition:args=>{disableTaskContainerPseudoTerminal(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};},
+      transform:{taskDefinition:args=>{hardenMaintenanceTask(args,containerName);args.tags={...(args.tags as Record<string,string> ?? {}),...tags};},
         taskRole:args=>{args.assumeRolePolicy=trust;},
         executionRole:args=>{
           args.assumeRolePolicy=trust;

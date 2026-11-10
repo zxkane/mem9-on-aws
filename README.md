@@ -2164,6 +2164,13 @@ Maintenance embedding requests use a 45-second HTTP budget within the existing
 50-second backend deadline and 120-second action lease. Ordinary embedding
 requests retain their 30-second budget; shorter caller deadlines still apply.
 
+Continuous planners/executors and consolidation/cleanup tasks run as UID/GID
+1000 with all Linux capabilities removed and no-new-privileges enabled. Workers
+check their actual process IDs and privilege state before reading credentials or
+opening a connection. Deployment and recurring-delivery verification reject task
+definitions that omit this boundary. The shared proxy/maintenance image also
+defaults to its non-root user.
+
 `STAGE=prod node scripts/run-production-consolidation.mjs set-model-budget 20000`
 sets the daily planner model request limit (1-100000) for the stage and each
 namespace; the token limits follow from the installed contract's maxima. It

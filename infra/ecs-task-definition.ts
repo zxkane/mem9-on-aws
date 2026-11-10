@@ -1,7 +1,24 @@
 import {hardenServiceRegistration} from '../scripts/lib/service-nonroot.mjs';
+import {hardenMaintenanceContainer} from '../scripts/lib/maintenance-task-nonroot.mjs';
 
 interface StringOutput {
   apply(callback: (value: string) => string): unknown;
+}
+
+/** Preserve workload settings while applying the maintenance process boundary. */
+export function hardenMaintenanceTask(args:Record<string,unknown>,containerName:string):void {
+  const definitions=args.containerDefinitions as StringOutput|undefined;
+  if(!definitions||typeof definitions.apply!=='function')throw Error('MaintenanceContainerDefinitionsRequired');
+  args.containerDefinitions=definitions.apply(raw=>{
+    const containers=JSON.parse(raw) as Record<string,unknown>[];
+    if(containers.length!==1||containers[0].name!==containerName)throw Error('MaintenanceContainerSet');
+    const container=containers[0];
+    if(Object.hasOwn(container,'entrypoint')){
+      if(Object.hasOwn(container,'entryPoint'))throw Error('MaintenanceAmbiguousEntrypoint');
+      container.entryPoint=container.entrypoint;delete container.entrypoint;
+    }
+    return JSON.stringify([hardenMaintenanceContainer(container)]);
+  });
 }
 
 /**

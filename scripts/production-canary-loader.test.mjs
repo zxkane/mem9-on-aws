@@ -29,8 +29,10 @@ function fixture(drift){
     if(name==='GetCallerIdentityCommand')return {Account:account};
     if(name==='GetParametersCommand')return {Parameters:input.Names.map(Name=>({Name,Value:JSON.stringify(Name.endsWith('/operator-manifest')?operator:manifest)}))};
     if(name==='DescribeTaskDefinitionCommand')return {taskDefinition:{taskDefinitionArn,taskRoleArn:role('task'),executionRoleArn:role('execution'),networkMode:'awsvpc',runtimePlatform:{cpuArchitecture:'ARM64'},
-      containerDefinitions:[{name:containerName,image:operator.workerImage,
-        entryPoint:['node'],command:['/app/scripts/consolidation-worker.mjs'],environment:Object.entries(values).map(([name,value])=>({name,value})),
+      containerDefinitions:[{name:containerName,image:operator.workerImage,user:drift==='root'?'0':'1000:1000',
+        entryPoint:drift==='entrypoint'?['node']:['/usr/bin/setpriv','--no-new-privs','--','/usr/local/bin/node'],
+        linuxParameters:{capabilities:{add:drift==='capability'?['SYS_ADMIN']:[],drop:['ALL']}},
+        command:['/app/scripts/consolidation-worker.mjs'],environment:Object.entries(values).map(([name,value])=>({name,value})),
         secrets:Object.entries(secrets).map(([name,valueFrom])=>({name,valueFrom})),logConfiguration:{options:{'awslogs-group':'/synthetic','awslogs-stream-prefix':'worker'}}}]}};
     const execution=input.RoleName?.includes('ExecutionRole');
     if(name==='GetRoleCommand')return {Role:{Arn:role(execution?'execution':'task'),PermissionsBoundary:{PermissionsBoundaryArn:`arn:aws:iam::${account}:policy/mem9-on-aws-workload-boundary`},
@@ -59,7 +61,7 @@ describe('production canary worker target loading',()=>{
     const f=fixture('planner'),target=await loadProductionCanaryWorker(f.clients,{...f.options,kind:'planner'});
     expect(target.plannerRoute).toEqual({model:'openai.gpt-example',region:'ap-northeast-1',project:'proj_app',responsesRegion:'us-east-1',openaiProject:'proj_responses'});
   });
-  it.each(['host','database','port'])('rejects %s drift before schedule creation',async drift=>{
+  it.each(['host','database','port','root','entrypoint','capability'])('rejects %s drift before schedule creation',async drift=>{
     const f=fixture(drift);await expect(loadProductionCanaryWorker(f.clients,f.options)).rejects.toThrow('ProductionCanaryDeliveryFailed');
     expect(f.calls).not.toContain('GetScheduleCommand');expect(f.calls).not.toContain('CreateScheduleCommand');
   });

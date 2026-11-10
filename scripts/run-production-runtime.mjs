@@ -73,11 +73,12 @@ export async function productionCoordinatorDigest(){
   const paths=['scripts/run-production-runtime.mjs','scripts/lib/production-runtime-aws.mjs','scripts/lib/production-runtime-backup.mjs',
     'scripts/lib/production-runtime-cancellation.mjs','scripts/lib/production-runtime-cancellation-runner.mjs',
     'scripts/lib/production-runtime-flow.mjs','scripts/lib/production-runtime-tasks.mjs','scripts/lib/production-runtime-administrator.mjs','scripts/lib/runtime-extension-catalog.mjs','scripts/lib/runtime-live-verification.mjs',
-    'infra/production-runtime.ts','infra/ecs.ts','infra/bootstrap.ts','infra/consolidation.ts','infra/maintenance-cleanup.ts',
+    'infra/production-runtime.ts','infra/ecs.ts','infra/ecs-task-definition.ts','infra/bootstrap.ts','infra/consolidation.ts','infra/maintenance-cleanup.ts','infra/slack-approval.ts',
     'sst.config.ts','infra/cloudformation/github-actions-role.yaml','.github/workflows/infra-ci.yml',
     '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
     '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
   paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
+    'scripts/lib/maintenance-task-nonroot.mjs',
     'scripts/lib/consolidation-planner-upgrade.mjs','scripts/lib/consolidation-provenance.mjs',
     'infra/post-runtime-preview.ts','scripts/consolidation-preview-fixture.mjs','scripts/lib/consolidation-preview-config.mjs',
     'scripts/lib/post-runtime-preview-authority.mjs','scripts/lib/post-runtime-preview-route.mjs','scripts/lib/post-runtime-preview-aws.mjs','scripts/consolidation-scheduler-e2e.mjs',

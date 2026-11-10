@@ -55,6 +55,7 @@ COPY scripts/lib/production-canary-compatibility.mjs /bootstrap/operator/scripts
 COPY scripts/lib/production-canary-snapshot.mjs /bootstrap/operator/scripts/lib/production-canary-snapshot.mjs
 COPY scripts/lib/production-canary-paused-audit.mjs /bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs
 COPY scripts/lib/production-canary-verification.mjs /bootstrap/operator/scripts/lib/production-canary-verification.mjs
+COPY scripts/lib/maintenance-task-nonroot.mjs /bootstrap/operator/scripts/lib/maintenance-task-nonroot.mjs
 COPY scripts/lib/production-canary-performance.mjs /bootstrap/operator/scripts/lib/production-canary-performance.mjs
 COPY scripts/lib/production-canary-report.mjs /bootstrap/operator/scripts/lib/production-canary-report.mjs
 COPY scripts/lib/canary-benchmark.mjs /bootstrap/operator/scripts/lib/canary-benchmark.mjs

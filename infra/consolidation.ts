@@ -10,7 +10,7 @@ import {
   consolidationDigestKey,
   decisionArtifactBucketName,
 } from "./decision-artifact";
-import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
+import { hardenMaintenanceTask } from "./ecs-task-definition";
 import { consolidationTimeoutSeconds } from "../scripts/lib/maintenance-runtime.mjs";
 import {protectLegacyRuntimeCredentials,productionRuntimeEnabled} from "./production-runtime";
 import {productionRecurringEnvironment} from '../scripts/lib/production-scheduler-context.mjs';
@@ -312,7 +312,7 @@ export function consolidation(
       executionRole: args=>protectLegacyRuntimeCredentials(args),
       taskRole: args=>protectLegacyRuntimeCredentials(args),
       taskDefinition: (args) => {
-        disableTaskContainerPseudoTerminal(
+        hardenMaintenanceTask(
           args,
           CONSOLIDATION_CONTAINER_NAME,
         );

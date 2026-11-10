@@ -32,6 +32,7 @@
  */
 
 import type { DbOutputs } from "./db";
+import { hardenMaintenanceTask } from "./ecs-task-definition";
 import type { EcsOutputs } from "./ecs";
 import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
@@ -364,8 +365,8 @@ export function slackApproval(
     cpu: "0.5 vCPU",
     memory: "1 GB",
     image: workloadImage("llm-proxy", IMAGE_TAG),
-    // `node` is the ENTRYPOINT because ECS can override `command` but NOT
-    // `entryPoint`; the handler's environment-only override depends on that.
+    // Task hardening wraps this fixed Node launcher. The handler overrides
+    // environment only; command arguments remain separate from the entrypoint.
     entrypoint: ["node"],
     command: [
       "/app/scripts/memory-cleanup.mjs",
@@ -517,6 +518,7 @@ export function slackApproval(
     logging: { retention: "1 month" },
     transform: {
       taskDefinition: (args: Record<string, any>) => {
+        hardenMaintenanceTask(args, CLEANUP_CONTAINER_NAME);
         args.tags = { ...(args.tags ?? {}), ...tags };
       },
     },
