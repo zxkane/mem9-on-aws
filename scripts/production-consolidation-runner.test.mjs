@@ -57,6 +57,16 @@ function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift,accepta
   return {meta,clients:{ssm:{send},ecs:{send},logs:{send},sts:{send},iam:{send}},calls,journals,options:{now:()=>time,sleep:async ms=>{time+=ms;}}};
 }
 describe('production worker administrative task invocation',()=>{
+  it.each(['status','census','retry-preparations'])('omits unused CLI numeric defaults from %s requests',async operation=>{
+    const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+    const acceptance={sourceTree:await productionSourceTree(),coordinatorDigest:await productionCoordinatorDigest()};
+    const f=fixture({acceptance,sourceTag:'mem9-'+revision.slice(0,7)});
+    await runProductionConsolidationTask(f.clients,{region,operation,dailyRows:Number(undefined),basisPoints:Number(undefined)},f.options);
+    const launch=f.calls.find(c=>c.type==='RunTaskCommand');
+    const request=JSON.parse(launch.input.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_PRODUCTION_CONSOLIDATION_REQUEST').value);
+    expect(request.operation).toBe(operation);expect(request).not.toHaveProperty('dailyRows');expect(request).not.toHaveProperty('basisPoints');
+    expect(f.journals.size).toBe(0);
+  });
   it('serializes continuation fields into the bounded owned task request without silently dropping them',async()=>{
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
     const acceptance={sourceTree:await productionSourceTree(),coordinatorDigest:await productionCoordinatorDigest()};

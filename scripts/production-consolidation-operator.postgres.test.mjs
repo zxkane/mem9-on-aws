@@ -285,10 +285,13 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
       expect(await scalar(f.admin,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton')).toBe(false);
       expect(await scalar(f.admin,'SELECT jsonb_agg(to_jsonb(p) ORDER BY scope) AS result FROM mem9_maintenance.budget_policies p')).toEqual(policies);
       expect((await readCanaryAttempt(f.admin,c.attemptId)).promoted).toBe(false);
+      await expect(run('retry-preparations')).rejects.toThrow('PreparationRecoveryRequiresPromotion');
       const canaryReport=encodeCanaryReport(report);
       await runProductionConsolidation(f.admin,{...c.config,canaryReport},{...c.request('promote'),dailyRows:1000,basisPoints:5000,canaryReportHash:canaryReportDigest(canaryReport)},{connect:f.connect});
     }finally{clock.mockRestore();}
     expect((await run('status')).setupPhase).toBe('promote');
+    expect((await readCanaryAttempt(f.admin,c.attemptId)).promoted).toBe(true);
+    expect(await run('retry-preparations')).toMatchObject({phase:'retry-preparations',retried:0,invalidated:0});
     expect((await run('begin-continuation')).repeated).toBe(true);
     const membershipBefore=await scalar(f.admin,'SELECT count(*)::int AS result FROM mem9_maintenance.production_canary_validation_receipts');
     const steady=await executablePair(f,'a'.repeat(64)),steadyExecutor=await f.connect(f.config.executor),steadyRuntime=await f.connect(f.runtime);
