@@ -50,6 +50,7 @@ export const fixtureCaseNames=Object.freeze([
   'filters size reviews once before visiting work with unrelated KEEP history',
   'checks repeated size-review publications once per original input set',
   'visits large size history once before checking each anchor candidate bucket',
+  'recovers preparation failures once without resetting attempts, ages or budgets',
 ]);
 export function fixtureChecksFromReport(report){
   const count=fixtureCaseNames.length,results=report?.testResults;
