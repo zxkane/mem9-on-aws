@@ -4,7 +4,7 @@ import {schemaAdministratorRole} from './lib/production-runtime-config.mjs';
 
 const request=operation=>({operation,invocation:'a'.repeat(32),deadline:Date.now()+60000});
 describe('production worker administration request boundary',()=>{
-  it.each(['requeue-scans','requeue-inputs'])('accepts %s without caller-supplied targets or SQL',operation=>{
+  it.each(['requeue-scans','requeue-inputs','retry-preparations'])('accepts %s without caller-supplied targets or SQL',operation=>{
     expect(parseProductionConsolidationRequest(JSON.stringify(request(operation))).operation).toBe(operation);
     for(const patch of [{targets:['synthetic']},{sql:'SELECT 1'},{force:true},{dailyRows:20}])
       expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request(operation),...patch}))).toThrow();

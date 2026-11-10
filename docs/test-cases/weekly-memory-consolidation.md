@@ -115,6 +115,16 @@ for the provider, 15 seconds for finishing, and 11 seconds for DB dispatch.
   afterward, then verify scoped synthetic writes and optimistic fences.
 
 
+## Maintenance embedding recovery
+
+| ID | Scenario | Required result / evidence |
+| --- | --- | --- |
+| TC-CONSOL-RECOVERY-001 | A bounded maintenance embedding exceeds the foreground HTTP client's deadline | Maintenance receives a 45-second HTTP budget within the existing 50-second handler and 120-second action lease; ordinary embedding keeps its 30-second budget |
+| TC-CONSOL-RECOVERY-002 | A caller has a shorter deadline or is cancelled | Maintenance preserves the caller's deadline and cancellation, localhost restriction, redirect rejection and admission acknowledgement |
+| TC-CONSOL-RECOVERY-003 | An owner retries a preparation failure after fixing its cause | Only current, unexpired, unreserved proposals in the configured namespaces are requeued; attempts, first-seen age, immutable proposals, receipts and spent budgets remain unchanged |
+| TC-CONSOL-RECOVERY-004 | Recovery is retried, or an input, membership, context or expiry changes | Recovery is idempotent and never revives invalid proposals or bypasses normal claim/commit checks; every recovery decision is recorded |
+| TC-CONSOL-RECOVERY-005 | Ordinary queues are empty but a preparation failed repeatedly | Operator status includes execution reviews; empty queued-action counts do not imply all recoverable work has completed |
+
 ## Proposed continuous consolidation acceptance
 
 These `TC-CONSOL-V2-*` cases specify the draft in

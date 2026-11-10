@@ -728,6 +728,39 @@
         "scripts/consolidation-planner.postgres.test.mjs",
         "scripts/production-consolidation-operator.postgres.test.mjs"
       ]
+    },
+    {
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "statement_sha256": "362120fd5b08d61f57350edd2b86abb4ee42d7ae775ab6ac5c8f0af7e3bf5557",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-only preparation-recovery receipt bound to the exact production generation and configured targets.",
+      "rationale": "The schema administrator validates promoted state, enabled execution, active namespaces and service memberships before recording bounded server-selected action decisions. The immutable invocation record returns the original result only for matching generation and targets. Worker roles receive no table privileges; no memory content or credential is stored.",
+      "namespace_evidence": "The operation selects action rows only within verified setup targets, retains immutable proposal identity, and records exact targets with each invocation.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "statement_sha256": "195187187802206915e66145287b64ada7cb46b9377f02b2904968bc394f1391",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-only preparation-recovery receipt bound to the exact production generation and configured targets.",
+      "rationale": "The schema administrator validates promoted state, enabled execution, active namespaces and service memberships before recording bounded server-selected action decisions. The immutable invocation record returns the original result only for matching generation and targets. Worker roles receive no table privileges; no memory content or credential is stored.",
+      "namespace_evidence": "The operation selects action rows only within verified setup targets, retains immutable proposal identity, and records exact targets with each invocation.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
+    },
+    {
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "statement_sha256": "2932aea99fb9a98b671250e020c12df969a2b9d97f10dec4d2526c2cc3c20f60",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Owner-only preparation-recovery receipt bound to the exact production generation and configured targets.",
+      "rationale": "The schema administrator validates promoted state, enabled execution, active namespaces and service memberships before recording bounded server-selected action decisions. The immutable invocation record returns the original result only for matching generation and targets. Worker roles receive no table privileges; no memory content or credential is stored.",
+      "namespace_evidence": "The operation selects action rows only within verified setup targets, retains immutable proposal identity, and records exact targets with each invocation.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs"
+      ]
     }
   ]
 }

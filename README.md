@@ -2148,6 +2148,22 @@ attempts by status, and whether the model is paused. Classifications count the
 current planner context; review counts include earlier contexts. It runs in a
 read-only transaction and needs no release evidence.
 
+`status` also reports `reviewActions` and `preparationFailures`. Empty queued
+counts alone do not prove that recoverable work has drained. After diagnosing
+and fixing a preparation failure, deploy the matching release and run
+`STAGE=prod node scripts/run-production-consolidation.mjs retry-preparations`.
+The owner operation considers at most 100 failed proposals, requeues only
+current unexpired inputs, and invalidates obsolete proposals. It records an
+immutable recovery decision and preserves attempts, first-seen times, original
+proposals, receipts and spent budgets. Each proposal gets at most one extra
+attempt after its original three failures; repeated recovery invocations cannot
+reset that limit. Normal execution still obtains reservations and rechecks
+authorization, inputs and all publication conditions before committing.
+
+Maintenance embedding requests use a 45-second HTTP budget within the existing
+50-second backend deadline and 120-second action lease. Ordinary embedding
+requests retain their 30-second budget; shorter caller deadlines still apply.
+
 `STAGE=prod node scripts/run-production-consolidation.mjs set-model-budget 20000`
 sets the daily planner model request limit (1-100000) for the stage and each
 namespace; the token limits follow from the installed contract's maxima. It
