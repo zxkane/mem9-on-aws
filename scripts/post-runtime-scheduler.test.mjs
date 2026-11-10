@@ -2,6 +2,7 @@ import {describe,it,expect,vi} from 'vitest';
 import {runSchedulerAcceptance} from './consolidation-scheduler-e2e.mjs';
 import {POST_RUNTIME_OPERATOR,postRuntimeCredentialReferences,postRuntimeOperatorEnvironment} from './lib/post-runtime-preview-route.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
+import {hardenMaintenanceContainer} from './lib/maintenance-task-nonroot.mjs';
 const deps=vi.hoisted(()=>({binding:null,checks:0}));
 vi.mock('./lib/post-runtime-preview-aws.mjs',()=>({loadPostRuntimeOperator:async()=>deps.binding,revalidatePostRuntimeOperator:async()=>{deps.checks++;}}));
 describe('dedicated post-runtime scheduler recovery',()=>{
@@ -32,7 +33,7 @@ describe('dedicated post-runtime scheduler recovery',()=>{
       if(kind==='DescribeTaskDefinitionCommand'){
         if(input.taskDefinition===route.taskDefinitionArn)return {taskDefinition:def};
         const worker=manifest.workers.find(w=>w.taskDefinitionArn===input.taskDefinition);
-        return {taskDefinition:{containerDefinitions:[{name:worker.containerName,environment:[{name:'MEM9_WORKER_GENERATION',value:generation}]}]}};
+        return {taskDefinition:{containerDefinitions:[hardenMaintenanceContainer({name:worker.containerName,entryPoint:['node'],environment:[{name:'MEM9_WORKER_GENERATION',value:generation}]})]}};
       }
       if(kind==='DescribeDBClustersCommand')return {DBClusters:[{Endpoint:route.host,DBClusterIdentifier:'mem9-on-aws-pr-7-db',DBClusterArn:'db-arn',DBClusterMembers:[{DBInstanceIdentifier:'mem9-on-aws-pr-7-instance'}]}]};
       if(kind==='ListTagsForResourceCommand')return {TagList:[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:stage}]};

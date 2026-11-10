@@ -3,13 +3,28 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 
+const workerStatus = ['Uid:\t1000\t1000\t1000\t1000', 'Gid:\t1000\t1000\t1000\t1000',
+  ...['CapInh', 'CapPrm', 'CapEff', 'CapBnd', 'CapAmb'].map(key => key + ':\t0000000000000000'), 'NoNewPrivs:\t1'].join('\n');
+
+// Model the deployed process in this child only. Keep the real privilege guard
+// active so the privacy test reaches its database error independently of CI's UID.
+function processPreload(status = workerStatus, uid = 1000) {
+  return `import fs from 'node:fs/promises';
+    import {syncBuiltinESMExports} from 'node:module';
+    const readFile=fs.readFile;
+    fs.readFile=async(path,...args)=>path==='/proc/self/status'?${JSON.stringify(status)}:readFile(path,...args);
+    process.getuid=()=>${uid};process.getgid=()=>1000;
+    syncBuiltinESMExports();`;
+}
+
 describe('planner CLI privacy', () => {
   const file = fileURLToPath(new URL('./consolidation-planner.mjs', import.meta.url));
   const clean = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('MEM9_')));
   const base = { ...clean, MEM9_STAGE: 'pr-planner', MEM9_NAMESPACE_ID: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' };
   it.each(['planner','worker'])('sanitizes asynchronous database errors at the actual %s CLI boundary', kind => {
     const pg = pathToFileURL(createRequire(import.meta.url).resolve('pg')).href;
-    const preload = `import pg from ${JSON.stringify(pg)};
+    const preload = `${kind === 'worker' ? processPreload() : ''}
+      import pg from ${JSON.stringify(pg)};
       import {EventEmitter} from 'node:events';
       pg.Client=class extends EventEmitter {
         async connect(){setImmediate(()=>this.emit('error',Object.assign(new Error('private-async-database-marker'),{code:'08006'})));}
@@ -27,6 +42,31 @@ describe('planner CLI privacy', () => {
     expect(result.stderr).toBe('');
     expect(result.stdout).not.toContain('private-async-database-marker');
     expect(JSON.parse(result.stdout)).toMatchObject({event:'consolidation_'+kind+'_failed',phase:'database',errorClass:'08006'});
+  });
+  it.each([
+    ['root', workerStatus, 0],
+    ['saved root', workerStatus.replace('Uid:\t1000\t1000\t1000\t1000', 'Uid:\t1000\t1000\t0\t1000'), 1000],
+    ['capabilities', workerStatus.replace('CapBnd:\t0000000000000000', 'CapBnd:\t0000000000000001'), 1000],
+    ['no-new-privileges missing', workerStatus.replace('NoNewPrivs:\t1', 'NoNewPrivs:\t0'), 1000],
+  ])('rejects %s before credential parsing or database construction', (_name, status, uid) => {
+    const pg = pathToFileURL(createRequire(import.meta.url).resolve('pg')).href;
+    const preload = `${processPreload(status, uid)}
+      import pg from ${JSON.stringify(pg)};
+      const parse=JSON.parse,credential=process.env.MEM9_PLANNER_DB_SECRET;
+      JSON.parse=(value,...args)=>{
+        if(value===credential){process.stdout.write('credential-parse-reached\\n');throw Error('UnexpectedCredentialParse');}
+        return parse(value,...args);
+      };
+      pg.Client=class {constructor(){process.stdout.write('database-construction-reached\\n');throw Error('UnexpectedDatabaseConstruction');}};`;
+    const result = spawnSync(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(preload),
+      fileURLToPath(new URL('./consolidation-worker.mjs', import.meta.url))], {
+      env: {...base, MEM9_PLANNER_DB_SECRET: '{"username":"synthetic","password":"synthetic"}',
+        MEM9_DB_HOST:'127.0.0.1', MEM9_DB_NAME:'synthetic', MEM9_WORKER_KIND:'planner',
+        MEM9_WORKER_GENERATION:'synthetic', MEM9_WORKER_TARGETS:JSON.stringify([base.MEM9_NAMESPACE_ID])},
+      encoding:'utf8', timeout:5000,
+    });
+    expect(result.error).toBeUndefined();expect(result.status).toBe(1);expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual({event:'consolidation_worker_failed',phase:'startup',errorClass:'WorkerError'});
   });
   it('bounds shutdown after database loss during stalled model work with live handles', () => {
     const pg = pathToFileURL(createRequire(import.meta.url).resolve('pg')).href;
