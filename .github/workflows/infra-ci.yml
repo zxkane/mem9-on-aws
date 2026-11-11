@@ -57,6 +57,9 @@
 
 name: Infra CI
 
+permissions:
+  contents: read
+
 on:
   # Manual prod redeploy — e.g. to re-link a newly-set SST secret into the
   # deployed Lambda env (SST secrets are build-time links, so setting one needs
@@ -64,6 +67,10 @@ on:
   # OAuth façade's HMAC state-signing key before the deploy.
   workflow_dispatch:
     inputs:
+      expected_revision:
+        description: "Exact main revision expected by automated promotion; empty for ordinary operator runs"
+        type: string
+        default: ""
       runtime_cutover:
         description: "Run the guarded runtime credential cutover against an already verified deployment"
         type: boolean
@@ -92,30 +99,6 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, closed]
-    paths:
-      - "infra/**"
-      - "docker/**"
-      - "sst.config.ts"
-      - ".github/workflows/infra-ci.yml"
-      - ".github/workflows/runtime-recovery.yml"
-      - ".github/actions/runtime-cutover/**"
-      - "scripts/**"
-      - "package.json"
-      - "package-lock.json"
-      - "tsconfig.json"
-      - "vitest.config.ts"
-      # The OIDC role + ECR repositories are bootstrapped out-of-band via
-      # scripts/deploy-github-role.sh / deploy-ecr-repositories.sh — NOT part of
-      # the per-PR SST deploy. Re-include templates whose regression tests run
-      # in this workflow.
-      - "!infra/cloudformation/**"
-      - "infra/cloudformation/ecr-repositories.yaml"
-      - "infra/cloudformation/github-actions-role.yaml"
-      - "infra/cloudformation/ecr-registry-scanning.yaml"
-      - "infra/cloudformation/workload-permissions-boundary.yaml"
-      - "infra/cloudformation/decision-artifact-bucket.yaml"
-      - "infra/cloudformation/decision-artifact-bucket-import.yaml"
-      - "infra/cloudformation/memory-namespace-operator-role.yaml"
   push:
     branches: [main]
     paths:
@@ -124,6 +107,8 @@ on:
       - "sst.config.ts"
       - ".github/workflows/infra-ci.yml"
       - ".github/workflows/runtime-recovery.yml"
+      - ".github/workflows/continuum-admission.yml"
+      - ".github/workflows/continuum-auto-merge.yml"
       - ".github/actions/runtime-cutover/**"
       - "scripts/**"
       - "package.json"
@@ -180,6 +165,12 @@ jobs:
       region: ${{ steps.resolve.outputs.region }}
       region_changed: ${{ steps.resolve.outputs.region_changed }}
     steps:
+      - name: Bind automated promotion to its merged revision
+        if: github.event_name == 'workflow_dispatch' && inputs.expected_revision != ''
+        env:
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: |
+          [[ "$GITHUB_REF" == refs/heads/main && "$EXPECTED_REVISION" =~ ^[a-f0-9]{40}$ && "$GITHUB_SHA" == "$EXPECTED_REVISION" ]] || exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.sha || github.sha }}
@@ -285,9 +276,13 @@ jobs:
     name: Typecheck & Unit Tests
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.action != 'closed'
+    permissions:
+      contents: read
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -415,6 +410,7 @@ jobs:
     # workload images.
     needs: [changes, application-region, typecheck, build-and-push-image, build-human-acceptance-image]
     if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.user.id == github.event.repository.owner.id && github.actor_id == format('{0}', github.event.repository.owner.id) && github.event.pull_request.head.repo.id == github.event.repository.id)) &&
       always()
       && github.event_name == 'pull_request'
       && github.event.action != 'closed'
@@ -819,6 +815,7 @@ jobs:
     environment: preview-ci
     needs: [application-region, deploy-preview]
     if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.user.id == github.event.repository.owner.id && github.actor_id == format('{0}', github.event.repository.owner.id) && github.event.pull_request.head.repo.id == github.event.repository.id)) &&
       always() &&
       github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&
@@ -943,7 +940,7 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: preview-ci
     needs: [application-region]
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
+    if: (github.event_name != 'pull_request' || (github.event.pull_request.user.id == github.event.repository.owner.id && github.actor_id == format('{0}', github.event.repository.owner.id) && github.event.pull_request.head.repo.id == github.event.repository.id)) && (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main')
     # Budget: 15m first remove + up to 20m ENI detach wait + 15m retry, plus
     # checkout/pnpm/install. The old 30m cut the FIRST remove off mid-flight (#146),
     # which is what leaked the security groups — the job timeout must stay strictly
@@ -1149,12 +1146,14 @@ jobs:
   # the scope-specific role; on PR it skips gracefully when the preview role is
   # absent, while production hard-fails without its role.
   # ───────────────────────────────────────────────────────────────────────────
+
   build-and-push-image:
     name: Build & push workload images
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: ${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}
     needs: [changes, application-region, typecheck]
     if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.user.id == github.event.repository.owner.id && github.actor_id == format('{0}', github.event.repository.owner.id) && github.event.pull_request.head.repo.id == github.event.repository.id)) &&
       always()
       && !inputs.runtime_cutover
       && needs.changes.outputs.workload_changed == 'true'
@@ -1183,6 +1182,13 @@ jobs:
       fixture_runner_digest: ${{ steps.canary-runner.outputs.digest }}
       fixture_database_digest: ${{ steps.canary-database.outputs.digest }}
     steps:
+      - name: Reject superseded automated production revision
+        if: github.event_name == 'workflow_dispatch' && inputs.expected_revision != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: |
+          [[ "$GITHUB_SHA" == "$EXPECTED_REVISION" && "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$EXPECTED_REVISION" ]] || exit 1
       - name: Deployment maintenance gate
         env:
           PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
@@ -1387,6 +1393,7 @@ jobs:
     environment: preview-ci
     needs: [changes, application-region, typecheck]
     if: >-
+      (github.event_name != 'pull_request' || (github.event.pull_request.user.id == github.event.repository.owner.id && github.actor_id == format('{0}', github.event.repository.owner.id) && github.event.pull_request.head.repo.id == github.event.repository.id)) &&
       always()
       && github.event_name == 'pull_request'
       && github.event.action != 'closed'
@@ -1521,6 +1528,13 @@ jobs:
       MEM9_AUTH_GROUP_CLAIM: ${{ secrets.MEM9_AUTH_GROUP_CLAIM }}
       MEM9_RETAIN_MANAGED_AUTH: ${{ secrets.MEM9_RETAIN_MANAGED_AUTH }}
     steps:
+      - name: Reject superseded automated production revision
+        if: github.event_name == 'workflow_dispatch' && inputs.expected_revision != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: |
+          [[ "$GITHUB_SHA" == "$EXPECTED_REVISION" && "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" == "$EXPECTED_REVISION" ]] || exit 1
       - name: Deployment maintenance gate
         env:
           BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
@@ -1988,7 +2002,7 @@ jobs:
     needs:
       - application-region
       - typecheck
-    if: github.event_name == 'workflow_dispatch' && inputs.runtime_cutover && inputs.runtime_stage != 'prod'
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime_cutover && inputs.runtime_stage != 'prod' && github.actor_id == format('{0}', github.event.repository.owner.id)
     timeout-minutes: 180
     permissions:
       id-token: write

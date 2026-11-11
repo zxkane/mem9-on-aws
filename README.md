@@ -383,9 +383,12 @@ main and inspect the new run's deploy result.
 
 `infra/continuum/environment.json` declares an independent AWS Continuum code
 environment: this repository's `main` branch, daily scans (`P1D`), and generated
-patch delivery (`ENABLED`). Continuum opens remediation pull requests when it
-produces a patch; this does not merge or deploy them. The existing review,
-test, and production deployment process remains authoritative.
+patch delivery (`ENABLED`). The trusted controller merges eligible application
+source fixes after the exact revision passes CI, then dispatches the existing
+production pipeline. It recovers a missed dispatch even after main advances beyond the patch
+revision; a failed deployment remains a visible failure requiring investigation.
+Production security tests, serialization, maintenance gates and smoke tests remain
+mandatory. A clean scan may produce no patch.
 
 The environment is managed out of band by `scripts/deploy-continuum.mjs`, not
 by the application SST stack. The operator tool implements plan/apply/read-back
@@ -405,26 +408,34 @@ Before activation:
    authorize the AWS GitHub App for this repository only. Reuse an existing
    authorized integration when available. GitHub's interactive authorization
    cannot be replaced by an IaC parameter or a repository token committed to Git.
-2. Review robot-PR admission to GitHub Actions. The deployment preflight reads
-   the actual CI role trusts and GitHub environment policies. PR-accessible
-   cloud environments need non-bypassable owner approval with self-review
-   disabled, or an exact main-only branch policy. This includes retained legacy
-   role environment subjects; a nonexistent environment is not a disabled trust.
-   A legacy role still trusting `pull_request` blocks activation. The check
-   also requires the existing runner to be a recognized GitHub-hosted runner,
-   read-default workflow tokens, and disabled workflow-token review approval.
-   It verifies GitHub.com identity and classic main branch protection requiring
-   at least one human approval, stale-review dismissal, latest-push approval,
-   enforced administrators, required checks, and no review bypass allowances.
-   Main-only deployment branches alone do not prove that a patch was reviewed.
-   Rulesets are not accepted as a substitute for these classic protections.
-   It never changes these settings, role policies, or runner selection.
-3. Review the template and live policies in the account's existing IAM
-   ownership stack before making any admission changes. New roles or different
-   OIDC subjects require extending this preflight. Environment protection is
-   an admission check, not continuous enforcement; keep control-plane changes
-   restricted and audited after enabling scans. Generated patches remain
-   untrusted, including when a scan has validated a vulnerability.
+2. Deploy the reviewed IAM ownership template using the existing
+   `scripts/deploy-github-role.sh` procedure. Its immutable `GitHubOwnerId` and
+   `GitHubRepositoryId` parameters must match the repository. Preview trust
+   requires the owner actor; production trust requires `refs/heads/main`.
+   A retired legacy role has an explicit deny. Workflow guards also keep bot
+   PRs out of image publication, preview deployment and recovery. Bot tests use
+   read-only tokens on the configured GitHub-hosted runner, without AWS access.
+3. Land `continuum-admission.yml` and `continuum-auto-merge.yml`, then require
+   `Continuum PR admission`, `Typecheck & Unit Tests` and
+   `Runbook & Public-Content Scan` from GitHub Actions in strict main branch protection, enforcing administrators and
+   disabling force pushes/deletions. Infra CI now tests every PR, including
+   documentation-only changes, so the required test job is never absent.
+   No global human approval is required.
+   Set `CONTINUUM_AUTO_MERGE_ENABLED=true`. The required admission check runs
+   protected-base code; the merge controller uses only main and metadata APIs.
+   It pins the official App and bot IDs and refuses App workflow/write access.
+   Owner-origin PR events admit owner changes. Other contributors need owner
+   intervention; a Continuum PR passes only after complete, successful,
+   exact-head/base CI from both named workflows and a bounded regular-file diff.
+   The automatic source scope is `infra/src/**/*.ts`, runtime-only gateway
+   modules listed in `scripts/lib/continuum-auto-merge.mjs`, and Qwen embedding
+   JavaScript modules. Shared modules imported by deployment/maintenance,
+   workflow/control files, IaC, dependency manifests, Dockerfiles, renames and
+   deletions remain open for owner review. Rebase stale patches and rerun CI
+   before admission. Do not treat the scanner's findings as authorization.
+   The preflight reads back the live role trusts, protected environments, App
+   permissions, required checks and reviewed main control files. It preserves
+   the configured runner and never changes settings or IAM itself.
 4. Use an independently authorized, temporary operator session in the intended
    account. The tool verifies STS identity against the binding. It needs
    `continuum:GetIntegration` on that integration,

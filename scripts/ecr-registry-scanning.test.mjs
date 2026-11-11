@@ -1257,7 +1257,8 @@ describe("CI validation", () => {
       expect(setupPython).toBeGreaterThan(coreCheck);
     }
     expect(templateValidation).toBeGreaterThan(setupPython);
-    for (const trigger of ["pull_request", "push"]) {
+    expect(workflowConfiguration.on.pull_request.paths).toBeUndefined();
+    for (const trigger of ["push"]) {
       const paths = workflowConfiguration.on[trigger].paths;
       const exclusion = paths.indexOf("!infra/cloudformation/**");
       const registryTemplate = paths.indexOf(

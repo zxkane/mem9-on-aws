@@ -147,6 +147,8 @@ function runDeployRoleFixture(
       MEM9_DECISION_ARTIFACT_BUCKET: "",
       MEM9_VPC_ID: "",
       MEM9_TEMPLATE_BUCKET: "fixture-template-bucket",
+      GITHUB_OWNER_ID: "7",
+      GITHUB_REPOSITORY_ID: "42",
       MOCK_APPLICATION_REGION: existingApplicationRegion ?? "eu-west-1",
       MOCK_LEGACY_ROLE_ENABLED: existingLegacyRoleEnabled,
       MOCK_ROLE_STACK_ABSENT: String(roleStackAbsent),
@@ -234,7 +236,8 @@ describe("workflow integration", () => {
   it("runs IAM regression tests when the GitHub Actions role template changes", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
 
-    for (const trigger of ["pull_request", "push"]) {
+    expect(workflow.on.pull_request.paths).toBeUndefined();
+    for (const trigger of ["push"]) {
       const paths = workflow.on[trigger].paths;
       const exclusion = paths.indexOf("!infra/cloudformation/**");
       const roleTemplate = paths.indexOf(
@@ -463,7 +466,8 @@ describe("workflow integration", () => {
     // presence. Without this, a PR touching only the bucket template triggers no
     // infra-ci run at all, and the five security properties that moved out of
     // infra/slack-approval.ts into that file drift with nothing watching.
-    for (const trigger of ["pull_request", "push"]) {
+    expect(workflow.on.pull_request.paths).toBeUndefined();
+    for (const trigger of ["push"]) {
       const paths = workflow.on[trigger].paths;
       for (const template of templates) {
         expect(paths.indexOf(template)).toBeGreaterThan(

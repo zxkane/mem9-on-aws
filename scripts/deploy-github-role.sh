@@ -218,6 +218,16 @@ PARAMS_JSON=$(printf \
   "$PRODUCTION_HOSTED_ZONE_ARN" \
   "$LEGACY_ROLE_ENABLED" \
   "$DECISION_ARTIFACT_BUCKET_NAME")
+# Public repository IDs are deployment bindings, not source defaults. Explicit
+# values support controlled automation; local operators resolve them via gh.
+GITHUB_OWNER_ID="${GITHUB_OWNER_ID:-$(gh api repos/zxkane/mem9-on-aws --jq .owner.id)}"
+GITHUB_REPOSITORY_ID="${GITHUB_REPOSITORY_ID:-$(gh api repos/zxkane/mem9-on-aws --jq .id)}"
+if [[ ! "$GITHUB_OWNER_ID" =~ ^[1-9][0-9]*$ || ! "$GITHUB_REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]]; then
+  echo 'Error: immutable GitHub identity is unavailable.' >&2
+  exit 1
+fi
+PARAMS_JSON="$(jq --arg owner "$GITHUB_OWNER_ID" --arg repository "$GITHUB_REPOSITORY_ID" \
+  '. + [{ParameterKey:"GitHubOwnerId",ParameterValue:$owner},{ParameterKey:"GitHubRepositoryId",ParameterValue:$repository}]' <<<"$PARAMS_JSON")"
 echo "ENI scope: $APPLICATION_REGION, one VPC, ${#PRIVATE_SUBNET_IDS[@]} private subnet(s)"
 echo "Legacy role enabled: $LEGACY_ROLE_ENABLED"
 

@@ -8,9 +8,9 @@ const cutover=parse(readFileSync(new URL('../.github/actions/runtime-cutover/act
 const ci=parse(readFileSync(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8'));
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const guard=new AsyncFunction('context','github','core',recovery.jobs.source.steps[0].with.script);
-async function classify({branch='main',event='workflow_dispatch',jobs,path='.github/workflows/infra-ci.yml'}={}){
+async function classify({actor=7,branch='main',event='workflow_dispatch',jobs,path='.github/workflows/infra-ci.yml'}={}){
   const outputs={};
-  await guard({repo:{owner:'example',repo:'example'},payload:{workflow_run:{id:7,event,path,head_branch:branch,head_sha:'a'.repeat(40)}}},
+  await guard({repo:{owner:'example',repo:'example'},payload:{repository:{owner:{id:7}},workflow_run:{actor:{id:actor},id:7,event,path,head_branch:branch,head_sha:'a'.repeat(40)}}},
     {paginate:async()=>jobs,rest:{actions:{listJobsForWorkflowRun(){}}}},
     {setOutput:(name,value)=>{outputs[name]=value;}});
   return outputs;
@@ -65,6 +65,8 @@ describe('independent cutover cancellation recovery',()=>{
     await expect(classify({branch:'feature/unreviewed',jobs})).rejects.toThrow('UntrustedProductionRecoverySource');
     expect(await classify({jobs:[{name:'Deploy prod',conclusion:'failure'}]})).toEqual({});
     expect(await classify({event:'pull_request',jobs})).toEqual({});
+    expect(await classify({actor:99,jobs})).toEqual({});
+    expect(await classify({actor:null,jobs})).toEqual({});
     expect(await classify({path:'unrelated.yml',jobs})).toEqual({});
   });
   it('binds preview cleanup/recovery to one validated numeric stage and ignores skipped cutovers',async()=>{

@@ -29,7 +29,7 @@ export function createRetainedOperatorFixture({ pool = '', legacy = 'false', pag
   const stackId = name => `arn:aws:cloudformation:us-west-2:${accountId}:stack/${name}/fixture-id`;
   const parameters = {
     [namespaceStack]: { ApplicationRegion: applicationRegion, Stage: 'prod', CognitoUserPoolId: pool },
-    [deploymentStack]: { ProjectName: 'mem9-on-aws', GitHubOrg: 'zxkane', GitHubRepo: 'mem9-on-aws', ApplicationRegion: applicationRegion,
+    [deploymentStack]: { GitHubOwnerId: '7', GitHubRepositoryId: '42', ProjectName: 'mem9-on-aws', GitHubOrg: 'zxkane', GitHubRepo: 'mem9-on-aws', ApplicationRegion: applicationRegion,
       LegacyRoleEnabled: legacy, OIDCProviderArn: `arn:aws:iam::${accountId}:oidc-provider/token.actions.githubusercontent.com` },
   };
   const noValue = Symbol('NoValue');

@@ -123,6 +123,27 @@ describe('deployment authorization maintenance exclusions', () => {
 
   it('preserves the prior template apart from approved isolation additions', () => {
     const { template } = render();
+    // Verify the exact OIDC tightening before removing this delta from the
+    // historical whole-template conservation proof.
+    for (const [name, claim, value] of [
+      ['GitHubPreviewActionsRole', 'actor_id', {Ref:'GitHubOwnerId'}],
+      ['GitHubProductionActionsRole', 'ref', 'refs/heads/main'],
+      ['GitHubActionsRole', 'actor_id', {Ref:'GitHubOwnerId'}],
+    ]) {
+      const conditions = template.Resources[name].Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals;
+      const expected = {repository_id:{Ref:'GitHubRepositoryId'}, repository_owner_id:{Ref:'GitHubOwnerId'}, [claim]:value};
+      for (const [key, value] of Object.entries(expected)) {
+        expect(conditions[`token.actions.githubusercontent.com:${key}`]).toEqual(value);
+        delete conditions[`token.actions.githubusercontent.com:${key}`];
+      }
+    }
+    expect(template.Resources.GitHubActionsRole.Properties.AssumeRolePolicyDocument.Statement.pop()).toEqual({If:[
+      'KeepLegacyRole', {Ref:'AWS::NoValue'}, {Effect:'Deny', Principal:{Federated:{If:['CreateOIDCProvider',{Ref:'GithubOidc'},{Ref:'OIDCProviderArn'}]}}, Action:'sts:AssumeRoleWithWebIdentity'},
+    ]});
+    expect(template.Parameters.GitHubOwnerId.AllowedPattern).toBe('^[1-9][0-9]*$');
+    expect(template.Parameters.GitHubRepositoryId.AllowedPattern).toBe('^[1-9][0-9]*$');
+    delete template.Parameters.GitHubOwnerId;
+    delete template.Parameters.GitHubRepositoryId;
     // Verify and reverse only the reviewed service-verification grants. Keep
     // both historical hashes below so unrelated IAM changes still fail closed.
     const preview = template.Resources.GitHubPreviewActionsRole.Properties.Policies
@@ -285,6 +306,7 @@ else if(['s3 cp','cloudformation create-stack','cloudformation update-stack','cl
 else {console.error('Unexpected synthetic AWS call '+args.join(' '));process.exit(1);}
 `, { mode: 0o755 });
     const env = { ...process.env, PATH: directory + ':' + process.env.PATH, WORKLOAD_BOUNDARY_SKIP_DOTENV: 'true',
+      GITHUB_OWNER_ID: '7', GITHUB_REPOSITORY_ID: '42',
       STACK_NAME: roleName, MEM9_TEMPLATE_BUCKET: 'example-template-bucket', MEM9_VPC_ID: '',
       ISOLATION_FIXTURE: join(directory, 'fixture.json'), ISOLATION_LOG: join(directory, 'calls.jsonl') };
     delete env.MEM9_DECISION_ARTIFACT_BUCKET;

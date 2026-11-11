@@ -185,7 +185,7 @@ describe("application region consumers", () => {
         "node scripts/resolve-application-region.mjs",
       );
       if (workflowName === "infra-ci.yml") {
-        expect(regionJob.steps[0].with?.ref).toContain(
+        expect(regionJob.steps.find(step => step.uses?.startsWith("actions/checkout@"))?.with?.ref).toContain(
           "github.event.pull_request.head.sha",
         );
         expect(regionJob.outputs.cleanup_region).toContain(
