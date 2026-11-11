@@ -384,9 +384,10 @@ main and inspect the new run's deploy result.
 **AWS Continuum accepts only private GitHub repositories.** Creating a GitHub
 integration does not make a public repository eligible. The deployment command
 rejects public or unknown source visibility before provisioning, including
-scan-only creation. This public repository cannot be connected directly; an
-alternative scanner or a separately reviewed private-source pipeline is needed.
-Private mirroring and cross-repository patch promotion are not implemented here.
+scan-only creation. For this public repository, use the
+[S3 scanning workflow](#continuum-scanning-through-s3-for-a-public-repository)
+below. Private GitHub mirroring and cross-repository patch promotion are not
+implemented here.
 
 `infra/continuum/environment.json` is an example declaration for an independent
 AWS Continuum code environment. An eligible private source must satisfy the
