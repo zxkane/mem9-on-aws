@@ -1,0 +1,8 @@
+{
+  "name": "mem9Security",
+  "repository": "zxkane/mem9-on-aws",
+  "defaultBranch": "main",
+  "scanFrequency": "P1D",
+  "patchCreationPolicy": "ENABLED",
+  "allowedDomains": ["registry.npmjs.org", "github.com", "codeload.github.com"]
+}
