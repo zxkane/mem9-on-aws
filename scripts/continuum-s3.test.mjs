@@ -60,6 +60,7 @@ describe('controller orchestration',()=>{
   try{
    execFileSync('git',['init','-q',dir]);execFileSync('git',['-C',dir,'config','user.name','Test']);execFileSync('git',['-C',dir,'config','user.email','user@example.com']);
    await writeFile(join(dir,'source.ts'),'export const source = 1;\n');execFileSync('git',['-C',dir,'add','.']);execFileSync('git',['-C',dir,'commit','-qm','test']);
+   execFileSync('git',['-C',dir,'remote','add','origin',dir]);
    const main=execFileSync('git',['-C',dir,'rev-parse','HEAD'],{encoding:'utf8'}).trim(), environmentId='environment1', integrationId='integration1', bucket='source-bucket';
    const account=['123456','789012'].join(''),region='us-east-1';
    let state={version:2,repository:'owner/project',integrationId,environmentId,bucket,source:main,lastScanAt:0,scans:{scan1:main},patches:[]};
@@ -88,6 +89,22 @@ describe('controller orchestration',()=>{
   expect(h.writes[0].condition.IfNoneMatch).toBe('*');
   const token=h.calls.find(c=>c.name==='CreateCodeScan').input.clientToken;expect(token).toMatch(/^[a-f0-9]{64}$/);
   expect(h.requests.every(r=>!r.method)).toBe(true);
+ }));
+ it('skips an unsupported delivered patch and continues source synchronization',async()=>harness(async h=>{
+  const list=h.api.list,call=h.api.call,get=h.api.get,a=artifact();
+  a.body.patch.patch=a.body.patch.patch.replaceAll('infra/src/foo.ts','scripts/run.mjs');
+  a.body.patch.patchSha256=hash(a.body.patch.patch);a.body.patch.sizeBytes=Buffer.byteLength(a.body.patch.patch);a.body.patch.repositoryName=`source-${h.main}`;
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1'}]:name==='ListCodeIssueArtifacts'?[{artifactId:'artifact1',contentSizeBytes:100}]:list(name,...args);
+  h.api.call=async(name,...args)=>name==='GetCodeIssueArtifact'?a:name==='GetCodeIssue'?{findingIds:['finding1']}:name==='GetCodeFinding'?{scanRunId:'scan1'}:call(name,...args);
+  h.api.get=async(key,...args)=>key.startsWith('continuum-patches/')?{bytes:Buffer.from(a.body.patch.patch)}:get(key,...args);
+  await h.run();expect(h.writes.some(w=>w.key.startsWith('code/'))).toBe(true);expect(h.getState().patches).toHaveLength(0);
+ }));
+ it('surfaces patch-download network failures instead of silently refusing a patch',async()=>harness(async h=>{
+  const list=h.api.list,call=h.api.call,get=h.api.get,failure=new Error('S3 unavailable');
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1'}]:name==='ListCodeIssueArtifacts'?[{artifactId:'artifact1',contentSizeBytes:100}]:list(name,...args);
+  h.api.call=async(name,...args)=>name==='GetCodeIssueArtifact'?artifact():call(name,...args);
+  h.api.get=async(key,...args)=>{if(key.startsWith('continuum-patches/'))throw failure;return get(key,...args);};
+  await expect(h.run()).rejects.toBe(failure);expect(h.writes).toHaveLength(0);
  }));
  it('syncs main without queuing another scan while a scan is active',async()=>harness(async h=>{
   h.scans[0].status='SCANNING';await h.run();expect(h.calls.some(c=>['CreateCodeScan','UpdateEnvironment'].includes(c.name))).toBe(false);expect(h.writes).toHaveLength(1);
@@ -148,6 +165,19 @@ describe('production dispatch and transport boundary',()=>{
  });
  it('rejects arbitrary GitHub hosts, paths and verbs before executing gh',async()=>{
   const {github}=await import('./continuum-s3-cycle.mjs');
-  for(const [path,method] of [['https://example.com','GET'],['repos/owner/project/../other','GET'],['repos/owner/project','DELETE'],['--hostname','POST']])await expect(github(path,method)).rejects.toThrow('Unsupported GitHub request');
+  for(const [path,method] of [['https://example.com','GET'],['repos/owner/project/../other','GET'],['repos/owner/project/%2e%2e/other','GET'],['repos/owner/project','DELETE'],['--hostname','POST']])await expect(github(path,method)).rejects.toThrow('Unsupported GitHub request');
+ });
+});
+
+describe('service pagination',()=>{
+ it('rejects multi-token cycles and stops before a 51st request',async()=>{
+  const {collectPages}=await import('./lib/continuum-s3.mjs');
+  let calls=0;const tokens=['A','B','A'];
+  await expect(collectPages(async()=>({items:[],nextToken:tokens[calls++]}),'List',{})).rejects.toThrow('cyclic');expect(calls).toBe(3);
+  calls=0;await expect(collectPages(async()=>({items:[],nextToken:String(++calls)}),'List',{})).rejects.toThrow('50 pages');expect(calls).toBe(50);
+ });
+ it('preserves transport failures as operational errors',async()=>{
+  const {collectPages}=await import('./lib/continuum-s3.mjs');const failure=new Error('network failure');
+  await expect(collectPages(async()=>{throw failure;},'List',{})).rejects.toBe(failure);
  });
 });

@@ -1,3 +1,4 @@
+import { collectPages } from '../lib/continuum-s3.mjs';
 import * as continuum from '@aws-sdk/client-continuum';
 import * as s3 from '@aws-sdk/client-s3';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
@@ -21,17 +22,7 @@ export function createClients(region, bucket, account) {
   return {
     call,
     identity: () => send(sts, new GetCallerIdentityCommand({})),
-    async list(name, input, key = name === 'ListCodeScans' ? 'scans' : 'items') {
-      const items = [], seen = new Set(); let nextToken;
-      let pages=0;
-      do {
-        if (++pages>50) throw new Error('Service inventory exceeds 50 pages');
-        const result = await call(name, { ...input, maxResults: 100, ...(nextToken ? {nextToken} : {}) });
-        if (!Array.isArray(result[key]) || seen.has(result.nextToken)) throw new Error('Incomplete service inventory');
-        items.push(...result[key]); nextToken = result.nextToken; if (nextToken) seen.add(nextToken);
-      } while (nextToken);
-      return items;
-    },
+    list: (name,input,key=name==='ListCodeScans'?'scans':'items') => collectPages(call,name,input,key),
     async get(key, version, limit = 1024 * 1024) {
       try {
         const response = await send(storage, new s3.GetObjectCommand({ Bucket: bucket, ExpectedBucketOwner: account, Key: key, ...(version ? { VersionId: version } : {}) }));

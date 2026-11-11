@@ -4,12 +4,11 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AdmissionError, actionsBotId, ensure, sha, sha256, git, applyPatch, patchDestination, verifyDeliveredPatch, snapshotConfiguration, validationTitle, verifyValidation, verifyS3Pr, patchSource } from './lib/continuum-s3.mjs';
+import { AdmissionError, actionsBotId, ensure, sha, sha256, git, applyPatch, patchDestination, verifyDeliveredPatch, snapshotConfiguration, validationTitle, verifyValidation, verifyS3Pr, patchSource, verifyPatchFiles } from './lib/continuum-s3.mjs';
 import { scanPublicArtifactText } from './scan-public-artifacts.mjs';
-import { verifyFiles } from './lib/continuum-auto-merge.mjs';
 const exec = promisify(execFile);
 export async function github(path, method = 'GET', body) {
-  ensure(['GET','POST','PUT','PATCH'].includes(method) && /^repos\/[\w.-]+\/[\w.-]+(?:[/?][\w./?=:%&+-]*)?$/u.test(path) && !path.split('/').some(part => part === '..'), 'Unsupported GitHub request');
+  ensure(['GET','POST','PUT','PATCH'].includes(method) && /^repos\/[\w.-]+\/[\w.-]+(?:[/?][\w./?=:&+-]*)?$/u.test(path) && !path.split('/').some(part => part === '..'), 'Unsupported GitHub request');
   const task = exec('gh', ['api', '--hostname', 'github.com', '--method', method, path, ...(body ? ['--input', '-'] : [])], { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
   if (body) task.child.stdin.end(JSON.stringify(body));
   const { stdout } = await task;
@@ -35,6 +34,7 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
   ensure(saved, 'Operator must initialize the bound environment receipt');
   const state = JSON.parse(saved.bytes.toString('utf8'));
   ensure(state.version === 2 && state.repository === repoName && state.integrationId === integrationId && state.bucket === bucket && state.environmentId === environmentId && sha(state.source) && typeof state.scans === 'object' && Array.isArray(state.patches), 'Controller state binding mismatch');
+  ensure(state.patches.every(p => sha(p.source) && sha(p.base) && sha(p.head) && sha(p.tree) && /^[a-f0-9]{64}$/u.test(p.digest) && p.branch===`continuum-s3/${p.digest.slice(0,32)}-${p.base.slice(0,12)}` && Number.isSafeInteger(p.pr) && p.pr>0), 'Invalid patch receipt schema; operator reconciliation required');
   const save = async () => {
     const result = await api.put('control/state.json', JSON.stringify(state), saved ? { IfMatch: saved.etag } : { IfNoneMatch: '*' });
     saved = { etag: result.ETag };
@@ -100,11 +100,11 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
     try {
       const jobs = await request(`${root}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
       verifyValidation(run, jobs, pr, validationWorkflow.id);
-      const files = await request(`${root}/pulls/${pr.number}/files?per_page=100`); verifyFiles(files, pr.changed_files);
+      const files = await request(`${root}/pulls/${pr.number}/files?per_page=100`); verifyPatchFiles(files, pr.changed_files);
       const commit = await request(`${root}/git/commits/${receipt.head}`);
       ensure(commit.tree.sha === receipt.tree && commit.parents.length === 1 && commit.parents[0].sha === receipt.base, 'Published commit was altered');
       verifyS3Pr(await request(`${root}/pulls/${pr.number}`), repo, receipt, (await request(`${root}/git/ref/heads/main`)).object.sha);
-    } catch { log(`PR #${receipt.pr} validation did not pass`); continue; }
+    } catch(error) { if (!(error instanceof AdmissionError)) throw error; log(`PR #${receipt.pr} validation did not pass`); continue; }
     for (const name of ['Runbook & Public-Content Scan', 'Typecheck & Unit Tests', 'Continuum PR admission']) {
       await request(`${root}/check-runs`, 'POST', { name, head_sha:receipt.head, status:'completed', conclusion:'success', details_url:run.html_url, output:{title:name,summary:'Verified isolated validation for the exact patch and main revision.'} });
     }
@@ -141,7 +141,7 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
           for(const file of source.files) ensure((await git(cwd,['diff','--name-only',revision,main,'--',file.path])).trim()==='', 'Patch source changed since scan');
           applied=await applyPatch({cwd,base:main,patch});
           ensure(applied.files.every(file => scanPublicArtifactText(file.content).length === 0), 'Patch contains prohibited public content');
-        } catch { log('Patch is pending delivery or requires owner reconciliation');continue; }
+        } catch(error) { if (!(error instanceof AdmissionError)) throw error; log('Patch is pending delivery or requires owner reconciliation');continue; }
         const digest=sha256(patch),branch=`continuum-s3/${digest.slice(0,32)}-${main.slice(0,12)}`;
         state.publications ??= [];
         let publication=state.publications.find(p=>p.branch===branch);

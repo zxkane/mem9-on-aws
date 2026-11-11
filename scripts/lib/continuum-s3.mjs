@@ -8,6 +8,11 @@ import { verifyFiles } from './continuum-auto-merge.mjs';
 const exec = promisify(execFile);
 export class AdmissionError extends Error {}
 export const ensure = (value, message) => { if (!value) throw new AdmissionError(message); };
+// The shared file validator is pure; all its refusals are policy decisions.
+export function verifyPatchFiles(files, count) {
+  try { verifyFiles(files,count); }
+  catch (error) { throw new AdmissionError(error.message); }
+}
 export const sha256 = value => createHash('sha256').update(value).digest('hex');
 export const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
 export const actionsBotId = 41898282;
@@ -45,17 +50,22 @@ export async function applyPatch({ cwd, base, patch }) {
   ensure(headers.length > 0 && headers.length <= 100, 'Invalid patch file count');
   const names = headers.map(([, a, b]) => { ensure(a === b, 'Renamed path'); return a; });
   ensure(new Set(names).size === names.length, 'Duplicate patch path');
-  verifyFiles(names.map(filename => ({ filename, status: 'modified', additions: 0, deletions: 0 })), names.length);
+  verifyPatchFiles(names.map(filename => ({ filename, status: 'modified', additions: 0, deletions: 0 })), names.length);
   ensure(!/^new file mode (?!100644$)/mu.test(patch) && !/^index .* (?!100644$)\d{6}$/mu.test(patch), 'Non-regular patch mode');
   const directory = await mkdtemp(join(tmpdir(), 'continuum-index-'));
   const env = { GIT_INDEX_FILE: join(directory, 'index') };
   try {
     await git(cwd, ['read-tree', base], { env });
-    await git(cwd, ['apply', '--cached', '--check', '--whitespace=error', '-'], { input: patch, env });
-    await git(cwd, ['apply', '--cached', '--whitespace=error', '-'], { input: patch, env });
+    try {
+      await git(cwd, ['apply', '--cached', '--check', '--whitespace=error', '-'], { input: patch, env });
+      await git(cwd, ['apply', '--cached', '--whitespace=error', '-'], { input: patch, env });
+    } catch (error) {
+      if ([1,128].includes(error.code) && /(?:^|\n)error: (?:patch failed:|corrupt patch|invalid patch|No valid patches|.*: (?:patch does not apply|does not exist in index|already exists in index))/u.test(error.stderr ?? '')) throw new AdmissionError('Patch does not apply cleanly');
+      throw error;
+    }
     const diff = (await git(cwd, ['diff', '--cached', '--numstat', base], { env })).trim().split('\n').filter(Boolean);
     const stats = diff.map(line => { const [additions, deletions, filename] = line.split('\t'); return { filename, status: 'modified', additions: Number(additions), deletions: Number(deletions) }; });
-    verifyFiles(stats, names.length);
+    verifyPatchFiles(stats, names.length);
     ensure(stats.every(x => names.includes(x.filename)), 'Applied paths differ from patch headers');
     const files = [];
     for (const path of names) {
@@ -89,4 +99,17 @@ export function verifyValidation(run, jobs, pr, workflowId) {
 export function verifyS3Pr(pr, repo, receipt, main) {
   ensure(pr?.user?.id === actionsBotId && pr.user.type === 'Bot' && pr.state === 'open' && !pr.draft && pr.base.ref === 'main' && pr.base.repo.id === repo.id && pr.head.repo?.id === repo.id, 'Unexpected S3 patch PR identity');
   ensure(pr.head.ref === receipt.branch && pr.head.sha === receipt.head && pr.base.sha === receipt.base && main === receipt.base && sha(main), 'Patch PR changed or base advanced');
+}
+
+export async function collectPages(call, name, input, key = 'items') {
+  const items = [], seen = new Set(); let nextToken;
+  for (let pages=0; pages<50; pages++) {
+    const result=await call(name,{...input,maxResults:100,...(nextToken?{nextToken}:{})});
+    if (!Array.isArray(result[key]) || seen.has(result.nextToken)) throw new Error('Invalid or cyclic service inventory');
+    items.push(...result[key]);nextToken=result.nextToken;
+    if (!nextToken) return items;
+    if (typeof nextToken!=='string') throw new Error('Invalid service pagination token');
+    seen.add(nextToken);
+  }
+  throw new Error('Service inventory exceeds 50 pages');
 }
