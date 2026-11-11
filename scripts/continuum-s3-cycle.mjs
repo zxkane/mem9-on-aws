@@ -9,10 +9,17 @@ import { scanPublicArtifactText } from './scan-public-artifacts.mjs';
 import { verifyFiles } from './lib/continuum-auto-merge.mjs';
 const exec = promisify(execFile);
 export async function github(path, method = 'GET', body) {
+  ensure(['GET','POST','PUT','PATCH'].includes(method) && /^repos\/[\w.-]+\/[\w.-]+(?:[/?][\w./?=:%&+-]*)?$/u.test(path) && !path.split('/').some(part => part === '..'), 'Unsupported GitHub request');
   const task = exec('gh', ['api', '--hostname', 'github.com', '--method', method, path, ...(body ? ['--input', '-'] : [])], { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
   if (body) task.child.stdin.end(JSON.stringify(body));
   const { stdout } = await task;
   return stdout.trim() ? JSON.parse(stdout) : null;
+}
+export async function dispatchProduction(request, root, merged) {
+  ensure(sha(merged), 'Invalid merged revision');
+  const current = (await request(`${root}/git/ref/heads/main`)).object.sha;
+  ensure(sha(current) && (current === merged || (await request(`${root}/compare/${merged}...${current}`)).status === 'ahead'), 'Main does not contain merged patch');
+  await request(`${root}/actions/workflows/infra-ci.yml/dispatches`, 'POST', {ref:'main',inputs:{expected_revision:current}});
 }
 export async function cycle({ api, repoName, integrationId, bucket, account, region, environmentId, cwd, request = github, now = Date.now(), log = console.log }) {
   ensure(/^[\w.-]+\/[\w.-]+$/u.test(repoName) && /^[a-z0-9]{1,64}$/u.test(integrationId), 'Invalid binding');
@@ -53,11 +60,15 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
         const response = await request(`${root}/actions/workflows/infra-ci.yml/runs?branch=main&per_page=100`);
         ensure(response.total_count <= 100 || response.workflow_runs.length === 100, 'Invalid deployment inventory');
         let attempted = false;
-        for (const run of response.workflow_runs.filter(r => ['push','workflow_dispatch'].includes(r.event) && r.created_at >= pr.merged_at)) {
+        const mergedAt = Date.parse(pr.merged_at); ensure(Number.isFinite(mergedAt), 'Invalid merge timestamp');
+        for (const run of response.workflow_runs.filter(r => ['push','workflow_dispatch'].includes(r.event) && Date.parse(r.created_at) >= mergedAt)) {
           if (run.head_sha !== pr.merge_commit_sha && (await request(`${root}/compare/${pr.merge_commit_sha}...${run.head_sha}`)).status !== 'ahead') continue;
-          attempted = true; break;
+          if (run.status !== 'completed' || run.conclusion !== 'success') { attempted = true; break; }
+          const jobs=await request(`${root}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
+          ensure(jobs.total_count<=100 && jobs.jobs.length===jobs.total_count, 'Incomplete deployment jobs');
+          if(jobs.jobs.some(job=>job.name==='Deploy prod' && job.conclusion==='success')) { attempted=true;break; }
         }
-        if (!attempted) await request(`${root}/actions/workflows/infra-ci.yml/dispatches`, 'POST', { ref: 'main', inputs: { expected_revision: main } });
+        if (!attempted) await dispatchProduction(request,root,pr.merge_commit_sha);
         receipt.deploymentAttemptRecorded = true;
       }
       receipt.closed = true; await save(); continue;
@@ -100,7 +111,7 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
     const result = await request(`${root}/pulls/${pr.number}/merge`, 'PUT', { sha:receipt.head, merge_method:'squash', commit_title:`fix(security): apply verified Continuum patch (#${pr.number})` });
     ensure(result.merged === true && sha(result.sha), 'Merge not confirmed');
     await save(); // On interruption, closed-PR reconciliation recovers dispatch.
-    await request(`${root}/actions/workflows/infra-ci.yml/dispatches`, 'POST', { ref:'main', inputs:{expected_revision:result.sha} });
+    await dispatchProduction(request,root,result.sha);
     receipt.deploymentAttemptRecorded=true;receipt.closed=true;await save();log(`Merged PR #${pr.number} and dispatched production`);return;
   }
   const scans = await api.list('ListCodeScans', { environmentId });

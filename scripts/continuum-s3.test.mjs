@@ -134,3 +134,20 @@ describe('scoped cloud and workflow contracts',()=>{
   expect(control.jobs.cycle.steps.every(step=>!step.run?.includes('npm test'))).toBe(true);
  });
 });
+
+describe('production dispatch and transport boundary',()=>{
+ it('dispatches a freshly read main containing the merge, and rejects divergence',async()=>{
+  const {dispatchProduction}=await import('./continuum-s3-cycle.mjs');
+  const merged='a'.repeat(40),current='b'.repeat(40),calls=[];
+  const request=async(path,method,body)=>{calls.push({path,method,body});if(path.endsWith('/git/ref/heads/main'))return {object:{sha:current}};if(path.includes('/compare/'))return {status:'ahead'};};
+  await dispatchProduction(request,'repos/owner/project',merged);
+  expect(calls.at(-1).body.inputs.expected_revision).toBe(current);
+  const refused=[];
+  await expect(dispatchProduction(async(path,method)=>{if(method)refused.push(path);return path.includes('/compare/')?{status:'diverged'}:{object:{sha:current}};},'repos/owner/project',merged)).rejects.toThrow('Main does not contain');
+  expect(refused).toHaveLength(0);
+ });
+ it('rejects arbitrary GitHub hosts, paths and verbs before executing gh',async()=>{
+  const {github}=await import('./continuum-s3-cycle.mjs');
+  for(const [path,method] of [['https://example.com','GET'],['repos/owner/project/../other','GET'],['repos/owner/project','DELETE'],['--hostname','POST']])await expect(github(path,method)).rejects.toThrow('Unsupported GitHub request');
+ });
+});

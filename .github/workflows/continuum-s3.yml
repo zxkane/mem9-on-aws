@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   cycle:
-    if: github.ref == 'refs/heads/main' && vars.CONTINUUM_S3_ENABLED == 'true'
+    if: github.ref == 'refs/heads/main' && vars.CONTINUUM_S3_ENABLED == 'true' && vars.DEPLOYMENT_MAINTENANCE_PAUSED != 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:

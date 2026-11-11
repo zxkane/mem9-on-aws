@@ -53,7 +53,7 @@ export async function applyPatch({ cwd, base, patch }) {
     await git(cwd, ['read-tree', base], { env });
     await git(cwd, ['apply', '--cached', '--check', '--whitespace=error', '-'], { input: patch, env });
     await git(cwd, ['apply', '--cached', '--whitespace=error', '-'], { input: patch, env });
-    const diff = (await git(cwd, ['diff', '--cached', '--numstat', base], { env })).trim().split('\n');
+    const diff = (await git(cwd, ['diff', '--cached', '--numstat', base], { env })).trim().split('\n').filter(Boolean);
     const stats = diff.map(line => { const [additions, deletions, filename] = line.split('\t'); return { filename, status: 'modified', additions: Number(additions), deletions: Number(deletions) }; });
     verifyFiles(stats, names.length);
     ensure(stats.every(x => names.includes(x.filename)), 'Applied paths differ from patch headers');

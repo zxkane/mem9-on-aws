@@ -2921,8 +2921,8 @@ Update the same stack's `IntegrationId` and `EnvironmentId` to the returned IDs
 and review that its workflow policy names only those resources and descendants.
 Set repository secrets `CONTINUUM_S3_ROLE_ARN`, `CONTINUUM_S3_BUCKET`,
 `CONTINUUM_ACCOUNT_ID`, `CONTINUUM_S3_INTEGRATION_ID`, and
-`CONTINUUM_ENVIRONMENT_ID`. Set `CONTINUUM_S3_ENABLED=true`. Keep the direct
-GitHub lane's `CONTINUUM_AUTO_MERGE_ENABLED` independently configured.
+`CONTINUUM_ENVIRONMENT_ID`. Set `CONTINUUM_S3_ENABLED=true`. Leave the direct
+GitHub lane's `CONTINUUM_AUTO_MERGE_ENABLED=false` for this S3 setup.
 
 GitHub must permit Actions to create PRs. GitHub combines creation and review
 approval enablement in one repository setting; this workflow never submits review
