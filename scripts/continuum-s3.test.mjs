@@ -109,6 +109,53 @@ describe('controller orchestration',()=>{
  it('syncs main without queuing another scan while a scan is active',async()=>harness(async h=>{
   h.scans[0].status='SCANNING';await h.run();expect(h.calls.some(c=>['CreateCodeScan','UpdateEnvironment'].includes(c.name))).toBe(false);expect(h.writes).toHaveLength(1);
  }));
+ it.each([
+  {status:'CREATED'},
+  {status:'IN_PROGRESS',phase:'REMEDIATION'},
+  {status:'FUTURE_STATUS'},
+  {status:'COMPLETED',patchDelivery:{status:'PENDING'}},
+  {status:'COMPLETED',patchDelivery:{status:'FUTURE_STATUS'}},
+  {status:'COMPLETED',patchDelivery:{status:'FAILED',patchCount:2,failedCount:1,succeededCount:0}},
+  {status:'COMPLETED',patchDelivery:{status:'FAILED'}},
+  {status:'COMPLETED',patchDelivery:{status:'SUCCEEDED',patchCount:1,failedCount:-1,succeededCount:2}},
+ ])('holds a finished scan source while issue processing remains: %j',async detail=>harness(async h=>{
+  const list=h.api.list,call=h.api.call,old='b'.repeat(40);
+  h.setState({...h.getState(),source:old,scans:{scan1:old}});
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1',status:'COMPLETED'}]:list(name,...args);
+  h.api.call=async(name,...args)=>name==='GetCodeIssue'?detail:name==='GetEnvironment'?{...(await call(name,...args)),configuration:snapshotConfiguration('integration1',old)}:call(name,...args);
+  await h.run();
+  expect(h.writes.some(w=>w.key===`code/${h.main}/source-${h.main}.zip`)).toBe(true);
+  expect(h.calls.some(c=>['UpdateEnvironment','CreateCodeScan'].includes(c.name))).toBe(false);
+  expect(h.getState().source).toBe(old);expect(h.getState().pending).toBeUndefined();
+ }));
+ it.each([
+  {status:'COMPLETED'},
+  {status:'FAILED'},
+  {status:'COMPLETED',patchDelivery:{status:'SUCCEEDED',patchCount:1,failedCount:0,succeededCount:1}},
+  {status:'COMPLETED',patchDelivery:{status:'FAILED',patchCount:2,failedCount:1,succeededCount:1}},
+  {status:'COMPLETED',patchDelivery:{status:'SKIPPED',patchCount:0,failedCount:0,succeededCount:0}},
+ ])('allows another scan after known processing terminates: %j',async detail=>harness(async h=>{
+  const list=h.api.list,call=h.api.call;
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1'}]:list(name,...args);
+  h.api.call=async(name,...args)=>name==='GetCodeIssue'?detail:call(name,...args);
+  await h.run();expect(h.calls.some(c=>c.name==='CreateCodeScan')).toBe(true);
+ }));
+ it('does not rotate source when issue-detail retrieval fails',async()=>harness(async h=>{
+  const list=h.api.list,call=h.api.call,failure=new Error('Continuum unavailable');
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1'}]:list(name,...args);
+  h.api.call=async(name,...args)=>{if(name==='GetCodeIssue')throw failure;return call(name,...args);};
+  await expect(h.run()).rejects.toBe(failure);
+  expect(h.calls.some(c=>['UpdateEnvironment','CreateCodeScan'].includes(c.name))).toBe(false);
+ }));
+ it('waits through mixed failed and pending deliveries then resumes once all finish',async()=>harness(async h=>{
+  const list=h.api.list,call=h.api.call;
+  const detail={status:'COMPLETED',patchDelivery:{status:'FAILED',patchCount:2,failedCount:1,succeededCount:0}};
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1'}]:list(name,...args);
+  h.api.call=async(name,...args)=>name==='GetCodeIssue'?detail:call(name,...args);
+  await h.run();expect(h.calls.some(c=>c.name==='CreateCodeScan')).toBe(false);
+  detail.patchDelivery.succeededCount=1;
+  await h.run();expect(h.calls.some(c=>c.name==='CreateCodeScan')).toBe(true);
+ }));
  it('rejects unrecorded scans before publishing or changing source',async()=>harness(async h=>{
   h.scans.push({scanRunId:'foreign',status:'SUCCEEDED'});await expect(h.run()).rejects.toThrow('Unrecorded scan');expect(h.writes).toHaveLength(0);
  }));

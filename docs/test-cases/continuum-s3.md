@@ -10,3 +10,6 @@
 - TC-CS3-008: Cloud template isolates source/patch/control prefixes, denies public/plaintext access and limits OIDC to main and immutable repository IDs.
 - TC-CS3-009: Live main snapshot upload, environment creation and actual scan status are independently recorded. Zero findings or pending remediation does not prove patch generation.
 - TC-CS3-010: A genuine generated patch is promoted only after service/S3/CI verification; deployment must have a successful runtime smoke test.
+- TC-CS3-011: A terminal scan with an active issue still uploads the latest main archive but does not change the environment or start another scan. Unknown issue states and pending delivery also hold the source; terminal issues and terminal delivery permit progress.
+- TC-CS3-012: Issue-detail transport failures stop source rotation, and an existing scan journal still resumes with the original idempotency token.
+- TC-CS3-013: Aggregate FAILED with one failed and one pending patch holds the source. Progress resumes only when validated delivery counts account for every patch; malformed or incomplete counts also hold the source.
