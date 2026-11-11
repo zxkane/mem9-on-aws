@@ -379,6 +379,132 @@ missing. Merging this PR alone does not change GitHub settings. If a run already
 waiting for approval stays queued after reconciliation, rerun Infra CI from
 main and inspect the new run's deploy result.
 
+### Continuous code scanning and remediation pull requests
+
+`infra/continuum/environment.json` declares an independent AWS Continuum code
+environment: this repository's `main` branch, daily scans (`P1D`), and generated
+patch delivery (`ENABLED`). Continuum opens remediation pull requests when it
+produces a patch; this does not merge or deploy them. The existing review,
+test, and production deployment process remains authoritative.
+
+The environment is managed out of band by `scripts/deploy-continuum.mjs`, not
+by the application SST stack. The operator tool implements plan/apply/read-back
+against the Continuum API because the service did not expose native
+`AWS::Continuum::*` CloudFormation resources when checked on 2026-11-11.
+It creates no Lambda, IAM role, GitHub token, collector, or scheduler: Continuum
+owns the recurring schedule. Removing a PR preview cannot delete the scanner.
+Its SDK installation is separate from application dependencies:
+
+```bash
+npm ci --prefix scripts/continuum --ignore-scripts
+```
+
+Before activation:
+
+1. In the chosen Continuum region (`us-east-1` or `us-west-2`), install and
+   authorize the AWS GitHub App for this repository only. Reuse an existing
+   authorized integration when available. GitHub's interactive authorization
+   cannot be replaced by an IaC parameter or a repository token committed to Git.
+2. Review robot-PR admission to GitHub Actions. The deployment preflight reads
+   the actual CI role trusts and GitHub environment policies. PR-accessible
+   cloud environments need non-bypassable owner approval with self-review
+   disabled, or an exact main-only branch policy. This includes retained legacy
+   role environment subjects; a nonexistent environment is not a disabled trust.
+   A legacy role still trusting `pull_request` blocks activation. The check
+   also requires the existing runner to be a recognized GitHub-hosted runner,
+   read-default workflow tokens, and disabled workflow-token review approval.
+   It verifies GitHub.com identity and classic main branch protection requiring
+   at least one human approval, stale-review dismissal, latest-push approval,
+   enforced administrators, required checks, and no review bypass allowances.
+   Main-only deployment branches alone do not prove that a patch was reviewed.
+   Rulesets are not accepted as a substitute for these classic protections.
+   It never changes these settings, role policies, or runner selection.
+3. Review the template and live policies in the account's existing IAM
+   ownership stack before making any admission changes. New roles or different
+   OIDC subjects require extending this preflight. Environment protection is
+   an admission check, not continuous enforcement; keep control-plane changes
+   restricted and audited after enabling scans. Generated patches remain
+   untrusted, including when a scan has validated a vulnerability.
+4. Use an independently authorized, temporary operator session in the intended
+   account. The tool verifies STS identity against the binding. It needs
+   `continuum:GetIntegration` on that integration,
+   `continuum:GetEnvironment`/`UpdateEnvironment` and
+   `continuum:ListAssociatedCollectors` on the owned environment,
+   `continuum:ListEnvironments`, and `continuum:CreateEnvironment` for initial
+   creation. Admission inspection additionally reads only the project's named
+   legacy, preview and production CI roles through `iam:GetRole`, plus GitHub
+   repository/environment metadata using the operator's existing `gh` login.
+   It does not create or broaden an automation role or give AWS credentials to
+   Continuum's code-execution sandbox. Collector access roles or associated
+   Collectors discovered during planning, application or verification block
+   this repository-only deployment; they are never silently removed or adopted.
+
+Create a mode-600 `continuum-binding.local.json` with this shape, replacing the
+placeholders locally. These values are references, not credentials:
+
+```json
+{
+  "accountId": "<aws-account-id>",
+  "region": "us-east-1",
+  "integrationId": "<authorized-github-integration-id>"
+}
+```
+
+From the repository root, generate and inspect the plan before applying:
+
+```bash
+chmod 600 continuum-binding.local.json
+node scripts/deploy-continuum.mjs plan \
+  --binding continuum-binding.local.json \
+  --state continuum-state.local.json --plan continuum-plan.local.json
+cat continuum-plan.local.json
+node scripts/deploy-continuum.mjs apply \
+  --binding continuum-binding.local.json \
+  --state continuum-state.local.json --plan continuum-plan.local.json
+node scripts/deploy-continuum.mjs status \
+  --binding continuum-binding.local.json --state continuum-state.local.json
+```
+
+Plans expire after 30 minutes. Apply rechecks the caller, integration, GitHub
+admission, owned source selection, and observed policy before writing, then
+verifies the result through `GetEnvironment`. An identical declaration is a
+no-op. Account, region, integration, repository and branch changes are not
+implicitly adopted. A same-name environment without ownership state blocks
+creation instead of taking over another environment.
+
+Keep the private binding, plan and state outside published artifacts. Use one
+operator/state file for this environment; the local lock does not serialize
+different machines. The API has no create idempotency token, so the tool writes
+a durable `creating` journal before its single create attempt. If the request
+has an ambiguous result, stop, inspect Continuum/CloudTrail, and reconcile the
+exact created environment ID and source configuration with the journal before
+retrying. Never delete the journal just to retry creation. Remove a stale lock
+only after proving no deployment process remains. Preserve state for recovery.
+
+Configuration verification is not a successful vulnerability scan. Creation
+starts the first build/scan; inspect `status` and the Continuum console until it
+finishes. Findings, issue validation and patch generation may finish later, and
+a clean scan need not produce a PR. Inspect any delivered PR separately. To stop
+recurring scans and future patch generation, change the declaration to
+`scanFrequency: "PT0H"` and `patchCreationPolicy: "DISABLED"`, then plan/apply;
+this preserves findings and ownership state and does not cancel already running
+work or remove existing PRs. Status and disabling patch delivery remain usable
+when the GitHub admission check fails.
+
+**Coverage:** Continuum code scanning complements the existing ECR image scan;
+it does not continuously scan deployed image digests or prove that every native
+library CVE is fixed. Its documented source-file filter currently excludes
+`.mjs` and `.cjs`, which this repository uses extensively. Verify actual coverage
+before relying on a clean result. Do not rename production files merely to make
+them qualify. The initial dependency-network allowlist permits npm and GitHub
+source downloads; additional build dependencies need reviewed exact domains.
+No production memory content or AWS inventory collector is connected here.
+
+References: [Continuum onboarding](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html),
+[supported source files](https://docs.aws.amazon.com/continuum/latest/userguide/cv-supported-languages.html),
+[patch delivery](https://docs.aws.amazon.com/continuum/latest/userguide/cv-viewing-patches.html),
+[environment API](https://docs.aws.amazon.com/continuum/latest/APIReference/API_CreateEnvironment.html).
+
 ### Team memory namespaces and production cutover
 
 One Aurora database is shared by all teams. A managed Cognito group routes a

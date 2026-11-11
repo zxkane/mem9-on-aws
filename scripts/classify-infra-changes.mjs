@@ -79,6 +79,8 @@ export function classifyChangedPaths(paths) {
     if (path === "sst.config.ts") return true;
     if (!path.startsWith("infra/")) return false;
     if (path.startsWith("infra/cloudformation/")) return false;
+    // Independent operator-managed Continuum environment, never SST-owned.
+    if (path === "infra/continuum/environment.json") return false;
     return !isTestPath(path);
   });
   return {
