@@ -1,0 +1,30 @@
+name: Trusted PR admission
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  admission:
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      # Always use the protected base. Never run PR code with this write token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Record admission for the exact PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-continuum-pr.mjs

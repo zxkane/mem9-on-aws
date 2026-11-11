@@ -147,6 +147,9 @@ describe("split GitHub OIDC deployment roles", () => {
     const productionTrust = role("GitHubProductionActionsRole")
       .AssumeRolePolicyDocument.Statement[0].Condition.StringEquals;
     expect(previewTrust).toEqual({
+      "token.actions.githubusercontent.com:actor_id": "GitHubOwnerId",
+      "token.actions.githubusercontent.com:repository_id": "GitHubRepositoryId",
+      "token.actions.githubusercontent.com:repository_owner_id": "GitHubOwnerId",
       "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
       "token.actions.githubusercontent.com:sub": [
         "repo:${GitHubOrg}/${GitHubRepo}:environment:preview-ci",
@@ -154,6 +157,9 @@ describe("split GitHub OIDC deployment roles", () => {
       ],
     });
     expect(productionTrust).toEqual({
+      "token.actions.githubusercontent.com:ref": "refs/heads/main",
+      "token.actions.githubusercontent.com:repository_id": "GitHubRepositoryId",
+      "token.actions.githubusercontent.com:repository_owner_id": "GitHubOwnerId",
       "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
       "token.actions.githubusercontent.com:sub":
         "repo:${GitHubOrg}/${GitHubRepo}:environment:prod",
@@ -480,7 +486,8 @@ describe("split GitHub OIDC deployment roles", () => {
   });
 
   it("re-includes the ECR owner template after the CloudFormation exclusion", () => {
-    for (const trigger of ["pull_request", "push"]) {
+    expect(workflow.on.pull_request.paths).toBeUndefined();
+    for (const trigger of ["push"]) {
       const paths = workflow.on[trigger].paths;
       expect(
         paths.indexOf("infra/cloudformation/ecr-repositories.yaml"),

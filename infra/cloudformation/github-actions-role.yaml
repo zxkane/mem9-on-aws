@@ -30,6 +30,14 @@ Parameters:
     Default: mem9-on-aws
     Description: GitHub repository name. Used in the trust policy and as a
       prefix for IAM role / managed policy names.
+  GitHubOwnerId:
+    Type: String
+    AllowedPattern: "^[1-9][0-9]*$"
+    Description: Immutable GitHub owner ID; must match GitHubOrg.
+  GitHubRepositoryId:
+    Type: String
+    AllowedPattern: "^[1-9][0-9]*$"
+    Description: Immutable GitHub repository ID; must match GitHubOrg/GitHubRepo.
   ProjectName:
     Type: String
     Default: mem9-on-aws
@@ -1701,6 +1709,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubOwnerId
+                token.actions.githubusercontent.com:actor_id: !Ref GitHubOwnerId
                 token.actions.githubusercontent.com:sub:
                   - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-ci
                   - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-maintenance
@@ -1893,6 +1904,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubOwnerId
+                token.actions.githubusercontent.com:ref: refs/heads/main
                 token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:prod
       ManagedPolicyArns:
         - !Ref DenyPolicy
@@ -2007,6 +2021,9 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:repository_id: !Ref GitHubRepositoryId
+                token.actions.githubusercontent.com:repository_owner_id: !Ref GitHubOwnerId
+                token.actions.githubusercontent.com:actor_id: !Ref GitHubOwnerId
               StringLike:
                 # Trust scope: only the subjects CI actually presents. NOT the
                 # broad `:*`. GitHub branch protection gates which workflows run.
@@ -2023,6 +2040,16 @@ Resources:
                     - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
                     - !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request
                   - - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:legacy-role-disabled
+          # An unused environment name is not a disabled trust: GitHub can
+          # create the environment on demand. Retired means unconditional deny.
+          - !If
+            - KeepLegacyRole
+            - !Ref AWS::NoValue
+            - Effect: Deny
+              Principal:
+                Federated:
+                  !If [CreateOIDCProvider, !Ref GithubOidc, !Ref OIDCProviderArn]
+              Action: sts:AssumeRoleWithWebIdentity
       ManagedPolicyArns:
         - !Ref DenyPolicy
         - !Ref CorePolicy
