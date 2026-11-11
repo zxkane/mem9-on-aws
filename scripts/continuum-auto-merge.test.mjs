@@ -173,3 +173,12 @@ it("continues past a full closed-PR page before evaluating open patches", async 
   expect(value.calls.some(c => c.path.endsWith("per_page=100&page=2"))).toBe(true);
   expect(value.calls.some(c => c.method === "PUT")).toBe(true);
 });
+
+it("accepts a complete 100-entry CI inventory but rejects an incomplete page", async () => {
+  const value = controllerFixture();
+  const result = value.data.get(`repos/owner/project/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`);
+  result.workflow_runs.push(...Array.from({length:98}, (_, i) => ({id:i+100,workflow_id:99,head_sha:sha,event:"pull_request"})));
+  result.total_count = 100;
+  await value.run();
+  expect(value.calls.some(c => c.method === "PUT")).toBe(true);
+});

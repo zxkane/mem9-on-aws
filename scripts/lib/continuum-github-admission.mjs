@@ -80,7 +80,7 @@ export async function checkGithubAdmission(repository, binding, api) {
   requireThat(variables.variables.find(item => item.name === "CONTINUUM_AUTO_MERGE_ENABLED")?.value === "true", "Continuum auto-merge controller must be enabled before patch creation");
   // The reviewed local controller and workflows must already be on main.
   // This also prevents activating a half-landed local working-tree change.
-  for (const path of [".github/workflows/infra-ci.yml", ".github/workflows/docs-security.yml", ".github/workflows/runtime-recovery.yml", ".github/workflows/continuum-admission.yml", "scripts/check-continuum-pr.mjs", ".github/workflows/continuum-auto-merge.yml", "scripts/merge-continuum-prs.mjs", "scripts/lib/continuum-auto-merge.mjs"]) {
+  for (const path of [".github/workflows/infra-ci.yml", ".github/workflows/docs-security.yml", ".github/workflows/runtime-recovery.yml", ".github/workflows/continuum-admission.yml", "scripts/check-continuum-pr.mjs", ".github/workflows/continuum-auto-merge.yml", "scripts/merge-continuum-prs.mjs", "scripts/lib/continuum-auto-merge.mjs", "scripts/lib/continuum-github-admission.mjs"]) {
     const remote = await get(`${root}/contents/${path}?ref=main`);
     requireThat(remote.type === "file" && remote.encoding === "base64" && Buffer.from(remote.content, "base64").equals(await readFile(new URL(`../../${path}`, import.meta.url))), "Reviewed robot PR controls must match deployed main");
   }

@@ -306,6 +306,7 @@ else if(['s3 cp','cloudformation create-stack','cloudformation update-stack','cl
 else {console.error('Unexpected synthetic AWS call '+args.join(' '));process.exit(1);}
 `, { mode: 0o755 });
     const env = { ...process.env, PATH: directory + ':' + process.env.PATH, WORKLOAD_BOUNDARY_SKIP_DOTENV: 'true',
+      GITHUB_OWNER_ID: '7', GITHUB_REPOSITORY_ID: '42',
       STACK_NAME: roleName, MEM9_TEMPLATE_BUCKET: 'example-template-bucket', MEM9_VPC_ID: '',
       ISOLATION_FIXTURE: join(directory, 'fixture.json'), ISOLATION_LOG: join(directory, 'calls.jsonl') };
     delete env.MEM9_DECISION_ARTIFACT_BUCKET;

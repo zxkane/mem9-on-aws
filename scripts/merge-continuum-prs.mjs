@@ -56,7 +56,7 @@ export async function mergeContinuumPrs({ repository, enabled, request = api, lo
       // actual failure; its normal production failure reporting stays intact.
       if (run.status !== "completed" || run.conclusion !== "success") { accounted = true; break; }
       const jobs = await request(`${root}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
-      ensure(jobs.total_count < 100, "Incomplete production job inventory");
+      ensure(jobs.total_count <= 100 && jobs.jobs?.length === jobs.total_count, "Incomplete production job inventory");
       if (jobs.jobs.some(job => job.name === "Deploy prod" && job.conclusion === "success")) { accounted = true; break; }
     }
     if (!accounted) {
@@ -79,12 +79,12 @@ export async function mergeContinuumPrs({ repository, enabled, request = api, lo
       ensure(tree.truncated === false && Array.isArray(tree.tree), "Cannot verify complete source tree");
       for (const file of files) ensure(tree.tree.some(entry => entry.path === file.filename && entry.type === "blob" && entry.mode === "100644"), "Patch contains non-regular source");
       const response = await request(`${root}/actions/runs?head_sha=${pr.head.sha}&event=pull_request&per_page=100`);
-      ensure(response.total_count < 100, "CI inventory exceeds controller bound");
+      ensure(response.total_count <= 100 && response.workflow_runs?.length === response.total_count, "CI inventory exceeds controller bound");
       const runs = verifyRuns(response.workflow_runs, pr, workflows);
       for (const run of runs) {
         const jobs = await request(`${root}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
         const name = run.workflow_id === workflows["infra-ci.yml"] ? "Typecheck & Unit Tests" : "Runbook & Public-Content Scan";
-        ensure(jobs.total_count < 100 && jobs.jobs.some(job => job.name === name && job.conclusion === "success"), "Required test job did not pass");
+        ensure(jobs.total_count <= 100 && jobs.jobs?.length === jobs.total_count && jobs.jobs.some(job => job.name === name && job.conclusion === "success"), "Required test job did not pass");
       }
       // Admission is evaluated again immediately before the SHA-conditioned merge.
       const fresh = await request(`${root}/pulls/${pr.number}`);
