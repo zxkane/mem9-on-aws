@@ -17,6 +17,9 @@ on:
 permissions:
   contents: read
 
+# workflow_dispatch otherwise receives a write-capable default-branch cache token.
+cache-mode: none
+
 concurrency:
   group: continuum-patch-ci-${{ inputs.pr }}
   cancel-in-progress: false
@@ -54,6 +57,8 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Verify cache isolation
+        run: test "$ACTIONS_CACHE_MODE" = none
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false

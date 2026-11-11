@@ -2932,7 +2932,9 @@ workflows, it explicitly dispatches `Continuum patch validation`. That workflow
 first validates the exact head/base and regular runtime-source scope from main,
 then executes the complete existing CI test steps, including PostgreSQL isolation
 and migration integration tests, without cloud credentials or write permissions.
-A regression test keeps those steps aligned with Infra CI. The trusted
+Cache access is disabled with token-enforced `cache-mode: none`, and the test
+job checks the effective mode before checking out candidate code. A regression
+test keeps the test steps aligned with Infra CI. The trusted
 controller verifies the workflow identity, revision and successful jobs before
 recording required checks, merging the same head SHA, and dispatching existing
 production CI. Runner selection remains the configured `RUNNER_LABEL`.

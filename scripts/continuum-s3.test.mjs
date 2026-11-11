@@ -142,6 +142,7 @@ describe('scoped cloud and workflow contracts',()=>{
   const {parse}=await import('yaml');
   const ci=parse(await readFile(new URL('../.github/workflows/continuum-patch-ci.yml',import.meta.url),'utf8'));
   const control=parse(await readFile(new URL('../.github/workflows/continuum-s3.yml',import.meta.url),'utf8'));
+  expect(ci['cache-mode']).toBe('none');
   for(const job of Object.values(ci.jobs)){
    expect(Object.values(job.permissions)).not.toContain('write');expect(job['runs-on']).toContain('vars.RUNNER_LABEL');
    expect(JSON.stringify(job)).not.toContain('secrets.');expect(JSON.stringify(job)).not.toContain('configure-aws-credentials');
@@ -189,5 +190,6 @@ it('keeps all existing CI test and integration steps in isolated patch validatio
  const expected=structuredClone(original);
  expected[0].with={...expected[0].with,ref:'${{ inputs.head }}','persist-credentials':false};
  for(const step of expected)if(step.uses?.startsWith('actions/setup-node@')){delete step.with.cache;delete step.with['cache-dependency-path'];}
- expect(actual).toEqual(expected);
+ expect(actual[0]).toEqual({name:"Verify cache isolation",run:'test "$ACTIONS_CACHE_MODE" = none'});
+ expect(actual.slice(1)).toEqual(expected);
 });
