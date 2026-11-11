@@ -54,31 +54,102 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ inputs.head }}
           persist-credentials: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+          ref: ${{ inputs.head }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
         with:
           package_json_file: infra/package.json
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 24
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: '1.24.x'
+          go-version: 1.24.x
           cache: false
-      - uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7
+      - name: Install infra dependencies
+        run: pnpm -C infra install --frozen-lockfile
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install Pulumi runtime for lifecycle tests
+        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d
         with:
           pulumi-version: 3.256.0
-      - name: Install and test without deployment credentials
+      - name: Type check (infra)
+        run: pnpm -C infra typecheck
+      - name: Unit tests (infra)
+        run: pnpm -C infra test
+      - name: Consolidation coverage (infra)
+        run: pnpm -C infra test:consolidation:coverage
+      - name: Type check (root)
+        run: npm run typecheck
+      - name: Unit tests (root)
+        run: npm test
+      - name: Consolidation coverage (root)
+        run: npm run test:consolidation:coverage
+      - name: Cleanup and recovery coverage (root)
+        run: npm run test:cleanup:coverage
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: 3.x
+      - name: Validate ECR registry scanning template
         run: |
-          npm ci
-          pnpm -C infra install --frozen-lockfile
-          npm run typecheck
-          npm test
-          npm run test:consolidation:coverage
-          npm run test:cleanup:coverage
-          pnpm -C infra typecheck
-          pnpm -C infra test
-          pnpm -C infra test:consolidation:coverage
+          python -m pip install --disable-pip-version-check 'cfn-lint>=1.39,<2'
+          application_region="$(node scripts/resolve-application-region.mjs)"
+          cfn-lint infra/cloudformation/ecr-registry-scanning.yaml --regions "$application_region"
+          cfn-lint infra/cloudformation/continuum-s3.json --regions us-east-1
+          cfn-lint infra/cloudformation/github-actions-role.yaml --regions us-west-2
+          cfn-lint infra/cloudformation/workload-permissions-boundary.yaml --regions us-west-2
+          # Application region: this bucket is deployed there, not us-west-2.
+          cfn-lint infra/cloudformation/decision-artifact-bucket.yaml --regions "$application_region"
+          cfn-lint infra/cloudformation/decision-artifact-bucket-import.yaml --regions "$application_region"
+          cfn-lint infra/cloudformation/memory-namespace-operator-role.yaml --regions us-west-2
+      - name: Validate workload boundary operator scripts
+        run: |
+          # pip, not apt: the previous `apt-get update` refreshed every package
+          # index to install one tool and left the job at the mercy of mirror
+          # latency (two runs hung there until the 20-minute job timeout, with all
+          # tests already green). It also could not pin a version, so the same
+          # commit could lint against whatever shellcheck the distro happened to
+          # ship. 0.11.0.1 wraps upstream 0.11.0, matching what apt installed.
+          python -m pip install --disable-pip-version-check 'shellcheck-py==0.11.0.1'
+          shellcheck scripts/deploy-workload-permissions-boundary.sh
+          shellcheck scripts/deploy-decision-artifact-bucket.sh
+          shellcheck scripts/rollout-workload-permissions-boundary.sh
+          shellcheck scripts/run-cleanup-scan-task.sh
+          shellcheck scripts/run-consolidation-task.sh
+          shellcheck scripts/run-slack-approval-e2e.sh
+          shellcheck scripts/run-ingest-queue-integration.sh
+          shellcheck scripts/run-memory-namespace-integration.sh
+          shellcheck scripts/run-runtime-credentials-integration.sh
+          shellcheck docker/bootstrap/schema-digest.sh docker/bootstrap/entrypoint.sh docker/mnemo-server/entrypoint.sh
+          shellcheck scripts/run-consolidation-storage-integration.sh
+          shellcheck scripts/run-consolidation-execution-integration.sh
+          shellcheck scripts/run-consolidation-planner-integration.sh
+          shellcheck scripts/run-consolidation-scheduling-integration.sh
+          shellcheck scripts/run-memory-namespace-e2e.sh
+          shellcheck scripts/run-memory-namespace-benchmark.sh
+          shellcheck scripts/run-memory-namespace-connection-e2e.sh
+          shellcheck scripts/run-human-namespace-preview-e2e.sh
+          shellcheck scripts/run-memory-namespace-task.sh
+          shellcheck scripts/lib/memory-namespace-operator.sh
+          shellcheck scripts/deploy-memory-namespace-operator-role.sh
+          shellcheck scripts/deploy-github-role.sh
+          shellcheck scripts/verify-deploy-role-isolation.sh
+      - name: PostgreSQL durable ingest integration tests
+        run: bash scripts/run-ingest-queue-integration.sh
+      - name: PostgreSQL namespace migration rehearsal
+        run: bash scripts/run-memory-namespace-integration.sh
+      - name: PostgreSQL runtime credential isolation
+        run: bash scripts/run-runtime-credentials-integration.sh
+      - name: PostgreSQL continuous consolidation storage
+        run: bash scripts/run-consolidation-storage-integration.sh
+      - name: PostgreSQL consolidation execution and budgets
+        run: bash scripts/run-consolidation-execution-integration.sh
+      - name: PostgreSQL incremental planner and model admission
+        run: bash scripts/run-consolidation-planner-integration.sh
+      - name: Consolidation scheduling and synthetic fixture integration
+        run: bash scripts/run-consolidation-scheduling-integration.sh
+      - name: Namespace analysis service isolation
+        run: bash scripts/run-analysis-namespace-integration.sh

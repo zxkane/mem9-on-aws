@@ -181,3 +181,13 @@ describe('service pagination',()=>{
   await expect(collectPages(async()=>{throw failure;},'List',{})).rejects.toBe(failure);
  });
 });
+
+it('keeps all existing CI test and integration steps in isolated patch validation',async()=>{
+ const {parse}=await import('yaml');
+ const original=parse(await readFile(new URL('../.github/workflows/infra-ci.yml',import.meta.url),'utf8')).jobs.typecheck.steps;
+ const actual=parse(await readFile(new URL('../.github/workflows/continuum-patch-ci.yml',import.meta.url),'utf8')).jobs.test.steps;
+ const expected=structuredClone(original);
+ expected[0].with={...expected[0].with,ref:'${{ inputs.head }}','persist-credentials':false};
+ for(const step of expected)if(step.uses?.startsWith('actions/setup-node@')){delete step.with.cache;delete step.with['cache-dependency-path'];}
+ expect(actual).toEqual(expected);
+});

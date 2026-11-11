@@ -2930,7 +2930,9 @@ approval enablement in one repository setting; this workflow never submits revie
 approvals. Because its repository token does not trigger ordinary PR
 workflows, it explicitly dispatches `Continuum patch validation`. That workflow
 first validates the exact head/base and regular runtime-source scope from main,
-then executes tests without cloud credentials or write permissions. The trusted
+then executes the complete existing CI test steps, including PostgreSQL isolation
+and migration integration tests, without cloud credentials or write permissions.
+A regression test keeps those steps aligned with Infra CI. The trusted
 controller verifies the workflow identity, revision and successful jobs before
 recording required checks, merging the same head SHA, and dispatching existing
 production CI. Runner selection remains the configured `RUNNER_LABEL`.
