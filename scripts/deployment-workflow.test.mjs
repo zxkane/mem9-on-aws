@@ -216,6 +216,7 @@ describe("workflow integration", () => {
 
     expect(credentialJobs.sort()).toEqual(
       [
+        "continuum-s3.yml:cycle",
         "infra-ci.yml:build-and-push-image",
         "infra-ci.yml:build-human-acceptance-image",
         "infra-ci.yml:cleanup-failed-preview",

@@ -2890,3 +2890,55 @@ switching secrets alone does not update deployed resources.
 
 This repository is licensed under the
 [Apache License 2.0](LICENSE), matching the upstream `mem9-ai/mem9` project.
+
+### Continuum scanning through S3 for a public repository
+
+The S3 lane archives only a verified `main` commit to an immutable SHA-specific
+ZIP. One operator-bound Continuum environment scans that archive. The trusted
+workflow polls delivered patches, compares their digest and S3 object version,
+and requires agreement between finding scan IDs and the patch archive name.
+Unknown lineage, unsupported changes and failed CI remain unmerged.
+
+Deploy `infra/cloudformation/continuum-s3.json` in `us-east-1` using the existing
+reviewed CloudFormation change-set procedure. Supply immutable GitHub repository
+and owner IDs and a generated integration external ID; initially leave the
+integration/environment parameters `unbound`. The retained source and access-log
+buckets are encrypted, private and TLS-only. The integration role can read only
+source/context and write only delivered patches. The main workflow has no
+application data, deployment-role, IAM administration or integration-creation
+permissions.
+
+Create a mode-600 `*.local.json` binding containing `account`, `region`, `bucket`,
+`roleArn` (the integration role), `externalId`, and `repository`. After reviewing
+the stack outputs, run `scripts/bootstrap-continuum-s3.mjs --binding <binding.local.json>
+--state <bootstrap.local.json>` with the isolated SDK installed using
+`npm ci --prefix scripts/continuum --ignore-scripts`. Bootstrap uploads current
+main, creates the S3 integration and environment, and initializes the private
+controller receipt. It journals the non-idempotent environment creation before
+sending the request. An ambiguous create requires operator reconciliation.
+
+Update the same stack's `IntegrationId` and `EnvironmentId` to the returned IDs
+and review that its workflow policy names only those resources and descendants.
+Set repository secrets `CONTINUUM_S3_ROLE_ARN`, `CONTINUUM_S3_BUCKET`,
+`CONTINUUM_ACCOUNT_ID`, `CONTINUUM_S3_INTEGRATION_ID`, and
+`CONTINUUM_ENVIRONMENT_ID`. Set `CONTINUUM_S3_ENABLED=true`. Keep the direct
+GitHub lane's `CONTINUUM_AUTO_MERGE_ENABLED` independently configured.
+
+GitHub must permit Actions to create PRs. GitHub combines creation and review
+approval enablement in one repository setting; this workflow never submits review
+approvals. Because its repository token does not trigger ordinary PR
+workflows, it explicitly dispatches `Continuum patch validation`. That workflow
+first validates the exact head/base and regular runtime-source scope from main,
+then executes tests without cloud credentials or write permissions. The trusted
+controller verifies the workflow identity, revision and successful jobs before
+recording required checks, merging the same head SHA, and dispatching existing
+production CI. Runner selection remains the configured `RUNNER_LABEL`.
+
+The controller runs on main pushes and every fifteen minutes, coalesces main
+updates while a scan is active, and rescans unchanged main daily. Source updates
+and scan tokens are journaled; unknown scans or changed bindings fail closed.
+Snapshots, scan lineage and patch receipts stay in private S3, not public PR
+bodies. Disable `CONTINUUM_S3_ENABLED` to stop new workflow work; this does not
+cancel already queued service scans. No automatic environment or evidence
+teardown runs. Scan success, generated patch, merged PR and successful deployment
+are separate acceptance results; a scan without patches proves only scanning.

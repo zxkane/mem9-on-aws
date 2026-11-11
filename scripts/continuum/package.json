@@ -2,10 +2,13 @@
   "name": "mem9-continuum-deployment",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
     "@aws-sdk/client-continuum": "3.1166.0",
     "@aws-sdk/client-iam": "3.1166.0",
+    "@aws-sdk/client-s3": "3.1166.0",
     "@aws-sdk/client-sts": "3.1166.0",
     "@aws-sdk/credential-providers": "3.1166.0"
   }

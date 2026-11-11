@@ -1,0 +1,84 @@
+name: Continuum patch validation
+run-name: Continuum PR ${{ inputs.pr }} ${{ inputs.head }} ${{ inputs.base }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        required: true
+        type: string
+      head:
+        required: true
+        type: string
+      base:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: continuum-patch-ci-${{ inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate patch
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Validate protected-base admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH_PR: ${{ inputs.pr }}
+          PATCH_HEAD: ${{ inputs.head }}
+          PATCH_BASE: ${{ inputs.base }}
+        run: node scripts/check-continuum-s3-ci.mjs
+  test:
+    name: Test patch
+    needs: validate
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.head }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: infra/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7
+        with:
+          pulumi-version: 3.256.0
+      - name: Install and test without deployment credentials
+        run: |
+          npm ci
+          pnpm -C infra install --frozen-lockfile
+          npm run typecheck
+          npm test
+          npm run test:consolidation:coverage
+          npm run test:cleanup:coverage
+          pnpm -C infra typecheck
+          pnpm -C infra test
+          pnpm -C infra test:consolidation:coverage
