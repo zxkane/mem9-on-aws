@@ -116,9 +116,10 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
   }
   const scans = await api.list('ListCodeScans', { environmentId });
   const busy = scans.some(s => !['SUCCEEDED','FAILED'].includes(s.status));
+  let issues = [];
   if (!state.pending) ensure(scans.every(scan => sha(state.scans[scan.scanRunId])), 'Unrecorded scan; source reconciliation required');
   if (!state.pending) {
-    const issues = await api.list('ListCodeIssues', { environmentId });
+    issues = await api.list('ListCodeIssues', { environmentId });
     for (const issue of issues) {
       const artifacts = await api.list('ListCodeIssueArtifacts', { environmentId, issueId:issue.issueId, artifactType:'PATCH' });
       for (const item of artifacts) {
@@ -172,13 +173,36 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
     log(`Scan snapshot ${state.source.slice(0,12)}: ${scans[0]?.status??'PENDING'}, ${issues.length} issues`);
   }
   // Every source archive is immutable. Only the environment's selected prefix
-  // moves, after its current scan completes. Findings and patch archive names
-  // must both agree with the scan-to-revision ledger before PR publication.
+  // moves after its scan and known asynchronous issue processing terminate.
+  // Findings and patch archive names must both agree with the scan-to-revision
+  // ledger before PR publication.
   const selected = state.pending?.sha ?? main;
   const key=`code/${selected}/source-${selected}.zip`, archive=await git(cwd,['archive','--format=zip',selected],{binary:true});
   try{await api.put(key,archive,{IfNoneMatch:'*',Metadata:{revision:selected,sha256:sha256(archive)}});}catch(error){if(error.$metadata?.httpStatusCode!==412)throw error; const existing=await api.get(key,undefined,100*1024*1024);ensure(existing && sha256(existing.bytes)===sha256(archive),'Snapshot key was overwritten');}
   if(busy && !state.pending){log('Main synchronized; waiting for active scan');return;}
   if (!state.pending && (state.source!==main || now-state.lastScanAt>=86400000)) {
+    // SUCCEEDED applies to the scan, not the later remediation/delivery work.
+    // Keep its source registered until that work ends so delivery can still
+    // resolve the original integration. Refresh details: list summaries omit
+    // delivery status and may precede the latest lifecycle transition.
+    for (const issue of issues) {
+      const detail = await api.call('GetCodeIssue', {environmentId,issueId:issue.issueId});
+      const delivery = detail.patchDelivery;
+      // Aggregate FAILED takes precedence over PENDING. It only proves all
+      // deliveries ended when the success/failure counts cover every patch.
+      // A mixed failed/skipped remainder is conservatively held for review.
+      const deliveryComplete = !delivery || (
+        [delivery.patchCount,delivery.succeededCount,delivery.failedCount].every(n=>Number.isSafeInteger(n) && n>=0) &&
+        delivery.succeededCount+delivery.failedCount<=delivery.patchCount && (
+          (delivery.status==='SKIPPED' && delivery.succeededCount===0 && delivery.failedCount===0) ||
+          (['SUCCEEDED','FAILED'].includes(delivery.status) && delivery.succeededCount+delivery.failedCount===delivery.patchCount)
+        )
+      );
+      if (!['COMPLETED','FAILED'].includes(detail.status) ||
+          !deliveryComplete) {
+        log('Main synchronized; waiting for issue processing and patch delivery');return;
+      }
+    }
     state.pending={sha:main,token:sha256(`${environmentId}:${main}:${now}`),startedAt:now,before:scans.map(scan=>scan.scanRunId)};await save();
   }
   if (state.pending) {

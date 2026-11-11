@@ -26,6 +26,16 @@ setting. The controller uses it to create PRs; it never submits review approvals
 The existing direct-GitHub Continuum lane remains independently disabled.
 
 Snapshots and scan receipts are retained in the private bucket. The controller
-coalesces main updates while a scan is active and queues a daily rescan when main
-has not changed. Ambiguous source changes or unrecorded scans stop promotion. A
-successful scan with zero patches is not an end-to-end fix.
+coalesces main updates while a scan or known issue processing is active and queues
+a daily rescan when main has not changed. A successful scan does not mean
+remediation has finished. Before rotating the source prefix or starting another
+scan, the controller refreshes issue details and waits for terminal issue and
+patch-delivery states. Unknown states also hold the source. Terminal failed
+deliveries remain unpublishable; they are not counted as successful patches.
+An aggregate delivery failure can conceal a pending delivery. Success and
+failure counts must cover every destination patch before rotation; incomplete
+or mixed failed/skipped counts conservatively retain the source for review.
+This gate covers the service's currently listed issues; an empty inventory is
+not evidence that no later findings will appear. Ambiguous source changes or
+unrecorded scans stop promotion. A successful scan with zero patches is not an
+end-to-end fix.
