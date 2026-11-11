@@ -1,0 +1,459 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated S3 source and patch transport for Continuum; no application data permissions.",
+  "Parameters": {
+    "GitHubRepository": {
+      "Type": "String",
+      "Default": "zxkane/mem9-on-aws",
+      "AllowedPattern": "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+    },
+    "GitHubRepositoryId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]+"
+    },
+    "GitHubOwnerId": {
+      "Type": "String",
+      "AllowedPattern": "[0-9]+"
+    },
+    "ExternalId": {
+      "Type": "String",
+      "AllowedPattern": "[A-Za-z0-9-]{32,64}"
+    },
+    "IntegrationId": {
+      "Type": "String",
+      "Default": "unbound",
+      "AllowedPattern": "[a-z0-9]{1,64}"
+    },
+    "EnvironmentId": {
+      "Type": "String",
+      "Default": "unbound",
+      "AllowedPattern": "[a-z0-9]{1,64}"
+    }
+  },
+  "Resources": {
+    "SourceBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "IgnorePublicAcls": true,
+          "BlockPublicPolicy": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "LoggingConfiguration": {
+          "DestinationBucketName": {
+            "Ref": "AuditBucket"
+          },
+          "LogFilePrefix": "source-access/"
+        }
+      }
+    },
+    "AuditBucket": {
+      "Type": "AWS::S3::Bucket",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "IgnorePublicAcls": true,
+          "BlockPublicPolicy": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "Id": "ExpireAccessLogs",
+              "Status": "Enabled",
+              "ExpirationInDays": 90,
+              "NoncurrentVersionExpiration": {
+                "NoncurrentDays": 30
+              }
+            }
+          ]
+        }
+      }
+    },
+    "SourceBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "SourceBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyPlaintext",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "SourceBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${SourceBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AuditBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "AuditBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "DenyPlaintext",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:*",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "AuditBucket",
+                    "Arn"
+                  ]
+                },
+                {
+                  "Fn::Sub": "${AuditBucket.Arn}/*"
+                }
+              ],
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            },
+            {
+              "Sid": "SourceAccessLogs",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "logging.s3.amazonaws.com"
+              },
+              "Action": "s3:PutObject",
+              "Resource": {
+                "Fn::Sub": "${AuditBucket.Arn}/source-access/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnEquals": {
+                  "aws:SourceArn": {
+                    "Fn::GetAtt": [
+                      "SourceBucket",
+                      "Arn"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "IntegrationRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "Path": "/continuum/integrations/",
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "continuum.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "sts:ExternalId": {
+                    "Ref": "ExternalId"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "SourceAndPatchOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ValidateBucket",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:ListBucket"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "SourceBucket",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReadSources",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/code/*"
+                    },
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/context/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DeliverPatches",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "${SourceBucket.Arn}/continuum-patches/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "WorkflowRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": {
+                    "Fn::Sub": "repo:${GitHubRepository}:ref:refs/heads/main"
+                  },
+                  "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                  "token.actions.githubusercontent.com:repository_id": {
+                    "Ref": "GitHubRepositoryId"
+                  },
+                  "token.actions.githubusercontent.com:repository_owner_id": {
+                    "Ref": "GitHubOwnerId"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "SnapshotAndPatchController",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "BucketMetadata",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetBucketLocation",
+                    "s3:GetBucketVersioning",
+                    "s3:GetBucketPublicAccessBlock"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "SourceBucket",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReadOwnedObjects",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/code/*"
+                    },
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/control/*"
+                    },
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/continuum-patches/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteSnapshotsAndReceipts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutObject"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/code/*"
+                    },
+                    {
+                      "Fn::Sub": "${SourceBucket.Arn}/control/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "OwnedEnvironmentOperations",
+                  "Effect": "Allow",
+                  "Action": [
+                    "continuum:GetEnvironment",
+                    "continuum:CreateCodeScan",
+                    "continuum:GetCodeScan",
+                    "continuum:ListCodeScans",
+                    "continuum:ListCodeIssues",
+                    "continuum:GetCodeIssue",
+                    "continuum:ListCodeIssueArtifacts",
+                    "continuum:GetCodeIssueArtifact",
+                    "continuum:ListAssociatedCollectors",
+                    "continuum:GetCodeFinding"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:continuum:${AWS::Region}:${AWS::AccountId}:environments/${EnvironmentId}"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:continuum:${AWS::Region}:${AWS::AccountId}:environments/${EnvironmentId}/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "IntegrationRead",
+                  "Effect": "Allow",
+                  "Action": [
+                    "continuum:GetIntegration"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:continuum:${AWS::Region}:${AWS::AccountId}:integrations/${IntegrationId}"
+                  }
+                },
+                {
+                  "Sid": "UpdateOwnedS3Source",
+                  "Effect": "Allow",
+                  "Action": "continuum:UpdateEnvironment",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:continuum:${AWS::Region}:${AWS::AccountId}:environments/${EnvironmentId}"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:continuum:${AWS::Region}:${AWS::AccountId}:integrations/${IntegrationId}"
+                    }
+                  ],
+                  "Condition": {
+                    "Null": {
+                      "continuum:RepositoryName": "true"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "BucketName": {
+      "Value": {
+        "Ref": "SourceBucket"
+      }
+    },
+    "IntegrationRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "IntegrationRole",
+          "Arn"
+        ]
+      }
+    },
+    "WorkflowRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "WorkflowRole",
+          "Arn"
+        ]
+      }
+    }
+  }
+}

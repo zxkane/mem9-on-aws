@@ -1,0 +1,54 @@
+name: Continuum S3 scanning
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '8,23,38,53 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: continuum-s3-controller
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cycle:
+    if: github.ref == 'refs/heads/main' && vars.CONTINUUM_S3_ENABLED == 'true' && vars.DEPLOYMENT_MAINTENANCE_PAUSED != 'true'
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      checks: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install isolated controller SDK
+        run: npm ci --prefix scripts/continuum --ignore-scripts --no-audit --no-fund
+      - name: Obtain scoped scanner credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.CONTINUUM_S3_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 1800
+          mask-aws-account-id: true
+      - name: Synchronize, scan and reconcile patches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTINUUM_REGION: us-east-1
+          CONTINUUM_BUCKET: ${{ secrets.CONTINUUM_S3_BUCKET }}
+          CONTINUUM_ACCOUNT_ID: ${{ secrets.CONTINUUM_ACCOUNT_ID }}
+          CONTINUUM_S3_INTEGRATION_ID: ${{ secrets.CONTINUUM_S3_INTEGRATION_ID }}
+          CONTINUUM_ENVIRONMENT_ID: ${{ secrets.CONTINUUM_ENVIRONMENT_ID }}
+        run: node scripts/continuum-s3-cycle.mjs
