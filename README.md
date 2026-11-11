@@ -381,8 +381,17 @@ main and inspect the new run's deploy result.
 
 ### Continuous code scanning and remediation pull requests
 
-`infra/continuum/environment.json` declares an independent AWS Continuum code
-environment: this repository's `main` branch, daily scans (`P1D`), and generated
+**AWS Continuum accepts only private GitHub repositories.** Creating a GitHub
+integration does not make a public repository eligible. The deployment command
+rejects public or unknown source visibility before provisioning, including
+scan-only creation. This public repository cannot be connected directly; an
+alternative scanner or a separately reviewed private-source pipeline is needed.
+Private mirroring and cross-repository patch promotion are not implemented here.
+
+`infra/continuum/environment.json` is an example declaration for an independent
+AWS Continuum code environment. An eligible private source must satisfy the
+repository-specific CI and IAM preflight below. It selects `main`, daily scans
+(`P1D`), and generated
 patch delivery (`ENABLED`). The trusted controller merges eligible application
 source fixes after the exact revision passes CI, then dispatches the existing
 production pipeline. It recovers a missed dispatch even after main advances beyond the patch
@@ -404,7 +413,8 @@ npm ci --prefix scripts/continuum --ignore-scripts
 
 Before activation:
 
-1. In the chosen Continuum region (`us-east-1` or `us-west-2`), install and
+1. Confirm that the configured source repository is private. In the chosen
+   Continuum region (`us-east-1` or `us-west-2`), install and
    authorize the AWS GitHub App for this repository only. Reuse an existing
    authorized integration when available. GitHub's interactive authorization
    cannot be replaced by an IaC parameter or a repository token committed to Git.

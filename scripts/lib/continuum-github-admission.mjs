@@ -6,6 +6,20 @@ const exec = promisify(execFile);
 export const cloudEnvironments = ["preview-ci", "preview-maintenance", "prod"];
 const requireThat = (ok, message) => { if (!ok) throw new Error(message); };
 
+async function githubGet(endpoint) {
+  const { stdout } = await exec("gh", ["api", "--hostname", "github.com", endpoint], { timeout: 30000, maxBuffer: 1024 * 1024 });
+  return JSON.parse(stdout);
+}
+
+// The service rejects public GitHub sources even when the integration exists.
+// Check this before sending a non-idempotent CreateEnvironment request.
+export async function checkPrivateRepository(repository, get = githubGet) {
+  const info = await get(`repos/${repository}`);
+  requireThat(info.full_name === repository && info.html_url === `https://github.com/${repository}` && info.default_branch === "main", "GitHub.com repository identity mismatch");
+  requireThat(info.private === true, "AWS Continuum supports only private GitHub repositories; public or unknown visibility cannot be provisioned");
+  return info;
+}
+
 export function verifyAwsPrTrust(roles, binding, repository, info) {
   const prefix = `repo:${repository}:`;
   const roleName = `github-actions-${repository.split("/")[1]}`;
@@ -64,13 +78,9 @@ export function verifyGithubAdmission({ repository, mainProtection, tokenPolicy,
 
 export async function checkGithubAdmission(repository, binding, api) {
   requireThat((await api.identity()).Account === binding.accountId, "AWS caller account does not match binding");
-  const get = async (endpoint) => {
-    const { stdout } = await exec("gh", ["api", "--hostname", "github.com", endpoint], { timeout: 30000, maxBuffer: 1024 * 1024 });
-    return JSON.parse(stdout);
-  };
+  const get = githubGet;
   const root = `repos/${repository}`;
-  const info = await get(root);
-  requireThat(info.full_name === repository && info.html_url === `https://github.com/${repository}` && info.default_branch === "main", "GitHub.com repository identity mismatch");
+  const info = await checkPrivateRepository(repository, get);
   const requiredEnvironments = verifyAwsPrTrust(await api.ciRoles(repository), binding, repository, info);
   const mainProtection = await get(`${root}/branches/main/protection`);
   const tokenPolicy = await get(`${root}/actions/permissions/workflow`);

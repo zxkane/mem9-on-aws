@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { makePlan, applyPlan, inspectEnvironment, validateInputs } from "./lib/continuum-environment.mjs";
-import { checkGithubAdmission } from "./lib/continuum-github-admission.mjs";
+import { checkGithubAdmission, checkPrivateRepository } from "./lib/continuum-github-admission.mjs";
 
 export async function readPrivate(path, optional = false) {
   let file;
@@ -82,6 +82,11 @@ async function main() {
     // is intentionally retained until the operator verifies no writer exists.
     if (action === "apply") lock = await open(lockPath, "wx", 0o600);
     const state = await readPrivate(values.state, true);
+    // Reject unsupported initial sources before loading AWS credentials or
+    // writing a creation journal, including when patch delivery is disabled.
+    // Status and stopping patch delivery on an already bound environment stay
+    // available if its source visibility changes during an incident.
+    if (action !== "status" && (desired.patchCreationPolicy === "ENABLED" || state?.phase !== "bound")) await checkPrivateRepository(desired.repository);
     const { clients } = await import("./continuum/aws-client.mjs");
     api = await clients(binding.region);
     // Automatic PR delivery introduces untrusted code into CI. Validate the
