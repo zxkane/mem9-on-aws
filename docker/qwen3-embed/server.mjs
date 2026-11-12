@@ -1,201 +1,131 @@
-// OpenAI-compatible /v1/embeddings service backed by Qwen3-Embedding-0.6B ONNX.
-//
-// mem9's embedder (server/internal/embed/embedder.go) POSTs to
-// `${MNEMO_EMBED_BASE_URL}/embeddings` with an OpenAI-shaped body and expects an
-// OpenAI-shaped reply. This is the mem9-on-aws embedding MaaS (ARCHITECTURE.md §7):
-// it runs as an ALWAYS-WARM ECS sidecar next to mnemo-server, reached over
-// localhost, so there's no cold-start / cross-service auth. The embedding code
-// (model, last_token pooling, L2 normalize, 1024 dims) is a standalone ONNX
-// embedder; this file is the thin HTTP wrapper around it.
-//
-// Non-obvious choices (see docs/mem9-facts.md "Embedding" + the qwen3 memory):
-//   - ONE text per pipeline call, never a native string[] batch: with last_token
-//     pooling, transformers.js pads every text to the batch's longest → one long
-//     input inflates the whole batch. ORT already parallelizes a single forward
-//     across vCPUs, so we loop and let ORT use the cores.
-//   - DOCUMENT mode (no instruction prefix): the OpenAI /embeddings contract has
-//     no query/document hint, and mem9 sends memory content. Both the stored
-//     memory and mem9's own query embedding go through here in document mode —
-//     symmetric, correct for cosine.
-//   - dims MUST be 1024 (qwen3-0.6B native; matches the PG vector(1024) column the
-//     bootstrap creates + mem9's MNEMO_EMBED_DIMS=1024). We assert it.
+// OpenAI-compatible HTTP supervisor for one always-warm Qwen ONNX process.
+import { createServer } from 'node:http';
+import { pathToFileURL } from 'node:url';
+import { createMaintenanceAdmission } from './maintenance-admission.mjs';
+import { createInferencePool, InferenceError } from './inference-pool.mjs';
 
-import { createServer } from "node:http";
-import { createMaintenanceAdmission } from "./maintenance-admission.mjs";
-
-const maintenanceAdmission = createMaintenanceAdmission();
-
-const PORT = Number(process.env.QWEN3_EMBED_PORT || 8081);
-const MODEL_REPO =
-  process.env.QWEN3_EMBED_MODEL_REPO || "onnx-community/Qwen3-Embedding-0.6B-ONNX";
-// The model id reported back in the OpenAI response `model` field. mem9 sends
-// MNEMO_EMBED_MODEL; we echo whatever the request asked for (or this default).
-const MODEL_ID = process.env.QWEN3_EMBED_MODEL_ID || "qwen3-embedding-0.6b";
-const EXPECTED_DIM = 1024; // qwen3-0.6B native; NOT configurable (no Matryoshka).
-// ORT thread pinning: leave unset on Fargate (cpuinfo works there). Set
-// QWEN3_INTRA_OP_THREADS to the task vCPU count only if inference goes
-// single-threaded (the Lambda-sandbox cpuinfo-autodetect failure mode).
-const INTRA_OP_THREADS = Number(process.env.QWEN3_INTRA_OP_THREADS || 0);
-
-// The feature-extraction pipeline, created once at boot and reused (always-warm).
-let extractorPromise = null;
-
-async function getExtractor() {
-  if (!extractorPromise) {
-    extractorPromise = (async () => {
-      const mod = await import("@huggingface/transformers");
-      const opts = { dtype: "fp32" }; // fp16 hurts recall; int8/q8 wreck it.
-      if (INTRA_OP_THREADS > 0) {
-        opts.session_options = {
-          intraOpNumThreads: INTRA_OP_THREADS,
-          interOpNumThreads: 1,
-          executionMode: "sequential",
-        };
-      }
-      return mod.pipeline("feature-extraction", MODEL_REPO, opts);
-    })();
-  }
-  return extractorPromise;
+export function readLimits(env = process.env) {
+  const integer = (name, fallback, maximum) => {
+    const value = env[name];
+    if (value === undefined || value === '') return fallback;
+    if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > maximum) throw Error('Invalid embedding limit: ' + name);
+    return Number(value);
+  };
+  return {
+    maxInputs: integer('QWEN3_EMBED_MAX_INPUTS', 32, 32),
+    maxInputBytes: integer('QWEN3_EMBED_MAX_INPUT_BYTES', 16384, 16384),
+    maxConcurrency: integer('QWEN3_EMBED_MAX_CONCURRENCY', 2, 2),
+    maxBodyBytes: integer('QWEN3_EMBED_MAX_BODY_BYTES', 540672, 1048576),
+    deadlineMs: integer('QWEN3_EMBED_OVERALL_DEADLINE_MS', 55000, 120000),
+  };
 }
 
-// Embed one text → a length-1024 number[]. last_token pooling + L2 normalize,
-// document mode (no prefix). Throws on a dim mismatch (fail loud, never store a
-// wrong-width vector).
-async function embedOne(extractor, text) {
-  const result = await extractor(text, { pooling: "last_token", normalize: true });
-  const vec = Array.from(result.data);
-  if (vec.length !== EXPECTED_DIM) {
-    throw new Error(
-      `embedding dim mismatch: expected ${EXPECTED_DIM}, got ${vec.length}`,
-    );
-  }
-  return vec;
-}
-
-// Normalize the OpenAI `input` field → an array of strings. Accepts a string or
-// a string[] (OpenAI also allows token-id arrays, which mem9 never sends — we
-// reject those explicitly rather than silently mis-embed).
-function normalizeInput(input) {
-  if (typeof input === "string") return [input];
-  if (Array.isArray(input) && input.every((x) => typeof x === "string")) return input;
-  return null;
-}
-
-function sendJson(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(body),
-  });
+function sendJson(res, status, value) {
+  if (res.destroyed || res.writableEnded || res.headersSent) return;
+  const body = JSON.stringify(value);
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) });
   res.end(body);
 }
+function sendError(res, status, message) { sendJson(res, status, { error: { message, type: status >= 500 ? 'server_error' : 'invalid_request_error' } }); }
 
-function sendError(res, status, message, type = "invalid_request_error") {
-  sendJson(res, status, { error: { message, type } });
+// Async-iterator early-exit can destroy the socket before a 413 is sent.
+function readBody(req, signal, limit, metadata, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let timer;
+    const cleanup = () => { clearTimeout(timer); req.off('data', data); req.off('end', end); req.off('error', failed); req.off('aborted', failed); signal.removeEventListener('abort', failed); };
+    const failed = () => { cleanup(); reject(new InferenceError('cancelled')); };
+    const data = chunk => {
+      metadata.bytes = Math.min(limit + 1, metadata.bytes + chunk.length);
+      if (metadata.bytes > limit) { cleanup(); req.resume(); reject(new InferenceError('body_too_large')); }
+      else chunks.push(chunk);
+    };
+    const end = () => { cleanup(); resolve(Buffer.concat(chunks).toString('utf8')); };
+    if (signal.aborted) { failed(); return; }
+    timer = setTimeout(() => { cleanup(); req.resume(); reject(new InferenceError('body_timeout')); }, timeoutMs);
+    timer.unref();
+    req.on('data', data); req.once('end', end); req.once('error', failed); req.once('aborted', failed);
+    signal.addEventListener('abort', failed, { once: true });
+  });
 }
 
-async function readBody(req, limitBytes = 12 * 1024 * 1024) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > limitBytes) throw new Error("request body too large");
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-const server = createServer(async (req, res) => {
-  try {
-    const url = new URL(req.url, `http://localhost:${PORT}`);
-
-    // Liveness/readiness: 200 only once the model is loaded, so an ECS/ALB health
-    // check won't route traffic before the pipeline is warm.
-    if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      let loaded = false;
-      if (extractorPromise !== null) {
-        try {
-          await extractorPromise;
-          loaded = true;
-        } catch {
-          // Load failed → stay 503 (loaded already false); the boot handler exits.
-        }
+export function createEmbeddingServer({ pool, limits = readLimits(), log = line => console.error(line), modelId = 'qwen3-embedding-0.6b', stage = 'local' }) {
+  if (typeof stage !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(stage)) throw Error('Invalid embedding stage');
+  const maintenanceAdmission = createMaintenanceAdmission();
+  const server = createServer({ connectionsCheckingInterval: 1000 }, async (req, res) => {
+    const abort = new AbortController();
+    const closed = () => { if (!res.writableEnded) abort.abort(); };
+    res.once('close', closed); // IncomingMessage.close also fires for a consumed body.
+    const metadata = { bytes: 0, inputs: 0, maintenance: false };
+    let timer, deadlineAt, deadline = false;
+    const event = (code, status) => log(JSON.stringify({ msg: 'embed request outcome', event: code, status, route: 'embeddings', stage, ...metadata }));
+    const reject = (status, code, message) => { event(code, status); sendError(res, status, message); };
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      if (req.method === 'GET' && ['/health', '/healthz'].includes(url.pathname)) {
+        const ready = pool.status().ready;
+        return sendJson(res, ready ? 200 : 503, { status: ready ? 'ok' : 'loading' });
       }
-      return sendJson(res, loaded ? 200 : 503, { status: loaded ? "ok" : "loading" });
-    }
-
-    // OpenAI embeddings. mem9 posts to `${base}/embeddings`; base is
-    // http://localhost:PORT/v1, so accept both /v1/embeddings and /embeddings.
-    if (req.method === "POST" && /\/(v1\/)?embeddings$/.test(url.pathname)) {
-      const raw = await readBody(req);
+      if (req.method !== 'POST' || !['/embeddings', '/v1/embeddings'].includes(url.pathname)) return sendError(res, 404, 'route not found');
+      const raw = await readBody(req, abort.signal, limits.maxBodyBytes, metadata, limits.bodyTimeoutMs ?? 15000);
       let payload;
-      try {
-        payload = JSON.parse(raw);
-      } catch {
-        return sendError(res, 400, "request body is not valid JSON");
-      }
-      const inputs = normalizeInput(payload?.input);
-      if (!inputs) {
-        return sendError(
-          res,
-          400,
-          "`input` must be a string or an array of strings (token-id arrays are not supported)",
-        );
-      }
-      const maintenance = req.headers["x-mem9-maintenance"];
-      if (maintenance !== undefined && (maintenance !== "1" || inputs.length !== 1 || Buffer.byteLength(inputs[0]) > 16384)) {
-        return sendError(res, 400, "invalid maintenance embedding request");
-      }
-      const compute = async () => {
-        const extractor = await getExtractor();
-        // Single-text loop avoids padding unrelated texts to the longest input.
-        const data = [];
-        let totalChars = 0;
-        for (let i = 0; i < inputs.length; i++) {
-          const embedding = await embedOne(extractor, inputs[i]);
-          data.push({ object: "embedding", index: i, embedding });
-          totalChars += inputs[i].length;
-        }
-        return { data, totalChars };
-      };
-      let computed;
-      if (maintenance === "1") {
+      try { payload = JSON.parse(raw); }
+      catch { return reject(400, 'embed_invalid_json', 'request body is not valid JSON'); }
+      const inputs = typeof payload?.input === 'string' ? [payload.input] : payload?.input;
+      if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > limits.maxInputs || !inputs.every(value => typeof value === 'string')) return reject(400, 'embed_invalid_input', 'input must contain a bounded non-empty list of strings');
+      metadata.inputs = inputs.length;
+      if (inputs.some(value => Buffer.byteLength(value) > limits.maxInputBytes)) return reject(413, 'embed_invalid_input', 'input exceeds per-text byte limit');
+      const maintenance = req.headers['x-mem9-maintenance'];
+      metadata.maintenance = maintenance === '1';
+      if (maintenance !== undefined && (maintenance !== '1' || inputs.length !== 1 || Buffer.byteLength(inputs[0]) > 16384)) return reject(400, 'embed_invalid_maintenance', 'invalid maintenance embedding request');
+
+      deadlineAt = performance.now() + limits.deadlineMs;
+      timer = setTimeout(() => { deadline = true; abort.abort(); }, limits.deadlineMs);
+      timer.unref();
+      const compute = () => pool.run(inputs, { signal: abort.signal });
+      let vectors;
+      if (maintenance === '1') {
         const admitted = await maintenanceAdmission.run(compute);
-        if (!admitted.accepted) return sendError(res, 429, "maintenance embedding busy");
-        res.setHeader("X-Mem9-Maintenance", "1");
-        computed = admitted.value;
-      } else {
-        computed = await compute();
-      }
-      const { data, totalChars } = computed;
-      // usage.*_tokens are not meaningful here (no token accounting); report a
-      // char-based proxy so the OpenAI shape is complete. mem9 ignores it.
-      const approxTokens = Math.ceil(totalChars / 4);
-      return sendJson(res, 200, {
-        object: "list",
-        data,
-        model: typeof payload?.model === "string" && payload.model ? payload.model : MODEL_ID,
+        if (!admitted.accepted) { res.setHeader('Retry-After', '1'); return reject(429, 'embed_maintenance_busy', 'maintenance embedding busy'); }
+        vectors = admitted.value;
+        res.setHeader('X-Mem9-Maintenance', '1');
+      } else vectors = await compute();
+      if (deadline || performance.now() >= deadlineAt) return reject(503, 'embed_deadline_exceeded', 'embedding deadline exceeded');
+      if (abort.signal.aborted || res.destroyed) { event('embed_client_closed', 499); return; }
+      const approxTokens = Math.ceil(inputs.reduce((sum, text) => sum + text.length, 0) / 4);
+      sendJson(res, 200, {
+        object: 'list', data: vectors.map((embedding, index) => ({ object: 'embedding', index, embedding })),
+        model: typeof payload?.model === 'string' && payload.model ? payload.model : modelId,
         usage: { prompt_tokens: approxTokens, total_tokens: approxTokens },
       });
-    }
+    } catch (error) {
+      const code = error instanceof InferenceError ? error.code : 'inference_failed';
+      if (code === 'body_too_large' || code === 'body_timeout') {
+        res.setHeader('Connection', 'close'); res.once('finish', () => req.destroy());
+        if (code === 'body_timeout') reject(408, 'embed_body_timeout', 'request body timed out');
+        else reject(413, 'embed_body_too_large', 'request body too large');
+      } else if (deadline) reject(503, 'embed_deadline_exceeded', 'embedding deadline exceeded');
+      else if (code === 'cancelled') event('embed_client_closed', 499);
+      else if (code === 'busy') { res.setHeader('Retry-After', '1'); reject(429, 'embed_busy', 'embedding service busy'); }
+      else if (code === 'unavailable') { res.setHeader('Retry-After', '1'); reject(503, 'embed_model_unavailable', 'embedding service unavailable'); }
+      else reject(500, code === 'dimension_mismatch' ? 'embed_dim_mismatch' : 'embed_request_error', 'internal error computing embedding');
+    } finally { clearTimeout(timer); res.off('close', closed); }
+  });
+  server.headersTimeout = 10000;
+  server.requestTimeout = 15000;
+  server.keepAliveTimeout = 5000;
+  server.maxConnections = 64;
+  return server;
+}
 
-    return sendError(res, 404, `no route for ${req.method} ${url.pathname}`, "not_found");
-  } catch (err) {
-    // Never leak a stack; log server-side, return a generic 500.
-    console.error("embed request error:", "EmbeddingError");
-    return sendError(res, 500, "internal error computing embedding", "server_error");
-  }
-});
-
-server.listen(PORT, () => {
-  console.log(`qwen3-embed listening on :${PORT} (model ${MODEL_REPO}, dims ${EXPECTED_DIM})`);
-  // Kick off model load at boot so the sidecar is warm before the first request
-  // (and /health flips to 200 only when it's done).
-  getExtractor()
-    .then(() => console.log("qwen3-embed model loaded, ready"))
-    .catch((err) => {
-      console.error("qwen3-embed model load FAILED:", err?.message || err);
-      // Exit non-zero so ECS restarts the task rather than serving 503 forever.
-      process.exit(1);
-    });
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const limits = readLimits();
+  const pool = createInferencePool({ maxConcurrency: limits.maxConcurrency, onFatal: () => { console.error('embed_model_unavailable'); process.exit(1); } });
+  const server = createEmbeddingServer({ pool, limits, modelId: process.env.QWEN3_EMBED_MODEL_ID || 'qwen3-embedding-0.6b', stage: process.env.MEM9_STAGE || 'local' });
+  const port = Number(process.env.QWEN3_EMBED_PORT || 8081);
+  server.listen(port, () => { console.log('qwen3-embed supervisor listening'); });
+  pool.start().then(() => console.log('qwen3-embed model ready')).catch(() => { console.error('embed_model_unavailable'); process.exit(1); });
+  for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, async () => {
+    server.close(); server.closeAllConnections(); await pool.close(); process.exit(0);
+  });
+}

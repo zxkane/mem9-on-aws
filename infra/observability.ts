@@ -27,6 +27,10 @@ export interface ObservabilityInputs {
   // hand-computed name. Passing the Output also preserves the dependency on
   // the component that creates the group.
   logGroupName: Output<string>;
+  // The qwen3-embed sidecar writes to a distinct log group. Metric filters for
+  // oversized-body abuse and the embedding-dimension mismatch integrity guard
+  // target this group so sidecar errors are detectable in CloudWatch.
+  embedLogGroupName?: Output<string>;
   slackWebhookUrl?: Input<string>;
   mantleProject?: string;
 }
@@ -55,13 +59,16 @@ export const PRESCREEN_FALSE_SKIP_RATE_EXPRESSION =
 export function observability(
   inputs: ObservabilityInputs,
 ): ObservabilityOutputs {
-  const { stage, logGroupName, slackWebhookUrl, mantleProject } = inputs;
+  const { stage, logGroupName, embedLogGroupName, slackWebhookUrl, mantleProject } = inputs;
   if (stage !== "prod") return {};
   if (!slackWebhookUrl) {
     throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
   }
   if (!mantleProject) {
     throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
+  }
+  if (!embedLogGroupName) {
+    throw new Error("qwen3-embed log group is required for production observability");
   }
 
   const namespace = "mem9-on-aws";
@@ -151,6 +158,31 @@ export function observability(
       name: "NamespaceVectorTimeout",
       namespace: namespaceVectorNamespace,
       value: "1",
+    },
+  });
+
+  // The sidecar emits fixed event codes. Match only those codes: raw errors,
+  // request paths, headers and input content are neither needed nor logged.
+  // Production requires its resolved log group; preview stages return above.
+  new aws.cloudwatch.LogMetricFilter("EmbedBodyTooLargeFilter", {
+    logGroupName: embedLogGroupName,
+    pattern: '{ $.event = "embed_body_too_large" && $.stage = "prod" }',
+    metricTransformation: {
+      name: "EmbedBodyTooLarge",
+      namespace,
+      value: "1",
+      dimensions: { stage: "$.stage" },
+    },
+  });
+
+  new aws.cloudwatch.LogMetricFilter("EmbedDimMismatchFilter", {
+    logGroupName: embedLogGroupName,
+    pattern: '{ $.event = "embed_dim_mismatch" && $.stage = "prod" }',
+    metricTransformation: {
+      name: "EmbedDimMismatch",
+      namespace,
+      value: "1",
+      dimensions: { stage: "$.stage" },
     },
   });
 
@@ -651,6 +683,46 @@ export function observability(
     period: 900,
     evaluationPeriods: 1,
     threshold: 3,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+    okActions,
+  });
+
+  // Three oversized-body rejections in 15 minutes indicate caller misuse.
+  // The body limit is configured in the ECS environment, not encoded here.
+  new aws.cloudwatch.MetricAlarm("EmbedBodyTooLargeAlarm", {
+    alarmDescription:
+      "qwen3-embed rejected at least three oversized-body requests in 15 minutes. " +
+      "The sidecar is reachable only task-locally; investigate the caller.",
+    namespace,
+    metricName: "EmbedBodyTooLarge",
+    dimensions: { stage },
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 3,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+    okActions,
+  });
+
+  // Any dim-mismatch is a model-integrity signal: the width guard exists
+  // specifically to stop a wrong-width vector from being stored. Page on
+  // the first occurrence.
+  new aws.cloudwatch.MetricAlarm("EmbedDimMismatchAlarm", {
+    alarmDescription:
+      "qwen3-embed produced an embedding whose width did not match the " +
+      "configured dimension. Investigate the model configuration and " +
+      "deployed image.",
+    namespace,
+    metricName: "EmbedDimMismatch",
+    dimensions: { stage },
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 1,
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
     alarmActions,

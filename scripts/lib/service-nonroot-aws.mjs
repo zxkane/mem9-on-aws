@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {readFile,open,lstat,mkdir} from 'node:fs/promises';
+import {open,lstat,mkdir} from 'node:fs/promises';
 import {resolve} from 'node:path';
+import {readPrivateJson} from './private-json.mjs';
+export {readPrivateJson,assertPrivateDirectory} from './private-json.mjs';
 import {ECSClient,DescribeServicesCommand,DescribeTaskDefinitionCommand,ListTasksCommand,DescribeTasksCommand,RegisterTaskDefinitionCommand,UpdateServiceCommand} from '@aws-sdk/client-ecs';
 import {S3Client,GetObjectCommand,PutObjectCommand,DeleteObjectCommand,GetPublicAccessBlockCommand,GetBucketEncryptionCommand,GetBucketLifecycleConfigurationCommand} from '@aws-sdk/client-s3';
 import {SSMClient,GetParametersCommand} from '@aws-sdk/client-ssm';
@@ -16,10 +18,6 @@ const exec=promisify(execFile),lockKey='runtime-publication-locks/prod/witness.j
 const variable='DEPLOYMENT_MAINTENANCE_PAUSED';
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const plain=v=>JSON.parse(JSON.stringify(v));
-export async function readPrivateJson(path){
- const stat=await lstat(path);assert(stat.isFile()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o077)===0&&stat.size<=8*1024*1024,'PrivateEvidenceRequired');
- return JSON.parse(await readFile(path,'utf8'));
-}
 export async function writePrivateJson(path,value){
  const fd=await open(path,'wx',0o600);try{await fd.writeFile(JSON.stringify(value)+'\n');await fd.sync();}finally{await fd.close();}
 }
@@ -27,7 +25,7 @@ export async function currentSource(root){
  const run=async args=>(await exec('git',['-C',root,...args],{timeout:10000,maxBuffer:1024*1024})).stdout.trim();
  await run(['diff','--quiet']);await run(['diff','--cached','--quiet']);
  assert.equal(await run(['status','--porcelain','--untracked-files=normal']),'','UnreviewedSourceFiles');
- for(const path of ['scripts/run-service-nonroot.mjs','scripts/run-service-nonroot-smoke.mjs','scripts/lib/service-nonroot.mjs','scripts/lib/service-nonroot-aws.mjs','scripts/lib/service-nonroot-operation.mjs','scripts/lib/service-nonroot-runtime.mjs','scripts/lib/service-nonroot-audit.mjs','scripts/lib/service-nonroot-evidence.mjs'])await run(['ls-files','--error-unmatch',path]);
+ for(const path of ['scripts/run-service-nonroot.mjs','scripts/run-service-nonroot-smoke.mjs','scripts/lib/service-nonroot.mjs','scripts/lib/service-nonroot-aws.mjs','scripts/lib/private-json.mjs','scripts/lib/service-nonroot-operation.mjs','scripts/lib/service-nonroot-runtime.mjs','scripts/lib/service-nonroot-audit.mjs','scripts/lib/service-nonroot-evidence.mjs'])await run(['ls-files','--error-unmatch',path]);
  return {commit:await run(['rev-parse','HEAD']),tree:await run(['rev-parse','HEAD^{tree}']),clean:true};
 }
 

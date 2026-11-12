@@ -100,6 +100,16 @@ build: asynchronous requests using it fail before queue acceptance because
 3. `llm-proxy` exposes an OpenAI-compatible `/v1/chat/completions` endpoint on
    localhost port 8082. It is the only task component that calls Mantle.
 
+The embedding HTTP supervisor owns one warm model subprocess. Admission allows
+one running request and one queued request; texts execute individually without
+duplicating model weights. Maintenance requests remain limited to one text.
+Input/body limits apply to every caller. A compute deadline or disconnected
+response socket kills the active model process before capacity is reused. The
+model reloads afterward, and readiness stays false during that recovery;
+callers receive retryable failures instead of unbounded orphaned computation.
+Embedding logs contain fixed event codes and bounded counts, never input text,
+arbitrary error strings, header values or URL paths.
+
 `mnemo-server` uses:
 
 ```text

@@ -61,3 +61,28 @@ This gate covers the service's currently listed issues; an empty inventory is
 not evidence that no later findings will appear. Ambiguous source changes or
 unrecorded scans stop promotion. A successful scan with zero patches is not an
 end-to-end fix.
+
+## Repairing rejected remediations
+
+A remediation changed after review follows an owner-authored repair PR. It does
+not reuse an immutable artifact receipt or claim the original patch digest. The
+repair PR combines overlapping changes and closes superseded generated PRs only
+after its own regression tests, review and normal integration checks pass.
+
+Embedding inference uses one warm model process and a bounded request queue.
+The HTTP supervisor retains responsive deadlines even when native inference
+blocks. It sends one text at a time, preserves single-text maintenance requests,
+and kills the active child on timeout or response-socket disconnect. It waits
+for child exit before releasing the active job or starting a replacement, so
+cancellation cannot admit overlapping model processes. Queued cancellation only
+removes that request. Readiness is false while the model reloads; pending work
+fails with a retryable response. A model-load failure is fatal to the service.
+Fixed event codes and bounded counters provide diagnostics without exception
+strings, request contents, arbitrary URL paths or header values.
+
+Private JSON evidence is read through validated descriptors with a bounded
+stream. Nonblocking opens reject special files without waiting for a writer;
+anchored directory traversal prevents ancestor replacement from redirecting a
+read. Tests exercise the real filesystem and process cancellation boundaries,
+not only mocked happy paths. Existing runtime credentials, runner selection,
+maintenance admission and cloud trust boundaries remain in force.

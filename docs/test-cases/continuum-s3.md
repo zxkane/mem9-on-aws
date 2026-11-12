@@ -19,3 +19,10 @@
 - TC-CS3-017: Reviewable patches retain path, size, mode, credential-file, source-lineage, S3-byte and public-content checks. Publication does not constitute approval.
 - TC-CS3-018: Reject private environment/integration/issue/artifact/finding identifiers in generated source, including IDs wrapped across comment lines. Preserve the original patch bytes; do not silently sanitize and claim a digest match.
 - TC-CS3-019: Check the runner-injected cache mode inside a pinned JavaScript action before candidate checkout. Accept only `none`; absent, read and write modes fail. Shell steps do not receive this action-only variable.
+- TC-CS3-020: Repair PRs preserve provenance of the rejected artifacts without reusing their immutable receipts; generated originals close only after replacement changes land.
+- TC-CS3-021: Embedding logs contain only fixed event codes and bounded metadata; synthetic secrets in model errors, header values, URL prefixes and request bodies never appear.
+- TC-CS3-022: Maintenance requests reject multiple texts before inference; interactive requests enforce item, UTF-8 byte, body and global capacity bounds. Invalid configuration fails closed.
+- TC-CS3-023: A stuck inference subprocess is killed on deadline; the process exits before capacity is reused or another model is loaded. No late success or later text is emitted.
+- TC-CS3-024: A response-socket disconnect after request-body consumption cancels active work; cancelling a queued request leaves other work intact. Recovery loads one model and restores readiness.
+- TC-CS3-025: HTTP oversized-body responses remain readable, byte telemetry counts received bytes, slow bodies time out, and normal completed responses do not restart the worker.
+- TC-CS3-026: Private JSON reads reject real FIFOs without hanging, symlinks and ancestor substitution without redirection, oversized or growing files without unbounded allocation, and close descriptors on every error.

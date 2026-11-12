@@ -54,6 +54,9 @@ const ACCEPTANCE_STAGE = validateAcceptanceStage(
 const TOOL_DELIM = "___";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const INGEST_JOBS_PATH = "/v1alpha2/mem9s/ingest-jobs";
+// Match the shared embedder's per-text byte cap. Configuration may only lower
+// this limit; malformed values fail initialization instead of disabling it.
+const ADD_MEMORY_MAX_CONTENT_BYTES = readAddMemoryContentLimit();
 const INGEST_STATUS_FIELDS = [
   "job_id",
   "state",
@@ -69,6 +72,16 @@ function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`missing required env ${name}`);
   return v;
+}
+
+function readAddMemoryContentLimit() {
+  const raw = process.env.MEM9_ADD_MEMORY_MAX_CONTENT_BYTES;
+  if (raw === undefined) return 16_384;
+  const limit = Number(raw);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16_384 || String(limit) !== raw) {
+    throw new Error("MEM9_ADD_MEMORY_MAX_CONTENT_BYTES must be an integer between 1 and 16384");
+  }
+  return limit;
 }
 
 /** Pull the AgentCore tool name from the Lambda client context, stripping the
@@ -196,6 +209,9 @@ async function addMemory(input, identity, budget) {
   const { content, agent_id, memory_type } = input ?? {};
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("add_memory requires non-empty 'content'");
+  }
+  if (Buffer.byteLength(content, "utf8") > ADD_MEMORY_MAX_CONTENT_BYTES) {
+    throw new Error(`add_memory 'content' exceeds ${ADD_MEMORY_MAX_CONTENT_BYTES} bytes`);
   }
   if (memory_type != null && String(memory_type) !== "pinned") {
     throw new Error("add_memory memory_type must be 'pinned'");

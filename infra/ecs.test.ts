@@ -119,7 +119,7 @@ function materialize(value: unknown): unknown {
   return value;
 }
 
-function installGlobals(stage: string) {
+function installGlobals(stage: string, embedLogGroup: string | undefined = "/sst/cluster/test/svc-hash/qwen3-embed") {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
   installInterpolate();
   (globalThis as Record<string, unknown>).$jsonStringify = (value: unknown) =>
@@ -255,7 +255,7 @@ function installGlobals(stage: string) {
         nodes = {
           service: { name: out("mem9-service"), arn: out("arn:service") },
           // observability wiring parses containerDefinitions JSON from the task
-          // def to find the mnemo-server awslogs-group.
+          // def to find each container's awslogs-group.
           taskDefinition: out({
             arn: out(
               "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42",
@@ -266,6 +266,12 @@ function installGlobals(stage: string) {
                   name: "mnemo-server",
                   logConfiguration: {
                     options: { "awslogs-group": "/sst/cluster/test/svc-hash/mnemo-server" },
+                  },
+                },
+                {
+                  name: "qwen3-embed",
+                  logConfiguration: {
+                    options: { "awslogs-group": embedLogGroup },
                   },
                 },
               ]),
@@ -339,6 +345,28 @@ async function loadEcs() {
 }
 
 describe("ecs stack", () => {
+  it("fails when the task definition omits the embedding log group", async () => {
+    installGlobals("prod", "");
+    const ecs = await loadEcs();
+    expect(() => ecs(fakeDbOut())).toThrow("qwen3-embed awslogs-group not found in task definition");
+  });
+
+  it("resolves embedding filters from the actual sidecar log group", async () => {
+    const resolvedGroup = "/retained/synthetic-embed-group";
+    installGlobals("prod", resolvedGroup);
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const filters = created.filter((r) => r.kind === "LogMetricFilter");
+    const embedFilters = filters.filter((r) => String(r.args.pattern).includes("embed_"));
+    expect(embedFilters).toHaveLength(2);
+    for (const filter of embedFilters) {
+      expect(materialize(filter.args.logGroupName)).toBe(resolvedGroup);
+    }
+    for (const filter of filters.filter((r) => !embedFilters.includes(r))) {
+      expect(materialize(filter.args.logGroupName)).toBe("/sst/cluster/test/svc-hash/mnemo-server");
+    }
+  });
+
   it("fails production synthesis before resources when the Slack secret is empty", async () => {
     process.env.SST_SECRET_SlackWebhookUrl = "";
     installGlobals("prod");
@@ -837,6 +865,15 @@ describe("ecs stack", () => {
     const embed = containersByName()["qwen3-embed"];
     const env = embed.environment as Record<string, unknown>;
     expect(env.QWEN3_EMBED_PORT).toBe("8081");
+    expect(env.MEM9_STAGE).toBe("prod");
+    // Resource-exhaustion bounds (CWE-770): the embed sidecar is the single
+    // always-warm embedder; its bounds must be explicit in the task definition
+    // so production does not depend on image defaults (parity with LLM_PROXY_*).
+    expect(env.QWEN3_EMBED_MAX_INPUTS).toBe("32");
+    expect(env.QWEN3_EMBED_MAX_INPUT_BYTES).toBe(String(16 * 1024));
+    expect(env.QWEN3_EMBED_MAX_CONCURRENCY).toBe("2");
+    expect(env.QWEN3_EMBED_OVERALL_DEADLINE_MS).toBe("55000");
+    expect(env.QWEN3_EMBED_MAX_BODY_BYTES).toBe(String(32 * 16 * 1024 + 16 * 1024));
     const health = embed.health as Record<string, unknown>;
     expect(health).toBeDefined();
     expect(health.command).toEqual([
@@ -912,8 +949,8 @@ describe("ecs stack", () => {
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     const compositeAlarms = created.filter((c) => c.kind === "CompositeAlarm");
-    expect(filters.length).toBe(7); // recall, ingest auth, and namespace-vector metrics
-    expect(alarms.length).toBe(16);
+    expect(filters.length).toBe(9); // recall, ingest auth, namespace-vector, and qwen3-embed metrics
+    expect(alarms.length).toBe(18);
     expect(compositeAlarms).toHaveLength(2);
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
     // Queue health remains evidence-based; only sampler liveness treats loss
@@ -923,12 +960,16 @@ describe("ecs stack", () => {
     expect(missingPolicies.filter((policy) => policy === "ignore")).toHaveLength(1);
     expect(
       missingPolicies.filter((policy) => policy === "notBreaching"),
-    ).toHaveLength(13);
+    ).toHaveLength(15);
     // Metric filter patterns reference the correct log line msg values.
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
     expect(patterns.some((p) => p.includes("confidence recall search") && p.includes("returned = 0"))).toBe(true);
     expect(patterns.some((p) => p.includes("extraction LLM call failed") && p.includes("401"))).toBe(true);
     expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(false);
+    // qwen3-embed sidecar signals: oversized-body abuse and the dim-mismatch
+    // integrity guard are now distinguishable via the sidecar's own log group.
+    expect(patterns.some((p) => p.includes("embed_body_too_large"))).toBe(true);
+    expect(patterns.some((p) => p.includes("embed_dim_mismatch"))).toBe(true);
   });
 
   it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
