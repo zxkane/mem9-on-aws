@@ -533,6 +533,45 @@ describe("proxy-handler get_ingest_job_status", () => {
     expect(logSpy).not.toHaveBeenCalled();
   });
 
+  it.each(["status-http", "status-network", "search-http", "search-network"])("keeps retry logs free of caller and backend content: %s", async scenario => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (++attempts === 1) {
+        if (scenario.endsWith("network")) throw new Error("private-error-marker", {cause: new Error("private-cause-marker")});
+        return {ok: false, status: 503, text: async () => "private-body-marker"};
+      }
+      return {ok: true, status: 200, text: async () => "{}"};
+    }));
+    const pending = scenario.startsWith("status")
+      ? handler({job_id: "private-job-marker"}, ctx("get_ingest_job_status"))
+      : handler({q: "private-query-marker"}, ctx("search_memories"));
+    await vi.advanceTimersByTimeAsync(1501);
+    await pending;
+    expect(attempts).toBe(2);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-|mnemo\.mem9-test/);
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({event: "mem9_fetch_retry", attempt: 1});
+  });
+
+  it.each(["http-retry", "http-terminal", "transport"])("sanitizes terminal failures and causes: %s", async fault => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (fault === "transport") throw new Error("private-error-marker", {cause: new Error("private-cause-marker")});
+      return {ok: false, status: fault === "http-terminal" ? 400 : 503, text: async () => "private-body-marker"};
+    }));
+    const pending = handler({q: "private-query-marker"}, ctx("search_memories")).catch(error => error);
+    await vi.advanceTimersByTimeAsync(9001);
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.cause).toBeUndefined();
+    expect(String(error)).not.toMatch(/private-|mnemo\.mem9-test/);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-|mnemo\.mem9-test/);
+    expect(fetch).toHaveBeenCalledTimes(fault === "http-terminal" ? 1 : 4);
+  });
+
   it("requires a non-empty job_id", async () => {
     const spy = mockFetchOk();
     await expect(handler({}, ctx("get_ingest_job_status"))).rejects.toThrow(/requires 'job_id'/);

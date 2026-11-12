@@ -132,11 +132,10 @@ async function withinProxyBudget(context, run) {
 }
 
 class Mem9HttpError extends Error {
-  constructor(method, path, status, body) {
+  constructor(method, path, status) {
     const isStatusLookup = path.startsWith(`${INGEST_JOBS_PATH}/`);
-    const detail = isStatusLookup || !body ? "" : `: ${body.slice(0, 500)}`;
-    const publicPath = isStatusLookup ? `${INGEST_JOBS_PATH}/:job_id` : path;
-    super(`mnemo-server ${method} ${publicPath} returned ${status}${detail}`);
+    const publicPath = isStatusLookup ? `${INGEST_JOBS_PATH}/:job_id` : path.split("?")[0];
+    super(`mnemo-server ${method} ${publicPath} returned ${status}`);
     this.status = status;
     this.retryable = status === 408 || status === 429 || (status >= 500 && status !== 504);
   }
@@ -165,7 +164,7 @@ async function mem9FetchOnce(path, init, identity, budget) {
   const text = await res.text();
   const body = text ? safeJson(text) : {};
   if (!res.ok) {
-    throw new Mem9HttpError(init.method, path, res.status, text);
+    throw new Mem9HttpError(init.method, path, res.status);
   }
   return body;
 }
@@ -182,15 +181,19 @@ async function mem9Fetch(path, init, identity, budget) {
     try {
       return await mem9FetchOnce(path, init, identity, budget);
     } catch (e) {
-      lastErr = e;
+      lastErr = e instanceof Mem9HttpError ? e : new Error("mnemo-server transport request failed");
       budget.signal.throwIfAborted();
       if (e instanceof Mem9HttpError && !e.retryable) throw e;
-      const cause = e?.cause ? ` (cause: ${e.cause.code ?? e.cause.message ?? e.cause})` : "";
-      console.error(
-        `mem9Fetch ${init.method} ${BASE_URL}${path} attempt ${i}/${ATTEMPTS} failed: ${e?.message ?? e}${cause}`,
-      );
+      // Query strings, job IDs, backend response bodies and native error text
+      // can contain caller data. Retry diagnostics use fixed fields only.
+      console.error(JSON.stringify({
+        event: "mem9_fetch_retry",
+        attempt: i,
+        status: e instanceof Mem9HttpError ? e.status : 0,
+        failure: e instanceof Mem9HttpError ? "http" : "transport",
+      }));
       const delay = 1500 * i;
-      if (i === ATTEMPTS || budget.remaining() <= delay + 1000) throw e;
+      if (i === ATTEMPTS || budget.remaining() <= delay + 1000) throw lastErr;
       await sleep(delay, budget.signal);
     }
   }
