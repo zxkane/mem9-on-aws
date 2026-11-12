@@ -6,6 +6,11 @@ on:
   schedule:
     - cron: '8,23,38,53 * * * *'
   workflow_dispatch:
+    inputs:
+      patch_sha256:
+        description: Optional patch digest to reconcile without starting scans
+        required: false
+        type: string
 
 concurrency:
   group: continuum-s3-controller
@@ -51,4 +56,5 @@ jobs:
           CONTINUUM_ACCOUNT_ID: ${{ secrets.CONTINUUM_ACCOUNT_ID }}
           CONTINUUM_S3_INTEGRATION_ID: ${{ secrets.CONTINUUM_S3_INTEGRATION_ID }}
           CONTINUUM_ENVIRONMENT_ID: ${{ secrets.CONTINUUM_ENVIRONMENT_ID }}
+          CONTINUUM_PATCH_SHA256: ${{ inputs.patch_sha256 }}
         run: node scripts/continuum-s3-cycle.mjs

@@ -2929,7 +2929,7 @@ GitHub must permit Actions to create PRs. GitHub combines creation and review
 approval enablement in one repository setting; this workflow never submits review
 approvals. Because its repository token does not trigger ordinary PR
 workflows, it explicitly dispatches `Continuum patch validation`. That workflow
-first validates the exact head/base and regular runtime-source scope from main,
+first validates the exact head/base and bounded regular-text scope from main,
 then executes the complete existing CI test steps, including PostgreSQL isolation
 and migration integration tests, without cloud credentials or write permissions.
 Cache access is disabled with token-enforced `cache-mode: none`, and the test
@@ -2937,10 +2937,20 @@ job checks the effective mode before checking out candidate code. A regression
 test keeps the test steps aligned with Infra CI. The trusted
 controller verifies the workflow identity, revision and successful jobs before
 recording required checks, merging the same head SHA, and dispatching existing
-production CI. Runner selection remains the configured `RUNNER_LABEL`.
+production CI. Runtime-only changes can merge automatically. Changes to tests,
+control scripts, infrastructure or dependencies additionally require the personal
+repository owner's approval of the exact head. The controller refreshes review
+evidence after CI; it never submits approvals itself. Runner selection remains
+the configured `RUNNER_LABEL`.
+
+For focused patch verification, dispatch `continuum-s3.yml` with its optional
+`patch_sha256` input. That run reconciles only the matching artifact/receipt and
+does not request a scan; the input does not authorize a merge. Empty selection
+keeps normal discovery and source synchronization.
 
 The controller runs on main pushes and every fifteen minutes, coalesces main
-updates while a scan is active, and rescans unchanged main daily. Source updates
+updates while a scan or known remediation/delivery work is active, and rescans
+unchanged main daily. Source updates
 and scan tokens are journaled; unknown scans or changed bindings fail closed.
 Snapshots, scan lineage and patch receipts stay in private S3, not public PR
 bodies. Disable `CONTINUUM_S3_ENABLED` to stop new workflow work; this does not
