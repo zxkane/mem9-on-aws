@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { github } from './continuum-s3-cycle.mjs';
-import { ensure, sha, actionsBotId, git } from './lib/continuum-s3.mjs';
-import { verifyFiles } from './lib/continuum-auto-merge.mjs';
+import { ensure, sha, actionsBotId, git, verifyReviewableFiles } from './lib/continuum-s3.mjs';
 const { GITHUB_REPOSITORY: repository, PATCH_PR: number, PATCH_HEAD: head, PATCH_BASE: base } = process.env;
 try {
   ensure(process.env.GITHUB_REF === 'refs/heads/main' && process.env.GITHUB_SHA === base && sha(head) && sha(base) && /^[1-9][0-9]*$/u.test(number ?? ''), 'Invalid dispatch');
@@ -9,7 +8,9 @@ try {
   ensure(pr.user.id === actionsBotId && pr.user.type === 'Bot' && pr.head.repo?.id === repo.id && pr.base.repo.id === repo.id && pr.state === 'open' && !pr.draft && pr.head.sha === head && pr.base.sha === base && pr.base.ref === 'main' && /^continuum-s3\/[a-f0-9]{32}-[a-f0-9]{12}$/u.test(pr.head.ref), 'Patch identity changed');
   ensure((await github(`${root}/git/ref/heads/main`)).object.sha === base, 'Main advanced');
   const files = await github(`${root}/pulls/${number}/files?per_page=100`);
-  verifyFiles(files, pr.changed_files);
+  // Reviewable control changes can be tested here without cloud credentials.
+  // The trusted controller separately requires exact-head owner approval.
+  verifyReviewableFiles(files, pr.changed_files);
   const commit = await github(`${root}/git/commits/${head}`);
   ensure(commit.parents.length === 1 && commit.parents[0].sha === base, 'Patch parent changed');
   const tree = await github(`${root}/git/trees/${head}?recursive=1`);

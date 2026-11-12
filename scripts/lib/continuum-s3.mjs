@@ -13,6 +13,41 @@ export function verifyPatchFiles(files, count) {
   try { verifyFiles(files,count); }
   catch (error) { throw new AdmissionError(error.message); }
 }
+// Publication accepts bounded source/configuration text for review. This is
+// deliberately separate from the runtime-only automatic merge policy.
+export function verifyReviewableFiles(files, count) {
+  ensure(Array.isArray(files) && files.length===count && count>0 && count<=100, 'Incomplete patch diff');
+  let lines=0;
+  for (const file of files) {
+    const path=file.filename;
+    ensure(typeof path==='string' && /^[a-zA-Z0-9_./-]+$/u.test(path) && !path.split('/').some(x=>['','.','..','.git'].includes(x)), 'Unsafe patch path');
+    ensure(/\.(?:[cm]?[jt]sx?|py|go|sql|md|json|ya?ml|toml|sh|txt)$/u.test(path) && !/(?:^|\/)\.env(?:\.|$)/u.test(path), 'Unsupported or credential file');
+    ensure(['added','modified'].includes(file.status) && !file.previous_filename, 'Renames and removals require reconciliation');
+    ensure(Number.isSafeInteger(file.additions) && file.additions>=0 && Number.isSafeInteger(file.deletions) && file.deletions>=0, 'Incomplete patch size');
+    lines+=file.additions+file.deletions;
+  }
+  ensure(lines<=2000, 'Patch line limit exceeded');
+}
+export function requiresOwnerReview(files, count) {
+  verifyReviewableFiles(files,count);
+  try { verifyPatchFiles(files,count); } catch (error) { if (!(error instanceof AdmissionError)) throw error; return true; }
+  return files.some(file=>/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\.[a-z]+$/u.test(file.filename));
+}
+export function verifyOwnerReview(reviews, pr, repository) {
+  const owner=repository.owner;
+  ensure(owner?.type==='User' && Number.isSafeInteger(owner.id) && owner.id>0, 'A personal repository owner review is required');
+  ensure(Array.isArray(reviews) && reviews.length<100, 'Incomplete owner review inventory');
+  const decisions=reviews.filter(review=>review.user?.id===owner.id && review.user.type==='User' && review.state!=='COMMENTED' && review.state!=='PENDING');
+  ensure(decisions.every(review=>Number.isSafeInteger(review.id) && review.id>0), 'Invalid owner review');
+  const latest=decisions.sort((a,b)=>b.id-a.id)[0];
+  ensure(latest?.state==='APPROVED' && latest.commit_id===pr.head.sha, 'Exact patch head needs owner approval');
+}
+export function verifyNoPrivateIdentifiers(text, identifiers) {
+  // Generated comments sometimes wrap a finding ID across comment lines. Keep
+  // account-local scan inventory out of public source without rewriting bytes.
+  const compact=text.toLowerCase().replace(/[\s/*#-]/gu,'');
+  ensure(!identifiers.filter(id=>typeof id==='string' && /^[a-z0-9]{16,64}$/u.test(id)).some(id=>compact.includes(id)), 'Patch contains private service identifiers');
+}
 export const sha256 = value => createHash('sha256').update(value).digest('hex');
 export const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
 export const actionsBotId = 41898282;
@@ -42,7 +77,7 @@ export async function git(cwd, args, { input, env = {}, binary = false } = {}) {
   if (input !== undefined) task.child.stdin.end(input);
   return (await task).stdout;
 }
-export async function applyPatch({ cwd, base, patch }) {
+export async function applyPatch({ cwd, base, patch, reviewable = false }) {
   ensure(sha(base) && typeof patch === 'string' && Buffer.byteLength(patch) <= MAX_PATCH && !patch.includes('\0'), 'Invalid patch input');
   ensure(patch.startsWith('diff --git ') || /^From [a-f0-9]{40} Mon Sep 17 00:00:00 2001\n/u.test(patch), 'Unsupported diff format');
   ensure(!/^(?:GIT binary patch|Binary files |old mode |new mode |deleted file mode |rename |copy |similarity index )/mu.test(patch), 'Unsupported patch operation');
@@ -50,7 +85,8 @@ export async function applyPatch({ cwd, base, patch }) {
   ensure(headers.length > 0 && headers.length <= 100, 'Invalid patch file count');
   const names = headers.map(([, a, b]) => { ensure(a === b, 'Renamed path'); return a; });
   ensure(new Set(names).size === names.length, 'Duplicate patch path');
-  verifyPatchFiles(names.map(filename => ({ filename, status: 'modified', additions: 0, deletions: 0 })), names.length);
+  const verify=reviewable ? verifyReviewableFiles : verifyPatchFiles;
+  verify(names.map(filename => ({ filename, status: 'modified', additions: 0, deletions: 0 })), names.length);
   ensure(!/^new file mode (?!100644$)/mu.test(patch) && !/^index .* (?!100644$)\d{6}$/mu.test(patch), 'Non-regular patch mode');
   const directory = await mkdtemp(join(tmpdir(), 'continuum-index-'));
   const env = { GIT_INDEX_FILE: join(directory, 'index') };
@@ -65,7 +101,7 @@ export async function applyPatch({ cwd, base, patch }) {
     }
     const diff = (await git(cwd, ['diff', '--cached', '--numstat', base], { env })).trim().split('\n').filter(Boolean);
     const stats = diff.map(line => { const [additions, deletions, filename] = line.split('\t'); return { filename, status: 'modified', additions: Number(additions), deletions: Number(deletions) }; });
-    verifyPatchFiles(stats, names.length);
+    verify(stats, names.length);
     ensure(stats.every(x => names.includes(x.filename)), 'Applied paths differ from patch headers');
     const files = [];
     for (const path of names) {
@@ -75,7 +111,7 @@ export async function applyPatch({ cwd, base, patch }) {
       ensure(Buffer.byteLength(content) <= 1024 * 1024 && !content.includes('\0'), 'Invalid source text');
       files.push({ path, mode: '100644', type: 'blob', content });
     }
-    return { files, tree: (await git(cwd, ['write-tree'], { env })).trim() };
+    return { files, needsOwnerReview:requiresOwnerReview(stats,names.length), tree: (await git(cwd, ['write-tree'], { env })).trim() };
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 

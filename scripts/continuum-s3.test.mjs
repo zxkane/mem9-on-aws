@@ -4,10 +4,40 @@ import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { verifyDeliveredPatch, applyPatch, validationTitle, verifyValidation, snapshotConfiguration, patchSource } from './lib/continuum-s3.mjs';
+import { verifyDeliveredPatch, applyPatch, validationTitle, verifyValidation, snapshotConfiguration, patchSource, verifyReviewableFiles, requiresOwnerReview, verifyOwnerReview, verifyNoPrivateIdentifiers } from './lib/continuum-s3.mjs';
 const hash = x => createHash('sha256').update(x).digest('hex');
 const patch = 'diff --git a/infra/src/foo.ts b/infra/src/foo.ts\nindex 3367afd..3e75765 100644\n--- a/infra/src/foo.ts\n+++ b/infra/src/foo.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const artifact = () => ({ artifactType:'PATCH', body:{patch:{patch,patchSha256:hash(patch),sizeBytes:Buffer.byteLength(patch),delivery:{status:'SUCCEEDED',target:{s3:{bucket:'source-bucket',key:'continuum-patches/fix.patch',version:'v1'}}}}}});
+describe('reviewed patch admission',()=>{
+ const file=filename=>({filename,status:'modified',additions:1,deletions:1});
+ it('rejects private service identifiers even when split across generated comments',()=>{
+  const id='abcde0123456789f'.repeat(2);
+  for(const content of [`// finding ${id}`,`-- finding ${id.slice(0,20)}\n-- ${id.slice(20)}`,`/* ${id.toUpperCase()} */`])expect(()=>verifyNoPrivateIdentifiers(content,[id])).toThrow('private service identifiers');
+  expect(()=>verifyNoPrivateIdentifiers('commit '+ 'a'.repeat(40),[id])).not.toThrow();
+ });
+ it('publishes regular source/control changes while keeping their merge review separate',()=>{
+  for(const path of ['scripts/operator.mjs','infra/ecs.ts','infra/src/handler.test.ts','docker/qwen3-embed/server.test.mjs']){
+   expect(()=>verifyReviewableFiles([file(path)],1)).not.toThrow();expect(requiresOwnerReview([file(path)],1)).toBe(true);
+  }
+  expect(requiresOwnerReview([file('infra/src/handler.ts')],1)).toBe(false);
+  expect(requiresOwnerReview([file('docker/qwen3-embed/server.mjs')],1)).toBe(false);
+ });
+ it('rejects unsafe paths, credentials, unbounded changes and removals even for review',()=>{
+  for(const path of ['../evil.mjs','.git/config','a/../b.ts','.env','.env.local','nested/.env.prod','private.pem','private.key','a//b.ts'])expect(()=>verifyReviewableFiles([file(path)],1)).toThrow();
+  for(const f of [{...file('scripts/a.mjs'),status:'removed'},{...file('scripts/a.mjs'),additions:2001},{...file('scripts/a.mjs'),deletions:-1}])expect(()=>verifyReviewableFiles([f],1)).toThrow();
+  expect(()=>verifyReviewableFiles([file('scripts/a.mjs')],2)).toThrow();
+ });
+ it('requires the current personal owner approval for the exact head',()=>{
+  const repo={owner:{id:7,type:'User'}},pr={head:{sha:'a'.repeat(40)}};
+  const review={id:1,user:{id:7,type:'User'},state:'APPROVED',commit_id:pr.head.sha};
+  expect(()=>verifyOwnerReview([review],pr,repo)).not.toThrow();
+  for(const r of [{...review,user:{id:8,type:'User'}},{...review,user:{id:7,type:'Bot'}},{...review,commit_id:'b'.repeat(40)},{...review,state:'DISMISSED'},{...review,state:'CHANGES_REQUESTED'}])expect(()=>verifyOwnerReview([r],pr,repo)).toThrow();
+  expect(()=>verifyOwnerReview([],pr,repo)).toThrow();
+  expect(()=>verifyOwnerReview([review,{...review,id:2,state:'CHANGES_REQUESTED'}],pr,repo)).toThrow();
+  expect(()=>verifyOwnerReview([review,{...review,id:2,state:'COMMENTED'}],pr,repo)).not.toThrow();
+  expect(()=>verifyOwnerReview([review],pr,{owner:{id:7,type:'Organization'}})).toThrow();
+ });
+});
 describe('S3 patch boundary',()=>{
  it('requires independent agreement of finding scan lineage and patch archive name',()=>{
   const a=artifact(), revision='a'.repeat(40);a.body.patch.repositoryName=`source-${revision}`;
@@ -75,11 +105,11 @@ describe('controller orchestration',()=>{
      throw Error('Unexpected call');},
     list:async(name)=>name==='ListCodeScans'?scans:[]};
    const requests=[];const request=async(path,method,body)=>{requests.push({path,method,body});
-    if(path==='repos/owner/project')return {id:1,full_name:'owner/project',default_branch:'main',owner:{login:'owner'}};
+    if(path==='repos/owner/project')return {id:1,full_name:'owner/project',default_branch:'main',owner:{login:'owner',id:7,type:'User'}};
     if(path.endsWith('/git/ref/heads/main'))return {object:{sha:main}};
     if(path.endsWith('/actions/workflows/continuum-patch-ci.yml'))return {id:1,state:'active',path:'.github/workflows/continuum-patch-ci.yml'};
     throw Error('Unexpected GitHub mutation');};
-   await fn({run:()=>cycle({api,repoName:'owner/project',integrationId,bucket,account,region,environmentId,cwd:dir,request,now:100000000,log:()=>{}}),api,calls,writes,scans,getState:()=>state,setState:s=>{state=s;},main,requests});
+   await fn({run:(options={})=>cycle({api,repoName:'owner/project',integrationId,bucket,account,region,environmentId,cwd:dir,request,now:100000000,log:()=>{},...options}),api,calls,writes,scans,getState:()=>state,setState:s=>{state=s;},main,requests,request,dir});
   }finally{await rm(dir,{recursive:true,force:true});}
  }
  it('journals source and idempotency token before starting a scan and records its revision',async()=>harness(async h=>{
@@ -89,6 +119,72 @@ describe('controller orchestration',()=>{
   expect(h.writes[0].condition.IfNoneMatch).toBe('*');
   const token=h.calls.find(c=>c.name==='CreateCodeScan').input.clientToken;expect(token).toMatch(/^[a-f0-9]{64}$/);
   expect(h.requests.every(r=>!r.method)).toBe(true);
+ }));
+ it('selected-patch processing does not start another scan',async()=>harness(async h=>{
+  await h.run({patchDigest:'a'.repeat(64)});
+  expect(h.calls.some(c=>['CreateCodeScan','UpdateEnvironment'].includes(c.name))).toBe(false);
+  expect(h.requests.some(r=>r.method)).toBe(false);
+  await expect(h.run({patchDigest:'bad-digest'})).rejects.toThrow('Invalid patch selector');
+ }));
+ it.each([false,true])('publishes a reviewable patch only when GitHub preserves its exact tree (altered=%s)',async altered=>harness(async h=>{
+  const change='diff --git a/source.ts b/source.ts\n--- a/source.ts\n+++ b/source.ts\n@@ -1 +1 @@\n-export const source = 1;\n+export const source = 2;\n';
+  const a=artifact();Object.assign(a.body.patch,{patch:change,patchSha256:hash(change),sizeBytes:Buffer.byteLength(change),repositoryName:`source-${h.main}`});
+  const list=h.api.list,call=h.api.call,get=h.api.get;
+  h.api.list=async(name,...args)=>name==='ListCodeIssues'?[{issueId:'issue1'}]:name==='ListCodeIssueArtifacts'?[{artifactId:'artifact1',contentSizeBytes:Buffer.byteLength(change)}]:list(name,...args);
+  h.api.call=async(name,...args)=>name==='GetCodeIssueArtifact'?a:name==='GetCodeIssue'?{status:'COMPLETED',findingIds:['finding1']}:name==='GetCodeFinding'?{scanRunId:'scan1'}:call(name,...args);
+  h.api.get=async(key,...args)=>key.startsWith('continuum-patches/')?{bytes:Buffer.from(change)}:get(key,...args);
+  const expected=await applyPatch({cwd:h.dir,base:h.main,patch:change,reviewable:true}),calls=[];
+  const request=async(path,method,body)=>{
+   calls.push({path,method,body});
+   if(path.includes('/pulls?'))return [];
+   if(path.endsWith(`/git/commits/${h.main}`))return {tree:{sha:execFileSync('git',['-C',h.dir,'rev-parse',`${h.main}^{tree}`],{encoding:'utf8'}).trim()}};
+   if(path.endsWith('/git/trees'))return {sha:altered?'b'.repeat(40):expected.tree};
+   if(path.includes('/git/ref/heads/continuum-s3/'))throw Object.assign(new Error('not found'),{stderr:'404'});
+   if(path.endsWith('/git/commits'))return {sha:'a'.repeat(40)};
+   if(path.endsWith('/git/refs'))return {};
+   if(path.endsWith('/pulls'))return {number:5};
+   return h.request(path,method,body);
+  };
+  if(altered){await expect(h.run({request,patchDigest:hash(change)})).rejects.toThrow('Published tree differs');expect(calls.some(c=>c.path.endsWith('/pulls'))).toBe(false);}
+  else{
+   await h.run({request,patchDigest:hash(change)});
+   expect(h.getState().patches[0]).toMatchObject({pr:5,source:h.main,digest:hash(change),tree:expected.tree,needsOwnerReview:true});
+   expect(calls.find(c=>c.path.endsWith('/pulls')).body.body).toContain('owner to approve this exact PR head');
+   expect(h.calls.some(c=>c.name==='CreateCodeScan')).toBe(false);
+  }
+  expect(await readFile(join(h.dir,'source.ts'),'utf8')).toBe('export const source = 1;\n');
+ }));
+ it.each(['scripts/operator.mjs','infra/src/handler.test.ts'])('requires owner approval after full CI before merging %s',async filename=>harness(async h=>{
+  const receipt={environmentId:'environment1',artifactId:'artifact1',issueId:'issue1',source:h.main,digest:'c'.repeat(64),head:'a'.repeat(40),tree:'b'.repeat(40),base:h.main,pr:5};
+  receipt.branch=`continuum-s3/${receipt.digest.slice(0,32)}-${h.main.slice(0,12)}`;
+  h.setState({...h.getState(),patches:[receipt]});
+  const pr={number:5,user:{id:41898282,type:'Bot'},state:'open',draft:false,head:{sha:receipt.head,ref:receipt.branch,repo:{id:1}},base:{sha:h.main,ref:'main',repo:{id:1}},changed_files:1};
+  const run={id:10,workflow_id:1,path:'.github/workflows/continuum-patch-ci.yml',event:'workflow_dispatch',head_branch:'main',head_sha:h.main,display_title:validationTitle(pr),status:'completed',conclusion:'success',run_attempt:1};
+  let reviews=[];const calls=[];
+  const request=async(path,method,body)=>{
+   calls.push({path,method,body});
+   if(path.endsWith('/pulls/5'))return pr;
+   if(path.includes('/continuum-patch-ci.yml/runs?'))return {workflow_runs:[run]};
+   if(path.includes('/actions/runs/10/'))return {total_count:2,jobs:[{name:'Validate patch',conclusion:'success'},{name:'Test patch',conclusion:'success'}]};
+   if(path.includes('/pulls/5/files?'))return [{filename,status:'modified',additions:1,deletions:1}];
+   if(path.endsWith(`/git/commits/${receipt.head}`))return {tree:{sha:receipt.tree},parents:[{sha:h.main}]};
+   if(path.includes('/pulls/5/reviews?'))return reviews;
+   if(path.endsWith('/check-runs'))return {};
+   if(path.endsWith('/pulls/5/merge'))return {merged:true,sha:h.main};
+   if(path.endsWith('/infra-ci.yml/dispatches'))return {};
+   return h.request(path,method,body);
+  };
+  for(const review of [null,{id:1,user:{id:8,type:'User'},state:'APPROVED',commit_id:receipt.head},{id:2,user:{id:7,type:'User'},state:'APPROVED',commit_id:'d'.repeat(40)},{id:3,user:{id:7,type:'User'},state:'CHANGES_REQUESTED',commit_id:receipt.head}]){
+   reviews=review?[review]:[];await h.run({request,patchDigest:receipt.digest});
+   expect(calls.some(c=>c.path.endsWith('/merge')||c.path.endsWith('/check-runs'))).toBe(false);
+  }
+  // Approval may predate CI: only the exact current code and current decision
+  // matter. Re-reading after CI catches dismissals without requiring re-review.
+  reviews=[{id:4,user:{id:7,type:'User'},state:'APPROVED',commit_id:receipt.head,submitted_at:'2025-01-01T00:00:00Z'}];
+  await h.run({request,patchDigest:receipt.digest});
+  expect(calls.filter(c=>c.path.endsWith('/merge'))).toHaveLength(1);
+  expect(calls.find(c=>c.path.endsWith('/merge')).body.sha).toBe(receipt.head);
+  expect(h.getState().patches[0].closed).toBe(true);
  }));
  it('skips an unsupported delivered patch and continues source synchronization',async()=>harness(async h=>{
   const list=h.api.list,call=h.api.call,get=h.api.get,a=artifact();

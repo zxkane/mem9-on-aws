@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AdmissionError, actionsBotId, ensure, sha, sha256, git, applyPatch, patchDestination, verifyDeliveredPatch, snapshotConfiguration, validationTitle, verifyValidation, verifyS3Pr, patchSource, verifyPatchFiles } from './lib/continuum-s3.mjs';
+import { AdmissionError, actionsBotId, ensure, sha, sha256, git, applyPatch, patchDestination, verifyDeliveredPatch, snapshotConfiguration, validationTitle, verifyValidation, verifyS3Pr, patchSource, verifyReviewableFiles, requiresOwnerReview, verifyOwnerReview, verifyNoPrivateIdentifiers } from './lib/continuum-s3.mjs';
 import { scanPublicArtifactText } from './scan-public-artifacts.mjs';
 const exec = promisify(execFile);
 export async function github(path, method = 'GET', body) {
@@ -20,7 +20,8 @@ export async function dispatchProduction(request, root, merged) {
   ensure(sha(current) && (current === merged || (await request(`${root}/compare/${merged}...${current}`)).status === 'ahead'), 'Main does not contain merged patch');
   await request(`${root}/actions/workflows/infra-ci.yml/dispatches`, 'POST', {ref:'main',inputs:{expected_revision:current}});
 }
-export async function cycle({ api, repoName, integrationId, bucket, account, region, environmentId, cwd, request = github, now = Date.now(), log = console.log }) {
+export async function cycle({ api, repoName, integrationId, bucket, account, region, environmentId, cwd, patchDigest, request = github, now = Date.now(), log = console.log }) {
+  ensure(patchDigest===undefined || /^[a-f0-9]{64}$/u.test(patchDigest), 'Invalid patch selector');
   ensure(/^[\w.-]+\/[\w.-]+$/u.test(repoName) && /^[a-z0-9]{1,64}$/u.test(integrationId), 'Invalid binding');
   ensure((await api.identity()).Account === account, 'Caller account differs from bucket owner');
   await api.bucketSafe();
@@ -51,6 +52,7 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
   const validationWorkflow = await request(`${root}/actions/workflows/continuum-patch-ci.yml`);
   ensure(validationWorkflow.state === 'active' && validationWorkflow.path === '.github/workflows/continuum-patch-ci.yml', 'Validation workflow unavailable');
   for (const receipt of state.patches.filter(p => p.pr && !p.closed)) {
+    if (patchDigest && receipt.digest!==patchDigest) continue;
     const pr = await request(`${root}/pulls/${receipt.pr}`);
     if (pr.state === 'closed') {
       if (pr.merged_at && !receipt.deploymentAttemptRecorded) {
@@ -100,11 +102,17 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
     try {
       const jobs = await request(`${root}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`);
       verifyValidation(run, jobs, pr, validationWorkflow.id);
-      const files = await request(`${root}/pulls/${pr.number}/files?per_page=100`); verifyPatchFiles(files, pr.changed_files);
+      const files = await request(`${root}/pulls/${pr.number}/files?per_page=100`); verifyReviewableFiles(files, pr.changed_files);
       const commit = await request(`${root}/git/commits/${receipt.head}`);
       ensure(commit.tree.sha === receipt.tree && commit.parents.length === 1 && commit.parents[0].sha === receipt.base, 'Published commit was altered');
       verifyS3Pr(await request(`${root}/pulls/${pr.number}`), repo, receipt, (await request(`${root}/git/ref/heads/main`)).object.sha);
-    } catch(error) { if (!(error instanceof AdmissionError)) throw error; log(`PR #${receipt.pr} validation did not pass`); continue; }
+      // Approval is authorization to merge this exact revision, not permission
+      // to run the isolated read-only tests. Re-read it after successful CI.
+      if (requiresOwnerReview(files,pr.changed_files)) {
+        const reviews=await request(`${root}/pulls/${pr.number}/reviews?per_page=100`);
+        verifyOwnerReview(reviews,pr,repo);
+      }
+    } catch(error) { if (!(error instanceof AdmissionError)) throw error; log(`PR #${receipt.pr}: ${error.message}`); continue; }
     for (const name of ['Runbook & Public-Content Scan', 'Typecheck & Unit Tests', 'Continuum PR admission']) {
       await request(`${root}/check-runs`, 'POST', { name, head_sha:receipt.head, status:'completed', conclusion:'success', details_url:run.html_url, output:{title:name,summary:'Verified isolated validation for the exact patch and main revision.'} });
     }
@@ -126,6 +134,7 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
         if (state.patches.some(p => p.environmentId === environmentId && p.artifactId === item.artifactId && !p.superseded)) continue;
         if (item.contentSizeBytes > 1024*1024) { log('Oversized patch artifact requires owner review');continue; }
         const artifact = await api.call('GetCodeIssueArtifact', {environmentId,issueId:issue.issueId,artifactId:item.artifactId});
+        if (patchDigest && artifact.body?.patch?.patchSha256!==patchDigest) continue;
         let patch, applied, revision;
         try {
           const target = patchDestination(artifact,bucket);
@@ -138,11 +147,12 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
           // Verify against the actual scanned snapshot, then reapply onto main
           // only when every touched file is unchanged since that snapshot.
           await git(cwd,['fetch','--no-tags','origin',revision]);
-          const source=await applyPatch({cwd,base:revision,patch});
+          const source=await applyPatch({cwd,base:revision,patch,reviewable:true});
           for(const file of source.files) ensure((await git(cwd,['diff','--name-only',revision,main,'--',file.path])).trim()==='', 'Patch source changed since scan');
-          applied=await applyPatch({cwd,base:main,patch});
+          applied=await applyPatch({cwd,base:main,patch,reviewable:true});
           ensure(applied.files.every(file => scanPublicArtifactText(file.content).length === 0), 'Patch contains prohibited public content');
-        } catch(error) { if (!(error instanceof AdmissionError)) throw error; log('Patch is pending delivery or requires owner reconciliation');continue; }
+          for (const file of applied.files) verifyNoPrivateIdentifiers(file.content,[environmentId,integrationId,issue.issueId,item.artifactId,...detail.findingIds]);
+        } catch(error) { if (!(error instanceof AdmissionError)) throw error; log(`Patch not admitted: ${error.message}`);continue; }
         const digest=sha256(patch),branch=`continuum-s3/${digest.slice(0,32)}-${main.slice(0,12)}`;
         state.publications ??= [];
         let publication=state.publications.find(p=>p.branch===branch);
@@ -162,16 +172,18 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
           let ref;try{ref=await request(`${root}/git/ref/heads/${branch}`);}catch(error){if(!String(error.stderr??'').includes('404'))throw error;}
           if(ref){head=ref.object.sha;const commit=await request(`${root}/git/commits/${head}`);ensure(commit.tree.sha===tree && commit.parents.length===1 && commit.parents[0].sha===main,'Existing branch mismatch');}
           else {head=(await request(`${root}/git/commits`,'POST',{message:'fix(security): apply Continuum remediation',tree,parents:[main]})).sha;await request(`${root}/git/refs`,'POST',{ref:`refs/heads/${branch}`,sha:head});}
-          pr=await request(`${root}/pulls`,'POST',{title:'fix(security): apply Continuum remediation',head:branch,base:'main',body:`Automated code remediation generated by AWS Continuum from source commit ${revision}.\n\nPatch digest: \`${digest}\`. Isolated tests and trusted admission must pass before automatic merge.`});
+          const reviewNotice=applied.needsOwnerReview ? 'Control or test changes require the personal repository owner to approve this exact PR head before automatic merge. CI success alone does not authorize it.' : 'Runtime source changes may merge automatically after isolated CI and trusted admission pass.';
+          pr=await request(`${root}/pulls`,'POST',{title:'fix(security): apply Continuum remediation',head:branch,base:'main',body:`Automated code remediation generated by AWS Continuum from source commit ${revision}.\n\nPatch digest: \`${digest}\`.\n\n${reviewNotice}`});
         }
         publication.head=head;publication.pr=pr.number;
-        state.patches.push({environmentId,artifactId:item.artifactId,issueId:issue.issueId,source:revision,digest,branch,tree,head,base:main,pr:pr.number});await save();
+        state.patches.push({environmentId,artifactId:item.artifactId,issueId:issue.issueId,source:revision,digest,branch,tree,head,base:main,pr:pr.number,needsOwnerReview:applied.needsOwnerReview});await save();
         log(`Published Continuum patch PR #${pr.number}`);
         return; // Next tick validates and dispatches this durable receipt.
       }
     }
     log(`Scan snapshot ${state.source.slice(0,12)}: ${scans[0]?.status??'PENDING'}, ${issues.length} issues`);
   }
+  if (patchDigest) { log('Selected patch reconciliation complete; no scan requested');return; }
   // Every source archive is immutable. Only the environment's selected prefix
   // moves after its scan and known asynchronous issue processing terminate.
   // Findings and patch archive names must both agree with the scan-to-revision
@@ -226,7 +238,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const region=process.env.CONTINUUM_REGION,bucket=process.env.CONTINUUM_BUCKET,account=process.env.CONTINUUM_ACCOUNT_ID;
     ensure(region==='us-east-1' && /^[a-z0-9-]{3,63}$/u.test(bucket??'') && /^\d{12}$/u.test(account??''),'Invalid cloud binding');
     api=createClients(region,bucket,account);
-    await cycle({api,repoName:process.env.GITHUB_REPOSITORY,integrationId:process.env.CONTINUUM_S3_INTEGRATION_ID,bucket,account,region,environmentId:process.env.CONTINUUM_ENVIRONMENT_ID,cwd:process.cwd()});
+    await cycle({api,repoName:process.env.GITHUB_REPOSITORY,integrationId:process.env.CONTINUUM_S3_INTEGRATION_ID,bucket,account,region,environmentId:process.env.CONTINUUM_ENVIRONMENT_ID,cwd:process.cwd(),patchDigest:process.env.CONTINUUM_PATCH_SHA256 || undefined});
   } catch(error) { console.error(`Continuum S3 cycle failed (${error.$metadata ? error.name : error instanceof AdmissionError ? error.message : 'transport error'}); inspect private state and workflow evidence before retrying`);process.exitCode=1; }
   finally {api?.destroy();}
 }
