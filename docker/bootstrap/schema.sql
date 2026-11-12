@@ -121,12 +121,38 @@ END
 $$;
 
 -- mem9's updated_at auto-touch trigger (from TenantMemorySchemaPostgres).
+-- The migration backfill needs the ability to UPDATE memories/upload_tasks
+-- without overwriting `updated_at`. The bypass is now gated on the same
+-- table-based marker as the writer-freeze trigger: only the migration/owner
+-- role, which holds UPDATE on `memory_namespace_migration_state`, can flip
+-- `backfill_in_progress`. Earlier revisions keyed the bypass on a session
+-- GUC (`mem9.namespace_migration_actor`), which any login role could assert
+-- itself to persist arbitrary `updated_at` values (CWE-15). The runtime
+-- login has only SELECT on `memory_namespace_migration_state`, so this
+-- forged-timestamp path is closed. If `memory_namespace_migration_state`
+-- does not yet exist (e.g. during initial bootstrap of this very file,
+-- before 002 has been \ir'd), we fall through to the auto-touch -- the
+-- backfill cannot be running in that window anyway.
 CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$
+DECLARE
+    bypass_marker BOOLEAN;
 BEGIN
-    IF current_setting(
-        'mem9.namespace_migration_actor',
-        TRUE
-    ) = 'backfill' THEN
+    BEGIN
+        SELECT backfill_in_progress
+        INTO bypass_marker
+        FROM public.memory_namespace_migration_state
+        WHERE singleton_id;
+    EXCEPTION
+        WHEN undefined_table OR undefined_column THEN
+            bypass_marker := FALSE;
+    END;
+    IF bypass_marker
+       AND has_table_privilege(
+           session_user,
+           'public.memory_namespace_migration_state',
+           'UPDATE'
+       )
+    THEN
         RETURN NEW;
     END IF;
     NEW.updated_at = NOW();

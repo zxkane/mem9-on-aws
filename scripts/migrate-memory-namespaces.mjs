@@ -647,12 +647,24 @@ async function backfillNamespacesLocked({
   }
 
   const counts = {};
+  // The writer-freeze and `updated_at` auto-touch bypass is now gated on a
+  // row in `memory_namespace_migration_state` that only the migration/owner
+  // role (holding UPDATE on that table) can flip. See
+  // docker/bootstrap/migrations/002_memory_namespaces.sql and
+  // docker/bootstrap/schema.sql. The earlier session GUC
+  // (`mem9.namespace_migration_actor`) was caller-settable from any login
+  // and self-authorized the freeze bypass (CWE-15); it is intentionally no
+  // longer part of the trust decision. We still clear the legacy GUC on
+  // entry/exit so that any existing session value cannot linger.
   await db.query(
-    `SELECT set_config(
-       'mem9.namespace_migration_actor',
-       'backfill',
-       FALSE
-     )`,
+    `SELECT set_config('mem9.namespace_migration_actor', '', FALSE)`,
+  );
+  await db.query(
+    `UPDATE memory_namespace_migration_state
+     SET backfill_in_progress = TRUE,
+         updated_at = statement_timestamp()
+     WHERE singleton_id
+       AND phase = 'backfilling'`,
   );
   try {
     counts.memories = await updateBatches(
@@ -734,6 +746,12 @@ async function backfillNamespacesLocked({
       batchSize,
     );
   } finally {
+    await db.query(
+      `UPDATE memory_namespace_migration_state
+       SET backfill_in_progress = FALSE,
+           updated_at = statement_timestamp()
+       WHERE singleton_id`,
+    );
     await db.query(
       `SELECT set_config('mem9.namespace_migration_actor', '', FALSE)`,
     );

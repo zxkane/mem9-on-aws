@@ -135,6 +135,16 @@ ALTER TABLE memory_namespace_migration_state
     ADD COLUMN IF NOT EXISTS legacy_namespace_display_name VARCHAR(255);
 ALTER TABLE memory_namespace_migration_state
     ADD COLUMN IF NOT EXISTS legacy_principal_key VARCHAR(64);
+-- The in-progress backfill marker. The writer-freeze bypass used to be gated
+-- on a caller-settable session GUC (`mem9.namespace_migration_actor`), which
+-- any login role could assert on its own session and so self-authorize past
+-- the freeze. The marker now lives in this table: the runtime role has only
+-- SELECT on `memory_namespace_migration_state` (runtime-contract.sql), so it
+-- cannot flip the flag; only the migration/owner role, which holds UPDATE,
+-- can. The triggers also require UPDATE privilege on this table as an
+-- identity gate before honouring the bypass.
+ALTER TABLE memory_namespace_migration_state
+    ADD COLUMN IF NOT EXISTS backfill_in_progress BOOLEAN NOT NULL DEFAULT FALSE;
 
 ALTER TABLE memory_namespace_migration_state
     DROP CONSTRAINT IF EXISTS ck_memory_namespace_migration_legacy_binding;
@@ -373,26 +383,42 @@ $$;
 -- The operator changes the migration phase to frozen only after application
 -- writers have been scaled down. These triggers make that operational freeze
 -- database-enforced, closing the race between the drain check and backfill.
--- The migration process opts into a narrowly named session-local bypass.
+--
+-- The bypass used by the migration process is keyed on an identity the caller
+-- cannot forge: it reads the `backfill_in_progress` flag on
+-- `memory_namespace_migration_state`, which only the migration/owner role
+-- holds UPDATE on (the de-privileged runtime login has SELECT only, see
+-- runtime-contract.sql). A `has_table_privilege(session_user, ..., 'UPDATE')`
+-- gate on the same table is applied so that `SET ROLE` or an inherited role
+-- membership shift cannot broaden the bypass window either. Earlier revisions
+-- gated the bypass on a session GUC (`mem9.namespace_migration_actor`); that
+-- was a USERSET placeholder any login could assert itself with a single `SET`,
+-- so the control was self-authorizing against the writers it was meant to
+-- fence (CWE-15 / CWE-371). The GUC branch is intentionally removed.
 CREATE OR REPLACE FUNCTION enforce_memory_namespace_writer_freeze()
 RETURNS TRIGGER AS $$
 DECLARE
     observed_phase VARCHAR(40);
+    bypass_marker BOOLEAN;
 BEGIN
-    IF current_setting(
-        'mem9.namespace_migration_actor',
-        TRUE
-    ) = 'backfill' THEN
+    SELECT phase, backfill_in_progress
+    INTO observed_phase, bypass_marker
+    FROM public.memory_namespace_migration_state
+    WHERE singleton_id;
+
+    IF bypass_marker
+       AND observed_phase = 'backfilling'
+       AND has_table_privilege(
+           session_user,
+           'public.memory_namespace_migration_state',
+           'UPDATE'
+       )
+    THEN
         IF TG_OP = 'DELETE' THEN
             RETURN OLD;
         END IF;
         RETURN NEW;
     END IF;
-
-    SELECT phase
-    INTO observed_phase
-    FROM public.memory_namespace_migration_state
-    WHERE singleton_id;
 
     IF observed_phase IN ('frozen', 'backfilling') THEN
         RAISE EXCEPTION
