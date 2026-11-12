@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {readFile,open,lstat,mkdir} from 'node:fs/promises';
-import {resolve} from 'node:path';
+import {open,lstat,mkdir,realpath} from 'node:fs/promises';
+import {constants} from 'node:fs';
+import {resolve,dirname} from 'node:path';
 import {ECSClient,DescribeServicesCommand,DescribeTaskDefinitionCommand,ListTasksCommand,DescribeTasksCommand,RegisterTaskDefinitionCommand,UpdateServiceCommand} from '@aws-sdk/client-ecs';
 import {S3Client,GetObjectCommand,PutObjectCommand,DeleteObjectCommand,GetPublicAccessBlockCommand,GetBucketEncryptionCommand,GetBucketLifecycleConfigurationCommand} from '@aws-sdk/client-s3';
 import {SSMClient,GetParametersCommand} from '@aws-sdk/client-ssm';
@@ -16,9 +17,20 @@ const exec=promisify(execFile),lockKey='runtime-publication-locks/prod/witness.j
 const variable='DEPLOYMENT_MAINTENANCE_PAUSED';
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const plain=v=>JSON.parse(JSON.stringify(v));
+export async function assertPrivateDirectory(path){
+ assert(typeof path==='string'&&resolve(path)===path,'PrivateEvidenceRequired');
+ const stat=await lstat(path);assert(stat.isDirectory()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o022)===0,'PrivateEvidenceRequired');
+ assert(await realpath(path)===path,'PrivateEvidenceRequired');
+}
 export async function readPrivateJson(path){
- const stat=await lstat(path);assert(stat.isFile()&&!stat.isSymbolicLink()&&stat.uid===process.getuid()&&(stat.mode&0o077)===0&&stat.size<=8*1024*1024,'PrivateEvidenceRequired');
- return JSON.parse(await readFile(path,'utf8'));
+ assert(typeof path==='string'&&resolve(path)===path,'PrivateEvidenceRequired');
+ assert(await realpath(path)===path,'PrivateEvidenceRequired');
+ const fd=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
+ try{
+  const stat=await fd.stat();
+  assert(stat.isFile()&&stat.uid===process.getuid()&&(stat.mode&0o077)===0&&stat.size<=8*1024*1024,'PrivateEvidenceRequired');
+  return JSON.parse(await fd.readFile('utf8'));
+ }finally{await fd.close();}
 }
 export async function writePrivateJson(path,value){
  const fd=await open(path,'wx',0o600);try{await fd.writeFile(JSON.stringify(value)+'\n');await fd.sync();}finally{await fd.close();}
