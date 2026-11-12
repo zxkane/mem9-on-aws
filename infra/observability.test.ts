@@ -155,6 +155,7 @@ describe("sampled namespace capacity", () => {
 
   it("requires measured recovery and independently reports missing samples", () => {
     observability({ stage: "prod", logGroupName: out("synthetic-log") as never,
+      embedLogGroupName: out("synthetic-embed-log") as never,
       slackWebhookUrl: "https://example.com/webhook", mantleProject: "synthetic" });
     const alarm = resources.find((r) => r.logicalName === "NamespaceVectorCapacityWarningAlarm")!;
     expect(alarm.args).toMatchObject({ namespace: "mem9-on-aws/NamespaceVector",
@@ -200,6 +201,7 @@ function named(kind: string, logicalName: string): ResourceRecord {
 const prodInputs = {
   stage: "prod",
   logGroupName: out("/logs/mem9") as never,
+  embedLogGroupName: out("/logs/qwen3-embed-resolved") as never,
   slackWebhookUrl: "https://example.com/hooks/test",
   mantleProject: "proj_testxyz",
 };
@@ -234,6 +236,47 @@ afterEach(() => {
 });
 
 describe("observability alert delivery", () => {
+  it("requires the dedicated embedding log group in production", () => {
+    expect(() => observability({ ...prodInputs, embedLogGroupName: undefined }))
+      .toThrow("qwen3-embed log group is required for production observability");
+    expect(resources).toHaveLength(0);
+  });
+
+  it.each(["pr-333", "dev", "test"])("omits embedding monitoring in %s", (stage) => {
+    observability({ ...prodInputs, stage });
+    expect(resources).toHaveLength(0);
+  });
+
+  it.each([
+    ["EmbedBodyTooLarge", "embed_body_too_large", 3],
+    ["EmbedDimMismatch", "embed_dim_mismatch", 1],
+  ] as const)("counts only the fixed event for %s and preserves alert delivery", (metric, event, threshold) => {
+    observability(prodInputs);
+    const filter = named("LogMetricFilter", `${metric}Filter`);
+    // Equality on fixed event/stage accepts content-free records. No error text,
+    // request path, caller address or header value participates in detection.
+    expect(materialize(filter.args)).toEqual({
+      logGroupName: "/logs/qwen3-embed-resolved",
+      pattern: `{ $.event = "${event}" && $.stage = "prod" }`,
+      metricTransformation: {
+        name: metric, namespace: "mem9-on-aws", value: "1", dimensions: { stage: "$.stage" },
+      },
+    });
+    const alarm = named("MetricAlarm", `${metric}Alarm`);
+    expect(alarm.args).toMatchObject({
+      namespace: "mem9-on-aws", metricName: metric, statistic: "Sum",
+      period: 900, evaluationPeriods: 1, threshold,
+      comparisonOperator: "GreaterThanOrEqualToThreshold", treatMissingData: "notBreaching",
+    });
+    // Dimensions cannot be combined with a default value on metric filters.
+    expect(filter.args.metricTransformation).not.toHaveProperty("defaultValue");
+    expect(alarm.args.dimensions).toEqual({ stage: "prod" });
+    expect(materialize(alarm.args.alarmActions)).toEqual([
+      "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+    ]);
+    expect(materialize(alarm.args.okActions)).toEqual(materialize(alarm.args.alarmActions));
+  });
+
   it("TC-ALERT-001: requires a managed sink only in production", () => {
     expect(() =>
       observability({
@@ -266,11 +309,11 @@ describe("observability alert delivery", () => {
     const topic = one("Topic");
     expect(topic.args).toEqual({ name: "mem9-on-aws-prod-alerts" });
     const alarms = resources.filter((resource) => resource.kind === "MetricAlarm");
-    expect(alarms).toHaveLength(16);
+    expect(alarms).toHaveLength(18);
     const actionBearingMetricAlarms = alarms.filter(
       (alarm) => alarm.args.alarmActions !== undefined,
     );
-    expect(actionBearingMetricAlarms).toHaveLength(12);
+    expect(actionBearingMetricAlarms).toHaveLength(14);
     for (const alarm of actionBearingMetricAlarms) {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
@@ -723,7 +766,7 @@ describe("observability alert delivery", () => {
           resource.kind === "MetricAlarm" ||
           resource.kind === "CompositeAlarm",
       ),
-    ).toHaveLength(18);
+    ).toHaveLength(20);
   });
 
   it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019/024..027: pins alarm semantics", () => {
@@ -1167,7 +1210,7 @@ describe("observability alert delivery", () => {
   it("TC-INGEST-METRIC-020: removes the obsolete ingest_dropped metric", () => {
     observability(prodInputs);
     const filters = resources.filter((resource) => resource.kind === "LogMetricFilter");
-    expect(filters).toHaveLength(7);
+    expect(filters).toHaveLength(9);
     expect(JSON.stringify(filters.map((filter) => filter.args))).not.toContain(
       "ingest_dropped",
     );

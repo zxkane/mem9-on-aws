@@ -3,7 +3,8 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {dirname,resolve} from 'node:path';
 import {setTimeout as wait} from 'node:timers/promises';
 import {buildServiceNonrootPlan,applyServiceNonrootPlan,inspectServiceNonrootOperation} from './lib/service-nonroot-operation.mjs';
-import {createServiceNonrootAws,currentSource,readPrivateJson,writePrivateJson} from './lib/service-nonroot-aws.mjs';
+import {createServiceNonrootAws,currentSource,writePrivateJson} from './lib/service-nonroot-aws.mjs';
+import {readPrivateJson} from './lib/private-json.mjs';
 import {verifyServiceRuntime} from './lib/service-nonroot-runtime.mjs';
 import {runServiceNonrootAudit} from './lib/service-nonroot-audit.mjs';
 import {serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
@@ -13,6 +14,7 @@ const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const evidenceKeys=['review','images','local','preview','fences','maintenance'];
 function exact(value,keys){assert(value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join()===keys.slice().sort().join(),'OperatorConfigurationFields');}
 async function loadConfig(path){
+ // readPrivateJson validates the private parent using the same pinned traversal.
  const config=await readPrivateJson(path);
  exact(config,['version','scope','operationId','directory','authMode','evidence']);assert.equal(config.version,1);
  exact(config.scope,['account','region','cluster','service','bucket','lockKey']);exact(config.evidence,evidenceKeys);

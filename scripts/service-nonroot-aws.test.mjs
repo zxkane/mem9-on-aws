@@ -1,6 +1,8 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {serviceNonrootHash as hash} from './lib/service-nonroot.mjs';
 import {createHash} from 'node:crypto';
+import {constants} from 'node:fs';
+import {join} from 'node:path';
 import {taggedServiceDefinition} from './test-fixtures/service-nonroot-images.mjs';
 
 // Exercise the actual adapter; intercept every SDK, filesystem and subprocess
@@ -28,7 +30,7 @@ vi.mock('@aws-sdk/client-sts', () => mocks.sdk('STSClient', ['GetCallerIdentityC
 vi.mock('@aws-sdk/client-ecr', () => mocks.sdk('ECRClient', ['BatchGetImageCommand']));
 vi.mock('node:fs/promises', () => mocks.fs);
 vi.mock('node:child_process', () => ({execFile: mocks.execFile}));
-import {createServiceNonrootAws} from './lib/service-nonroot-aws.mjs';
+import {createServiceNonrootAws, currentSource} from './lib/service-nonroot-aws.mjs';
 
 const operationId = 'a'.repeat(32), directory = '/private/service-nonroot-fixture';
 const lockKey = 'runtime-publication-locks/prod/witness.json';
@@ -43,6 +45,7 @@ afterEach(() => {active?.close(); active = undefined;});
 async function harness({bucket=scope.bucket,configuredBucket}={}) {
   vi.clearAllMocks(); mocks.configurations.length = 0;
   const h = {cloud: new Map(), local: new Map(), requests: [], controls: [], events: [], destroyed: [],
+    fds: new Map(),
     gate: {name: 'DEPLOYMENT_MAINTENANCE_PAUSED', value: 'false', updated_at: 'before'}, plan: {version: 1, owner: operationId},
     variables: configuredBucket===undefined?[]:[{name:'MEM9_DECISION_ARTIFACT_BUCKET',value:configuredBucket}]};
   let sequence = 0;
@@ -50,7 +53,7 @@ async function harness({bucket=scope.bucket,configuredBucket}={}) {
   h.putLocal = (name, value) => h.local.set(localPath(name), JSON.stringify(value));
   mocks.fs.mkdir.mockImplementation(async path => {expect(path).toBe(directory);});
   mocks.fs.lstat.mockImplementation(async path => {
-    if (path === directory) return {isDirectory: () => true, isSymbolicLink: () => false, mode: 0o700};
+    if (path === directory) return {isDirectory: () => true, isSymbolicLink: () => false, uid: process.getuid(), mode: 0o700};
     if (!h.local.has(path)) throw failure('ENOENT');
     return {isFile: () => true, isSymbolicLink: () => false, uid: process.getuid(), mode: 0o600, size: Buffer.byteLength(h.local.get(path))};
   });
@@ -59,6 +62,31 @@ async function harness({bucket=scope.bucket,configuredBucket}={}) {
     return h.local.get(path);
   });
   mocks.fs.open.mockImplementation(async (path, flags, mode) => {
+    if (typeof flags === 'number') {
+      expect(flags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+      expect(flags & constants.O_NONBLOCK).toBe(constants.O_NONBLOCK);
+      expect(flags & (constants.O_WRONLY | constants.O_RDWR)).toBe(0);
+      const anchored = /^\/proc\/self\/fd\/(\d+)\/(.+)$/.exec(path);
+      if (anchored) {
+        expect(h.fds.has(Number(anchored[1]))).toBe(true);
+        path = join(h.fds.get(Number(anchored[1])), anchored[2]);
+      } else expect(path).toBe('/');
+      const isDirectory = Boolean(flags & constants.O_DIRECTORY);
+      if (isDirectory) expect(['/', '/private', directory]).toContain(path);
+      else if (!h.local.has(path)) throw failure('ENOENT');
+      const body = isDirectory ? undefined : Buffer.from(h.local.get(path));
+      const fd = ++sequence + 100; h.fds.set(fd, path);
+      return {fd,
+        stat: async () => ({isDirectory: () => isDirectory, isFile: () => !isDirectory,
+          uid: process.getuid(), mode: isDirectory ? 0o700 : 0o600, size: body?.length ?? 0}),
+        read: async (buffer, offset, length, position) => {
+          expect(isDirectory).toBe(false);
+          const bytesRead = body.copy(buffer, offset, position, position + length);
+          return {bytesRead, buffer};
+        },
+        close: async () => {expect(h.fds.delete(fd)).toBe(true);},
+      };
+    }
     expect(flags).toBe('wx'); expect(mode).toBe(0o600);
     if (h.beforeOpen) await h.beforeOpen(path);
     if (h.local.has(path)) throw failure('EEXIST');
@@ -88,6 +116,7 @@ async function harness({bucket=scope.bucket,configuredBucket}={}) {
   });
   mocks.send.mockImplementation(async (kind, input, options) => {
     expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+    expect(h.fds.size).toBe(0);
     h.requests.push({kind, input: clone(input)});
     if (h.beforeRequest) await h.beforeRequest(kind, input);
     if (kind === 'GetCallerIdentityCommand') return {Account: scope.account};
@@ -332,5 +361,22 @@ describe('service nonroot fence mutation intent gates', () => {
     h.afterGatePatch = undefined; h.controls.length = 0;
     await expect(h.io.releaseFences()).rejects.toThrow('FenceReconciliationRequired');
     expect(h.controls).toEqual([]); expect(h.cloud.has(lockKey)).toBe(true);
+  });
+});
+
+
+describe('service nonroot reviewed source closure', () => {
+  it.each([true, false])('requires the private JSON dependency to be tracked (tracked=%s)', async tracked => {
+    vi.clearAllMocks();
+    mocks.exec.mockImplementation(async (file, args) => {
+      expect(file).toBe('git');
+      if (args.includes('scripts/lib/private-json.mjs') && !tracked) throw failure('UntrackedPrivateJson');
+      const last = args.at(-1);
+      return {stdout: last === 'HEAD' ? 'a'.repeat(40) : last === 'HEAD^{tree}' ? 'b'.repeat(40) : ''};
+    });
+    if (tracked) {
+      expect(await currentSource('/private/source-fixture')).toEqual({commit: 'a'.repeat(40), tree: 'b'.repeat(40), clean: true});
+      expect(mocks.exec.mock.calls.some(([, args]) => args.includes('scripts/lib/private-json.mjs'))).toBe(true);
+    } else await expect(currentSource('/private/source-fixture')).rejects.toThrow('UntrackedPrivateJson');
   });
 });

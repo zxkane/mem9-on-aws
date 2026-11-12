@@ -89,6 +89,7 @@ const ctx = (tool) => ({
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -254,6 +255,42 @@ describe("proxy-handler ingest_messages", () => {
 });
 
 describe("proxy-handler routing (regression)", () => {
+  it.each([
+    ["below cap", "a".repeat(16_383), true],
+    ["at cap", "a".repeat(16_384), true],
+    ["above cap", "a".repeat(16_385), false],
+    ["two-byte boundary", "é".repeat(8192), true],
+    ["two-byte overflow", "é".repeat(8192) + "a", false],
+    ["four-byte boundary", "😀".repeat(4096), true],
+    ["four-byte overflow", "😀".repeat(4096) + "a", false],
+  ])("enforces the UTF-8 add_memory limit: %s", async (_name, content, accepted) => {
+    const spy = mockFetchOk();
+    const pending = handler({ content }, ctx("add_memory"));
+    if (accepted) {
+      await expect(pending).resolves.toEqual({ status: "accepted" });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(spy.mock.calls[0][1].body).content).toBe(content);
+    } else {
+      await expect(pending).rejects.toThrow("add_memory 'content' exceeds 16384 bytes");
+      expect(spy).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["missing", "tampered"])("checks %s authentication before the content bound or backend call", async (kind) => {
+    const spy = mockFetchOk();
+    const args = { content: "a".repeat(16_385) };
+    const event = { ...args };
+    if (kind === "tampered") {
+      event[INTERNAL_AUTH_FIELD] = createInternalContext({
+        invocation: { tool: "add_memory", arguments: { content: "original" } },
+        identity: { issuer: "https://example.com", principalType: "human", subject: "test", clientId: "reader", groups: ["team-a"] },
+        keys: identityKeys,
+      });
+    }
+    await expect(rawHandler(event, ctx("add_memory"))).rejects.toThrow(/internal context|request hash|signature/u);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("rejects interceptor events because identity and target Lambdas are split", async () => {
     const spy = mockFetchOk();
     await expect(
@@ -350,6 +387,41 @@ describe("proxy-handler routing (regression)", () => {
       ),
     ).rejects.toThrow(/request hash|signature/u);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("add_memory content limit configuration", () => {
+  it.each(["", "0", "-1", "1.5", "NaN", "Infinity", "-Infinity", "16385", "9007199254740993", "1e3", "0x4000", " 32 ", "32\n", "1junk"])(
+    "fails closed for invalid limit %j", async (value) => {
+      vi.stubEnv("MEM9_ADD_MEMORY_MAX_CONTENT_BYTES", value);
+      vi.resetModules();
+      const spy = mockFetchOk();
+      await expect(import("./proxy-handler.mjs")).rejects.toThrow(
+        "MEM9_ADD_MEMORY_MAX_CONTENT_BYTES must be an integer between 1 and 16384",
+      );
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([1, 16, 16_384])("honors an explicit %i-byte limit without raising the hard cap", async (limit) => {
+    vi.stubEnv("MEM9_ADD_MEMORY_MAX_CONTENT_BYTES", String(limit));
+    vi.resetModules();
+    const { handler: configuredHandler } = await import("./proxy-handler.mjs");
+    const spy = mockFetchOk();
+    const call = (content) => {
+      const args = { content };
+      return configuredHandler({
+        ...args,
+        [INTERNAL_AUTH_FIELD]: createInternalContext({
+          invocation: { tool: "add_memory", arguments: args },
+          identity: { issuer: "https://example.com", principalType: "human", subject: "test", clientId: "reader", groups: ["team-a"] },
+          keys: identityKeys,
+        }),
+      }, ctx("add_memory"));
+    };
+    await expect(call("a".repeat(limit))).resolves.toEqual({ status: "accepted" });
+    await expect(call("a".repeat(limit + 1))).rejects.toThrow(`add_memory 'content' exceeds ${limit} bytes`);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -459,6 +531,45 @@ describe("proxy-handler get_ingest_job_status", () => {
     expect(messages[0]).not.toMatch(/payload-leak|job-other|job-unknown/);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(["status-http", "status-network", "search-http", "search-network"])("keeps retry logs free of caller and backend content: %s", async scenario => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    let attempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (++attempts === 1) {
+        if (scenario.endsWith("network")) throw new Error("private-error-marker", {cause: new Error("private-cause-marker")});
+        return {ok: false, status: 503, text: async () => "private-body-marker"};
+      }
+      return {ok: true, status: 200, text: async () => "{}"};
+    }));
+    const pending = scenario.startsWith("status")
+      ? handler({job_id: "private-job-marker"}, ctx("get_ingest_job_status"))
+      : handler({q: "private-query-marker"}, ctx("search_memories"));
+    await vi.advanceTimersByTimeAsync(1501);
+    await pending;
+    expect(attempts).toBe(2);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-|mnemo\.mem9-test/);
+    expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({event: "mem9_fetch_retry", attempt: 1});
+  });
+
+  it.each(["http-retry", "http-terminal", "transport"])("sanitizes terminal failures and causes: %s", async fault => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (fault === "transport") throw new Error("private-error-marker", {cause: new Error("private-cause-marker")});
+      return {ok: false, status: fault === "http-terminal" ? 400 : 503, text: async () => "private-body-marker"};
+    }));
+    const pending = handler({q: "private-query-marker"}, ctx("search_memories")).catch(error => error);
+    await vi.advanceTimersByTimeAsync(9001);
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.cause).toBeUndefined();
+    expect(String(error)).not.toMatch(/private-|mnemo\.mem9-test/);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-|mnemo\.mem9-test/);
+    expect(fetch).toHaveBeenCalledTimes(fault === "http-terminal" ? 1 : 4);
   });
 
   it("requires a non-empty job_id", async () => {

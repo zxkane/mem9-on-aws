@@ -88,6 +88,11 @@ and compares the complete task definition before updating the service. Private
 operator inputs and receipts belong in owner-only, gitignored local files and
 the account-owned audit bucket.
 
+Run this operator on Linux with procfs available. Private JSON readers pin each
+directory and file descriptor, reject symlinks and special files without
+blocking, and enforce the 8 MiB limit while reading. This prevents pathname
+replacement from redirecting evidence reads. Missing procfs fails closed.
+
 Before running frozen-image preview verification, update the existing IAM owner
 stack with `scripts/deploy-github-role.sh`. The preview role needs regional
 schedule inventory and ECS Exec scoped to preview tasks and the three service

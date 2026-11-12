@@ -54,6 +54,9 @@ const ACCEPTANCE_STAGE = validateAcceptanceStage(
 const TOOL_DELIM = "___";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const INGEST_JOBS_PATH = "/v1alpha2/mem9s/ingest-jobs";
+// Match the shared embedder's per-text byte cap. Configuration may only lower
+// this limit; malformed values fail initialization instead of disabling it.
+const ADD_MEMORY_MAX_CONTENT_BYTES = readAddMemoryContentLimit();
 const INGEST_STATUS_FIELDS = [
   "job_id",
   "state",
@@ -69,6 +72,16 @@ function requireEnv(name) {
   const v = process.env[name];
   if (!v) throw new Error(`missing required env ${name}`);
   return v;
+}
+
+function readAddMemoryContentLimit() {
+  const raw = process.env.MEM9_ADD_MEMORY_MAX_CONTENT_BYTES;
+  if (raw === undefined) return 16_384;
+  const limit = Number(raw);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 16_384 || String(limit) !== raw) {
+    throw new Error("MEM9_ADD_MEMORY_MAX_CONTENT_BYTES must be an integer between 1 and 16384");
+  }
+  return limit;
 }
 
 /** Pull the AgentCore tool name from the Lambda client context, stripping the
@@ -119,11 +132,10 @@ async function withinProxyBudget(context, run) {
 }
 
 class Mem9HttpError extends Error {
-  constructor(method, path, status, body) {
+  constructor(method, path, status) {
     const isStatusLookup = path.startsWith(`${INGEST_JOBS_PATH}/`);
-    const detail = isStatusLookup || !body ? "" : `: ${body.slice(0, 500)}`;
-    const publicPath = isStatusLookup ? `${INGEST_JOBS_PATH}/:job_id` : path;
-    super(`mnemo-server ${method} ${publicPath} returned ${status}${detail}`);
+    const publicPath = isStatusLookup ? `${INGEST_JOBS_PATH}/:job_id` : path.split("?")[0];
+    super(`mnemo-server ${method} ${publicPath} returned ${status}`);
     this.status = status;
     this.retryable = status === 408 || status === 429 || (status >= 500 && status !== 504);
   }
@@ -152,7 +164,7 @@ async function mem9FetchOnce(path, init, identity, budget) {
   const text = await res.text();
   const body = text ? safeJson(text) : {};
   if (!res.ok) {
-    throw new Mem9HttpError(init.method, path, res.status, text);
+    throw new Mem9HttpError(init.method, path, res.status);
   }
   return body;
 }
@@ -169,15 +181,19 @@ async function mem9Fetch(path, init, identity, budget) {
     try {
       return await mem9FetchOnce(path, init, identity, budget);
     } catch (e) {
-      lastErr = e;
+      lastErr = e instanceof Mem9HttpError ? e : new Error("mnemo-server transport request failed");
       budget.signal.throwIfAborted();
       if (e instanceof Mem9HttpError && !e.retryable) throw e;
-      const cause = e?.cause ? ` (cause: ${e.cause.code ?? e.cause.message ?? e.cause})` : "";
-      console.error(
-        `mem9Fetch ${init.method} ${BASE_URL}${path} attempt ${i}/${ATTEMPTS} failed: ${e?.message ?? e}${cause}`,
-      );
+      // Query strings, job IDs, backend response bodies and native error text
+      // can contain caller data. Retry diagnostics use fixed fields only.
+      console.error(JSON.stringify({
+        event: "mem9_fetch_retry",
+        attempt: i,
+        status: e instanceof Mem9HttpError ? e.status : 0,
+        failure: e instanceof Mem9HttpError ? "http" : "transport",
+      }));
       const delay = 1500 * i;
-      if (i === ATTEMPTS || budget.remaining() <= delay + 1000) throw e;
+      if (i === ATTEMPTS || budget.remaining() <= delay + 1000) throw lastErr;
       await sleep(delay, budget.signal);
     }
   }
@@ -196,6 +212,9 @@ async function addMemory(input, identity, budget) {
   const { content, agent_id, memory_type } = input ?? {};
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("add_memory requires non-empty 'content'");
+  }
+  if (Buffer.byteLength(content, "utf8") > ADD_MEMORY_MAX_CONTENT_BYTES) {
+    throw new Error(`add_memory 'content' exceeds ${ADD_MEMORY_MAX_CONTENT_BYTES} bytes`);
   }
   if (memory_type != null && String(memory_type) !== "pinned") {
     throw new Error("add_memory memory_type must be 'pinned'");

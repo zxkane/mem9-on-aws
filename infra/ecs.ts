@@ -94,6 +94,20 @@ const LLM_PROXY_MAX_TOKENS = 4096;
 const LLM_PROXY_OVERALL_DEADLINE_MS = 110_000;
 const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
 
+// qwen3-embed resource-exhaustion controls (CWE-770). Explicit in the task
+// definition for the same reason as LLM_PROXY_*: production must not depend on
+// image defaults. The embed sidecar is the single always-warm embedder shared
+// by every namespace, so it is the sensitive path for shared-embedder DoS.
+const QWEN3_EMBED_MAX_INPUTS = 32;
+const QWEN3_EMBED_MAX_INPUT_BYTES = 16 * 1024; // matches the maintenance budget
+// One active inference plus three queued requests accommodates Recall
+// fan-out alongside maintenance. A rejected Recall branch cancels its siblings.
+// One model copy still executes serially and cancels inference before reuse.
+const QWEN3_EMBED_MAX_CONCURRENCY = 4;
+const QWEN3_EMBED_OVERALL_DEADLINE_MS = 55_000; // > mnemo 45s maintenance timeout
+const QWEN3_EMBED_MAX_BODY_BYTES =
+  QWEN3_EMBED_MAX_INPUTS * QWEN3_EMBED_MAX_INPUT_BYTES + 16 * 1024;
+
 // mnemo-server's HTTP port. The MCP proxy Lambda (§6a) reaches this port on the
 // task privately via the Cloud Map DNS name registered below.
 const MNEMO_PORT = 8080;
@@ -487,6 +501,16 @@ export function ecs(
         image: embedImage,
         environment: {
           QWEN3_EMBED_PORT: String(EMBED_PORT),
+          MEM9_STAGE: $app.stage,
+          // Resource-exhaustion bounds (CWE-770). Enforced unconditionally by
+          // the sidecar; see docker/qwen3-embed/server.mjs. Mirrors the
+          // LLM_PROXY_* envelope above so operators own both services' limits
+          // from the same task-definition surface.
+          QWEN3_EMBED_MAX_INPUTS: String(QWEN3_EMBED_MAX_INPUTS),
+          QWEN3_EMBED_MAX_INPUT_BYTES: String(QWEN3_EMBED_MAX_INPUT_BYTES),
+          QWEN3_EMBED_MAX_CONCURRENCY: String(QWEN3_EMBED_MAX_CONCURRENCY),
+          QWEN3_EMBED_OVERALL_DEADLINE_MS: String(QWEN3_EMBED_OVERALL_DEADLINE_MS),
+          QWEN3_EMBED_MAX_BODY_BYTES: String(QWEN3_EMBED_MAX_BODY_BYTES),
         },
         logging: { retention: "1 month" },
         // Model load is slow on cold start (baked into the image, but the ONNX
@@ -690,22 +714,30 @@ export function ecs(
   // (`ignoreChanges: ["name"]`), so a hand-computed name silently diverges on
   // stacks whose group already exists. Reading it also gives the metric
   // filters a real Pulumi dependency on the log group's creator.
-  const mnemoLogGroupName = service.nodes.taskDefinition
-    .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
-    .apply((raw: string) => {
-      const defs = JSON.parse(raw) as {
-        name: string;
-        logConfiguration?: { options?: Record<string, string> };
-      }[];
-      const group = defs.find((c) => c.name === "mnemo-server")?.logConfiguration?.options?.[
-        "awslogs-group"
-      ];
-      if (!group) throw new Error("mnemo-server awslogs-group not found in task definition");
-      return group;
-    });
+  const resolveContainerLogGroup = (containerName: string) =>
+    service.nodes.taskDefinition
+      .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
+      .apply((raw: string) => {
+        const defs = JSON.parse(raw) as {
+          name: string;
+          logConfiguration?: { options?: Record<string, string> };
+        }[];
+        const group = defs.find((c) => c.name === containerName)?.logConfiguration?.options?.[
+          "awslogs-group"
+        ];
+        if (!group)
+          throw new Error(`${containerName} awslogs-group not found in task definition`);
+        return group;
+      });
+  const mnemoLogGroupName = resolveContainerLogGroup("mnemo-server");
+  // qwen3-embed has its own log group; metric filters on oversized-body abuse
+  // and the dim-mismatch integrity guard target this group so the sidecar's
+  // structured error log is actionable in CloudWatch.
+  const embedLogGroupName = resolveContainerLogGroup("qwen3-embed");
   const observabilityOut = observability({
     stage: $app.stage,
     logGroupName: mnemoLogGroupName,
+    embedLogGroupName,
     slackWebhookUrl,
     mantleProject: BEDROCK_PROJECT,
   });
