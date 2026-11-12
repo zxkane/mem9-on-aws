@@ -12,6 +12,7 @@ export function readLimits(env = process.env) {
     return Number(value);
   };
   return {
+    bodyTimeoutMs: 15000, // Fixed production limit; factory overrides support HTTP tests.
     maxInputs: integer('QWEN3_EMBED_MAX_INPUTS', 32, 32),
     maxInputBytes: integer('QWEN3_EMBED_MAX_INPUT_BYTES', 16384, 16384),
     maxConcurrency: integer('QWEN3_EMBED_MAX_CONCURRENCY', 2, 2),
@@ -67,7 +68,7 @@ export function createEmbeddingServer({ pool, limits = readLimits(), log = line 
         return sendJson(res, ready ? 200 : 503, { status: ready ? 'ok' : 'loading' });
       }
       if (req.method !== 'POST' || !['/embeddings', '/v1/embeddings'].includes(url.pathname)) return sendError(res, 404, 'route not found');
-      const raw = await readBody(req, abort.signal, limits.maxBodyBytes, metadata, limits.bodyTimeoutMs ?? 15000);
+      const raw = await readBody(req, abort.signal, limits.maxBodyBytes, metadata, limits.bodyTimeoutMs);
       let payload;
       try { payload = JSON.parse(raw); }
       catch { return reject(400, 'embed_invalid_json', 'request body is not valid JSON'); }

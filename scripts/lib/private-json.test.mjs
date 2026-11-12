@@ -210,7 +210,22 @@ describe('private JSON real filesystem boundary', () => {
     hooks.afterClose = async logical => {
       if (logical === path) throw new Error('synthetic close failure');
     };
-    await expect(privateJson.readPrivateJson(path)).rejects.toThrow('synthetic close failure');
+    await expect(privateJson.readPrivateJson(path)).rejects.toThrow('PrivateEvidenceCleanupFailed');
+    expect(hooks.handles.size).toBe(0);
+  });
+  it.each([false, true])('preserves every close failure with missing evidence=%s', async missing => {
+    const failures = [];
+    hooks.afterClose = async () => {
+      const failure = new Error('synthetic close failure');
+      failures.push(failure);
+      throw failure;
+    };
+    const error = await privateJson.readPrivateJson(missing ? join(root, 'absent.json') : path).catch(error => error);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.code).toBeUndefined();
+    expect(failures.length).toBeGreaterThan(1);
+    expect(error.errors.slice(missing ? 1 : 0)).toEqual(failures);
+    if (missing) expect(error.errors[0]).toMatchObject({code: 'ENOENT'});
     expect(hooks.handles.size).toBe(0);
   });
   it('validates private directories with anchored traversal and releases their descriptors', async () => {

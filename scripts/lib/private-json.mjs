@@ -19,6 +19,7 @@ function privateDirectory(stat) {
 async function withPrivateDirectory(path, consume) {
   canonicalPath(path);
   const handles = [];
+  const errors = [];
   const acquire = async (name, flags) => {
     const handle = await open(name, flags);
     handles.push(handle);
@@ -37,11 +38,16 @@ async function withPrivateDirectory(path, consume) {
     }
     privateDirectory(await directory.stat());
     return await consume(directory, acquire);
+  } catch (error) {
+    errors.push(error);
+    throw error;
   } finally {
     // Attempt every close even if one fails. Never depend on GC to release FDs.
     const results = await Promise.allSettled(handles.reverse().map(handle => handle.close()));
-    const failed = results.find(result => result.status === 'rejected');
-    if (failed) throw failed.reason;
+    const closeErrors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+    // A cleanup failure must never look like an ordinary missing input (ENOENT).
+    // Retain the primary error and every cleanup error for accurate attribution.
+    if (closeErrors.length) throw new AggregateError([...errors, ...closeErrors], 'PrivateEvidenceCleanupFailed');
   }
 }
 
