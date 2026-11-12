@@ -105,9 +105,40 @@ async function readBody(req, limitBytes = 12 * 1024 * 1024) {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-const server = createServer(async (req, res) => {
+// Structured server-side log record. Emitted as a single JSON line so that
+// CloudWatch metric filters on the qwen3-embed log group can key off
+// `$.msg`, `$.event`, and `$.err` (see infra/observability.ts: oversized-body
+// and dim-mismatch filters). Never written to the HTTP response body: the
+// response wire format stays the generic shape sendError/sendJson produce.
+function logEvent(fields) {
   try {
-    const url = new URL(req.url, `http://localhost:${PORT}`);
+    console.error(JSON.stringify(fields));
+  } catch {
+    // Fallback for a circular/non-serializable payload — better than silence.
+    console.error("embed log serialization failed");
+  }
+}
+
+// Classify the catch-all error so the dim-mismatch integrity guard and the
+// oversized-body abuse signal are distinguishable in the log stream even if
+// the error class is a plain Error.
+function classifyError(err) {
+  const message = typeof err?.message === "string" ? err.message : "";
+  if (message.startsWith("embedding dim mismatch")) return "embed_dim_mismatch";
+  if (message === "request body too large") return "embed_body_too_large";
+  return "embed_request_error";
+}
+
+const server = createServer(async (req, res) => {
+  // These are hoisted so the catch-all can include them in the structured log
+  // without re-parsing. `raw` captures the pre-JSON byte length so the
+  // oversized-body abuse signal records the attempted size.
+  let url;
+  let raw;
+  let inputs;
+  let maintenance;
+  try {
+    url = new URL(req.url, `http://localhost:${PORT}`);
 
     // Liveness/readiness: 200 only once the model is loaded, so an ECS/ALB health
     // check won't route traffic before the pipeline is warm.
@@ -127,23 +158,52 @@ const server = createServer(async (req, res) => {
     // OpenAI embeddings. mem9 posts to `${base}/embeddings`; base is
     // http://localhost:PORT/v1, so accept both /v1/embeddings and /embeddings.
     if (req.method === "POST" && /\/(v1\/)?embeddings$/.test(url.pathname)) {
-      const raw = await readBody(req);
+      raw = await readBody(req);
       let payload;
       try {
         payload = JSON.parse(raw);
       } catch {
+        logEvent({
+          msg: "embed request rejected",
+          event: "embed_invalid_json",
+          status: 400,
+          method: req.method,
+          path: url.pathname,
+          bytes: raw?.length,
+          remote: req.socket.remoteAddress,
+        });
         return sendError(res, 400, "request body is not valid JSON");
       }
-      const inputs = normalizeInput(payload?.input);
+      inputs = normalizeInput(payload?.input);
       if (!inputs) {
+        logEvent({
+          msg: "embed request rejected",
+          event: "embed_invalid_input",
+          status: 400,
+          method: req.method,
+          path: url.pathname,
+          bytes: raw?.length,
+          remote: req.socket.remoteAddress,
+        });
         return sendError(
           res,
           400,
           "`input` must be a string or an array of strings (token-id arrays are not supported)",
         );
       }
-      const maintenance = req.headers["x-mem9-maintenance"];
+      maintenance = req.headers["x-mem9-maintenance"];
       if (maintenance !== undefined && (maintenance !== "1" || inputs.length !== 1 || Buffer.byteLength(inputs[0]) > 16384)) {
+        logEvent({
+          msg: "embed request rejected",
+          event: "embed_invalid_maintenance",
+          status: 400,
+          method: req.method,
+          path: url.pathname,
+          inputs: inputs?.length,
+          bytes: raw?.length,
+          maintenance: String(maintenance),
+          remote: req.socket.remoteAddress,
+        });
         return sendError(res, 400, "invalid maintenance embedding request");
       }
       const compute = async () => {
@@ -161,7 +221,20 @@ const server = createServer(async (req, res) => {
       let computed;
       if (maintenance === "1") {
         const admitted = await maintenanceAdmission.run(compute);
-        if (!admitted.accepted) return sendError(res, 429, "maintenance embedding busy");
+        if (!admitted.accepted) {
+          logEvent({
+            msg: "embed request rejected",
+            event: "embed_maintenance_busy",
+            status: 429,
+            method: req.method,
+            path: url.pathname,
+            inputs: inputs?.length,
+            bytes: raw?.length,
+            maintenance: true,
+            remote: req.socket.remoteAddress,
+          });
+          return sendError(res, 429, "maintenance embedding busy");
+        }
         res.setHeader("X-Mem9-Maintenance", "1");
         computed = admitted.value;
       } else {
@@ -181,8 +254,22 @@ const server = createServer(async (req, res) => {
 
     return sendError(res, 404, `no route for ${req.method} ${url.pathname}`, "not_found");
   } catch (err) {
-    // Never leak a stack; log server-side, return a generic 500.
-    console.error("embed request error:", "EmbeddingError");
+    // Never leak a stack to the caller; log server-side with enough context to
+    // distinguish oversized-body abuse, the dim-mismatch integrity guard, and
+    // any ONNX/OOM inference failure. Response body is unchanged.
+    logEvent({
+      msg: "embed request error",
+      event: classifyError(err),
+      status: 500,
+      err: err?.message,
+      name: err?.name,
+      method: req?.method,
+      path: url?.pathname,
+      inputs: inputs?.length,
+      bytes: raw?.length,
+      maintenance: maintenance === "1",
+      remote: req.socket?.remoteAddress,
+    });
     return sendError(res, 500, "internal error computing embedding", "server_error");
   }
 });

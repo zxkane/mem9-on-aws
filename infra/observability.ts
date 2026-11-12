@@ -27,6 +27,10 @@ export interface ObservabilityInputs {
   // hand-computed name. Passing the Output also preserves the dependency on
   // the component that creates the group.
   logGroupName: Output<string>;
+  // The qwen3-embed sidecar writes to a distinct log group. Metric filters for
+  // oversized-body abuse and the embedding-dimension mismatch integrity guard
+  // target this group so sidecar errors are detectable in CloudWatch.
+  embedLogGroupName?: Output<string>;
   slackWebhookUrl?: Input<string>;
   mantleProject?: string;
 }
@@ -55,7 +59,7 @@ export const PRESCREEN_FALSE_SKIP_RATE_EXPRESSION =
 export function observability(
   inputs: ObservabilityInputs,
 ): ObservabilityOutputs {
-  const { stage, logGroupName, slackWebhookUrl, mantleProject } = inputs;
+  const { stage, logGroupName, embedLogGroupName, slackWebhookUrl, mantleProject } = inputs;
   if (stage !== "prod") return {};
   if (!slackWebhookUrl) {
     throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
@@ -153,6 +157,40 @@ export function observability(
       value: "1",
     },
   });
+
+  // qwen3-embed sidecar: metric filters on the dedicated log group. The sidecar
+  // writes structured JSON records on every rejected or failed request
+  // (docker/qwen3-embed/server.mjs). These two signals matter the most:
+  //   - oversized-body abuse of the unauthenticated endpoint (`event =
+  //     "embed_body_too_large"`), and
+  //   - the embedding-dimension mismatch integrity guard that exists to stop
+  //     a wrong-width vector from being stored (`event = "embed_dim_mismatch"`),
+  //     a model-substitution/corruption signal.
+  // Filters are only created when the log-group name is wired through from the
+  // task definition so synthesis stays unchanged on stages that opt out.
+  if (embedLogGroupName) {
+    new aws.cloudwatch.LogMetricFilter("EmbedBodyTooLargeFilter", {
+      logGroupName: embedLogGroupName,
+      pattern: '{ $.event = "embed_body_too_large" }',
+      metricTransformation: {
+        name: "EmbedBodyTooLarge",
+        namespace,
+        value: "1",
+        defaultValue: "0",
+      },
+    });
+
+    new aws.cloudwatch.LogMetricFilter("EmbedDimMismatchFilter", {
+      logGroupName: embedLogGroupName,
+      pattern: '{ $.event = "embed_dim_mismatch" }',
+      metricTransformation: {
+        name: "EmbedDimMismatch",
+        namespace,
+        value: "1",
+        defaultValue: "0",
+      },
+    });
+  }
 
   // ─── Alarm topic + independently observable delivery failures ───────────
 
@@ -656,6 +694,49 @@ export function observability(
     alarmActions,
     okActions,
   });
+
+  // Alarms backing the qwen3-embed sidecar structured error log. Only wired
+  // when the log-group name is available (matches the metric filters above).
+  if (embedLogGroupName) {
+    // Oversized-body abuse of the unauthenticated endpoint. Three or more
+    // 12 MiB-cap rejections in 15 min is far outside expected traffic; the
+    // sidecar sees only localhost/task-local callers.
+    new aws.cloudwatch.MetricAlarm("EmbedBodyTooLargeAlarm", {
+      alarmDescription:
+        "qwen3-embed rejected at least three oversized-body requests in 15 minutes. " +
+        "The sidecar is reachable only task-locally; investigate the caller.",
+      namespace,
+      metricName: "EmbedBodyTooLarge",
+      statistic: "Sum",
+      period: 900,
+      evaluationPeriods: 1,
+      threshold: 3,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+      alarmActions,
+      okActions,
+    });
+
+    // Any dim-mismatch is a model-integrity signal: the width guard exists
+    // specifically to stop a wrong-width vector from being stored. Page on
+    // the first occurrence.
+    new aws.cloudwatch.MetricAlarm("EmbedDimMismatchAlarm", {
+      alarmDescription:
+        "qwen3-embed produced an embedding whose width did not match the " +
+        "configured dimension. Treat as a model-substitution or corruption " +
+        "signal and inspect the deployed model image.",
+      namespace,
+      metricName: "EmbedDimMismatch",
+      statistic: "Sum",
+      period: 900,
+      evaluationPeriods: 1,
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+      alarmActions,
+      okActions,
+    });
+  }
 
   new aws.cloudwatch.MetricAlarm("DurableIngestDeadJobAlarm", {
     alarmDescription: "At least one durable ingest job reached dead state in 15 minutes.",

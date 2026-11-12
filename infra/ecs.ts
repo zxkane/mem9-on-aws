@@ -690,22 +690,30 @@ export function ecs(
   // (`ignoreChanges: ["name"]`), so a hand-computed name silently diverges on
   // stacks whose group already exists. Reading it also gives the metric
   // filters a real Pulumi dependency on the log group's creator.
-  const mnemoLogGroupName = service.nodes.taskDefinition
-    .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
-    .apply((raw: string) => {
-      const defs = JSON.parse(raw) as {
-        name: string;
-        logConfiguration?: { options?: Record<string, string> };
-      }[];
-      const group = defs.find((c) => c.name === "mnemo-server")?.logConfiguration?.options?.[
-        "awslogs-group"
-      ];
-      if (!group) throw new Error("mnemo-server awslogs-group not found in task definition");
-      return group;
-    });
+  const resolveContainerLogGroup = (containerName: string) =>
+    service.nodes.taskDefinition
+      .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
+      .apply((raw: string) => {
+        const defs = JSON.parse(raw) as {
+          name: string;
+          logConfiguration?: { options?: Record<string, string> };
+        }[];
+        const group = defs.find((c) => c.name === containerName)?.logConfiguration?.options?.[
+          "awslogs-group"
+        ];
+        if (!group)
+          throw new Error(`${containerName} awslogs-group not found in task definition`);
+        return group;
+      });
+  const mnemoLogGroupName = resolveContainerLogGroup("mnemo-server");
+  // qwen3-embed has its own log group; metric filters on oversized-body abuse
+  // and the dim-mismatch integrity guard target this group so the sidecar's
+  // structured error log is actionable in CloudWatch.
+  const embedLogGroupName = resolveContainerLogGroup("qwen3-embed");
   const observabilityOut = observability({
     stage: $app.stage,
     logGroupName: mnemoLogGroupName,
+    embedLogGroupName,
     slackWebhookUrl,
     mantleProject: BEDROCK_PROJECT,
   });

@@ -268,6 +268,12 @@ function installGlobals(stage: string) {
                     options: { "awslogs-group": "/sst/cluster/test/svc-hash/mnemo-server" },
                   },
                 },
+                {
+                  name: "qwen3-embed",
+                  logConfiguration: {
+                    options: { "awslogs-group": "/sst/cluster/test/svc-hash/qwen3-embed" },
+                  },
+                },
               ]),
             ),
           }),
@@ -912,8 +918,8 @@ describe("ecs stack", () => {
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     const compositeAlarms = created.filter((c) => c.kind === "CompositeAlarm");
-    expect(filters.length).toBe(7); // recall, ingest auth, and namespace-vector metrics
-    expect(alarms.length).toBe(16);
+    expect(filters.length).toBe(9); // recall, ingest auth, namespace-vector, and qwen3-embed metrics
+    expect(alarms.length).toBe(18);
     expect(compositeAlarms).toHaveLength(2);
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
     // Queue health remains evidence-based; only sampler liveness treats loss
@@ -923,12 +929,16 @@ describe("ecs stack", () => {
     expect(missingPolicies.filter((policy) => policy === "ignore")).toHaveLength(1);
     expect(
       missingPolicies.filter((policy) => policy === "notBreaching"),
-    ).toHaveLength(13);
+    ).toHaveLength(15);
     // Metric filter patterns reference the correct log line msg values.
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
     expect(patterns.some((p) => p.includes("confidence recall search") && p.includes("returned = 0"))).toBe(true);
     expect(patterns.some((p) => p.includes("extraction LLM call failed") && p.includes("401"))).toBe(true);
     expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(false);
+    // qwen3-embed sidecar signals: oversized-body abuse and the dim-mismatch
+    // integrity guard are now distinguishable via the sidecar's own log group.
+    expect(patterns.some((p) => p.includes("embed_body_too_large"))).toBe(true);
+    expect(patterns.some((p) => p.includes("embed_dim_mismatch"))).toBe(true);
   });
 
   it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
