@@ -11,7 +11,7 @@ async function setup(overrides = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'embed-tests-'));
   const logFile = join(directory, 'calls.jsonl');
   const logs = [];
-  const pool = createInferencePool({ workerURL: new URL('./test-fixtures/inference-worker.mjs', import.meta.url), workerEnv: { TEST_CALL_LOG: logFile }, loadTimeoutMs: 2000 });
+  const pool = createInferencePool({ workerURL: new URL('./test-fixtures/inference-worker.mjs', import.meta.url), workerEnv: { TEST_CALL_LOG: logFile }, maxConcurrency: overrides.maxConcurrency ?? readLimits({}).maxConcurrency, loadTimeoutMs: 2000 });
   await pool.start();
   const server = createEmbeddingServer({ pool, limits: { ...readLimits({}), ...overrides }, log: line => logs.push(line) });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -119,7 +119,7 @@ describe('embedding HTTP resource and privacy boundaries', () => {
     expect((await h.post({ input: 'ok' })).status).toBe(200);
   });
   it('rejects global and maintenance overload before an extra model call', async () => {
-    const h = await setup();
+    const h = await setup({maxConcurrency: 2});
     const one = h.post({ input: 'slow' }, { 'x-mem9-maintenance': '1' });
     await until(async () => (await h.calls()).length === 1);
     expect((await h.post({ input: 'x' }, { 'x-mem9-maintenance': '1' })).status).toBe(429);
@@ -128,6 +128,31 @@ describe('embedding HTTP resource and privacy boundaries', () => {
     expect((await h.post({ input: 'overflow' })).status).toBe(429);
     expect((await one).status).toBe(200); expect((await two).status).toBe(200);
     expect((await h.calls()).map(x => x.text)).toEqual(['slow', 'slow']);
+  });
+  it('admits a three-way recall burst while one maintenance request is active', async () => {
+    const h = await setup();
+    const pid = h.pool.status().pid;
+    const maintenance = h.post({input: 'slow'}, {'x-mem9-maintenance': '1'}).catch(() => ({status: 0}));
+    await until(async () => (await h.calls()).length === 1);
+    // Recall fans out under one cancellation context: a rejected branch aborts
+    // its siblings. Its normal burst must fit before any inference completes.
+    const cancel = new AbortController();
+    const recall = Array.from({length: 3}, async () => {
+      try {
+        const response = await fetch(h.url + '/v1/embeddings', {
+          method: 'POST', body: JSON.stringify({input: 'slow'}), signal: cancel.signal,
+        });
+        if (!response.ok) cancel.abort();
+        return response.status;
+      } catch {return 0;}
+    });
+    const statuses = await Promise.all(recall);
+    const maintenanceStatus = (await maintenance).status;
+    expect(statuses).toEqual([200, 200, 200]);
+    expect(maintenanceStatus).toBe(200);
+    expect(h.pool.status().pid).toBe(pid);
+    expect((await h.calls()).map(call => call.pid)).toEqual(Array(4).fill(pid));
+    expect(h.logs.map(JSON.parse).some(event => event.status >= 400)).toBe(false);
   });
   it('counts received UTF-8 bytes rather than decoded string length', async () => {
     const h = await setup();

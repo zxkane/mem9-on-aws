@@ -10,11 +10,11 @@ export function createInferencePool({
   workerURL = new URL('./inference-worker.mjs', import.meta.url),
   workerEnv = Object.fromEntries(['PATH', 'HOME', 'NODE_ENV', 'QWEN3_EMBED_MODEL_REPO', 'QWEN3_INTRA_OP_THREADS']
     .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
-  maxConcurrency = 2,
+  maxConcurrency = 4,
   loadTimeoutMs = 180000,
   onFatal = () => {},
 } = {}) {
-  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 2) throw Error('Invalid embedding concurrency');
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 4) throw Error('Invalid embedding concurrency');
   if (!Number.isInteger(loadTimeoutMs) || loadTimeoutMs < 1 || loadTimeoutMs > 180000) throw Error('Invalid model load timeout');
   let child = null, ready = false, stopped = false, active = null, sequence = 0;
   let bootTimer, startPromise, resolveStart, rejectStart, closePromise, resolveClose;

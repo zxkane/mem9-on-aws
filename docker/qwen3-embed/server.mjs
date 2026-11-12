@@ -15,7 +15,7 @@ export function readLimits(env = process.env) {
     bodyTimeoutMs: 15000, // Fixed production limit; factory overrides support HTTP tests.
     maxInputs: integer('QWEN3_EMBED_MAX_INPUTS', 32, 32),
     maxInputBytes: integer('QWEN3_EMBED_MAX_INPUT_BYTES', 16384, 16384),
-    maxConcurrency: integer('QWEN3_EMBED_MAX_CONCURRENCY', 2, 2),
+    maxConcurrency: integer('QWEN3_EMBED_MAX_CONCURRENCY', 4, 4),
     maxBodyBytes: integer('QWEN3_EMBED_MAX_BODY_BYTES', 540672, 1048576),
     deadlineMs: integer('QWEN3_EMBED_OVERALL_DEADLINE_MS', 55000, 120000),
   };

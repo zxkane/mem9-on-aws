@@ -101,8 +101,10 @@ build: asynchronous requests using it fail before queue acceptance because
    localhost port 8082. It is the only task component that calls Mantle.
 
 The embedding HTTP supervisor owns one warm model subprocess. Admission allows
-one running request and one queued request; texts execute individually without
-duplicating model weights. Maintenance requests remain limited to one text.
+one running request and three queued requests, accommodating a three-way Recall
+burst alongside maintenance. Texts execute individually without duplicating model
+weights. A fifth concurrent request is rejected before inference. Maintenance
+requests remain limited to one text.
 Input/body limits apply to every caller. A compute deadline or disconnected
 response socket kills the active model process before capacity is reused. The
 model reloads afterward, and readiness stays false during that recovery;

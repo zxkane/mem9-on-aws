@@ -58,7 +58,7 @@ describe('embedding process lifecycle', () => {
     expect(next[0][0]).toBe(first[0][0]);
   });
   it('rejects excess work and cancels a queued request without killing active work', async () => {
-    const pool = await setup();
+    const pool = await setup({maxConcurrency: 2});
     const pid = pool.status().pid;
     const running = pool.run(['slow']);
     const cancel = new AbortController();
@@ -68,6 +68,15 @@ describe('embedding process lifecycle', () => {
     expect(await queued).toBe('cancelled');
     expect((await running)[0][0]).toBe(pid);
     expect(pool.status().pid).toBe(pid);
+  });
+  it('bounds default admission at one active request and three queued requests', async () => {
+    const pool = await setup();
+    const pid = pool.status().pid;
+    const jobs = Array.from({length: 4}, () => pool.run(['slow']));
+    expect(pool.status()).toMatchObject({active: 1, queued: 3});
+    await expect(pool.run(['overflow'])).rejects.toMatchObject({code: 'busy'});
+    for (const result of await Promise.all(jobs)) expect(result[0][0]).toBe(pid);
+    expect(pool.status()).toMatchObject({active: 0, queued: 0, pid});
   });
   it('kills a blocked child before releasing capacity; reloads without overlapping processes', async () => {
     const pool = await setup();

@@ -100,9 +100,10 @@ const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
 // by every namespace, so it is the sensitive path for shared-embedder DoS.
 const QWEN3_EMBED_MAX_INPUTS = 32;
 const QWEN3_EMBED_MAX_INPUT_BYTES = 16 * 1024; // matches the maintenance budget
-// Admission includes one active native inference and one bounded queued request.
-// The sidecar owns a single model copy and cancels inference before reuse.
-const QWEN3_EMBED_MAX_CONCURRENCY = 2;
+// One active inference plus three queued requests accommodates Recall
+// fan-out alongside maintenance. A rejected Recall branch cancels its siblings.
+// One model copy still executes serially and cancels inference before reuse.
+const QWEN3_EMBED_MAX_CONCURRENCY = 4;
 const QWEN3_EMBED_OVERALL_DEADLINE_MS = 55_000; // > mnemo 45s maintenance timeout
 const QWEN3_EMBED_MAX_BODY_BYTES =
   QWEN3_EMBED_MAX_INPUTS * QWEN3_EMBED_MAX_INPUT_BYTES + 16 * 1024;

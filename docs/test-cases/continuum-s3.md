@@ -26,3 +26,5 @@
 - TC-CS3-024: A response-socket disconnect after request-body consumption cancels active work; cancelling a queued request leaves other work intact. Recovery loads one model and restores readiness.
 - TC-CS3-025: HTTP oversized-body responses remain readable, byte telemetry counts received bytes, slow bodies time out, and normal completed responses do not restart the worker.
 - TC-CS3-026: Private JSON reads reject real FIFOs without hanging, symlinks and ancestor substitution without redirection, oversized or growing files without unbounded allocation, and close descriptors on every error.
+
+- TC-CS3-027: One maintenance request and a three-way Recall burst fit the default four-request admission bound without triggering sibling cancellation or model reload; a fifth request is rejected before inference. All accepted requests reuse one serial model process.
