@@ -333,6 +333,17 @@ it('keeps all existing CI test and integration steps in isolated patch validatio
  const expected=structuredClone(original);
  expected[0].with={...expected[0].with,ref:'${{ inputs.head }}','persist-credentials':false};
  for(const step of expected)if(step.uses?.startsWith('actions/setup-node@')){delete step.with.cache;delete step.with['cache-dependency-path'];}
- expect(actual[0]).toEqual({name:"Verify cache isolation",run:'test "$ACTIONS_CACHE_MODE" = none'});
+ expect(actual[0].name).toBe('Verify cache isolation');
+ expect(actual[0].uses).toBe('actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd');
+ expect(actual[0].run).toBeUndefined();
+ const {runInNewContext}=await import('node:vm');
+ const script=actual[0].with?.script;
+ expect(typeof script).toBe('string');
+ for(const mode of [undefined,'read','write','write-only','none']){
+  const messages=[];
+  const run=()=>runInNewContext(script,{process:{env:{ACTIONS_CACHE_MODE:mode}},core:{info:message=>messages.push(message)}},{timeout:1000});
+  if(mode==='none'){expect(run).not.toThrow();expect(messages).toEqual(['Runner-enforced cache isolation verified']);}
+  else{expect(run).toThrow('Expected runner-enforced cache-mode: none');expect(messages).toHaveLength(0);}
+ }
  expect(actual.slice(1)).toEqual(expected);
 });
