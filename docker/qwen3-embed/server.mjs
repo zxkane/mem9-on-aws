@@ -37,6 +37,43 @@ const EXPECTED_DIM = 1024; // qwen3-0.6B native; NOT configurable (no Matryoshka
 // single-threaded (the Lambda-sandbox cpuinfo-autodetect failure mode).
 const INTRA_OP_THREADS = Number(process.env.QWEN3_INTRA_OP_THREADS || 0);
 
+// Resource-exhaustion bounds (CWE-770). Env-tunable so the ECS task definition
+// owns production values, mirroring llm-proxy's LLM_PROXY_* envelope. The
+// handler enforces these unconditionally -- NOT keyed off any client header.
+function readPositiveInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) return fallback;
+  return n;
+}
+// Max number of texts per request. mnemo-server's interactive path sends one.
+const MAX_INPUTS = readPositiveInt("QWEN3_EMBED_MAX_INPUTS", 32);
+// Max bytes per text, matching the maintenance budget (16 KiB).
+const MAX_INPUT_BYTES = readPositiveInt("QWEN3_EMBED_MAX_INPUT_BYTES", 16 * 1024);
+// Max concurrent inferences (interactive + maintenance share the pool).
+const MAX_CONCURRENCY = readPositiveInt("QWEN3_EMBED_MAX_CONCURRENCY", 2);
+// Overall per-request compute deadline. Exceeds mnemo-server's 45s maintenance
+// client timeout so legitimate work completes; still bounds orphaned work.
+const OVERALL_DEADLINE_MS = readPositiveInt("QWEN3_EMBED_OVERALL_DEADLINE_MS", 55_000);
+// Worst-case body size: MAX_INPUTS * MAX_INPUT_BYTES plus small JSON envelope.
+const DEFAULT_MAX_BODY_BYTES = MAX_INPUTS * MAX_INPUT_BYTES + 16 * 1024;
+const MAX_BODY_BYTES = readPositiveInt("QWEN3_EMBED_MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES);
+
+// Global in-flight limiter. Covers interactive and maintenance paths alike so
+// concurrent requests cannot blow past the task's limited headroom.
+let inFlight = 0;
+function tryAcquire() {
+  if (inFlight >= MAX_CONCURRENCY) return null;
+  inFlight += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    inFlight -= 1;
+  };
+}
+
 // The feature-extraction pipeline, created once at boot and reused (always-warm).
 let extractorPromise = null;
 
@@ -82,6 +119,7 @@ function normalizeInput(input) {
 }
 
 function sendJson(res, status, obj) {
+  if (res.headersSent || res.writableEnded) return;
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     "content-type": "application/json",
@@ -94,12 +132,16 @@ function sendError(res, status, message, type = "invalid_request_error") {
   sendJson(res, status, { error: { message, type } });
 }
 
-async function readBody(req, limitBytes = 12 * 1024 * 1024) {
+async function readBody(req, limitBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limitBytes) throw new Error("request body too large");
+    if (size > limitBytes) {
+      const err = new Error("request body too large");
+      err.statusCode = 413;
+      throw err;
+    }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString("utf8");
@@ -127,7 +169,15 @@ const server = createServer(async (req, res) => {
     // OpenAI embeddings. mem9 posts to `${base}/embeddings`; base is
     // http://localhost:PORT/v1, so accept both /v1/embeddings and /embeddings.
     if (req.method === "POST" && /\/(v1\/)?embeddings$/.test(url.pathname)) {
-      const raw = await readBody(req);
+      let raw;
+      try {
+        raw = await readBody(req);
+      } catch (err) {
+        if (err && err.statusCode === 413) {
+          return sendError(res, 413, "request body too large");
+        }
+        throw err;
+      }
       let payload;
       try {
         payload = JSON.parse(raw);
@@ -142,16 +192,72 @@ const server = createServer(async (req, res) => {
           "`input` must be a string or an array of strings (token-id arrays are not supported)",
         );
       }
-      const maintenance = req.headers["x-mem9-maintenance"];
-      if (maintenance !== undefined && (maintenance !== "1" || inputs.length !== 1 || Buffer.byteLength(inputs[0]) > 16384)) {
-        return sendError(res, 400, "invalid maintenance embedding request");
+      // Unconditional input bounds. Enforced for every request; the maintenance
+      // header does NOT gate them. One malformed request must not drive
+      // unbounded ONNX work on the single shared embedder.
+      if (inputs.length === 0) {
+        return sendError(res, 400, "`input` must contain at least one string");
       }
+      if (inputs.length > MAX_INPUTS) {
+        return sendError(res, 400, `too many inputs (max ${MAX_INPUTS})`);
+      }
+      for (let i = 0; i < inputs.length; i++) {
+        if (Buffer.byteLength(inputs[i]) > MAX_INPUT_BYTES) {
+          return sendError(
+            res,
+            413,
+            `input[${i}] exceeds per-text byte limit (max ${MAX_INPUT_BYTES} bytes)`,
+          );
+        }
+      }
+      const maintenance = req.headers["x-mem9-maintenance"];
+      // Maintenance header is advisory: its only effect is to route through the
+      // single-flight admission permit so a maintenance batch does not starve
+      // the interactive path. Size and count caps are already enforced above.
+      if (maintenance !== undefined && maintenance !== "1") {
+        return sendError(res, 400, "invalid X-Mem9-Maintenance header value");
+      }
+
+      // Per-request compute deadline + abort-on-client-close. A disconnected
+      // client cannot leave orphaned ONNX work consuming the shared vCPU.
+      let aborted = false;
+      let abortReason = null;
+      const abort = (reason) => {
+        if (aborted) return;
+        aborted = true;
+        abortReason = reason;
+      };
+      const onClientClose = () => {
+        if (!res.writableEnded) abort("client_closed");
+      };
+      req.on("close", onClientClose);
+      const deadlineTimer = setTimeout(
+        () => abort("deadline_exceeded"),
+        OVERALL_DEADLINE_MS,
+      );
+      if (typeof deadlineTimer.unref === "function") deadlineTimer.unref();
+
+      // Global in-flight limiter. Shed load with 429 BEFORE any model call so
+      // concurrent requests cannot evade the per-path admission permits.
+      const release = tryAcquire();
+      if (!release) {
+        clearTimeout(deadlineTimer);
+        req.off("close", onClientClose);
+        res.setHeader("Retry-After", "1");
+        return sendError(res, 429, "embedding service busy", "rate_limited");
+      }
+
       const compute = async () => {
         const extractor = await getExtractor();
         // Single-text loop avoids padding unrelated texts to the longest input.
         const data = [];
         let totalChars = 0;
         for (let i = 0; i < inputs.length; i++) {
+          if (aborted) {
+            const err = new Error(`embedding aborted: ${abortReason ?? "aborted"}`);
+            err.aborted = true;
+            throw err;
+          }
           const embedding = await embedOne(extractor, inputs[i]);
           data.push({ object: "embedding", index: i, embedding });
           totalChars += inputs[i].length;
@@ -159,13 +265,31 @@ const server = createServer(async (req, res) => {
         return { data, totalChars };
       };
       let computed;
-      if (maintenance === "1") {
-        const admitted = await maintenanceAdmission.run(compute);
-        if (!admitted.accepted) return sendError(res, 429, "maintenance embedding busy");
-        res.setHeader("X-Mem9-Maintenance", "1");
-        computed = admitted.value;
-      } else {
-        computed = await compute();
+      try {
+        if (maintenance === "1") {
+          const admitted = await maintenanceAdmission.run(compute);
+          if (!admitted.accepted) return sendError(res, 429, "maintenance embedding busy");
+          res.setHeader("X-Mem9-Maintenance", "1");
+          computed = admitted.value;
+        } else {
+          computed = await compute();
+        }
+      } catch (err) {
+        if (err && err.aborted) {
+          if (abortReason === "deadline_exceeded") {
+            return sendError(res, 503, "embedding deadline exceeded", "server_error");
+          }
+          // Client disconnected mid-compute; drop the response.
+          if (!res.writableEnded) {
+            try { res.destroy(); } catch { /* ignore */ }
+          }
+          return;
+        }
+        throw err;
+      } finally {
+        clearTimeout(deadlineTimer);
+        req.off("close", onClientClose);
+        release();
       }
       const { data, totalChars } = computed;
       // usage.*_tokens are not meaningful here (no token accounting); report a
@@ -186,6 +310,12 @@ const server = createServer(async (req, res) => {
     return sendError(res, 500, "internal error computing embedding", "server_error");
   }
 });
+
+// Server-wide timeouts cap slow-header / slow-body abuse at the HTTP layer.
+// The per-request handler above still owns the compute deadline.
+server.headersTimeout = 15_000;
+server.requestTimeout = Math.max(OVERALL_DEADLINE_MS + 5_000, 30_000);
+server.keepAliveTimeout = 10_000;
 
 server.listen(PORT, () => {
   console.log(`qwen3-embed listening on :${PORT} (model ${MODEL_REPO}, dims ${EXPECTED_DIM})`);

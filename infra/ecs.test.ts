@@ -837,6 +837,14 @@ describe("ecs stack", () => {
     const embed = containersByName()["qwen3-embed"];
     const env = embed.environment as Record<string, unknown>;
     expect(env.QWEN3_EMBED_PORT).toBe("8081");
+    // Resource-exhaustion bounds (CWE-770): the embed sidecar is the single
+    // always-warm embedder; its bounds must be explicit in the task definition
+    // so production does not depend on image defaults (parity with LLM_PROXY_*).
+    expect(env.QWEN3_EMBED_MAX_INPUTS).toBe("32");
+    expect(env.QWEN3_EMBED_MAX_INPUT_BYTES).toBe(String(16 * 1024));
+    expect(env.QWEN3_EMBED_MAX_CONCURRENCY).toBe("2");
+    expect(env.QWEN3_EMBED_OVERALL_DEADLINE_MS).toBe("55000");
+    expect(env.QWEN3_EMBED_MAX_BODY_BYTES).toBe(String(32 * 16 * 1024 + 16 * 1024));
     const health = embed.health as Record<string, unknown>;
     expect(health).toBeDefined();
     expect(health.command).toEqual([

@@ -94,6 +94,17 @@ const LLM_PROXY_MAX_TOKENS = 4096;
 const LLM_PROXY_OVERALL_DEADLINE_MS = 110_000;
 const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
 
+// qwen3-embed resource-exhaustion controls (CWE-770). Explicit in the task
+// definition for the same reason as LLM_PROXY_*: production must not depend on
+// image defaults. The embed sidecar is the single always-warm embedder shared
+// by every namespace, so it is the sensitive path for shared-embedder DoS.
+const QWEN3_EMBED_MAX_INPUTS = 32;
+const QWEN3_EMBED_MAX_INPUT_BYTES = 16 * 1024; // matches the maintenance budget
+const QWEN3_EMBED_MAX_CONCURRENCY = 2;
+const QWEN3_EMBED_OVERALL_DEADLINE_MS = 55_000; // > mnemo 45s maintenance timeout
+const QWEN3_EMBED_MAX_BODY_BYTES =
+  QWEN3_EMBED_MAX_INPUTS * QWEN3_EMBED_MAX_INPUT_BYTES + 16 * 1024;
+
 // mnemo-server's HTTP port. The MCP proxy Lambda (§6a) reaches this port on the
 // task privately via the Cloud Map DNS name registered below.
 const MNEMO_PORT = 8080;
@@ -487,6 +498,15 @@ export function ecs(
         image: embedImage,
         environment: {
           QWEN3_EMBED_PORT: String(EMBED_PORT),
+          // Resource-exhaustion bounds (CWE-770). Enforced unconditionally by
+          // the sidecar; see docker/qwen3-embed/server.mjs. Mirrors the
+          // LLM_PROXY_* envelope above so operators own both services' limits
+          // from the same task-definition surface.
+          QWEN3_EMBED_MAX_INPUTS: String(QWEN3_EMBED_MAX_INPUTS),
+          QWEN3_EMBED_MAX_INPUT_BYTES: String(QWEN3_EMBED_MAX_INPUT_BYTES),
+          QWEN3_EMBED_MAX_CONCURRENCY: String(QWEN3_EMBED_MAX_CONCURRENCY),
+          QWEN3_EMBED_OVERALL_DEADLINE_MS: String(QWEN3_EMBED_OVERALL_DEADLINE_MS),
+          QWEN3_EMBED_MAX_BODY_BYTES: String(QWEN3_EMBED_MAX_BODY_BYTES),
         },
         logging: { retention: "1 month" },
         // Model load is slow on cold start (baked into the image, but the ONNX
