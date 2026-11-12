@@ -454,13 +454,43 @@ export function planDecisions(memories, verdicts, opts = {}) {
   const protectedTopics = opts.protectedTopics ?? DEFAULT_PROTECTED_TOPICS;
   const byId = new Map(memories.map((m) => [m.id, m]));
   const verdictById = new Map();
+  const occurrencesById = new Map();
   const conflicted = new Set();
   const retained = new Map();
+  // Normalize fields a downstream decision depends on, so a duplicate entry
+  // that disagrees on ANY of them is flagged as contradictory — not just on
+  // `verdict`. `topic` steers the protected-topic withholding; `merge_into`
+  // and `absorbs` steer the merge graph. Comparing only `verdict` lets a
+  // reply that repeats an id with the same verdict but a different `topic`
+  // slip past the consistency check and overwrite the surviving entry's
+  // topic to an unprotected one — which is the fail-open this guard exists
+  // to prevent (CWE-1288).
+  const sameAbsorbs = (a, b) => {
+    const aa = Array.isArray(a) ? [...a].sort() : [];
+    const bb = Array.isArray(b) ? [...b].sort() : [];
+    if (aa.length !== bb.length) return false;
+    for (let i = 0; i < aa.length; i += 1) if (aa[i] !== bb[i]) return false;
+    return true;
+  };
   for (const v of verdicts) {
     if (!byId.has(v.id)) continue;
     const prior = verdictById.get(v.id);
-    // Contradictory duplicate verdicts for one id: trust neither (SKIP).
-    if (prior && prior.verdict !== v.verdict) conflicted.add(v.id);
+    // Contradictory duplicate entries for one id: trust neither (SKIP). Any
+    // field a later decision reads — verdict, topic, merge_into, absorbs —
+    // must agree across duplicates; otherwise last-wins silently narrows
+    // whichever rule reads it.
+    if (
+      prior &&
+      (prior.verdict !== v.verdict ||
+        prior.topic !== v.topic ||
+        (prior.merge_into || "") !== (v.merge_into || "") ||
+        !sameAbsorbs(prior.absorbs, v.absorbs))
+    ) {
+      conflicted.add(v.id);
+    }
+    const occ = occurrencesById.get(v.id);
+    if (occ) occ.push(v);
+    else occurrencesById.set(v.id, [v]);
     verdictById.set(v.id, v);
   }
 
@@ -471,10 +501,23 @@ export function planDecisions(memories, verdicts, opts = {}) {
   // left — degrades to SKIP through the existing path, so the survivor is not
   // rewritten either. KEEP is exempt because KEEP mutates nothing: downgrading it
   // would report policy as having overridden a decision that agreed with policy.
-  for (const [id, v] of verdictById) {
-    if (v.verdict === "KEEP") continue;
-    if (!protectedTopics.includes(v.topic)) continue;
-    retained.set(id, v);
+  //
+  // Evaluated over the UNION of all occurrences of an id rather than over the
+  // last-wins survivor: if any occurrence names a protected topic and any
+  // occurrence is a mutating verdict, the id is retained. An overwrite that
+  // narrows a protected topic to an unprotected one cannot escape the rule.
+  for (const [id, occs] of occurrencesById) {
+    const anyProtected = occs.find((o) => protectedTopics.includes(o.topic));
+    if (!anyProtected) continue;
+    const anyMutating = occs.find((o) => o.verdict !== "KEEP");
+    if (!anyMutating) continue;
+    // Prefer a mutating occurrence that already names the protected topic so
+    // `originalVerdict`/`retainedReason` document what the classifier judged
+    // and which protected topic triggered the withholding.
+    const protectedMutating = occs.find(
+      (o) => o.verdict !== "KEEP" && protectedTopics.includes(o.topic),
+    );
+    retained.set(id, protectedMutating || anyMutating);
     verdictById.delete(id);
   }
 
