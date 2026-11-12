@@ -191,6 +191,13 @@ export const OFFER_TTL_MS = 72 * HOUR_MS;
  */
 export const UNPOSTED_GRACE_MS = HOUR_MS / 4;
 const SNIPPET_LEN = 120;
+// Model-authored `reason` strings ride next to a danger-styled Approve button
+// in Slack. The snippets alongside them are 120-character slices; a reason
+// should fit the same order of magnitude. Capped where the model's output
+// enters planDecisions (parseVerdicts); the renderer re-normalises whitespace
+// and escapes mrkdwn, and keeps the per-line / section / block ceilings as its
+// own size guards for reasons that reach it from a non-parseVerdicts path.
+const REASON_MAX_LEN = 240;
 // The two inactive states, and the only values --state accepts. They are NOT
 // interchangeable: see `inactiveMemoryAdapter` and issue #124.
 const INACTIVE_STATES = ["deleted", "archived"];
@@ -344,6 +351,21 @@ export function parseVerdicts(raw) {
     }
     if (v.merged_content !== undefined && typeof v.merged_content !== "string") {
       throw new MalformedResponse("merged_content must be a string");
+    }
+    // `reason` is model output interpolated into the Slack approval message
+    // next to a danger-styled Approve button. The renderer re-normalises and
+    // escapes it, but the shape has to be bounded HERE too so a hallucinated
+    // array / object / number cannot ride through planDecisions and surface as
+    // `[object Object]` next to an id the operator is approving. Length is
+    // capped at REASON_MAX_LEN; the overflow is sliced (not throw-SKIPped)
+    // because an unbounded reason is a renderer concern, not a correctness one.
+    if (v.reason !== undefined && v.reason !== null) {
+      if (typeof v.reason !== "string") {
+        throw new MalformedResponse("reason must be a string");
+      }
+      if (v.reason.length > REASON_MAX_LEN) {
+        v = { ...v, reason: v.reason.slice(0, REASON_MAX_LEN) };
+      }
     }
     return v;
   });
@@ -1689,6 +1711,27 @@ export function buildApprovalMessage({ record, decisions, channel, batch }) {
     if (d.verdict in withheld) withheld[d.verdict] += 1;
   }
   const clean = (text) => (text ?? "").replace(/\s+/gu, " ").trim();
+  // Slack `mrkdwn` is live in these sections, so an un-escaped model-supplied
+  // string can emit `<https://attacker.example|Approve>` links, `*bold*`
+  // emphasis or backtick code spans next to the real review bullets. Escape
+  // the control characters mrkdwn reads: `<` and `>` (link / user mention
+  // delimiters), `&` (entity delimiter), and `*`, `_`, `` ` `` (emphasis /
+  // code). The ids themselves are already wrapped in backticks and come from
+  // the database; this is for model-authored fields only (reason, snippet,
+  // mergedContent, absorbs[].snippet).
+  const escapeMrkdwn = (text) =>
+    (text ?? "")
+      .replace(/&/gu, "&amp;")
+      .replace(/</gu, "&lt;")
+      .replace(/>/gu, "&gt;")
+      .replace(/([*_`])/gu, "\\$1");
+  // `clean()` collapses whitespace (so a `\n` in a reason cannot forge a line
+  // break into chunkSections' `\n`-joined section text); the mrkdwn escape
+  // then neutralises active markup. Reasons from parseVerdicts are already
+  // length-bounded at `REASON_MAX_LEN`; nothing is re-bounded here because
+  // the per-line / block / section ceilings below are the renderer's own
+  // size guards and must stay the first thing a wordy classifier trips.
+  const safeModelText = (text) => escapeMrkdwn(clean(text));
 
   const deleteCount = decisions.filter((d) => d.verdict === "DELETE").length;
   const merges = decisions.filter((d) => d.verdict === "MERGE");
@@ -1720,8 +1763,8 @@ export function buildApprovalMessage({ record, decisions, channel, batch }) {
     // The snippet is the review: an id alone is not something an operator can
     // judge. Slack and CloudWatch Logs are the approved destinations for memory
     // content — the SSM record and the repository are not.
-    const snippet = clean(decision.snippet);
-    const reason = decision.reason ?? "no reason recorded";
+    const snippet = escapeMrkdwn(clean(decision.snippet));
+    const reason = safeModelText(decision.reason) || "no reason recorded";
     if (decision.verdict !== "MERGE") {
       lines.push(`• \`${decision.id}\` — ${reason}${snippet ? `: ${snippet}` : ""}`);
       continue;
@@ -1733,12 +1776,15 @@ export function buildApprovalMessage({ record, decisions, channel, batch }) {
     // instead would be an approval of something unreviewed.
     const line =
       `• *MERGE* into \`${decision.id}\` — ${reason}` +
-      `\n    _new content_: ${clean(decision.mergedContent)}` +
+      `\n    _new content_: ${escapeMrkdwn(clean(decision.mergedContent))}` +
       // Each absorbed id with its own snippet, because each one is DELETED by
       // this single approval. A count would be the "deletions the operator never
       // saw" defect with a number in front of it.
       decision.absorbs
-        .map((a) => `\n    _absorbs_ \`${a.id}\`${clean(a.snippet) ? `: ${clean(a.snippet)}` : ""}`)
+        .map((a) => {
+          const absorbedSnippet = escapeMrkdwn(clean(a.snippet));
+          return `\n    _absorbs_ \`${a.id}\`${absorbedSnippet ? `: ${absorbedSnippet}` : ""}`;
+        })
         .join("");
     // Checked HERE and not left to `chunkSections`, which TRUNCATES an over-long
     // line with a marker. That was safe while every line was a reason plus a
