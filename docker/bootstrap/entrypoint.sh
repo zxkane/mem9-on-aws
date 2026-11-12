@@ -50,8 +50,14 @@ DB_PASS=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.password // error("missing .
 
 # psql reads the password from PGPASSWORD (never on the command line / in the
 # process args). The direct Aurora connection requires TLS, as does mnemo-server.
+# Pin the RDS CA bundle baked into the image (same bundle the Node clients in
+# this subsystem rely on via NODE_EXTRA_CA_CERTS) and demand verify-full so the
+# TLS handshake fails on a spoofed endpoint before libpq ever transmits the
+# Aurora master credential or the control-plane DDL. The Aurora writer endpoint
+# hostname matches the certificate presented by RDS.
 export PGPASSWORD="$DB_PASS"
-export PGSSLMODE=require
+export PGSSLROOTCERT=/bootstrap/global-bundle.pem
+export PGSSLMODE=verify-full
 export PGCONNECT_TIMEOUT=8
 
 PSQL="psql --host=${MEM9_DB_HOST} --port=${MEM9_DB_PORT} --username=${DB_USER} \
