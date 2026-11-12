@@ -300,6 +300,17 @@ describe("proxy-handler routing (regression)", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("rejects oversized add_memory content before calling mnemo-server", async () => {
+    // Default byte cap mirrors the qwen3-embed sidecar's per-text byte limit
+    // (16 KiB) so mnemo-server never forwards an unbounded `input` string.
+    const spy = mockFetchOk();
+    const giant = "a".repeat(16 * 1024 + 1);
+    await expect(
+      handler({ content: giant }, ctx("add_memory")),
+    ).rejects.toThrow(/exceeds .* bytes/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("search_memories GETs with the query string", async () => {
     const spy = mockFetchOk({ memories: [], total: 0 });
     await handler(

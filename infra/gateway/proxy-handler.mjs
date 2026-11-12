@@ -54,6 +54,13 @@ const ACCEPTANCE_STAGE = validateAcceptanceStage(
 const TOOL_DELIM = "___";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const INGEST_JOBS_PATH = "/v1alpha2/mem9s/ingest-jobs";
+// Per-memory content byte cap. Matches the qwen3-embed sidecar's per-text
+// byte limit so mnemo-server never forwards an oversized `input` string to
+// the shared embedder (CWE-770). Overridable for parity with the sidecar.
+const ADD_MEMORY_MAX_CONTENT_BYTES = Math.max(
+  1,
+  Number(process.env.MEM9_ADD_MEMORY_MAX_CONTENT_BYTES) || 16 * 1024,
+);
 const INGEST_STATUS_FIELDS = [
   "job_id",
   "state",
@@ -196,6 +203,13 @@ async function addMemory(input, identity, budget) {
   const { content, agent_id, memory_type } = input ?? {};
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("add_memory requires non-empty 'content'");
+  }
+  // Reject oversized content upstream so mnemo-server never forwards it to
+  // the shared embedder as an unbounded `input` string.
+  if (Buffer.byteLength(content, "utf8") > ADD_MEMORY_MAX_CONTENT_BYTES) {
+    throw new Error(
+      `add_memory 'content' exceeds ${ADD_MEMORY_MAX_CONTENT_BYTES} bytes`,
+    );
   }
   if (memory_type != null && String(memory_type) !== "pinned") {
     throw new Error("add_memory memory_type must be 'pinned'");
