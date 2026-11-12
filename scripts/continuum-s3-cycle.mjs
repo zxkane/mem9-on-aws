@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AdmissionError, actionsBotId, ensure, sha, sha256, git, applyPatch, patchDestination, verifyDeliveredPatch, snapshotConfiguration, validationTitle, verifyValidation, verifyS3Pr, patchSource, verifyReviewableFiles, requiresOwnerReview, verifyOwnerReview } from './lib/continuum-s3.mjs';
+import { AdmissionError, actionsBotId, ensure, sha, sha256, git, applyPatch, patchDestination, verifyDeliveredPatch, snapshotConfiguration, validationTitle, verifyValidation, verifyS3Pr, patchSource, verifyReviewableFiles, requiresOwnerReview, verifyOwnerReview, verifyNoPrivateIdentifiers } from './lib/continuum-s3.mjs';
 import { scanPublicArtifactText } from './scan-public-artifacts.mjs';
 const exec = promisify(execFile);
 export async function github(path, method = 'GET', body) {
@@ -151,6 +151,7 @@ export async function cycle({ api, repoName, integrationId, bucket, account, reg
           for(const file of source.files) ensure((await git(cwd,['diff','--name-only',revision,main,'--',file.path])).trim()==='', 'Patch source changed since scan');
           applied=await applyPatch({cwd,base:main,patch,reviewable:true});
           ensure(applied.files.every(file => scanPublicArtifactText(file.content).length === 0), 'Patch contains prohibited public content');
+          for (const file of applied.files) verifyNoPrivateIdentifiers(file.content,[environmentId,integrationId,issue.issueId,item.artifactId,...detail.findingIds]);
         } catch(error) { if (!(error instanceof AdmissionError)) throw error; log(`Patch not admitted: ${error.message}`);continue; }
         const digest=sha256(patch),branch=`continuum-s3/${digest.slice(0,32)}-${main.slice(0,12)}`;
         state.publications ??= [];

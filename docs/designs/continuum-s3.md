@@ -13,6 +13,9 @@ hash and delivered S3 object version, and applies only bounded regular source
 and configuration text changes in an empty Git index. Credential files,
 unsupported formats and non-regular files remain inadmissible. It never executes candidate code. A
 private S3 receipt binds environment, artifact, source, patch and PR head.
+Known private service identifiers in generated source also block publication,
+including identifiers wrapped across comments. The controller never rewrites
+patch bytes to make them pass the public-content check.
 
 The controller publishes PRs through GITHUB_TOKEN and explicitly dispatches a
 separate read-only validation workflow. That workflow checks out the protected

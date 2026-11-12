@@ -42,6 +42,12 @@ export function verifyOwnerReview(reviews, pr, repository) {
   const latest=decisions.sort((a,b)=>b.id-a.id)[0];
   ensure(latest?.state==='APPROVED' && latest.commit_id===pr.head.sha, 'Exact patch head needs owner approval');
 }
+export function verifyNoPrivateIdentifiers(text, identifiers) {
+  // Generated comments sometimes wrap a finding ID across comment lines. Keep
+  // account-local scan inventory out of public source without rewriting bytes.
+  const compact=text.toLowerCase().replace(/[\s/*#-]/gu,'');
+  ensure(!identifiers.filter(id=>typeof id==='string' && /^[a-z0-9]{16,64}$/u.test(id)).some(id=>compact.includes(id)), 'Patch contains private service identifiers');
+}
 export const sha256 = value => createHash('sha256').update(value).digest('hex');
 export const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
 export const actionsBotId = 41898282;

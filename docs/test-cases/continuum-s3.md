@@ -17,3 +17,4 @@
 - TC-CS3-015: Missing, foreign, stale, dismissed or changes-requested reviews never authorize merge. Refresh review evidence after successful CI. No Actions bot review can authorize itself.
 - TC-CS3-016: Manual patch selection validates a SHA-256 digest and processes only that artifact/receipt; it does not start another scan or dispatch other patches.
 - TC-CS3-017: Reviewable patches retain path, size, mode, credential-file, source-lineage, S3-byte and public-content checks. Publication does not constitute approval.
+- TC-CS3-018: Reject private environment/integration/issue/artifact/finding identifiers in generated source, including IDs wrapped across comment lines. Preserve the original patch bytes; do not silently sanitize and claim a digest match.

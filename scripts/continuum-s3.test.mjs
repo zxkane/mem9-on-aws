@@ -4,12 +4,17 @@ import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { verifyDeliveredPatch, applyPatch, validationTitle, verifyValidation, snapshotConfiguration, patchSource, verifyReviewableFiles, requiresOwnerReview, verifyOwnerReview } from './lib/continuum-s3.mjs';
+import { verifyDeliveredPatch, applyPatch, validationTitle, verifyValidation, snapshotConfiguration, patchSource, verifyReviewableFiles, requiresOwnerReview, verifyOwnerReview, verifyNoPrivateIdentifiers } from './lib/continuum-s3.mjs';
 const hash = x => createHash('sha256').update(x).digest('hex');
 const patch = 'diff --git a/infra/src/foo.ts b/infra/src/foo.ts\nindex 3367afd..3e75765 100644\n--- a/infra/src/foo.ts\n+++ b/infra/src/foo.ts\n@@ -1 +1 @@\n-old\n+new\n';
 const artifact = () => ({ artifactType:'PATCH', body:{patch:{patch,patchSha256:hash(patch),sizeBytes:Buffer.byteLength(patch),delivery:{status:'SUCCEEDED',target:{s3:{bucket:'source-bucket',key:'continuum-patches/fix.patch',version:'v1'}}}}}});
 describe('reviewed patch admission',()=>{
  const file=filename=>({filename,status:'modified',additions:1,deletions:1});
+ it('rejects private service identifiers even when split across generated comments',()=>{
+  const id='abcde0123456789f'.repeat(2);
+  for(const content of [`// finding ${id}`,`-- finding ${id.slice(0,20)}\n-- ${id.slice(20)}`,`/* ${id.toUpperCase()} */`])expect(()=>verifyNoPrivateIdentifiers(content,[id])).toThrow('private service identifiers');
+  expect(()=>verifyNoPrivateIdentifiers('commit '+ 'a'.repeat(40),[id])).not.toThrow();
+ });
  it('publishes regular source/control changes while keeping their merge review separate',()=>{
   for(const path of ['scripts/operator.mjs','infra/ecs.ts','infra/src/handler.test.ts','docker/qwen3-embed/server.test.mjs']){
    expect(()=>verifyReviewableFiles([file(path)],1)).not.toThrow();expect(requiresOwnerReview([file(path)],1)).toBe(true);
