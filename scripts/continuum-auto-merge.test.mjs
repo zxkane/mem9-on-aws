@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { continuumApp, verifyApp, verifyCandidate, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
-const sha = "a".repeat(40), base = "b".repeat(40);
+import { continuumApp, continuumCommitter, verifyApp, verifyCandidate, verifyCommitProvenance, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
+const sha = "a".repeat(40), base = "b".repeat(40), treeSha = "d".repeat(40);
 const repo = { id: 42, full_name: "owner/project", owner: { id: 7 } };
 const pr = () => ({ number: 1, state: "open", draft: false, user: { id: continuumApp.botId, type: "Bot" }, base: { ref: "main", sha: base, repo }, head: { sha, repo }, mergeable: true, mergeable_state: "clean", changed_files: 1 });
 const file = () => ({ filename: "infra/src/oauth-facade/state.ts", status: "modified", additions: 2, deletions: 1 });
+const commit = () => ({ sha, parents: [{ sha: base }], tree: { sha: treeSha }, author: { ...continuumCommitter }, committer: { ...continuumCommitter }, verification: { verified: false } });
+const comparison = () => ({ status: "ahead", merge_base_commit: { sha: base }, files: [file()] });
 const runs = () => ["infra-ci.yml", "docs-security.yml"].map((path, i) => ({ id: i + 1, workflow_id: i + 10, path: `.github/workflows/${path}`, event: "pull_request", head_sha: sha, head_repository: structuredClone(repo), status: "completed", conclusion: "success", run_attempt: 1, pull_requests: [{ number: 1, head: { sha }, base: { sha: base } }] }));
 describe("trusted Continuum merge admission", () => {
+  it("binds the merged revision to a single-parent Continuum commit and refuses rogue provenance", () => {
+    expect(verifyCommitProvenance(commit(), sha, base)).toBe(treeSha);
+    expect(verifyCommitProvenance({ ...commit(), author: { name: "x", email: "y" }, committer: { name: "x", email: "y" }, verification: { verified: true } }, sha, base)).toBe(treeSha);
+    for (const mutate of [c => c.parents = [], c => c.parents = [{ sha: base }, { sha: base }], c => c.parents[0].sha = sha, c => c.sha = base, c => c.tree.sha = "bad", c => { c.committer.email = "attacker@example.com"; }, c => { c.author.name = "attacker"; }]) {
+      const value = structuredClone(commit()); mutate(value); expect(() => verifyCommitProvenance(value, sha, base)).toThrow();
+    }
+  });
   it("pins the public App identity and refuses workflow or administrative writes", () => {
     const app = { id: continuumApp.id, slug: continuumApp.slug, owner: { login: "AWS-Continuum" }, permissions: { contents: "write", pull_requests: "write", metadata: "read", actions: "read" } };
     expect(() => verifyApp(app)).not.toThrow();
@@ -49,8 +58,9 @@ function controllerFixture() {
     ["repos/owner/project/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=100&page=1", []],
     ["repos/owner/project/pulls?state=open&base=main&per_page=100&page=1", [pr()]],
     ["repos/owner/project/pulls/1", pr()],
-    ["repos/owner/project/pulls/1/files?per_page=100", [file()]],
-    [`repos/owner/project/git/trees/${sha}?recursive=1`, { truncated: false, tree: [{ path: file().filename, type: "blob", mode: "100644" }] }],
+    [`repos/owner/project/compare/${base}...${sha}`, comparison()],
+    [`repos/owner/project/git/commits/${sha}`, commit()],
+    [`repos/owner/project/git/trees/${treeSha}?recursive=1`, { sha: treeSha, truncated: false, tree: [{ path: file().filename, type: "blob", mode: "100644" }] }],
     [`repos/owner/project/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`, { total_count: 2, workflow_runs: runs() }],
     ["repos/owner/project/actions/runs/1/attempts/1/jobs?per_page=100", { total_count: 1, jobs: [{ name: "Typecheck & Unit Tests", conclusion: "success" }] }],
     ["repos/owner/project/actions/runs/2/attempts/1/jobs?per_page=100", { total_count: 1, jobs: [{ name: "Runbook & Public-Content Scan", conclusion: "success" }] }],
@@ -75,8 +85,8 @@ it("makes admission mandatory before SHA-conditioned merge and explicitly dispat
 });
 it("does not merge rejected paths, symlinks, failed jobs or incomplete evidence", async () => {
   for (const alter of [
-    f => f.data.get("repos/owner/project/pulls/1/files?per_page=100")[0].filename = "infra/gateway/request-limits.mjs",
-    f => f.data.get(`repos/owner/project/git/trees/${sha}?recursive=1`).tree[0].mode = "120000",
+    f => f.data.get(`repos/owner/project/compare/${base}...${sha}`).files[0].filename = "infra/gateway/request-limits.mjs",
+    f => f.data.get(`repos/owner/project/git/trees/${treeSha}?recursive=1`).tree[0].mode = "120000",
     f => f.data.get("repos/owner/project/actions/runs/1/attempts/1/jobs?per_page=100").jobs[0].conclusion = "skipped",
     f => f.data.get(`repos/owner/project/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`).total_count = 100,
   ]) {
