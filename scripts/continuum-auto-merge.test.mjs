@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { continuumApp, verifyApp, verifyCandidate, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
+import { continuumApp, verifyApp, verifyCandidate, verifyCommits, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
 const sha = "a".repeat(40), base = "b".repeat(40);
 const repo = { id: 42, full_name: "owner/project", owner: { id: 7 } };
-const pr = () => ({ number: 1, state: "open", draft: false, user: { id: continuumApp.botId, type: "Bot" }, base: { ref: "main", sha: base, repo }, head: { sha, repo }, mergeable: true, mergeable_state: "clean", changed_files: 1 });
+const pr = () => ({ number: 1, state: "open", draft: false, user: { id: continuumApp.botId, type: "Bot" }, base: { ref: "main", sha: base, repo }, head: { sha, repo }, mergeable: true, mergeable_state: "clean", changed_files: 1, commits: 1 });
 const file = () => ({ filename: "infra/src/oauth-facade/state.ts", status: "modified", additions: 2, deletions: 1 });
+const botSigner = `<${continuumApp.botId}+${continuumApp.slug}[bot]@users.noreply.github.com>`;
+const signedCommit = (headSha, parentSha) => ({ sha: headSha, parents: [{ sha: parentSha }], author: { id: continuumApp.botId, type: "Bot" }, committer: { id: continuumApp.botId, type: "Bot" }, commit: { verification: { verified: true, reason: "valid", signature: "sig", payload: `tree x\nparent ${parentSha}\nauthor aws-continuum[bot] ${botSigner} 0 +0000\ncommitter aws-continuum[bot] ${botSigner} 0 +0000\n\nsecurity patch` } } });
+const commits = () => [signedCommit(sha, base)];
 const runs = () => ["infra-ci.yml", "docs-security.yml"].map((path, i) => ({ id: i + 1, workflow_id: i + 10, path: `.github/workflows/${path}`, event: "pull_request", head_sha: sha, head_repository: structuredClone(repo), status: "completed", conclusion: "success", run_attempt: 1, pull_requests: [{ number: 1, head: { sha }, base: { sha: base } }] }));
 describe("trusted Continuum merge admission", () => {
   it("pins the public App identity and refuses workflow or administrative writes", () => {
@@ -24,6 +27,52 @@ describe("trusted Continuum merge admission", () => {
     expect(() => verifyFiles([{ ...file(), status: "renamed", previous_filename: ".github/workflows/x.yml" }], 1)).toThrow();
     expect(() => verifyFiles([{ ...file(), additions: 10001 }], 1)).toThrow();
     expect(() => verifyFiles([], 1)).toThrow();
+    // An auto-merged diff must not modify an implementation and its own test
+    // file together, so the CI evidence is not written by the patch itself.
+    const impl = { filename: "infra/gateway/access-token-verifier.mjs", status: "modified", additions: 2, deletions: 1 };
+    const test = { filename: "infra/gateway/access-token-verifier.test.mjs", status: "modified", additions: 2, deletions: 1 };
+    expect(() => verifyFiles([impl, test], 2)).toThrow();
+    const tsImpl = { filename: "infra/src/oauth-facade/state.ts", status: "modified", additions: 2, deletions: 1 };
+    const tsTest = { filename: "infra/src/oauth-facade/state.test.ts", status: "modified", additions: 2, deletions: 1 };
+    expect(() => verifyFiles([tsImpl, tsTest], 2)).toThrow();
+    // Independent files in the lane continue to be accepted.
+    const otherImpl = { filename: "infra/gateway/scope-interceptor.mjs", status: "modified", additions: 2, deletions: 0 };
+    expect(() => verifyFiles([impl, otherImpl], 2)).not.toThrow();
+  });
+  it("authorises patch content: every reachable commit must be bot-authored, bot-committed and App-signed with a linear chain from base", () => {
+    const botSigner = `<${continuumApp.botId}+${continuumApp.slug}[bot]@users.noreply.github.com>`;
+    const makeCommit = (headSha, parentSha) => ({ sha: headSha, parents: [{ sha: parentSha }], author: { id: continuumApp.botId, type: "Bot" }, committer: { id: continuumApp.botId, type: "Bot" }, commit: { verification: { verified: true, reason: "valid", signature: "sig", payload: `tree 0\nparent ${parentSha}\nauthor aws-continuum[bot] ${botSigner} 0 +0000\ncommitter aws-continuum[bot] ${botSigner} 0 +0000\n\npatch` } } });
+    const prValue = { ...pr(), commits: 1 };
+    expect(verifyCommits([makeCommit(sha, base)], prValue, base)).toBe(sha);
+    // Reject when any provenance invariant is violated.
+    for (const mutate of [
+      c => c.author.id = 99,
+      c => c.author.type = "User",
+      c => c.committer.id = 99,
+      c => c.committer.type = "User",
+      c => c.commit.verification.verified = false,
+      c => c.commit.verification.reason = "unsigned",
+      c => c.commit.verification.signature = "",
+      c => c.commit.verification.payload = "author attacker <attacker@example.com>",
+      c => c.parents.push({ sha: base }),
+      c => c.parents[0].sha = sha,
+    ]) {
+      const value = structuredClone(makeCommit(sha, base)); mutate(value);
+      expect(() => verifyCommits([value], prValue, base)).toThrow();
+    }
+    // A linear two-commit chain is accepted when every commit is App-signed.
+    const mid = "c".repeat(40);
+    const two = [makeCommit(mid, base), makeCommit(sha, mid)];
+    expect(verifyCommits(two, { ...pr(), commits: 2 }, base)).toBe(sha);
+    // An attacker commit inserted on top of a bot commit is refused even when
+    // the earlier bot commit remains App-signed and the chain is still linear.
+    const attacker = { sha, parents: [{ sha: mid }], author: { id: 99, type: "User" }, committer: { id: 99, type: "User" }, commit: { verification: { verified: false, reason: "unsigned" } } };
+    expect(() => verifyCommits([makeCommit(mid, base), attacker], { ...pr(), commits: 2 }, base)).toThrow();
+    // The commit list must match pr.commits and terminate at pr.head.sha.
+    expect(() => verifyCommits([makeCommit(sha, base)], { ...pr(), commits: 2 }, base)).toThrow();
+    expect(() => verifyCommits([makeCommit(mid, base)], prValue, base)).toThrow();
+    // The chain must be anchored at the current PR base.
+    expect(() => verifyCommits([makeCommit(sha, sha)], prValue, base)).toThrow();
   });
   it("requires latest successful PR runs from both actual workflow IDs on the exact revision/base", () => {
     const ids = { "infra-ci.yml": 10, "docs-security.yml": 11 };
@@ -50,6 +99,7 @@ function controllerFixture() {
     ["repos/owner/project/pulls?state=open&base=main&per_page=100&page=1", [pr()]],
     ["repos/owner/project/pulls/1", pr()],
     ["repos/owner/project/pulls/1/files?per_page=100", [file()]],
+    ["repos/owner/project/pulls/1/commits?per_page=100", commits()],
     [`repos/owner/project/git/trees/${sha}?recursive=1`, { truncated: false, tree: [{ path: file().filename, type: "blob", mode: "100644" }] }],
     [`repos/owner/project/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`, { total_count: 2, workflow_runs: runs() }],
     ["repos/owner/project/actions/runs/1/attempts/1/jobs?per_page=100", { total_count: 1, jobs: [{ name: "Typecheck & Unit Tests", conclusion: "success" }] }],
@@ -79,6 +129,23 @@ it("does not merge rejected paths, symlinks, failed jobs or incomplete evidence"
     f => f.data.get(`repos/owner/project/git/trees/${sha}?recursive=1`).tree[0].mode = "120000",
     f => f.data.get("repos/owner/project/actions/runs/1/attempts/1/jobs?per_page=100").jobs[0].conclusion = "skipped",
     f => f.data.get(`repos/owner/project/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`).total_count = 100,
+    // A collaborator-pushed commit on the bot PR branch: head is attributed to
+    // another principal and lacks the Continuum App signature.
+    f => { f.data.get("repos/owner/project/pulls/1/commits?per_page=100")[0].author = { id: 99, type: "User" }; },
+    f => { f.data.get("repos/owner/project/pulls/1/commits?per_page=100")[0].committer = { id: 99, type: "User" }; },
+    f => { f.data.get("repos/owner/project/pulls/1/commits?per_page=100")[0].commit.verification.verified = false; },
+    f => { f.data.get("repos/owner/project/pulls/1/commits?per_page=100")[0].commit.verification.payload = "author attacker <attacker@example.com>"; },
+    // A linear chain whose parent does not anchor at the current base.
+    f => { f.data.get("repos/owner/project/pulls/1/commits?per_page=100")[0].parents[0].sha = "d".repeat(40); },
+    // An auto-lane patch that modifies an implementation and its own test file.
+    f => {
+      f.data.set("repos/owner/project/pulls/1/files?per_page=100", [
+        { filename: "infra/gateway/access-token-verifier.mjs", status: "modified", additions: 1, deletions: 0 },
+        { filename: "infra/gateway/access-token-verifier.test.mjs", status: "modified", additions: 1, deletions: 0 },
+      ]);
+      const prValue = f.data.get("repos/owner/project/pulls/1"); prValue.changed_files = 2;
+      f.data.get("repos/owner/project/pulls?state=open&base=main&per_page=100&page=1")[0].changed_files = 2;
+    },
   ]) {
     const value = controllerFixture(); alter(value); await value.run(); expect(value.calls.some(c => c.method === "PUT")).toBe(false);
   }
@@ -106,17 +173,28 @@ it("fails visibly on a dispatch error after merge, making recovery necessary", a
     if (path.endsWith("/dispatches")) throw Error("Network failure"); return value.request(path, ...rest);
   } })).rejects.toThrow("Network failure");
 });
-it("records bot admission as pending, rejects an App push onto an owner's PR", async () => {
+it("records bot admission as pending for App-signed heads, rejects an App push onto an owner's PR", async () => {
   const event = { repository: repo, pull_request: pr(), sender: { id: continuumApp.botId } }, calls = [];
-  const request = async (...args) => calls.push(args);
+  const request = async (path, method, body) => { calls.push([path, method, body]); if (path === `repos/${repo.full_name}/commits/${sha}`) return signedCommit(sha, base); return undefined; };
   await admitPullRequest(event, request);
-  expect(calls[0][2]).toMatchObject({ status: "in_progress", head_sha: sha });
+  const writes = calls.filter(c => c[0].endsWith("/check-runs"));
+  expect(writes[0][2]).toMatchObject({ status: "in_progress", head_sha: sha });
   event.pull_request.user = { id: repo.owner.id, type: "User" };
   await admitPullRequest(event, request);
-  expect(calls[1][2].conclusion).toBe("failure");
+  expect(calls.filter(c => c[0].endsWith("/check-runs"))[1][2].conclusion).toBe("failure");
   event.sender.id = repo.owner.id;
   await admitPullRequest(event, request);
-  expect(calls[2][2].conclusion).toBe("success");
+  expect(calls.filter(c => c[0].endsWith("/check-runs"))[2][2].conclusion).toBe("success");
+});
+
+it("records bot admission as failure when the pushed head commit is not App-signed", async () => {
+  for (const mutate of [c => c.author.id = 99, c => c.committer.id = 99, c => c.commit.verification.verified = false, c => c.commit.verification.payload = "author attacker <attacker@example.com>", c => c.commit.verification.signature = ""]) {
+    const event = { repository: repo, pull_request: pr(), sender: { id: continuumApp.botId } }, calls = [];
+    const commit = signedCommit(sha, base); mutate(commit);
+    const request = async (path, method, body) => { calls.push([path, method, body]); if (path === `repos/${repo.full_name}/commits/${sha}`) return commit; return undefined; };
+    await admitPullRequest(event, request);
+    expect(calls.filter(c => c[0].endsWith("/check-runs"))[0][2].conclusion).toBe("failure");
+  }
 });
 
 import { readFileSync } from "node:fs";
