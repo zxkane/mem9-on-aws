@@ -1030,16 +1030,18 @@ describe("execution safety", () => {
       fake.deps,
     );
 
-    // Without the version argument the server cannot fence the rewrite.
+    // Without the version argument the server cannot fence the rewrite. The
+    // merged content is derived from the member rows (sorted by created_at,
+    // id ascending) and is NOT the model-authored `merged_content`.
     expect(fake.deps.putMemory).toHaveBeenCalledWith(
       "survivor",
-      { content: "fragment one and fragment two" },
+      { content: "fragment two\n\nfragment one" },
       1,
     );
     // A content-bearing PUT is what makes upstream re-embed, so the survivor's
     // embedding matches its merged content (issue #128 requirement d).
     expect(fake.store.get("survivor").content).toBe(
-      "fragment one and fragment two",
+      "fragment two\n\nfragment one",
     );
     expect(fake.store.get("absorbed").state).toBe("deleted");
     expect(result.metrics.skippedLww).toBe(0);
