@@ -1,5 +1,11 @@
 // Public GitHub identities, independently verified through the GitHub Apps API.
 export const continuumApp = Object.freeze({ slug: "aws-continuum", id: 5070184, botId: 333661207 });
+// GitHub Apps commit under the deterministic bot git identity below; the name
+// and noreply email are owned by GitHub and bound to the App's numeric bot id.
+export const continuumCommitter = Object.freeze({
+  name: `${continuumApp.slug}[bot]`,
+  email: `${continuumApp.botId}+${continuumApp.slug}[bot]@users.noreply.github.com`,
+});
 const requireThat = (ok, message) => { if (!ok) throw new Error(message); };
 export function verifyApp(app) {
   requireThat(app?.id === continuumApp.id && app.slug === continuumApp.slug && app.owner?.login === "AWS-Continuum", "Continuum App identity changed");
@@ -32,6 +38,19 @@ export function verifyFiles(files, count) {
     lines += file.additions + file.deletions;
   }
   requireThat(lines <= 2000, "Patch line limit exceeded");
+}
+// Bind the merged revision's provenance: single parent at main, Continuum App
+// committer (or a GitHub-verified signature), and no in-flight tree surprise.
+export function verifyCommitProvenance(commit, head, mainSha) {
+  requireThat(commit && typeof commit === "object", "Missing commit object");
+  requireThat(commit.sha === head, "Commit sha does not match pinned revision");
+  requireThat(Array.isArray(commit.parents) && commit.parents.length === 1 && commit.parents[0]?.sha === mainSha, "Patch parent is not current main");
+  requireThat(/^[a-f0-9]{40}$/u.test(commit.tree?.sha ?? ""), "Missing patch tree sha");
+  const verified = commit.verification?.verified === true;
+  const committer = commit.committer, author = commit.author;
+  const bot = identity => identity && identity.name === continuumCommitter.name && identity.email === continuumCommitter.email;
+  requireThat(verified || (bot(committer) && bot(author)), "Commit provenance is not Continuum App or GitHub-verified");
+  return commit.tree.sha;
 }
 export function verifyRuns(runs, pr, ids) {
   return Object.entries(ids).map(([file, id]) => {

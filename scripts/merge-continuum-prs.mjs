@@ -3,7 +3,7 @@
 // a candidate's code, dependencies, logs, caches, or artifacts.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { continuumApp, verifyApp, verifyCandidate, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
+import { continuumApp, verifyApp, verifyCandidate, verifyCommitProvenance, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
 import { recordAdmission } from "./check-continuum-pr.mjs";
 const exec = promisify(execFile);
 async function api(path, method = "GET", body) {
@@ -72,12 +72,17 @@ export async function mergeContinuumPrs({ repository, enabled, request = api, lo
       pr = await request(`${root}/pulls/${candidate.number}`);
       await recordAdmission(request, root, pr.head.sha, null);
       const main = await request(`${root}/git/ref/heads/main`);
-      verifyCandidate(pr, info, main.object.sha, false);
-      const files = await request(`${root}/pulls/${pr.number}/files?per_page=100`);
-      verifyFiles(files, pr.changed_files);
-      const tree = await request(`${root}/git/trees/${pr.head.sha}?recursive=1`);
-      ensure(tree.truncated === false && Array.isArray(tree.tree), "Cannot verify complete source tree");
-      for (const file of files) ensure(tree.tree.some(entry => entry.path === file.filename && entry.type === "blob" && entry.mode === "100644"), "Patch contains non-regular source");
+      verifyCandidate(pr, info, main.object.sha, true);
+      // Bind every content check to the pinned head SHA, never to the mutable
+      // `/pulls/{n}/files` view which follows whatever the branch head is now.
+      const comparison = await request(`${root}/compare/${main.object.sha}...${pr.head.sha}`);
+      ensure(comparison?.status === "ahead" && Array.isArray(comparison.files) && comparison.files.length === pr.changed_files && /^[a-f0-9]{40}$/u.test(comparison.merge_base_commit?.sha ?? "") && comparison.merge_base_commit.sha === main.object.sha, "Pinned revision is not a single-parent advance of main");
+      verifyFiles(comparison.files, pr.changed_files);
+      const commit = await request(`${root}/git/commits/${pr.head.sha}`);
+      const treeSha = verifyCommitProvenance(commit, pr.head.sha, main.object.sha);
+      const tree = await request(`${root}/git/trees/${treeSha}?recursive=1`);
+      ensure(tree.sha === treeSha && tree.truncated === false && Array.isArray(tree.tree), "Cannot verify complete source tree");
+      for (const file of comparison.files) ensure(tree.tree.some(entry => entry.path === file.filename && entry.type === "blob" && entry.mode === "100644"), "Patch contains non-regular source");
       const response = await request(`${root}/actions/runs?head_sha=${pr.head.sha}&event=pull_request&per_page=100`);
       ensure(response.total_count <= 100 && response.workflow_runs?.length === response.total_count, "CI inventory exceeds controller bound");
       const runs = verifyRuns(response.workflow_runs, pr, workflows);
@@ -86,10 +91,17 @@ export async function mergeContinuumPrs({ repository, enabled, request = api, lo
         const name = run.workflow_id === workflows["infra-ci.yml"] ? "Typecheck & Unit Tests" : "Runbook & Public-Content Scan";
         ensure(jobs.total_count <= 100 && jobs.jobs?.length === jobs.total_count && jobs.jobs.some(job => job.name === name && job.conclusion === "success"), "Required test job did not pass");
       }
-      // Admission is evaluated again immediately before the SHA-conditioned merge.
+      // Re-read pinned-revision provenance and diff immediately before merge.
       const fresh = await request(`${root}/pulls/${pr.number}`);
       ensure(fresh.base.sha === pr.base.sha, "Tested base changed during verification");
-      ensure(verifyCandidate(fresh, info, (await request(`${root}/git/ref/heads/main`)).object.sha, false) === pr.head.sha, "Candidate changed during verification");
+      const freshMain = (await request(`${root}/git/ref/heads/main`)).object.sha;
+      ensure(verifyCandidate(fresh, info, freshMain, true) === pr.head.sha, "Candidate changed during verification");
+      const freshComparison = await request(`${root}/compare/${freshMain}...${pr.head.sha}`);
+      ensure(freshComparison?.status === "ahead" && Array.isArray(freshComparison.files) && freshComparison.files.length === pr.changed_files && freshComparison.merge_base_commit?.sha === freshMain, "Pinned revision diverged from main during verification");
+      verifyFiles(freshComparison.files, pr.changed_files);
+      ensure(freshComparison.files.length === comparison.files.length && freshComparison.files.every((file, index) => file.filename === comparison.files[index].filename && file.status === comparison.files[index].status), "Pinned revision diff changed during verification");
+      const freshCommit = await request(`${root}/git/commits/${pr.head.sha}`);
+      ensure(verifyCommitProvenance(freshCommit, pr.head.sha, freshMain) === treeSha, "Pinned commit tree changed during verification");
     } catch (error) {
       if (pr?.head?.sha) await recordAdmission(request, root, pr.head.sha, "failure");
       // No untrusted PR titles, bodies, URLs, or API payloads go to the log.
