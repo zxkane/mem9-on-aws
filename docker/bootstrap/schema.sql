@@ -185,3 +185,10 @@ CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
 \ir migrations/005_consolidation_execution.sql
 \ir migrations/006_consolidation_planner.sql
 \ir migrations/007_consolidation_scheduling.sql
+
+-- 9) Durable ingest queue retention: adds a completed_at index, a sweep
+-- function that nulls canonical_payload / plan_payload on terminal rows older
+-- than the configured retention window, and a per-scope purge function that
+-- session / memory deletion calls to remove the queue copies of that content
+-- immediately. See docker/bootstrap/migrations/008_ingest_queue_retention.sql.
+\ir migrations/008_ingest_queue_retention.sql
