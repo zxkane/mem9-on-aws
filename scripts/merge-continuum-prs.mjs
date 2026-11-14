@@ -3,7 +3,7 @@
 // a candidate's code, dependencies, logs, caches, or artifacts.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { continuumApp, verifyApp, verifyCandidate, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
+import { continuumApp, verifyApp, verifyCandidate, verifyCandidateCommits, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
 import { recordAdmission } from "./check-continuum-pr.mjs";
 const exec = promisify(execFile);
 async function api(path, method = "GET", body) {
@@ -75,6 +75,12 @@ export async function mergeContinuumPrs({ repository, enabled, request = api, lo
       verifyCandidate(pr, info, main.object.sha, false);
       const files = await request(`${root}/pulls/${pr.number}/files?per_page=100`);
       verifyFiles(files, pr.changed_files);
+      // Every commit on the PR must be produced by the pinned Continuum App
+      // identity. A push by any other principal onto the bot PR's head branch
+      // introduces a commit this check refuses, even when the PR author is
+      // still the bot and CI is re-triggered by the foreign push.
+      const commits = await request(`${root}/pulls/${pr.number}/commits?per_page=100`);
+      verifyCandidateCommits(commits, pr);
       const tree = await request(`${root}/git/trees/${pr.head.sha}?recursive=1`);
       ensure(tree.truncated === false && Array.isArray(tree.tree), "Cannot verify complete source tree");
       for (const file of files) ensure(tree.tree.some(entry => entry.path === file.filename && entry.type === "blob" && entry.mode === "100644"), "Patch contains non-regular source");

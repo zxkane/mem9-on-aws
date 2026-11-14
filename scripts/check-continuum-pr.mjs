@@ -13,7 +13,13 @@ export async function admitPullRequest(event, request) {
   if (!pr || !Number.isSafeInteger(pr.number) || !/^[a-f0-9]{40}$/u.test(pr.head?.sha) || pr.base?.ref !== "main") throw new Error("Invalid PR event");
   const owner = pr.user?.id === repo.owner.id && event.sender?.id === repo.owner.id && pr.head.repo?.id === repo.id;
   const bot = pr.user?.id === continuumApp.botId && pr.user.type === "Bot" && pr.head.repo?.id === repo.id;
-  await recordAdmission(request, `repos/${repo.full_name}`, pr.head.sha, owner ? "success" : bot ? null : "failure");
+  // A bot PR whose synchronize event was sent by a principal other than the
+  // App itself or the repository owner is a foreign push onto the bot branch
+  // and withdraws admission. Only the App's own or an owner-origin event may
+  // leave admission pending for a bot PR.
+  const botOrigin = bot && (event.sender?.id === continuumApp.botId || event.sender?.id === repo.owner.id);
+  const conclusion = owner ? "success" : botOrigin ? null : bot ? "failure" : "failure";
+  await recordAdmission(request, `repos/${repo.full_name}`, pr.head.sha, conclusion);
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
   try {

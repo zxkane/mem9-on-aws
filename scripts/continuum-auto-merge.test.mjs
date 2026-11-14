@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { continuumApp, verifyApp, verifyCandidate, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
+import { continuumApp, verifyApp, verifyCandidate, verifyCandidateCommits, verifyFiles, verifyRuns } from "./lib/continuum-auto-merge.mjs";
 const sha = "a".repeat(40), base = "b".repeat(40);
 const repo = { id: 42, full_name: "owner/project", owner: { id: 7 } };
-const pr = () => ({ number: 1, state: "open", draft: false, user: { id: continuumApp.botId, type: "Bot" }, base: { ref: "main", sha: base, repo }, head: { sha, repo }, mergeable: true, mergeable_state: "clean", changed_files: 1 });
+const pr = () => ({ number: 1, state: "open", draft: false, user: { id: continuumApp.botId, type: "Bot" }, base: { ref: "main", sha: base, repo }, head: { sha, ref: "continuum/patch/1", repo }, mergeable: true, mergeable_state: "clean", changed_files: 1, commits: 1 });
 const file = () => ({ filename: "infra/src/oauth-facade/state.ts", status: "modified", additions: 2, deletions: 1 });
+const commits = () => [{ sha, commit: { verification: { verified: true, reason: "valid", signature: "-----BEGIN PGP SIGNATURE-----..." } }, author: { id: continuumApp.botId, type: "Bot" }, committer: { id: continuumApp.botId, type: "Bot" } }];
 const runs = () => ["infra-ci.yml", "docs-security.yml"].map((path, i) => ({ id: i + 1, workflow_id: i + 10, path: `.github/workflows/${path}`, event: "pull_request", head_sha: sha, head_repository: structuredClone(repo), status: "completed", conclusion: "success", run_attempt: 1, pull_requests: [{ number: 1, head: { sha }, base: { sha: base } }] }));
 describe("trusted Continuum merge admission", () => {
   it("pins the public App identity and refuses workflow or administrative writes", () => {
@@ -14,9 +15,23 @@ describe("trusted Continuum merge admission", () => {
   });
   it("requires the exact bot, repository, main base and mergeable revision", () => {
     expect(verifyCandidate(pr(), repo, base)).toBe(sha);
-    for (const mutate of [p => p.user.id = 3, p => p.user.type = "User", p => p.head.repo.id = 99, p => p.draft = true, p => p.mergeable = null, p => p.base.sha = sha, p => p.mergeable_state = "behind", p => p.head.sha = "bad", p => p.changed_files = 101]) {
+    for (const mutate of [p => p.user.id = 3, p => p.user.type = "User", p => p.head.repo.id = 99, p => p.draft = true, p => p.mergeable = null, p => p.base.sha = sha, p => p.mergeable_state = "behind", p => p.head.sha = "bad", p => p.changed_files = 101, p => p.head.ref = "attacker-branch", p => p.head.ref = "continuum/../../etc", p => p.commits = 0, p => p.commits = 101, p => delete p.commits]) {
       const value = structuredClone(pr()); mutate(value); expect(() => verifyCandidate(value, repo, base)).toThrow();
     }
+  });
+  it("binds patch admission to the revision's producer: every commit must be the pinned Continuum App or a verified-signature commit", () => {
+    expect(() => verifyCandidateCommits(commits(), pr())).not.toThrow();
+    const unverified = () => [{ sha, commit: { verification: { verified: false, reason: "unsigned" } }, author: { id: continuumApp.botId, type: "Bot" }, committer: { id: continuumApp.botId, type: "Bot" } }];
+    expect(() => verifyCandidateCommits(unverified(), pr())).toThrow();
+    const foreignCommitter = () => [{ sha, commit: { verification: { verified: null } }, author: { id: continuumApp.botId, type: "Bot" }, committer: { id: 99, type: "User" } }];
+    expect(() => verifyCandidateCommits(foreignCommitter(), pr())).toThrow();
+    const foreignAuthor = () => [{ sha, commit: { verification: { verified: null } }, author: { id: 99, type: "User" }, committer: { id: continuumApp.botId, type: "Bot" } }];
+    expect(() => verifyCandidateCommits(foreignAuthor(), pr())).toThrow();
+    const missingHead = () => [{ sha: "c".repeat(40), commit: { verification: { verified: null } }, author: { id: continuumApp.botId, type: "Bot" }, committer: { id: continuumApp.botId, type: "Bot" } }];
+    expect(() => verifyCandidateCommits(missingHead(), pr())).toThrow();
+    expect(() => verifyCandidateCommits([], { ...pr(), commits: 0 })).toThrow();
+    const value = pr(); value.commits = 2;
+    expect(() => verifyCandidateCommits(commits(), value)).toThrow();
   });
   it("limits auto merge to bounded application source, leaving control and deployment changes for owner review", () => {
     expect(() => verifyFiles([file()], 1)).not.toThrow();
@@ -50,6 +65,7 @@ function controllerFixture() {
     ["repos/owner/project/pulls?state=open&base=main&per_page=100&page=1", [pr()]],
     ["repos/owner/project/pulls/1", pr()],
     ["repos/owner/project/pulls/1/files?per_page=100", [file()]],
+    ["repos/owner/project/pulls/1/commits?per_page=100", commits()],
     [`repos/owner/project/git/trees/${sha}?recursive=1`, { truncated: false, tree: [{ path: file().filename, type: "blob", mode: "100644" }] }],
     [`repos/owner/project/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`, { total_count: 2, workflow_runs: runs() }],
     ["repos/owner/project/actions/runs/1/attempts/1/jobs?per_page=100", { total_count: 1, jobs: [{ name: "Typecheck & Unit Tests", conclusion: "success" }] }],
@@ -117,6 +133,16 @@ it("records bot admission as pending, rejects an App push onto an owner's PR", a
   event.sender.id = repo.owner.id;
   await admitPullRequest(event, request);
   expect(calls[2][2].conclusion).toBe("success");
+});
+it("withdraws bot admission when a foreign principal synchronizes a bot PR", async () => {
+  const event = { repository: repo, pull_request: pr(), sender: { id: 9999 } }, calls = [];
+  const request = async (...args) => calls.push(args);
+  await admitPullRequest(event, request);
+  expect(calls[0][2].conclusion).toBe("failure");
+  // Owner-origin push onto a bot PR leaves admission pending for CI/commit verification.
+  event.sender.id = repo.owner.id;
+  await admitPullRequest(event, request);
+  expect(calls[1][2]).toMatchObject({ status: "in_progress", head_sha: sha });
 });
 
 import { readFileSync } from "node:fs";
