@@ -153,6 +153,31 @@ BEGIN
         ALTER TABLE ingest_jobs
             VALIDATE CONSTRAINT ck_ingest_jobs_payload_size;
     END IF;
+    -- Mirror ck_ingest_jobs_payload_size on the mutable active plan column so a
+    -- large plan copy on the job row cannot exceed the per-payload bound a
+    -- caller is already held to on canonical_payload. Added NOT VALID and then
+    -- validated when no pre-existing row violates it, so upgrades are safe.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_jobs'::regclass
+          AND conname = 'ck_ingest_jobs_plan_payload_size'
+    ) THEN
+        ALTER TABLE ingest_jobs ADD CONSTRAINT ck_ingest_jobs_plan_payload_size
+            CHECK (plan_payload IS NULL OR octet_length(plan_payload) <= 1048576) NOT VALID;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_jobs'::regclass
+          AND conname = 'ck_ingest_jobs_plan_payload_size'
+          AND NOT convalidated
+    ) AND NOT EXISTS (
+        SELECT 1 FROM ingest_jobs
+        WHERE plan_payload IS NOT NULL
+          AND octet_length(plan_payload) > 1048576
+    ) THEN
+        ALTER TABLE ingest_jobs
+            VALIDATE CONSTRAINT ck_ingest_jobs_plan_payload_size;
+    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'ingest_jobs'::regclass
@@ -247,8 +272,44 @@ CREATE TABLE IF NOT EXISTS ingest_job_plans (
     ),
     CONSTRAINT ck_ingest_job_plans_state CHECK (
         state IN ('valid', 'stale', 'applied')
+    ),
+    -- Bound plan_payload mirroring ck_ingest_jobs_payload_size so a plan row
+    -- cannot grow past the per-payload cap already enforced on the admitting
+    -- canonical payload. Plans encode the transcript plus extracted actions, so
+    -- an unbounded plan column is an order-of-magnitude amplification of the
+    -- 1 MiB admitted request.
+    CONSTRAINT ck_ingest_job_plans_payload_size CHECK (
+        octet_length(plan_payload) <= 1048576
     )
 );
+
+-- A pre-existing deployment may hold ingest_job_plans without the payload-size
+-- constraint. Add it (NOT VALID) and then validate when no row violates it so
+-- upgrades are non-blocking.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_job_plans'::regclass
+          AND conname = 'ck_ingest_job_plans_payload_size'
+    ) THEN
+        ALTER TABLE ingest_job_plans ADD CONSTRAINT ck_ingest_job_plans_payload_size
+            CHECK (octet_length(plan_payload) <= 1048576) NOT VALID;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_job_plans'::regclass
+          AND conname = 'ck_ingest_job_plans_payload_size'
+          AND NOT convalidated
+    ) AND NOT EXISTS (
+        SELECT 1 FROM ingest_job_plans
+        WHERE octet_length(plan_payload) > 1048576
+    ) THEN
+        ALTER TABLE ingest_job_plans
+            VALIDATE CONSTRAINT ck_ingest_job_plans_payload_size;
+    END IF;
+END
+$$;
 
 DO $$
 DECLARE
