@@ -8,6 +8,15 @@ SET LOCAL statement_timeout = '25min';
 
 SELECT pg_advisory_xact_lock(hashtext('mem9-memory-namespace-cutover-v1'));
 
+-- Serialize the unassigned-row pre-check against any concurrent data-plane
+-- writer. The writer-freeze trigger is intended to block writes during
+-- backfilling/frozen phases, but AccessExclusive on the data-plane tables
+-- ensures the pre-check and the subsequent NOT NULL / FK validation cannot
+-- race a concurrent writer that reaches the row between the EXISTS checks
+-- and the ALTER TABLE validation.
+LOCK TABLE memories, sessions, ingest_jobs, ingest_job_plans, upload_tasks
+    IN ACCESS EXCLUSIVE MODE;
+
 DO $$
 DECLARE
     observed_phase VARCHAR(40);

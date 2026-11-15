@@ -121,12 +121,25 @@ END
 $$;
 
 -- mem9's updated_at auto-touch trigger (from TenantMemorySchemaPostgres).
+-- The bypass is gated on the authenticated session_user being a member of the
+-- schema-owner role that owns `memories`. Data-plane runtime roles created by
+-- mem9_runtime.grant_runtime are unprivileged and are explicitly verified not
+-- to belong to any object-owning role (see mem9_runtime.unprivileged), so they
+-- cannot suppress the auto-touch. This deliberately replaces an earlier
+-- session-GUC-based bypass: a prefixed custom GUC is USERSET in PostgreSQL and
+-- could be set by any login, letting a data-plane session forge updated_at
+-- (CWE-807). See the project's own rule at
+-- migrations/004_consolidation_storage.sql:145-148 ("never ... a GUC").
 CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$
+DECLARE
+    owner_oid OID;
 BEGIN
-    IF current_setting(
-        'mem9.namespace_migration_actor',
-        TRUE
-    ) = 'backfill' THEN
+    SELECT relowner
+    INTO owner_oid
+    FROM pg_class
+    WHERE oid = 'public.memories'::regclass;
+    IF owner_oid IS NOT NULL
+       AND pg_has_role(session_user, owner_oid, 'MEMBER') THEN
         RETURN NEW;
     END IF;
     NEW.updated_at = NOW();

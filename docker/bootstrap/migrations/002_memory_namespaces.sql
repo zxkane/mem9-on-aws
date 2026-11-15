@@ -373,16 +373,30 @@ $$;
 -- The operator changes the migration phase to frozen only after application
 -- writers have been scaled down. These triggers make that operational freeze
 -- database-enforced, closing the race between the drain check and backfill.
--- The migration process opts into a narrowly named session-local bypass.
+-- The migration bypass is gated on the authenticated session_user being a
+-- member of the schema-owner role that owns the `memories` table (the admin
+-- bootstrap credential the operator uses to run the backfill). Data-plane
+-- runtime roles created by mem9_runtime.grant_runtime are unprivileged logins
+-- that are explicitly verified to NOT be a member of any object-owning role
+-- (see mem9_runtime.unprivileged), so they cannot satisfy this check. This
+-- deliberately replaces an earlier session-GUC-based bypass: a prefixed custom
+-- GUC is USERSET in PostgreSQL and could be set by any login, which made the
+-- control a reliance on untrusted session state (CWE-807). See the project's
+-- own rule at migrations/004_consolidation_storage.sql:145-148 ("never ... a
+-- GUC").
 CREATE OR REPLACE FUNCTION enforce_memory_namespace_writer_freeze()
 RETURNS TRIGGER AS $$
 DECLARE
     observed_phase VARCHAR(40);
+    owner_oid OID;
 BEGIN
-    IF current_setting(
-        'mem9.namespace_migration_actor',
-        TRUE
-    ) = 'backfill' THEN
+    SELECT relowner
+    INTO owner_oid
+    FROM pg_class
+    WHERE oid = 'public.memories'::regclass;
+
+    IF owner_oid IS NOT NULL
+       AND pg_has_role(session_user, owner_oid, 'MEMBER') THEN
         IF TG_OP = 'DELETE' THEN
             RETURN OLD;
         END IF;
