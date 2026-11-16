@@ -598,6 +598,116 @@ describe("LLM action validation and tiers", () => {
       ).auto,
     ).toHaveLength(1);
   });
+
+  it("refuses to auto-merge a cluster that contains a protected member", () => {
+    // Protected-member fence (indirect prompt injection remediation). Any
+    // cluster member whose memory_type is not 'insight', whose metadata has
+    // `protected` set, or whose tags include 'protected'/'pinned' must not
+    // enter the auto-apply tier even if the model orders a MERGE. Mirrors
+    // docker/bootstrap/migrations/005_consolidation_execution.sql:298-299.
+    const scenarios = [
+      { memory_type: "pinned" },
+      { metadata: { protected: true } },
+      { tags: ["pinned"] },
+      { tags: ["protected"] },
+    ];
+    for (const overrides of scenarios) {
+      const routed = routeActions(
+        [
+          memory("surv", "one", [1, 0]),
+          memory("frag", "two", [1, 0], overrides),
+        ],
+        [{
+          type: "MERGE",
+          ids: ["surv", "frag"],
+          survivor_id: "surv",
+          merged_content: "one two",
+          rationale: "duplicates",
+        }],
+      );
+      expect(routed.auto).toEqual([]);
+      expect(routed.review).toContainEqual(
+        expect.objectContaining({ kind: "PROTECTED_MEMBER" }),
+      );
+    }
+  });
+
+  it("refuses to auto-merge members with incompatible material context", () => {
+    // Material-context compatibility fence: refuse clusters where members
+    // disagree on app_id/agent_id/source/tags/metadata. Mirrors the SQL
+    // execution plane's context_conflict review.
+    const scenarios = [
+      { app_id: "other-app" },
+      { agent_id: "other-agent" },
+      { source: "other-source" },
+      { tags: ["topic-a"] },
+      { metadata: { origin: "different" } },
+    ];
+    for (const overrides of scenarios) {
+      const routed = routeActions(
+        [
+          memory("surv", "one", [1, 0]),
+          memory("frag", "two", [1, 0], overrides),
+        ],
+        [{
+          type: "MERGE",
+          ids: ["surv", "frag"],
+          survivor_id: "surv",
+          merged_content: "one two",
+          rationale: "duplicates",
+        }],
+      );
+      expect(routed.auto).toEqual([]);
+      expect(routed.review).toContainEqual(
+        expect.objectContaining({ kind: "CONTEXT_CONFLICT" }),
+      );
+    }
+  });
+
+  it("derives merged content locally and ignores model-supplied text", () => {
+    // Mitigation (1): the model's merged_content is never used. Verify both
+    // the substring-anchor path (one member contains the other losslessly)
+    // and the concatenation path (deterministic order by created_at, id).
+    const routed = routeActions(
+      [
+        memory("surv", "alpha beta", [1, 0]),
+        memory("frag", "beta", [1, 0]),
+      ],
+      [{
+        type: "MERGE",
+        ids: ["surv", "frag"],
+        survivor_id: "surv",
+        merged_content: "ATTACKER-SUPPLIED REPLACEMENT TEXT",
+        rationale: "same topic",
+      }],
+    );
+    expect(routed.auto).toHaveLength(1);
+    // Anchor is the earliest-created member; both share timestamps so the
+    // smaller id wins. "frag" < "surv": anchor = "frag" with content "beta",
+    // but "beta" does not contain "alpha beta" — fall through to the next
+    // anchor candidate. "alpha beta" contains "beta", so it is the lossless
+    // anchor.
+    expect(routed.auto[0].mergedContent).toBe("alpha beta");
+    expect(routed.auto[0].mergedContent).not.toContain("ATTACKER");
+
+    const concat = routeActions(
+      [
+        memory("surv", "one", [1, 0]),
+        memory("frag", "two", [1, 0]),
+      ],
+      [{
+        type: "MERGE",
+        ids: ["surv", "frag"],
+        survivor_id: "surv",
+        merged_content: "ATTACKER-SUPPLIED",
+        rationale: "same topic",
+      }],
+    );
+    expect(concat.auto).toHaveLength(1);
+    // Equal timestamps, order by id: "frag" < "surv" → "two\n\none".
+    expect(concat.auto[0].mergedContent).toBe("two\n\none");
+    expect(concat.auto[0].mergedContent).not.toContain("ATTACKER");
+  });
 });
 
 describe("execution safety", () => {
@@ -1031,15 +1141,20 @@ describe("execution safety", () => {
     );
 
     // Without the version argument the server cannot fence the rewrite.
+    // The planner derives the merged text locally from the stored source
+    // rows: the model's `merged_content` is NOT trusted. For this cluster
+    // neither member's content is a substring of the other, so the
+    // deterministic-order concatenation is written (absorbed < survivor on
+    // id with equal created_at).
     expect(fake.deps.putMemory).toHaveBeenCalledWith(
       "survivor",
-      { content: "fragment one and fragment two" },
+      { content: "fragment two\n\nfragment one" },
       1,
     );
     // A content-bearing PUT is what makes upstream re-embed, so the survivor's
     // embedding matches its merged content (issue #128 requirement d).
     expect(fake.store.get("survivor").content).toBe(
-      "fragment one and fragment two",
+      "fragment two\n\nfragment one",
     );
     expect(fake.store.get("absorbed").state).toBe("deleted");
     expect(result.metrics.skippedLww).toBe(0);
@@ -1953,6 +2068,8 @@ describe("risk-tiered consolidation digests", () => {
     "UNKNOWN_ID",
     "CONFLICTING_ACTION",
     "INVALID_MERGE",
+    "PROTECTED_MEMBER",
+    "CONTEXT_CONFLICT",
     "INVALID_STALE",
     "INELIGIBLE_STALE",
   ];

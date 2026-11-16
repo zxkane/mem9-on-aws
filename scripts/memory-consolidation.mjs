@@ -129,6 +129,26 @@ export const REVIEW_KIND_POLICIES = new Map([
     priority: 5,
     escalation: "threshold",
   }],
+  // Protected-member fence: a cluster that tried to auto-merge a non-insight
+  // memory, a memory with metadata.protected, or one tagged protected/pinned.
+  // The SQL execution plane rejects the same shape as 'protected_member'
+  // (docker/bootstrap/migrations/005_consolidation_execution.sql); the legacy
+  // JS planner must match so attacker-stored text cannot steer the model into
+  // rewriting or absorbing a record the rest of the system treats as
+  // LLM-exempt.
+  ["PROTECTED_MEMBER", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 5,
+    escalation: "threshold",
+  }],
+  // Material-context compatibility fence: a cluster that mixed app_id,
+  // agent_id, source, tags, or stable metadata across members. Mirrors the SQL
+  // path's 'context_conflict' review.
+  ["CONTEXT_CONFLICT", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 5,
+    escalation: "threshold",
+  }],
   ["INVALID_STALE", {
     disposition: DISPOSITION_HEALTH,
     priority: 6,
@@ -234,6 +254,99 @@ function isStaleCandidate(memory, now, staleAfterMs) {
 
 function isConsolidationCandidate(memory) {
   return memory.memory_type !== "session";
+}
+
+// Protected-member fence: refuse to absorb or rewrite any memory the system
+// treats as LLM-exempt. Non-insight memory_type, metadata.protected, and the
+// 'protected'/'pinned' tags all disqualify a cluster member from entering the
+// auto-apply tier. This mirrors the SQL execution plane's protected_member
+// gate (docker/bootstrap/migrations/005_consolidation_execution.sql:298-299).
+function isProtectedMember(memory) {
+  if (!memory) return true;
+  if (memory.memory_type !== "insight") return true;
+  const metadata = memory.metadata && typeof memory.metadata === "object"
+    ? memory.metadata
+    : {};
+  if (metadata.protected) return true;
+  const tags = Array.isArray(memory.tags) ? memory.tags : [];
+  if (tags.includes("protected") || tags.includes("pinned")) return true;
+  return false;
+}
+
+// Material-context key: two memories may only be auto-merged when they agree
+// on the fields that determine their identity and audience (app_id, agent_id,
+// source, tags, and stable metadata). Mutable consolidation-provenance fields
+// are stripped before comparison so prior merges don't permanently fracture a
+// cluster. Mirrors the context compatibility check at
+// docker/bootstrap/migrations/005_consolidation_execution.sql:312-319.
+function materialContextKey(memory) {
+  const rawMetadata = memory.metadata && typeof memory.metadata === "object"
+    ? memory.metadata
+    : {};
+  const metadata = { ...rawMetadata };
+  delete metadata.source_turns;
+  delete metadata.source_seqs;
+  delete metadata.consolidation;
+  const tags = Array.isArray(memory.tags) ? [...memory.tags].sort() : [];
+  return JSON.stringify({
+    app_id: memory.app_id ?? null,
+    agent_id: memory.agent_id ?? null,
+    source: memory.source ?? null,
+    tags,
+    metadata,
+  });
+}
+
+function materialContextCompatible(members) {
+  if (members.length <= 1) return true;
+  const first = materialContextKey(members[0]);
+  for (let i = 1; i < members.length; i++) {
+    if (materialContextKey(members[i]) !== first) return false;
+  }
+  return true;
+}
+
+// Server-derived merged text. A model cannot inject replacement text: the
+// planner only accepts content it can reconstruct from the stored source
+// rows. When one member's content contains every other member's as a
+// substring, that content is the merged text (lossless preservation).
+// Otherwise, the merged text is the deterministic concatenation of the
+// members' unique contents, separated by blank lines and ordered by
+// (created_at, id). Mirrors the SQL execution plane's lossless-first strategy
+// (docker/bootstrap/migrations/005_consolidation_execution.sql:321-331).
+function deriveMergedContent(members) {
+  const sorted = [...members].sort((a, b) => {
+    const ta = timestamp(a?.created_at);
+    const tb = timestamp(b?.created_at);
+    if (ta !== tb) return ta - tb;
+    const ida = String(a?.id ?? "");
+    const idb = String(b?.id ?? "");
+    if (ida < idb) return -1;
+    if (ida > idb) return 1;
+    return 0;
+  });
+  // Prefer a lossless substring anchor: if one member already contains every
+  // other member's content, the merge is a no-op on text.
+  for (const anchor of sorted) {
+    const anchorContent = String(anchor?.content ?? "");
+    if (
+      anchorContent.length > 0 &&
+      sorted.every((member) =>
+        anchorContent.includes(String(member?.content ?? ""))
+      )
+    ) {
+      return anchorContent;
+    }
+  }
+  const seen = new Set();
+  const parts = [];
+  for (const member of sorted) {
+    const text = String(member?.content ?? "");
+    if (text.length === 0 || seen.has(text)) continue;
+    seen.add(text);
+    parts.push(text);
+  }
+  return parts.join("\n\n");
 }
 
 function withStaleTag(value) {
@@ -887,10 +1000,32 @@ export function routeActions(memories, actions, options = {}) {
       if (
         ids.length < 2 ||
         !survivor ||
-        !ids.includes(survivor.id) ||
-        !action.merged_content
+        !ids.includes(survivor.id)
       ) {
         review.push(reviewItem("INVALID_MERGE", ids, byId, action.rationale));
+        continue;
+      }
+      const members = ids.map((id) => byId.get(id));
+      // Protected-member fence: refuse any cluster carrying a non-insight
+      // memory, a metadata.protected record, or a protected/pinned-tagged
+      // record into the auto-apply tier. Pinned is the schema default
+      // (docker/bootstrap/schema.sql:77), and attacker-written text in the
+      // same namespace can cosine-cluster with a pinned victim; this fence
+      // keeps such a cluster off the auto path entirely. Matches the SQL
+      // execution plane's protected_member review.
+      if (members.some(isProtectedMember)) {
+        review.push(
+          reviewItem("PROTECTED_MEMBER", ids, byId, action.rationale),
+        );
+        continue;
+      }
+      // Material-context compatibility: cluster members must agree on
+      // app_id/agent_id/source/tags/metadata before an auto-merge is allowed.
+      // Mirrors the SQL execution plane's context_conflict review.
+      if (!materialContextCompatible(members)) {
+        review.push(
+          reviewItem("CONTEXT_CONFLICT", ids, byId, action.rationale),
+        );
         continue;
       }
       const absorbed = ids
@@ -917,6 +1052,17 @@ export function routeActions(memories, actions, options = {}) {
         review.push(reviewItem("UNFENCEABLE_MERGE", ids, byId, action.rationale));
         continue;
       }
+      // Derive merged text locally from the stored source rows. The model's
+      // `action.merged_content` is NOT trusted: accepting it would let any
+      // namespace writer whose text co-clusters with a victim steer the LLM
+      // into overwriting the victim's content with attacker-chosen text
+      // (indirect prompt injection, CWE-841). Server-derived content either
+      // preserves every absorbed record losslessly or rejects the merge.
+      const mergedContent = deriveMergedContent(members);
+      if (!mergedContent) {
+        review.push(reviewItem("INVALID_MERGE", ids, byId, action.rationale));
+        continue;
+      }
       auto.push({
         type: "MERGE",
         id: survivor.id,
@@ -924,8 +1070,8 @@ export function routeActions(memories, actions, options = {}) {
         rationale: boundedRationale(action.rationale),
         cost: 1 + absorbed.length,
         ...snapshot(survivor),
-        mergedContent: action.merged_content,
-        mergedContentHash: contentHash(action.merged_content),
+        mergedContent,
+        mergedContentHash: contentHash(mergedContent),
         absorbs: absorbed,
       });
       continue;
