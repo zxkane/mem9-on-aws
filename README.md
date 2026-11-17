@@ -1,5 +1,15 @@
 # mem9-on-aws
 
+> [!IMPORTANT]
+> **This project is no longer maintained.** For memory shared between coding
+> agents and machines, use
+> [agent-memory-kit](https://github.com/zxkane/agent-memory-kit) instead. It
+> keeps the notes as Markdown files in a private Git repository that each
+> machine syncs, with no database or always-on server. An optional Memory API
+> (one Lambda function and an S3 bucket) lets an MCP gateway serve the same
+> notes to agents that cannot reach your machines. The code and documentation
+> below stay for reference only and receive no fixes or security updates.
+
 Self-hosted deployment of **mem9** (`mnemo-server`, the open-source agent-memory
 server by [`mem9-ai/mem9`](https://github.com/mem9-ai/mem9), Apache-2.0) on AWS —
 a single-operator, multi-device, multi-agent shared memory layer with **full data
